@@ -230,7 +230,6 @@ function createTestStack(): { stack: TelemetryStack; template: Template } {
   );
 
   const userPool = new cognito.UserPool(helperStack, "UserPool");
-  const userPoolClient = userPool.addClient("UserPoolClient");
 
   const executionsTable = new dynamodb.Table(helperStack, "ExecutionsTable", {
     tableName: "citadel-executions-test",
@@ -370,7 +369,6 @@ function createTestStack(): { stack: TelemetryStack; template: Template } {
     agentEventBus,
     modelCatalogTable,
     userPool,
-    userPoolClient,
     frontendOrigin: "https://app.example.com",
     bedrockInvocationLogGroupName: "/aws/bedrock/invocation-logs",
     executionsTable,

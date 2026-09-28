@@ -688,6 +688,16 @@ export const REMOVAL_ALLOWLIST: AllowlistEntry[] = [
       "Retained only during E19 phase 1; consumers now read the registry id/arn from SSM (finding 8b7ee8af, decision 06077146).",
   },
 
+  // --- CIT-207: Cognito UserPoolClient id now resolved via SSM ---
+  {
+    logicalId: "UserPoolClientIdExport",
+    justification:
+      "CIT-207: duplicate explicit export of the Cognito UserPoolClient id " +
+      "(0 importers — RUNBOOK.md reads the plain UserPoolClientId output, " +
+      "not this export). Frontend/telemetry now resolve the client id via " +
+      "SSM (/citadel/<env>/cognito/client-id) instead of Fn::ImportValue.",
+  },
+
   // --- Lambda functions (7 clusters, 4 CFN each: fn, log group, role, policy) ---
   {
     logicalId: "AgentImportResolverFunctionE5B20F94",
@@ -1894,6 +1904,16 @@ export const ADDITION_ALLOWLIST: AllowlistEntry[] = [
       "E19 phase-1: SSM parameter for registry ARN (finding 8b7ee8af, " +
       "decision 06077146). Replaces Fn::ImportValue for IAM resource " +
       "resolution; retained as export from CitadelRegistryStack.",
+  },
+
+  // --- CIT-207: new SSM parameter publishing the Cognito UserPoolClient id ---
+  {
+    logicalId: "UserPoolClientIdParam5DF0EADC",
+    justification:
+      "CIT-207: SSM parameter (/citadel/<env>/cognito/client-id) " +
+      "publishing the Cognito UserPoolClient id so frontend/telemetry can " +
+      "resolve it without a cross-stack Fn::ImportValue (mirrors the E19 " +
+      "registry id/arn SSM channel, decision 06077146).",
   },
 ];
 

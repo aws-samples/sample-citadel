@@ -63,8 +63,6 @@ export interface TelemetryStackProps extends cdk.StackProps {
   modelCatalogTable: dynamodb.ITable;
   /** Cognito user pool backing the cost-query HttpApi's JWT authorizer. */
   userPool: cognito.IUserPool;
-  /** Cognito user pool client — becomes the authorizer's audience. */
-  userPoolClient: cognito.IUserPoolClient;
   /**
    * Deploy-time frontend origin for CORS (e.g. the CloudFront domain).
    * Sourced from env/CDK context, NOT the FrontendStack construct, to
@@ -832,11 +830,25 @@ export class TelemetryStack extends cdk.Stack {
       new iam.ServicePrincipal("apigateway.amazonaws.com"),
     );
 
+    // CIT-207: resolve the client id via SSM instead of a cross-stack
+    // Fn::ImportValue, then wrap it as an IUserPoolClient for the
+    // authorizer's `userPoolClients` list.
+    const userPoolClientId = ssm.StringParameter.fromStringParameterName(
+      this,
+      "UserPoolClientIdParam",
+      `/citadel/${props.environment}/cognito/client-id`,
+    ).stringValue;
+    const costJwtAuthorizerUserPoolClient =
+      cognito.UserPoolClient.fromUserPoolClientId(
+        this,
+        "UserPoolClientLookup",
+        userPoolClientId,
+      );
     const costJwtAuthorizer =
       new apigatewayv2Authorizers.HttpUserPoolAuthorizer(
         "CostJwtAuthorizer",
         props.userPool,
-        { userPoolClients: [props.userPoolClient] },
+        { userPoolClients: [costJwtAuthorizerUserPoolClient] },
       );
 
     const costQueryIntegration =

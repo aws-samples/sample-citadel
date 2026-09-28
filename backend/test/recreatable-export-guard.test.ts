@@ -251,10 +251,8 @@ const KNOWN_VIOLATIONS: AllowlistEntry[] = [
     exportName: `citadel-backend-${ENV}:ExportsOutputRefUserPoolClient2F5918F753847A55`,
     justification:
       "Auto-export of the Cognito UserPoolClient id, imported by frontend " +
-      "and telemetry. Retained via exportValue during CIT-207 phase 1 " +
-      "while consumers migrate to the SSM-parameter channel " +
-      "(/citadel/<env>/cognito/client-id, mirroring registry-ssm.ts); " +
-      "phase 2 drops the exportValue call and this entry.",
+      "and telemetry. Kept alive via exportValue until consumers redeploy " +
+      "(CIT-207 phase 2).",
     followUpId: "CIT-207",
   },
 ];
