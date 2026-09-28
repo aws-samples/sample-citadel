@@ -1075,7 +1075,6 @@ def handler(event, context):
     new cdk.CfnOutput(this, "SessionKbId", {
       value: sessionKb.attrKnowledgeBaseId,
       description: "Session documents Knowledge Base ID",
-      exportName: `${this.stackName}-SessionKbId`,
     });
 
     // Agent Intake Single - Runtime
@@ -1631,7 +1630,6 @@ def handler(event, context):
     new cdk.CfnOutput(this, "GatewayId", {
       value: gatewayIdFinal,
       description: "AgentCore Gateway ID",
-      exportName: `citadel-services-${props.environment}-GatewayId`,
     });
 
     // SSM parameter for Gateway ID (used by BackendStack Lambda at runtime)

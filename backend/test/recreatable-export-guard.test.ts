@@ -251,31 +251,10 @@ const KNOWN_VIOLATIONS: AllowlistEntry[] = [
     exportName: `citadel-backend-${ENV}:ExportsOutputRefUserPoolClient2F5918F753847A55`,
     justification:
       "Auto-export of the Cognito UserPoolClient id, imported by frontend " +
-      "and telemetry. Live lock-in already exists; migrating to the " +
-      "SSM-parameter channel (like registry-ssm.ts) is tracked separately.",
-    followUpId: "CIT-207",
-  },
-  {
-    exportName: `citadel-backend-${ENV}-UserPoolClientId`,
-    justification:
-      "Explicit orphan export of the same UserPoolClient id (no in-app " +
-      "importer). Drop the exportName once CIT-207 lands.",
-    followUpId: "CIT-207",
-  },
-  {
-    exportName: `citadel-services-${ENV}-SessionKbId`,
-    justification:
-      "Orphan export of the Bedrock KnowledgeBase id (no in-app " +
-      "importer). Drop the exportName once CIT-207 lands.",
-    followUpId: "CIT-207",
-  },
-  {
-    exportName: `citadel-services-${ENV}-GatewayId`,
-    justification:
-      "Orphan export of the AgentCore Gateway id (no in-app importer; " +
-      "docs/INTEGRATION_SETUP.md queries it out-of-band). The runtime " +
-      "channel already exists via SSM /citadel/gateway-id-<env>; retire " +
-      "the export and repoint the doc once CIT-207 lands.",
+      "and telemetry. Retained via exportValue during CIT-207 phase 1 " +
+      "while consumers migrate to the SSM-parameter channel " +
+      "(/citadel/<env>/cognito/client-id, mirroring registry-ssm.ts); " +
+      "phase 2 drops the exportValue call and this entry.",
     followUpId: "CIT-207",
   },
 ];
