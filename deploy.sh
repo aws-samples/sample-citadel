@@ -377,6 +377,12 @@ classify_deploy_failure() {
 # --- Deploy a single stack with retry ---
 deploy_stack() {
   local stack_name="$1"
+  # Optional 2nd arg: "true" adds `cdk deploy --exclusively`, so this single
+  # invocation does not pull in the stack's dependencies. Used ONLY for
+  # single-stack mode (DEPLOY_MODE=single) — deploy_all_stacks/--backend-only/
+  # --frontend-only intentionally deploy dependency chains together and must
+  # keep calling this with the arg omitted (defaults to "false").
+  local exclusively="${2:-false}"
   local attempt=1
   local max_attempts=2
   local profile_flag=""
@@ -450,6 +456,7 @@ deploy_stack() {
     log "Deploying $stack_name (attempt $attempt/$max_attempts)..."
     pushd backend > /dev/null
     local cmd="npx cdk deploy $stack_name --require-approval never --outputs-file ../cdk-outputs.json"
+    [ "$exclusively" = "true" ] && cmd="$cmd --exclusively"
     [ -n "${AWS_PROFILE:-}" ] && cmd="$cmd --profile $AWS_PROFILE"
 
     # Pass admin email as CDK context if provided via --admin-email or ADMIN_EMAIL env var
@@ -955,11 +962,43 @@ resolve_deployed_stack_names() {
   esac
 }
 
+# --- Validate a positional stack-name argument ---
+# Accepts ONLY an exact match against KNOWN_STACKS (bare name) or
+# KNOWN_STACKS suffixed with "-$ENVIRONMENT". ENVIRONMENT itself is never
+# read from a positional — it comes solely from backend/.env or the shell
+# environment (see load_env), exactly as before this fix. A positional was
+# never a supported way to set ENVIRONMENT; this function only tightens what
+# a positional is allowed to mean (a single known stack), it does not add or
+# remove any ENVIRONMENT-setting path.
+#
+# Echoes the matched stack name (with -$ENVIRONMENT suffix applied if the
+# bare form was given) on success; returns 1 on no match.
+is_known_stack_arg() {
+  local arg="$1"
+  local env="$2"
+  local s
+  for s in "${KNOWN_STACKS[@]}"; do
+    if [ "$arg" = "$s" ]; then
+      echo "${s}-${env}"
+      return 0
+    fi
+    if [ "$arg" = "${s}-${env}" ]; then
+      echo "$arg"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # --- Help ---
-show_help() {
+print_usage() {
   echo "Citadel Deployment Script"
   echo ""
   echo "Usage: ./deploy.sh [options] [stack-name]"
+  echo ""
+  echo "  stack-name must exactly match one of the known stacks (bare name or"
+  echo "  <name>-\$ENVIRONMENT). ENVIRONMENT itself is never read from a"
+  echo "  positional — it comes only from backend/.env or the shell environment."
   echo ""
   echo "Options:"
   echo "  --all                Deploy all stacks (default)"
@@ -975,6 +1014,11 @@ show_help() {
   echo "  --allow-dirty        Proceed even if the working tree is dirty (default: refuse)"
   echo "  --admin-email <addr> Admin email for initial user (overrides ADMIN_EMAIL env var)"
   echo "  --help               Show this help message"
+}
+
+# --help/-h entry point: print usage and exit 0.
+show_help() {
+  print_usage
   exit 0
 }
 
@@ -991,6 +1035,7 @@ fi
 
 # --- Main ---
 STACK_NAME=""
+STACK_NAME_RAW=""
 AWS_PROFILE=""
 DEPLOY_MODE="all"
 SKIP_FRONTEND_BUILD=false
@@ -1018,11 +1063,19 @@ while [[ $# -gt 0 ]]; do
     --allow-deletions) ALLOW_DELETIONS=true; shift ;;
     --allow-dirty)    ALLOW_DIRTY=true; shift ;;
     --admin-email)    ADMIN_EMAIL_ARG="$2"; shift 2 ;;
+    -*)
+      echo "Unknown argument: $1" >&2
+      echo "" >&2
+      print_usage >&2
+      exit 2 ;;
     *)
-      if [ -z "$STACK_NAME" ]; then
-        STACK_NAME="$1"
-        DEPLOY_MODE="single"
+      if [ -n "$STACK_NAME_RAW" ]; then
+        echo "Unknown argument: $1 (only one stack-name positional is accepted)" >&2
+        echo "" >&2
+        print_usage >&2
+        exit 2
       fi
+      STACK_NAME_RAW="$1"
       shift ;;
   esac
 done
@@ -1033,6 +1086,22 @@ header "Citadel Deployment"
 load_env "backend/.env"
 validate_env
 capture_git_info
+
+# --- Positional stack-name validation ---
+# Must exactly match a KNOWN_STACKS entry (bare or -$ENVIRONMENT suffixed).
+# ENVIRONMENT is resolved above from backend/.env / shell env only — a
+# positional has never set it and does not start now. Any other positional
+# is rejected here rather than silently treated as a stack or an environment.
+if [ -n "$STACK_NAME_RAW" ]; then
+  if STACK_NAME="$(is_known_stack_arg "$STACK_NAME_RAW" "$ENVIRONMENT")"; then
+    DEPLOY_MODE="single"
+  else
+    echo "Unknown argument: $STACK_NAME_RAW (not a known stack for environment '$ENVIRONMENT')" >&2
+    echo "" >&2
+    print_usage >&2
+    exit 2
+  fi
+fi
 
 # --- Provenance & divergence gates (findings 7f42ae86, 9c92a738) ---
 # Run BEFORE any expensive build/synth so a wrong-clone / wrong-branch /
@@ -1161,7 +1230,7 @@ case "$DEPLOY_MODE" in
     deploy_stack "citadel-telemetry-$ENVIRONMENT"
     ;;
   frontend) deploy_stack "citadel-frontend-$ENVIRONMENT" ;;
-  single)   deploy_stack "$STACK_NAME" ;;
+  single)   deploy_stack "$STACK_NAME" "true" ;;
 esac
 
 # Post-deploy: CloudFront invalidation + verification

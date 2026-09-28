@@ -875,6 +875,167 @@ else
 fi
 
 ########################################
+# Argument-guard regression: unknown positional / bogus stack rejected;
+# known stack accepted; single-stack cdk command gains --exclusively.
+########################################
+section "arg guard: bogus positional rejected with usage + exit 2, no synth/deploy"
+reset_fakes
+mkdir -p "$TMP_DIR/argguard-bogus/backend" "$TMP_DIR/argguard-bogus/frontend"
+cp "$DEPLOY_SH" "$TMP_DIR/argguard-bogus/deploy.sh"
+cat > "$FAKE_BIN/aws" <<'FAKE_AWS_EOF'
+#!/bin/bash
+exit 0
+FAKE_AWS_EOF
+chmod +x "$FAKE_BIN/aws"
+cat > "$FAKE_BIN/npx" <<'FAKE_NPX_EOF'
+#!/bin/bash
+echo "npx $*" >> "${FAKE_NPX_LOG:-/dev/null}"
+exit 0
+FAKE_NPX_EOF
+chmod +x "$FAKE_BIN/npx"
+export FAKE_NPX_LOG="$TMP_DIR/argguard-bogus-npx-log"
+set +e
+bogus_out=$(
+  cd "$TMP_DIR/argguard-bogus" || exit 1
+  env -u DEPLOY_SH_SOURCE_ONLY \
+    ENVIRONMENT="dev" CDK_DEFAULT_REGION="us-east-1" CDK_DEFAULT_ACCOUNT="123456789012" \
+    PATH="$FAKE_BIN:$PATH" \
+    bash deploy.sh bogus-arg --dry-run </dev/null 2>&1
+)
+bogus_rc=$?
+set -e 2>/dev/null || true
+if [ $bogus_rc -eq 2 ]; then
+  pass "unknown positional exits 2"
+else
+  fail "expected exit 2 for unknown positional, got rc=$bogus_rc: $bogus_out"
+fi
+if echo "$bogus_out" | grep -qi "unknown argument" && echo "$bogus_out" | grep -qi "Usage:"; then
+  pass "unknown positional prints 'unknown argument' and usage"
+else
+  fail "unknown positional output missing message/usage: $bogus_out"
+fi
+if [ ! -f "$FAKE_NPX_LOG" ]; then
+  pass "unknown positional never invoked cdk (npx)"
+else
+  fail "unknown positional reached cdk: $(cat "$FAKE_NPX_LOG")"
+fi
+
+section "arg guard: known bare stack name resolves to single mode with -\$ENVIRONMENT suffix"
+reset_fakes
+match1=$(bash -c '
+  export DEPLOY_SH_SOURCE_ONLY=1
+  source "'"$DEPLOY_SH"'" >/dev/null 2>&1
+  trap - EXIT
+  set +e
+  is_known_stack_arg "citadel-registry" "dev"
+')
+if [ "$match1" = "citadel-registry-dev" ]; then
+  pass "bare KNOWN_STACKS name resolves to citadel-registry-dev"
+else
+  fail "bare name did not resolve correctly: $match1"
+fi
+
+section "arg guard: suffixed stack name (citadel-registry-dev) matches directly"
+match2=$(bash -c '
+  export DEPLOY_SH_SOURCE_ONLY=1
+  source "'"$DEPLOY_SH"'" >/dev/null 2>&1
+  trap - EXIT
+  set +e
+  is_known_stack_arg "citadel-registry-dev" "dev"
+')
+if [ "$match2" = "citadel-registry-dev" ]; then
+  pass "already-suffixed stack name matches directly"
+else
+  fail "suffixed name did not match: $match2"
+fi
+
+section "arg guard: stack-name-shaped positional for the WRONG environment is rejected"
+# This is the original bug's core case: 'citadel-registry-dev' must not be
+# accepted as environment 'test', nor treated as some other stack.
+set +e
+match3=$(bash -c '
+  export DEPLOY_SH_SOURCE_ONLY=1
+  source "'"$DEPLOY_SH"'" >/dev/null 2>&1
+  trap - EXIT
+  set +e
+  is_known_stack_arg "citadel-registry-dev" "test"
+' 2>&1)
+rc3=$?
+set -e 2>/dev/null || true
+if [ $rc3 -ne 0 ] && [ -z "$match3" ]; then
+  pass "citadel-registry-dev does not match KNOWN_STACKS for environment 'test'"
+else
+  fail "expected no match for wrong-environment suffix; rc=$rc3 out=$match3"
+fi
+
+section "arg guard: single-stack cdk deploy command includes --exclusively"
+reset_fakes
+cat > "$FAKE_BIN/aws" <<'FAKE_AWS_EOF'
+#!/bin/bash
+if [ "$1" = "cloudformation" ] && [ "$2" = "describe-stacks" ]; then
+  echo "NOT_FOUND"; exit 0
+fi
+exit 0
+FAKE_AWS_EOF
+chmod +x "$FAKE_BIN/aws"
+cat > "$FAKE_BIN/npx" <<FAKE_NPX_EOF
+#!/bin/bash
+echo "\$*" >> "$TMP_DIR/excl-npx-log"
+if [ "\$1" = "cdk" ] && [ "\$2" = "deploy" ]; then
+  exit 0
+fi
+exit 0
+FAKE_NPX_EOF
+chmod +x "$FAKE_BIN/npx"
+cat > "$FAKE_BIN/docker" <<'FAKE_DOCKER_EOF'
+#!/bin/bash
+exit 0
+FAKE_DOCKER_EOF
+chmod +x "$FAKE_BIN/docker"
+mkdir -p "$TMP_DIR/backend"
+(
+  cd "$TMP_DIR" || exit 1
+  PATH="$FAKE_BIN:$PATH" DEPLOY_LOG="$TMP_DIR/deploy.log" deploy_stack "citadel-registry-test" "true" </dev/null >/dev/null 2>&1
+)
+if grep -q -- "--exclusively" "$TMP_DIR/excl-npx-log"; then
+  pass "single-stack deploy_stack call (exclusively=true) includes --exclusively"
+else
+  fail "expected --exclusively in cdk deploy invocation: $(cat "$TMP_DIR/excl-npx-log" 2>/dev/null)"
+fi
+
+section "arg guard: multi-stack (all/backend/frontend) deploy_stack calls omit --exclusively"
+reset_fakes
+cat > "$FAKE_BIN/aws" <<'FAKE_AWS_EOF'
+#!/bin/bash
+if [ "$1" = "cloudformation" ] && [ "$2" = "describe-stacks" ]; then
+  echo "NOT_FOUND"; exit 0
+fi
+exit 0
+FAKE_AWS_EOF
+chmod +x "$FAKE_BIN/aws"
+cat > "$FAKE_BIN/npx" <<FAKE_NPX_EOF
+#!/bin/bash
+echo "\$*" >> "$TMP_DIR/no-excl-npx-log"
+exit 0
+FAKE_NPX_EOF
+chmod +x "$FAKE_BIN/npx"
+cat > "$FAKE_BIN/docker" <<'FAKE_DOCKER_EOF'
+#!/bin/bash
+exit 0
+FAKE_DOCKER_EOF
+chmod +x "$FAKE_BIN/docker"
+mkdir -p "$TMP_DIR/backend"
+(
+  cd "$TMP_DIR" || exit 1
+  PATH="$FAKE_BIN:$PATH" DEPLOY_LOG="$TMP_DIR/deploy.log" deploy_stack "citadel-backend-test" </dev/null >/dev/null 2>&1
+)
+if [ -f "$TMP_DIR/no-excl-npx-log" ] && ! grep -q -- "--exclusively" "$TMP_DIR/no-excl-npx-log"; then
+  pass "deploy_stack call without exclusively arg omits --exclusively (dependency chains unaffected)"
+else
+  fail "unexpected --exclusively in non-single-mode call: $(cat "$TMP_DIR/no-excl-npx-log" 2>/dev/null)"
+fi
+
+########################################
 # Summary
 ########################################
 echo ""
