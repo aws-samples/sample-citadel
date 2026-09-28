@@ -381,6 +381,39 @@ export function coerceAgentConfig(
   return undefined;
 }
 
+/**
+ * Returns the RAW `state` value from the resource's customDescriptorContent
+ * JSON, or `undefined` if the JSON is missing/malformed/non-object OR the
+ * field is simply absent. Used to derive `registryStatus` WITHOUT going
+ * through `deserializeCustomMetadata`'s defaulting merge — that merge
+ * substitutes `AGENT_METADATA_DEFAULTS.state = "APPROVED"` (a deliberate
+ * fail-OPEN default for the internal `state` field) whenever the source
+ * omits status, which would make an absent status indistinguishable from an
+ * explicit APPROVED. `registryStatus` must never inherit that default: it
+ * is either the source's raw status string, or left unset.
+ */
+export function extractRawStatus(
+  customDescriptorContent: string | null | undefined,
+): string | undefined {
+  if (customDescriptorContent == null || customDescriptorContent === "") {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(customDescriptorContent);
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      return undefined;
+    }
+    const raw = (parsed as Record<string, unknown>).state;
+    return typeof raw === "string" && raw !== "" ? raw : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function getKeyForResource(
   resourceType: ResourceType,
   resourceId: string,
@@ -424,6 +457,16 @@ export type AgentCacheRecord = {
   orgId: string | undefined;
   createdBy: string | undefined;
   sourceProjectId: string | undefined;
+  /**
+   * Raw registry approval status (e.g. "APPROVED", "DRAFT",
+   * "PENDING_APPROVAL", "REJECTED", "DEPRECATED"), denormalized for the
+   * dispatch-time approval gate. Absent (never defaulted to "APPROVED")
+   * when the source carries no status signal — see
+   * approval-cache-fields.ts for the field-name contract.
+   */
+  registryStatus: string | undefined;
+  registryRecordId: string | undefined;
+  statusUpdatedAt: string | undefined;
 };
 
 /**
@@ -454,6 +497,7 @@ export function buildAgentCacheRecord(
     resource.customDescriptorContent ?? null,
     AGENT_METADATA_DEFAULTS,
   );
+  const rawStatus = extractRawStatus(resource.customDescriptorContent);
 
   return {
     agentId: resourceId,
@@ -474,6 +518,13 @@ export function buildAgentCacheRecord(
     updatedAt: resource.updatedAt
       ? new Date(resource.updatedAt).toISOString()
       : new Date().toISOString(),
+    // Never defaulted to APPROVED — undefined (UNSET) when the source has
+    // no raw status signal. registryRecordId is not derivable on the
+    // legacy resourceType/eventType path (no recordId in the payload).
+    registryStatus: rawStatus,
+    registryRecordId: undefined,
+    statusUpdatedAt:
+      rawStatus !== undefined ? new Date().toISOString() : undefined,
   };
 }
 
@@ -645,6 +696,23 @@ function buildGaMergeFields(
   const mappedState = toInternalStateFromGaStatus(record.status);
   if (mappedState !== undefined) fields.state = mappedState;
 
+  // registryStatus/registryRecordId/statusUpdatedAt: merge semantics apply
+  // — SET only when the resolved record carries a present value. record.status
+  // is a required string on RegistryRecord, so this branch is effectively
+  // always taken for a real GA record; the guard mirrors the other
+  // record-derived fields' isPresentNonEmpty convention.
+  if (isPresentNonEmpty(record.status)) {
+    fields.registryStatus = record.status;
+    fields.statusUpdatedAt = now;
+  } else {
+    skipped.push("registryStatus");
+  }
+  if (isPresentNonEmpty(record.recordId)) {
+    fields.registryRecordId = record.recordId;
+  } else {
+    skipped.push("registryRecordId");
+  }
+
   if (skipped.length > 0) {
     console.warn(
       `GA merge-upsert for agent "${record.recordId}": skipping empty/absent record-derived fields to avoid overwriting cache values: ${skipped.join(", ")}`,
@@ -760,17 +828,25 @@ export async function handleStatusChanged(
   const params: UpdateCommandInput = {
     TableName: tableName,
     Key: getKeyForResource(resourceType, resourceId),
-    UpdateExpression: "SET #state = :newState, #updatedAt = :now",
+    // registryStatus is SET to the RAW newStatus (never the mapped
+    // internal state) alongside #state, so the denormalized approval
+    // signal reflects the true registry status even when it maps to the
+    // same internal `state` as before.
+    UpdateExpression:
+      "SET #state = :newState, #updatedAt = :now, #registryStatus = :newStatus, #statusUpdatedAt = :now",
     // Idempotency: only update if the state is actually different
     ConditionExpression: `attribute_exists(#key) AND (attribute_not_exists(#state) OR #state <> :newState)`,
     ExpressionAttributeNames: {
       "#key": keyAttr,
       "#state": "state",
       "#updatedAt": "updatedAt",
+      "#registryStatus": "registryStatus",
+      "#statusUpdatedAt": "statusUpdatedAt",
     },
     ExpressionAttributeValues: {
       ":newState": mappedState,
       ":now": now,
+      ":newStatus": newStatus,
     },
   };
 
