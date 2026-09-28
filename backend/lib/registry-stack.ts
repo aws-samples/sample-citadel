@@ -260,6 +260,12 @@ export class RegistryStack extends cdk.Stack {
           "dynamodb:GetItem",
           "dynamodb:PutItem",
           "dynamodb:DeleteItem",
+          // finding (bug #199): the GA sync path added an UpdateItem-based
+          // merge-upsert (handleGaUpsert) that runs for BOTH agent and tool
+          // records, but this tools-table grant was never updated to match
+          // the agents table's grantReadWriteData action set — every
+          // tool-record GA event dead-lettered with AccessDenied.
+          "dynamodb:UpdateItem",
         ],
         resources: [
           `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-tools-${props.environment}`,

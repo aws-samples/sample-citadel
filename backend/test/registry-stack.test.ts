@@ -22,6 +22,7 @@ import * as cognito from "aws-cdk-lib/aws-cognito";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
 import * as path from "path";
+import { readFileSync } from "fs";
 import { scaffoldBackendAssetDirs } from "./helpers/scaffold-stub-assets";
 import {
   expectNoRegistryExportImports,
@@ -443,6 +444,165 @@ describe("RegistryStack — backend-stack-split phase 2", () => {
         }
       }
     }
+  });
+
+  describe("RegistrySyncLambda tools-table grant parity (bug #199 — GA UpdateItem path)", () => {
+    function registrySyncRoleStatements(): CfnIamStatement[] {
+      const fns = template.findResources("AWS::Lambda::Function", {
+        Properties: { Handler: "registry-sync.handler" },
+      });
+      const fnLogicalId = Object.keys(fns)[0];
+      expect(fnLogicalId).toBeDefined();
+      const roleRef = (fns[fnLogicalId] as CfnLambdaFunctionResource).Properties
+        ?.Role?.["Fn::GetAtt"]?.[0];
+      expect(roleRef).toBeDefined();
+
+      const policies = template.findResources("AWS::IAM::Policy");
+      const statements: CfnIamStatement[] = [];
+      for (const policy of Object.values(policies)) {
+        const props = (policy as CfnIamPolicyResource).Properties;
+        const roles = props?.Roles ?? [];
+        const attachedToSyncRole = roles.some((r) => r.Ref === roleRef);
+        if (!attachedToSyncRole) continue;
+        const stmts = props?.PolicyDocument?.Statement;
+        if (Array.isArray(stmts)) statements.push(...stmts);
+      }
+      return statements;
+    }
+
+    // Resource entries take two shapes in this stack's synthesized template:
+    //   - the agents table (granted via `Table.grantReadWriteData`, a
+    //     cross-stack construct) resolves to `{ "Fn::ImportValue":
+    //     "...ExportsOutputFnGetAtt<LogicalId>Arn..." }`, not a literal ARN
+    //     string — so matching must also inspect Fn::ImportValue keys.
+    //   - the tools table (granted via a literal `addToRolePolicy`
+    //     PolicyStatement in this stack) resolves to a plain ARN string.
+    // `resourceMatches` recognizes both shapes via a substring test against
+    // either the raw string or the Fn::ImportValue's own string value.
+    function resourceMatches(resource: unknown, substring: string): boolean {
+      if (typeof resource === "string") return resource.includes(substring);
+      if (
+        resource !== null &&
+        typeof resource === "object" &&
+        "Fn::ImportValue" in (resource as Record<string, unknown>)
+      ) {
+        const importValue = (resource as Record<string, unknown>)[
+          "Fn::ImportValue"
+        ];
+        return (
+          typeof importValue === "string" && importValue.includes(substring)
+        );
+      }
+      return false;
+    }
+
+    function actionsForResourceSubstring(
+      statements: CfnIamStatement[],
+      substring: string,
+    ): Set<string> {
+      const actions = new Set<string>();
+      for (const stmt of statements) {
+        const resources = Array.isArray(stmt.Resource)
+          ? stmt.Resource
+          : [stmt.Resource];
+        const matches = resources.some((r) => resourceMatches(r, substring));
+        if (!matches) continue;
+        const stmtActions = Array.isArray(stmt.Action)
+          ? stmt.Action
+          : [stmt.Action];
+        for (const a of stmtActions) {
+          if (typeof a === "string") actions.add(a);
+        }
+      }
+      return actions;
+    }
+
+    test("sync role grants dynamodb:UpdateItem on BOTH the agents table and the tools table", () => {
+      const statements = registrySyncRoleStatements();
+
+      const agentActions = actionsForResourceSubstring(
+        statements,
+        "AgentConfigTable",
+      );
+      const toolActions = actionsForResourceSubstring(
+        statements,
+        "citadel-tools-test",
+      );
+
+      expect(agentActions).toContain("dynamodb:UpdateItem");
+      expect(toolActions).toContain("dynamodb:UpdateItem");
+    });
+
+    test("tools table grant is a superset of the agent table's Get/Put/Delete/Update action set", () => {
+      const statements = registrySyncRoleStatements();
+
+      const agentActions = actionsForResourceSubstring(
+        statements,
+        "AgentConfigTable",
+      );
+      const toolActions = actionsForResourceSubstring(
+        statements,
+        "citadel-tools-test",
+      );
+
+      for (const required of [
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:UpdateItem",
+      ]) {
+        expect(agentActions).toContain(required);
+        expect(toolActions).toContain(required);
+      }
+    });
+
+    test("contract: every DynamoDB *Command class used in registry-sync.ts maps to a granted action on BOTH table ARNs", () => {
+      const handlerSrc = readFileSync(
+        path.join(__dirname, "..", "src", "lambda", "registry-sync.ts"),
+        "utf-8",
+      );
+
+      // Derive the set of AWS SDK DynamoDB command classes actually
+      // constructed in the handler (e.g. "new PutCommand(", "new
+      // UpdateCommand(") rather than hardcoding the list, so this test
+      // fails loudly if a future command type is added without a
+      // matching grant.
+      const commandMatches = handlerSrc.matchAll(/new (\w+Command)\(/g);
+      const commandNames = new Set<string>();
+      for (const m of commandMatches) commandNames.add(m[1]);
+      expect(commandNames.size).toBeGreaterThan(0);
+
+      const COMMAND_TO_ACTION: Record<string, string> = {
+        PutCommand: "dynamodb:PutItem",
+        DeleteCommand: "dynamodb:DeleteItem",
+        UpdateCommand: "dynamodb:UpdateItem",
+        GetCommand: "dynamodb:GetItem",
+      };
+
+      const requiredActions = new Set<string>();
+      for (const name of commandNames) {
+        const action = COMMAND_TO_ACTION[name];
+        // Non-DynamoDB commands (e.g. SendMessageCommand, PutMetricDataCommand)
+        // are not part of this contract — skip them.
+        if (action) requiredActions.add(action);
+      }
+      expect(requiredActions.size).toBeGreaterThan(0);
+
+      const statements = registrySyncRoleStatements();
+      const agentActions = actionsForResourceSubstring(
+        statements,
+        "AgentConfigTable",
+      );
+      const toolActions = actionsForResourceSubstring(
+        statements,
+        "citadel-tools-test",
+      );
+
+      for (const action of requiredActions) {
+        expect(agentActions).toContain(action);
+        expect(toolActions).toContain(action);
+      }
+    });
   });
 
   test("no IAM policy statement grants a full-service wildcard action (iam:*, dynamodb:*, or s3:*)", () => {

@@ -2082,5 +2082,25 @@ export const ALLOWED_SATELLITE_ADDED_STATEMENTS: Record<
       ],
       conditionKeys: [],
     },
+    // Bug #199: registry-sync GA path added UpdateItem for both the agents
+    // and tools cache tables, but the tools table grant was originally
+    // Get/Put/Delete only, so every tool-record event dead-lettered with
+    // AccessDenied. This statement covers the widened tools-table grant
+    // (Delete/Get/Put/UpdateItem) added alongside the pre-existing
+    // agents-table grant (000000000000 is rail 6's normalized sandbox
+    // account placeholder, not a real account).
+    {
+      effect: "Allow",
+      actions: [
+        "dynamodb:DeleteItem",
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+      ],
+      resources: [
+        "arn:aws:dynamodb:us-west-2:000000000000:table/citadel-tools-dev",
+      ],
+      conditionKeys: [],
+    },
   ],
 };
