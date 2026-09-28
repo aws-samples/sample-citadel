@@ -243,18 +243,10 @@ interface AllowlistEntry {
 }
 
 const KNOWN_VIOLATIONS: AllowlistEntry[] = [
-  {
-    // The auto-generated logical-id hash suffix (2F5918F753847A55) is
-    // derived from construct path, not environment, so it stays constant
-    // across dev/test/prod — only the stack-name prefix varies with ENV
-    // (finding 81f8b586: this list must not hardcode "-dev").
-    exportName: `citadel-backend-${ENV}:ExportsOutputRefUserPoolClient2F5918F753847A55`,
-    justification:
-      "Auto-export of the Cognito UserPoolClient id, imported by frontend " +
-      "and telemetry. Kept alive via exportValue until consumers redeploy " +
-      "(CIT-207 phase 2).",
-    followUpId: "CIT-207",
-  },
+  // CIT-207 phase 2: the last entry here (the Cognito UserPoolClient id
+  // auto-export) was removed once phase 1 was live everywhere and the
+  // exportValue keep-alive was dropped from BackendStack. Empty by design —
+  // keep the structure so future violations have a documented landing spot.
 ];
 
 const ALLOWLISTED_EXPORT_NAMES = new Set(

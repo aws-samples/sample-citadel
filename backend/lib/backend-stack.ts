@@ -959,13 +959,12 @@ export class BackendStack extends cdk.Stack {
 
     // Publish the user pool client id to SSM (mirrors the registry id/arn
     // params) so consumers can resolve it without a cross-stack
-    // Fn::ImportValue. Keep the auto-export alive via exportValue (E19
-    // phase-1 pattern) while importers are still deployed.
+    // Fn::ImportValue. The exportValue keep-alive from CIT-207 phase 1 has
+    // been dropped now that consumers read SSM (CIT-207 phase 2).
     new ssm.StringParameter(this, "UserPoolClientIdParam", {
       parameterName: `/citadel/${props.environment}/cognito/client-id`,
       stringValue: this.userPoolClient.userPoolClientId,
     });
-    this.exportValue(this.userPoolClient.userPoolClientId);
 
     // Lambda functions for resolvers
     //

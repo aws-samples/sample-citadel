@@ -698,6 +698,18 @@ export const REMOVAL_ALLOWLIST: AllowlistEntry[] = [
       "SSM (/citadel/<env>/cognito/client-id) instead of Fn::ImportValue.",
   },
 
+  // --- CIT-207 phase 2: drop the auto-export keep-alive now that consumers read SSM ---
+  {
+    logicalId: "ExportsOutputRefUserPoolClient2F5918F753847A55",
+    justification:
+      "CIT-207 phase 2: auto-generated export of the Cognito " +
+      "UserPoolClient id, retained via exportValue during phase 1 while " +
+      "frontend/telemetry importers migrated to the SSM parameter " +
+      "(/citadel/<env>/cognito/client-id). Phase 1 is now live everywhere, " +
+      "so the exportValue keep-alive is removed (mirrors the registry " +
+      "exports allowlisted in phase 2, commit 0904aa2/eaa8e17).",
+  },
+
   // --- Lambda functions (7 clusters, 4 CFN each: fn, log group, role, policy) ---
   {
     logicalId: "AgentImportResolverFunctionE5B20F94",
