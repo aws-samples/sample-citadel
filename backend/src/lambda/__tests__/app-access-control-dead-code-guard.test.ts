@@ -57,35 +57,18 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import * as ts from "typescript";
+import {
+  listSourceFiles,
+  readSourceFileOrNull,
+} from "./fixtures/source-file-walker";
 
 const REPO_ROOT = path.resolve(__dirname, "../../..");
 const SCAN_DIR = path.join("src", "lambda");
 const DELETED_MODULE_BASENAME = "app-access-control";
 
-function listSourceFiles(dir: string): string[] {
-  const abs = path.join(REPO_ROOT, dir);
-  if (!fs.existsSync(abs)) return [];
-  const out: string[] = [];
-  const stack = [abs];
-  while (stack.length > 0) {
-    const current = stack.pop()!;
-    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
-      if (entry.name === "node_modules" || entry.name === "__tests__") {
-        continue;
-      }
-      const full = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        stack.push(full);
-      } else if (entry.isFile() && /\.tsx?$/.test(entry.name)) {
-        out.push(full);
-      }
-    }
-  }
-  return out;
-}
-
-function parseSourceFile(filePath: string): ts.SourceFile {
-  const text = fs.readFileSync(filePath, "utf-8");
+function parseSourceFile(filePath: string): ts.SourceFile | null {
+  const text = readSourceFileOrNull(filePath);
+  if (text === null) return null;
   return ts.createSourceFile(
     filePath,
     text,
@@ -211,9 +194,10 @@ function scan(): {
   const importViolations: string[] = [];
   const gsiViolations: string[] = [];
 
-  for (const file of listSourceFiles(SCAN_DIR)) {
+  for (const file of listSourceFiles(path.join(REPO_ROOT, SCAN_DIR))) {
     const relPath = path.relative(REPO_ROOT, file);
     const sf = parseSourceFile(file);
+    if (sf === null) continue;
 
     const specifiers = collectModuleSpecifiers(sf);
     if (specifiers.some(referencesDeletedModule)) {
@@ -262,7 +246,7 @@ describe("app-access-control dead-code guard (finding 603e732f)", () => {
           "export { listAppAccessEntries };",
         ].join("\n"),
       );
-      const sf = parseSourceFile(scratchFile);
+      const sf = parseSourceFile(scratchFile)!;
       const specifiers = collectModuleSpecifiers(sf);
       expect(specifiers.some(referencesDeletedModule)).toBe(true);
     } finally {
@@ -298,7 +282,7 @@ describe("app-access-control dead-code guard (finding 603e732f)", () => {
           "}",
         ].join("\n"),
       );
-      const sf = parseSourceFile(scratchFile);
+      const sf = parseSourceFile(scratchFile)!;
       expect(findAccessRowGsiQueries(sf).length).toBeGreaterThan(0);
     } finally {
       fs.rmSync(scratchDir, { recursive: true, force: true });
@@ -330,7 +314,7 @@ describe("app-access-control dead-code guard (finding 603e732f)", () => {
           "}",
         ].join("\n"),
       );
-      const sf = parseSourceFile(scratchFile);
+      const sf = parseSourceFile(scratchFile)!;
       expect(findAccessRowGsiQueries(sf).length).toBe(0);
     } finally {
       fs.rmSync(scratchDir, { recursive: true, force: true });
@@ -354,7 +338,7 @@ describe("app-access-control dead-code guard (finding 603e732f)", () => {
           "export function noop(): void {}",
         ].join("\n"),
       );
-      const sf = parseSourceFile(scratchFile);
+      const sf = parseSourceFile(scratchFile)!;
       const specifiers = collectModuleSpecifiers(sf);
       expect(specifiers.some(referencesDeletedModule)).toBe(false);
       expect(findAccessRowGsiQueries(sf).length).toBe(0);
@@ -376,7 +360,7 @@ describe("app-access-control dead-code guard (finding 603e732f)", () => {
           "export { historicalNote };",
         ].join("\n"),
       );
-      const sf = parseSourceFile(scratchFile);
+      const sf = parseSourceFile(scratchFile)!;
       const specifiers = collectModuleSpecifiers(sf);
       expect(specifiers.some(referencesDeletedModule)).toBe(false);
     } finally {

@@ -58,37 +58,22 @@
  *     is ever rewritten to read `event.arguments.orgId` directly inline,
  *     that WOULD trip this guard (see the bites test below).
  */
-import * as fs from "fs";
 import * as path from "path";
 import * as ts from "typescript";
+import {
+  listSourceFiles,
+  readSourceFileOrNull,
+} from "./fixtures/source-file-walker";
 
 const REPO_ROOT = path.resolve(__dirname, "../../..");
 const SCAN_DIR = path.join("src");
 
-function listSourceFiles(dir: string): string[] {
-  const abs = path.join(REPO_ROOT, dir);
-  if (!fs.existsSync(abs)) return [];
-  const out: string[] = [];
-  const stack = [abs];
-  while (stack.length > 0) {
-    const current = stack.pop()!;
-    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
-      if (entry.name === "node_modules" || entry.name === "__tests__") {
-        continue;
-      }
-      const full = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        stack.push(full);
-      } else if (entry.isFile() && /\.tsx?$/.test(entry.name)) {
-        out.push(full);
-      }
-    }
-  }
-  return out;
-}
-
-function parseSourceFile(filePath: string, text?: string): ts.SourceFile {
-  const content = text ?? fs.readFileSync(filePath, "utf-8");
+function parseSourceFile(
+  filePath: string,
+  text?: string,
+): ts.SourceFile | null {
+  const content = text ?? readSourceFileOrNull(filePath);
+  if (content === null) return null;
   return ts.createSourceFile(
     filePath,
     content,
@@ -159,9 +144,10 @@ function findCallerOrgFallbackIdioms(sf: ts.SourceFile): ts.Node[] {
 
 function scan(): string[] {
   const violations: string[] = [];
-  for (const file of listSourceFiles(SCAN_DIR)) {
+  for (const file of listSourceFiles(path.join(REPO_ROOT, SCAN_DIR))) {
     const relPath = path.relative(REPO_ROOT, file);
     const sf = parseSourceFile(file);
+    if (sf === null) continue;
     if (findCallerOrgFallbackIdioms(sf).length > 0) {
       violations.push(relPath);
     }
@@ -185,7 +171,7 @@ describe("no-caller-org-fallback-idiom guard (finding f0ce2b00)", () => {
         "  return effectiveOrgId;",
         "}",
       ].join("\n"),
-    );
+    )!;
     expect(findCallerOrgFallbackIdioms(sf).length).toBeGreaterThan(0);
   });
 
@@ -197,7 +183,7 @@ describe("no-caller-org-fallback-idiom guard (finding f0ce2b00)", () => {
         "  return callerOrgId || args.orgId;",
         "}",
       ].join("\n"),
-    );
+    )!;
     expect(findCallerOrgFallbackIdioms(sf).length).toBeGreaterThan(0);
   });
 
@@ -209,7 +195,7 @@ describe("no-caller-org-fallback-idiom guard (finding f0ce2b00)", () => {
         "  return someOrg || evt.arguments.orgId;",
         "}",
       ].join("\n"),
-    );
+    )!;
     expect(findCallerOrgFallbackIdioms(sf).length).toBeGreaterThan(0);
   });
 
@@ -222,7 +208,7 @@ describe("no-caller-org-fallback-idiom guard (finding f0ce2b00)", () => {
         "  return callerOrgId || orgId;",
         "}",
       ].join("\n"),
-    );
+    )!;
     expect(findCallerOrgFallbackIdioms(sf).length).toBeGreaterThan(0);
   });
 
@@ -236,7 +222,7 @@ describe("no-caller-org-fallback-idiom guard (finding f0ce2b00)", () => {
         "  }",
         "}",
       ].join("\n"),
-    );
+    )!;
     expect(findCallerOrgFallbackIdioms(sf).length).toBe(0);
   });
 
@@ -248,7 +234,7 @@ describe("no-caller-org-fallback-idiom guard (finding f0ce2b00)", () => {
         "  return rows.filter((a) => a.orgId === callerOrgId || a.orgId === '');",
         "}",
       ].join("\n"),
-    );
+    )!;
     expect(findCallerOrgFallbackIdioms(sf).length).toBe(0);
   });
 
@@ -261,7 +247,7 @@ describe("no-caller-org-fallback-idiom guard (finding f0ce2b00)", () => {
         "  return callerOrgId || suppliedOrgId;",
         "}",
       ].join("\n"),
-    );
+    )!;
     expect(findCallerOrgFallbackIdioms(sf).length).toBe(0);
   });
 
@@ -275,7 +261,7 @@ describe("no-caller-org-fallback-idiom guard (finding f0ce2b00)", () => {
         " */",
         "export function noop(): void {}",
       ].join("\n"),
-    );
+    )!;
     expect(findCallerOrgFallbackIdioms(sf).length).toBe(0);
   });
 
@@ -287,7 +273,7 @@ describe("no-caller-org-fallback-idiom guard (finding f0ce2b00)", () => {
         "  return orgId || orgId;",
         "}",
       ].join("\n"),
-    );
+    )!;
     expect(findCallerOrgFallbackIdioms(sf).length).toBe(0);
   });
 
@@ -297,7 +283,7 @@ describe("no-caller-org-fallback-idiom guard (finding f0ce2b00)", () => {
       path.join(REPO_ROOT, "src", "lambda", "integration-resolver.ts"),
     ];
     for (const file of fixedFiles) {
-      const sf = parseSourceFile(file);
+      const sf = parseSourceFile(file)!;
       expect(findCallerOrgFallbackIdioms(sf)).toEqual([]);
     }
   });

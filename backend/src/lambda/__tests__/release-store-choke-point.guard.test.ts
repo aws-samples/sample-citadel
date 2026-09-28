@@ -74,6 +74,10 @@ import * as os from "os";
 import * as path from "path";
 import * as ts from "typescript";
 import * as releaseStore from "../release-store";
+import {
+  listSourceFiles,
+  readSourceFileOrNull,
+} from "./fixtures/source-file-walker";
 
 const REPO_ROOT = path.resolve(__dirname, "../../..");
 const OWNING_FILE = path.join("src", "lambda", "release-store.ts");
@@ -133,39 +137,18 @@ function stripComments(source: string): string {
  * (lib/*.ts) legitimately defines the table/IAM and is out of scope. */
 const SCAN_DIR = path.join("src", "lambda");
 
-function listSourceFiles(dir: string): string[] {
-  const abs = path.join(REPO_ROOT, dir);
-  if (!fs.existsSync(abs)) return [];
-  const out: string[] = [];
-  const stack = [abs];
-  while (stack.length > 0) {
-    const current = stack.pop()!;
-    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
-      if (entry.name === "node_modules" || entry.name === "__tests__") {
-        continue;
-      }
-      const full = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        stack.push(full);
-      } else if (entry.isFile() && /\.tsx?$/.test(entry.name)) {
-        out.push(full);
-      }
-    }
-  }
-  return out;
-}
-
 /** Returns the list of files (relative to repo root) that combine a raw
  * write-command import/usage with a reference to the AgentReleasesTable
  * name/env var — the exact signature of a bypass write — EXCLUDING the
  * one legitimate owning file. */
 function findChokePointViolations(): string[] {
   const violations: string[] = [];
-  for (const file of listSourceFiles(SCAN_DIR)) {
+  for (const file of listSourceFiles(path.join(REPO_ROOT, SCAN_DIR))) {
     const relPath = path.relative(REPO_ROOT, file);
     if (relPath === OWNING_FILE) continue;
 
-    const rawContent = fs.readFileSync(file, "utf-8");
+    const rawContent = readSourceFileOrNull(file);
+    if (rawContent === null) continue;
     const content = stripComments(rawContent);
     const referencesTable =
       content.includes(TABLE_ENV_VAR) || TABLE_NAME_LITERAL_RE.test(content);
