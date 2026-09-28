@@ -18,7 +18,8 @@ jest.mock('../AgentConfig', () => ({
     React.createElement('button', { onClick: onSave }, 'Save Details'),
 }));
 jest.mock('../AgentCode', () => ({
-  AgentCodeTab: () => null,
+  AgentCodeTab: ({ onSave }: { onSave: () => void }) =>
+    React.createElement('button', { onClick: onSave }, 'Save Code'),
 }));
 
 jest.mock('../../services/agentConfigService', () => ({
@@ -222,6 +223,47 @@ describe('AgentDetails — confirm before saving content edits to an approved re
     fireEvent.click(screen.getByText('Save Details'));
 
     await waitFor(() => expect(agentConfigService.updateAgentConfig).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText('Saving will require re-approval')).not.toBeInTheDocument();
+  });
+});
+
+describe('AgentDetails — confirm before saving code edits to an approved registry record', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (agentConfigService.getAgentCode as jest.Mock).mockRejectedValue(new Error('no code'));
+  });
+
+  it('opens the confirm on Code tab save for an active registry-backed agent and does not save until confirmed', async () => {
+    (agentConfigService.getAgentConfig as jest.Mock).mockResolvedValue(makeRegistryAgent('active'));
+    (agentConfigService.updateAgentConfig as jest.Mock).mockResolvedValue({});
+    (agentConfigService.updateAgentCode as jest.Mock).mockResolvedValue({});
+
+    render(<AgentDetails agentId="agent-1" onBack={jest.fn()} />);
+    await waitFor(() => expect(screen.getByText('Test Agent')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText('Code'));
+    fireEvent.click(screen.getByText('Save Code'));
+
+    expect(await screen.findByText('Saving will require re-approval')).toBeInTheDocument();
+    expect(agentConfigService.updateAgentCode).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByText('Save'));
+
+    await waitFor(() => expect(agentConfigService.updateAgentCode).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(agentConfigService.updateAgentConfig).toHaveBeenCalledTimes(1));
+  });
+
+  it('saves code directly without a confirmation for a legacy agent', async () => {
+    (agentConfigService.getAgentConfig as jest.Mock).mockResolvedValue(makeLegacyAgent('active'));
+    (agentConfigService.updateAgentCode as jest.Mock).mockResolvedValue({});
+
+    render(<AgentDetails agentId="legacy-agent-1" onBack={jest.fn()} />);
+    await waitFor(() => expect(screen.getByText('Code')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText('Code'));
+    fireEvent.click(screen.getByText('Save Code'));
+
+    await waitFor(() => expect(agentConfigService.updateAgentCode).toHaveBeenCalledTimes(1));
     expect(screen.queryByText('Saving will require re-approval')).not.toBeInTheDocument();
   });
 });

@@ -15,6 +15,7 @@ import {
 } from './ui/alert-dialog';
 import { AgentConfigTab } from './AgentConfig';
 import { AgentCodeTab } from './AgentCode';
+import { RequireReapprovalDialog } from './RequireReapprovalDialog';
 import { registryStatusLabel } from './registry-status-label';
 import './AgentDetails.css';
 
@@ -55,6 +56,10 @@ export const AgentDetails: React.FC<AgentDetailsProps> = ({
   // APPROVED/REJECTED -> DRAFT, surfaced to the UI as 'maintenance'). Gate
   // the save behind a confirmation so the demotion isn't silent.
   const [showEditApprovedConfirm, setShowEditApprovedConfirm] = useState(false);
+  // Which save the confirm dialog should trigger once accepted — Details and
+  // Code tabs share one dialog/state pair (both are content edits that demote
+  // an APPROVED registry record, see handleSaveCode below).
+  const [pendingApprovedSave, setPendingApprovedSave] = useState<'details' | 'code' | null>(null);
   const [formData, setFormData] = useState({
     agentId: '',
     config: {} as any,
@@ -200,15 +205,30 @@ def handler(event, context):
 
   const handleSaveDetailsClick = () => {
     if (isEditingApprovedRegistryRecord) {
+      setPendingApprovedSave('details');
       setShowEditApprovedConfirm(true);
       return;
     }
     handleSaveDetails();
   };
 
+  const handleSaveCodeClick = () => {
+    if (isEditingApprovedRegistryRecord) {
+      setPendingApprovedSave('code');
+      setShowEditApprovedConfirm(true);
+      return;
+    }
+    handleSaveCode();
+  };
+
   const handleEditApprovedConfirm = () => {
     setShowEditApprovedConfirm(false);
-    handleSaveDetails();
+    if (pendingApprovedSave === 'code') {
+      handleSaveCode();
+    } else {
+      handleSaveDetails();
+    }
+    setPendingApprovedSave(null);
   };
 
   const handleSaveDetails = async () => {
@@ -483,23 +503,12 @@ def handler(event, context):
           </div>
         </div>
 
-        <AlertDialog open={showEditApprovedConfirm} onOpenChange={setShowEditApprovedConfirm}>
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>Saving will require re-approval</AlertDialogTitle>
-              <AlertDialogDescription>
-                This agent is approved. Saving changes moves it back to Draft in the registry;
-                use Activate afterwards to resubmit it for approval.
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel>Cancel</AlertDialogCancel>
-              <AlertDialogAction onClick={handleEditApprovedConfirm}>
-                Save
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
+        <RequireReapprovalDialog
+          open={showEditApprovedConfirm}
+          onOpenChange={setShowEditApprovedConfirm}
+          onConfirm={handleEditApprovedConfirm}
+          recordKind="agent"
+        />
 
         {/* Tabs */}
         <div className="agent-details-tabs">
@@ -547,7 +556,7 @@ def handler(event, context):
             agentCode={agentCode}
             onCodeChange={setAgentCode}
             onStartEdit={() => setIsEditingCode(true)}
-            onSave={handleSaveCode}
+            onSave={handleSaveCodeClick}
             onCancel={handleCancelCodeEdit}
           />
         )}
