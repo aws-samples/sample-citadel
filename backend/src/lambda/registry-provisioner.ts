@@ -13,6 +13,7 @@ import {
   GetRegistryCommand,
   ListRegistriesCommand,
   ListRegistryRecordsCommand,
+  UpdateRegistryCommand,
   AutoApprovalRule,
 } from "@aws-sdk/client-agent-registry-control";
 import type {
@@ -122,6 +123,8 @@ export async function handler(
         // Check if the existing registry is still alive
         let registryArn = physicalId;
         let needsReplacement = false;
+        let outcome: "unchanged" | "updated-in-place" | "replaced" =
+          "unchanged";
         try {
           const existing = await client.send(
             new GetRegistryCommand({ registryId }),
@@ -197,6 +200,7 @@ export async function handler(
         }
 
         if (needsReplacement) {
+          outcome = "replaced";
           try {
             const result = await client.send(
               new CreateRegistryCommand({
@@ -225,7 +229,29 @@ export async function handler(
               throw createErr;
             }
           }
+        } else {
+          // Registry is healthy (no replacement). Apply in-place changes when
+          // the Description or AutoApproval properties differ from the values
+          // CloudFormation recorded before this update.
+          const oldProps = event.OldResourceProperties;
+          const descriptionChanged =
+            props.Description !== oldProps?.Description;
+          const autoApprovalChanged =
+            props.AutoApproval !== oldProps?.AutoApproval;
+          if (descriptionChanged || autoApprovalChanged) {
+            await client.send(
+              new UpdateRegistryCommand({
+                registryId,
+                description: { optionalValue: description },
+                approvalConfiguration: { optionalValue: approvalConfiguration },
+              }),
+            );
+            console.log("registry updated in place");
+            outcome = "updated-in-place";
+          }
         }
+
+        console.log(`update outcome: ${outcome}`);
 
         const finalRegistryId = registryArn.split("/").pop()!;
         await sendResponse(

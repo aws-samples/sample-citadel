@@ -19,6 +19,7 @@ import {
   GetRegistryCommand,
   ListRegistriesCommand,
   ListRegistryRecordsCommand,
+  UpdateRegistryCommand,
   AutoApprovalRule,
 } from "@aws-sdk/client-agent-registry-control";
 import { mockClient } from "aws-sdk-client-mock";
@@ -187,6 +188,72 @@ describe("registry-provisioner handler", () => {
       });
       const body = JSON.parse(fetchMock.mock.calls[0][1].body);
       expect(body.Data.RegistryId).toBe("reg-new");
+    });
+
+    it("updates in place with UpdateRegistryCommand once when Description changes, keeping the same physical id", async () => {
+      sdkMock.on(GetRegistryCommand).resolves({ status: "READY" } as never);
+      sdkMock.on(UpdateRegistryCommand).resolves({} as never);
+      const logSpy = jest.spyOn(console, "log");
+
+      const event = baseEvent({
+        RequestType: "Update",
+        PhysicalResourceId:
+          "arn:aws:agent-registry:us-east-1:123:registry/reg-live",
+        ResourceProperties: {
+          ServiceToken: "arn:aws:lambda:us-east-1:123:function:provisioner",
+          RegistryName: "citadel-registry-dev",
+          AutoApproval: "true",
+          Description: "new description",
+        },
+        OldResourceProperties: {
+          ServiceToken: "arn:aws:lambda:us-east-1:123:function:provisioner",
+          RegistryName: "citadel-registry-dev",
+          AutoApproval: "true",
+          Description: "old description",
+        },
+      } as Partial<CloudFormationCustomResourceEvent>);
+      await handler(event);
+
+      const calls = sdkMock.commandCalls(UpdateRegistryCommand);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].args[0].input.registryId).toBe("reg-live");
+      expect(calls[0].args[0].input.description).toEqual({
+        optionalValue: "new description",
+      });
+      expect(sdkMock.commandCalls(CreateRegistryCommand)).toHaveLength(0);
+
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body.Status).toBe("SUCCESS");
+      expect(body.Data.RegistryId).toBe("reg-live");
+      expect(logSpy).toHaveBeenCalledWith("update outcome: updated-in-place");
+    });
+
+    it("does not call UpdateRegistryCommand when Description and AutoApproval are unchanged", async () => {
+      sdkMock.on(GetRegistryCommand).resolves({ status: "READY" } as never);
+      const logSpy = jest.spyOn(console, "log");
+
+      const resourceProperties = {
+        ServiceToken: "arn:aws:lambda:us-east-1:123:function:provisioner",
+        RegistryName: "citadel-registry-dev",
+        AutoApproval: "true",
+        Description: "same description",
+      };
+      const event = baseEvent({
+        RequestType: "Update",
+        PhysicalResourceId:
+          "arn:aws:agent-registry:us-east-1:123:registry/reg-live",
+        ResourceProperties: { ...resourceProperties },
+        OldResourceProperties: { ...resourceProperties },
+      } as Partial<CloudFormationCustomResourceEvent>);
+      await handler(event);
+
+      expect(sdkMock.commandCalls(UpdateRegistryCommand)).toHaveLength(0);
+      expect(sdkMock.commandCalls(CreateRegistryCommand)).toHaveLength(0);
+
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body.Status).toBe("SUCCESS");
+      expect(body.Data.RegistryId).toBe("reg-live");
+      expect(logSpy).toHaveBeenCalledWith("update outcome: unchanged");
     });
 
     it("retries GetRegistry up to 3 times on ThrottlingException, then fails without calling CreateRegistry", async () => {
