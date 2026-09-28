@@ -957,6 +957,16 @@ export class BackendStack extends cdk.Stack {
       idTokenValidity: cdk.Duration.hours(1),
     });
 
+    // Publish the user pool client id to SSM (mirrors the registry id/arn
+    // params) so consumers can resolve it without a cross-stack
+    // Fn::ImportValue. Keep the auto-export alive via exportValue (E19
+    // phase-1 pattern) while importers are still deployed.
+    new ssm.StringParameter(this, "UserPoolClientIdParam", {
+      parameterName: `/citadel/${props.environment}/cognito/client-id`,
+      stringValue: this.userPoolClient.userPoolClientId,
+    });
+    this.exportValue(this.userPoolClient.userPoolClientId);
+
     // Lambda functions for resolvers
     //
     // NOTE: projectResolverFunction, conversationResolverFunction,
@@ -3331,11 +3341,6 @@ export class BackendStack extends cdk.Stack {
     new cdk.CfnOutput(this, "UserPoolIdExport", {
       value: this.userPool.userPoolId,
       exportName: `${this.stackName}-UserPoolId`,
-    });
-
-    new cdk.CfnOutput(this, "UserPoolClientIdExport", {
-      value: this.userPoolClient.userPoolClientId,
-      exportName: `${this.stackName}-UserPoolClientId`,
     });
 
     new cdk.CfnOutput(this, "AgentMessageHandlerFunctionArn", {

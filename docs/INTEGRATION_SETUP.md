@@ -445,9 +445,10 @@ The AgentCore Gateway ID is automatically imported from the Services Stack durin
 If you need to verify the Gateway ID:
 
 ```bash
-# Get Gateway ID from CloudFormation exports
-aws cloudformation list-exports \
-  --query "Exports[?Name=='citadel-services-dev-GatewayId'].Value" \
+# Get Gateway ID from SSM Parameter Store
+aws ssm get-parameter \
+  --name /citadel/gateway-id-dev \
+  --query Parameter.Value \
   --output text
 ```
 

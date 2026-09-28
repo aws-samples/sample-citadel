@@ -1,7 +1,6 @@
 import * as cdk from "aws-cdk-lib";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
-import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
 import * as s3deploy from "aws-cdk-lib/aws-s3-deployment";
 import * as appsync from "aws-cdk-lib/aws-appsync";
 import * as cognito from "aws-cdk-lib/aws-cognito";
@@ -9,6 +8,7 @@ import * as events from "aws-cdk-lib/aws-events";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as logs from "aws-cdk-lib/aws-logs";
 import * as wafv2 from "aws-cdk-lib/aws-wafv2";
+import * as ssm from "aws-cdk-lib/aws-ssm";
 import * as fs from "fs";
 import * as path from "path";
 import { Construct } from "constructs";
@@ -16,7 +16,6 @@ import { Construct } from "constructs";
 interface FrontendStackProps extends cdk.StackProps {
   appSyncApi: appsync.GraphqlApi;
   userPool: cognito.UserPool;
-  userPoolClient: cognito.UserPoolClient;
   agentEventBus: events.EventBus;
   environment: string;
   /** Cost query HttpApi endpoint from TelemetryStack (pass 2) — rides the existing aws-exports.json deployment as `aws_cost_api_url`. */
@@ -317,7 +316,13 @@ export class FrontendStack extends cdk.Stack {
       aws_appsync_authenticationType: "AMAZON_COGNITO_USER_POOLS",
       aws_cognito_region: this.region,
       aws_user_pools_id: props.userPool.userPoolId,
-      aws_user_pools_web_client_id: props.userPoolClient.userPoolClientId,
+      // CIT-207: read via SSM instead of a cross-stack Fn::ImportValue
+      // (valueForStringParameter caused a stack cycle here in E19).
+      aws_user_pools_web_client_id: ssm.StringParameter.fromStringParameterName(
+        this,
+        "UserPoolClientIdParam",
+        `/citadel/${props.environment}/cognito/client-id`,
+      ).stringValue,
       aws_cognito_identity_pool_id: "", // Optional: Add if using Identity Pool
       aws_mandatory_sign_in: "enable",
       aws_cognito_username_attributes: ["EMAIL"],

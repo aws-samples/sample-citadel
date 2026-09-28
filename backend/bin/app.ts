@@ -341,7 +341,6 @@ const telemetryStack = new TelemetryStack(
     agentEventBus: backendStack.agentEventBus,
     modelCatalogTable: backendStack.modelCatalogTable,
     userPool: backendStack.userPool,
-    userPoolClient: backendStack.userPoolClient,
     frontendOrigin,
     bedrockInvocationLogGroupName,
     // Waterfall trace viewer (pass 1) — ownership resolution reads.
@@ -415,7 +414,6 @@ const frontendStack = new FrontendStack(
     description: `Frontend hosting infrastructure - ${environment}`,
     appSyncApi: backendStack.appSyncApi,
     userPool: backendStack.userPool,
-    userPoolClient: backendStack.userPoolClient,
     agentEventBus: backendStack.agentEventBus,
     // Cost query HttpApi endpoint (TelemetryStack, pass 1) — threaded into
     // aws-exports.json as `aws_cost_api_url` (pass 2). TelemetryStack is

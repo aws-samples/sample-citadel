@@ -195,7 +195,6 @@ function buildStack(): {
   });
 
   const userPool = new cognito.UserPool(supportStack, "TestUserPool");
-  const userPoolClient = userPool.addClient("TestUserPoolClient");
   const agentEventBus = new events.EventBus(supportStack, "TestEventBus");
   const alarmTopic = new sns.Topic(supportStack, "TestAlarmTopic", {
     topicName: "citadel-alarms-test",
@@ -224,7 +223,6 @@ function buildStack(): {
     agentEventBus,
     modelCatalogTable,
     userPool,
-    userPoolClient,
     frontendOrigin: "https://example.test",
     bedrockInvocationLogGroupName: "/aws/bedrock/invocation-logs",
     executionsTable,
@@ -264,7 +262,6 @@ function buildStackWithOrigin(frontendOrigin: string): { template: Template } {
   });
 
   const userPool = new cognito.UserPool(supportStack, "TestUserPool");
-  const userPoolClient = userPool.addClient("TestUserPoolClient");
   const agentEventBus = new events.EventBus(supportStack, "TestEventBus");
   const alarmTopic = new sns.Topic(supportStack, "TestAlarmTopic", {
     topicName: "citadel-alarms-test-origin",
@@ -293,7 +290,6 @@ function buildStackWithOrigin(frontendOrigin: string): { template: Template } {
     agentEventBus,
     modelCatalogTable,
     userPool,
-    userPoolClient,
     frontendOrigin,
     bedrockInvocationLogGroupName: "/aws/bedrock/invocation-logs",
     executionsTable,
@@ -608,7 +604,6 @@ describe("TelemetryStack — reconciler Tier B IAM additions", () => {
       env: { account: "123456789012", region: "us-east-1" },
     });
     const userPool = new cognito.UserPool(supportStack, "TestUserPool");
-    const userPoolClient = userPool.addClient("TestUserPoolClient");
     const agentEventBus = new events.EventBus(supportStack, "TestEventBus");
     const alarmTopic = new sns.Topic(supportStack, "TestAlarmTopic", {
       topicName: "citadel-alarms-test-unconfigured",
@@ -636,7 +631,6 @@ describe("TelemetryStack — reconciler Tier B IAM additions", () => {
       agentEventBus,
       modelCatalogTable,
       userPool,
-      userPoolClient,
       frontendOrigin: "https://example.test",
       // bedrockInvocationLogGroupName intentionally omitted
       executionsTable,
