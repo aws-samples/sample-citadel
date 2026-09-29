@@ -49,6 +49,9 @@ from common.metrics_constants import (
     METRIC_RELEASE_DISPATCH_EVALUATED,
     METRIC_RELEASE_DISPATCH_WOULD_BLOCK,
     METRIC_RELEASE_DISPATCH_REFUSED,
+    METRIC_APPROVAL_DISPATCH_EVALUATED,
+    METRIC_APPROVAL_DISPATCH_WOULD_BLOCK,
+    METRIC_APPROVAL_DISPATCH_REFUSED,
     UNIT_MILLISECONDS,
     UNIT_COUNT,
     DIMENSION_WORKFLOW_ID,
@@ -112,7 +115,7 @@ def _load_release_governance_modules():
     sys.modules[pkg_name] = pkg
     spec.loader.exec_module(pkg)
 
-    for submod in ('hierarchy', 'release_resolution', 'grandfathering'):
+    for submod in ('hierarchy', 'release_resolution', 'grandfathering', 'record_approval'):
         sub_file = os.path.join(pkg_dir, f'{submod}.py')
         if not os.path.isfile(sub_file):
             continue
@@ -133,6 +136,15 @@ try:
     resolve_release = _gov_pkg.release_resolution.resolve_release
     ReleaseResolutionStatus = _gov_pkg.release_resolution.ReleaseResolutionStatus
     is_grandfathered_pure = _gov_pkg.grandfathering.is_grandfathered_pure
+    # Record-approval dispatch gate (this story). Same single-try/except
+    # load as every other governance symbol above — a packaging
+    # regression that drops record_approval.py surfaces as the SAME
+    # fail-closed refusal the release gate already has, never a silent
+    # approval-gate bypass.
+    resolve_record_approval = _gov_pkg.record_approval.resolve_record_approval
+    approval_decide = _gov_pkg.record_approval.decide
+    ApprovalStatus = _gov_pkg.record_approval.ApprovalStatus
+    ApprovalStatusReadError = _gov_pkg.record_approval.ApprovalStatusReadError
     _RELEASE_GOVERNANCE_AVAILABLE = True
     _RELEASE_GOVERNANCE_IMPORT_ERROR: str | None = None
 except ImportError as e:
@@ -157,6 +169,11 @@ except ImportError as e:
 # DynamoDB table names from environment
 WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'citadel-workflows-dev')
 EXECUTIONS_TABLE = os.environ.get('EXECUTIONS_TABLE', 'citadel-executions-dev')
+# Agent config/registry table — same env var name the supervisor
+# (agent_config.py) and worker (workerWrapper/index.py) read for their
+# agent-record lookups. The approval gate below (this story) is the first
+# stepRunner reader of this table.
+AGENT_CONFIG_TABLE = os.environ.get('AGENT_CONFIG_TABLE')
 
 # DynamoDB resource
 _dynamodb = boto3.resource('dynamodb')
@@ -462,6 +479,123 @@ def _check_release_gate(
     return False, None
 
 
+def _emit_approval_dispatch_metric(
+    *, mode: str, outcome: str, would_block: bool, workflow_id: str = '',
+) -> None:
+    """Best-effort CloudWatch telemetry for the record-approval dispatch
+    gate. Mirrors ``_emit_release_dispatch_metric`` exactly (same
+    never-raises discipline, same dimension shape) using the
+    ApprovalDispatch* metric names so the two gates' rollout can be
+    measured independently, same as supervisor/index.py's identical
+    helper.
+    """
+    try:
+        cw = _get_cloudwatch_client()
+        dimensions = [{'Name': DIMENSION_RELEASE_MODE, 'Value': mode}]
+        if workflow_id:
+            dimensions.append({'Name': DIMENSION_WORKFLOW_ID, 'Value': workflow_id})
+        outcome_dimensions = dimensions + [
+            {'Name': DIMENSION_RELEASE_OUTCOME, 'Value': outcome},
+        ]
+        metric_data = [{
+            'MetricName': METRIC_APPROVAL_DISPATCH_EVALUATED,
+            'Value': 1.0,
+            'Unit': UNIT_COUNT,
+            'Dimensions': outcome_dimensions,
+        }]
+        if would_block:
+            metric_data.append({
+                'MetricName': METRIC_APPROVAL_DISPATCH_WOULD_BLOCK,
+                'Value': 1.0,
+                'Unit': UNIT_COUNT,
+                'Dimensions': dimensions,
+            })
+        if outcome == 'refused':
+            metric_data.append({
+                'MetricName': METRIC_APPROVAL_DISPATCH_REFUSED,
+                'Value': 1.0,
+                'Unit': UNIT_COUNT,
+                'Dimensions': dimensions,
+            })
+        cw.put_metric_data(Namespace=METRIC_NAMESPACE, MetricData=metric_data)
+    except Exception as exc:  # noqa: BLE001 — telemetry must never raise
+        _logger.warning('approval-dispatch metric emit failed: %s', exc)
+
+
+def _check_approval_gate(
+    agent_id: str, workflow_id: str, execution_id: str = ''
+) -> tuple[bool, str | None]:
+    """Evaluates the record-approval dispatch gate for one node dispatch.
+
+    Sibling of ``_check_release_gate``, called right after it at the same
+    call site. Read-only GetItem on the agents table
+    (``AGENT_CONFIG_TABLE`` — the same env var name the supervisor's
+    ``agent_config.py`` and the worker's ``workerWrapper/index.py`` read
+    for their own agent-record lookups), keyed by ``agentId``. A raised
+    GetItem is captured here and turned into an
+    ``ApprovalResolution(LOOKUP_FAILED)`` (mirrors how ``resolve_release``
+    keeps its own exception-to-status boundary — ``resolve_record_approval``
+    itself never raises and never produces LOOKUP_FAILED; that status is
+    always constructed by the calling adapter).
+
+    Resolves and decides using the SAME ``load_governance_state()``
+    snapshot (mode/effective_at) the release gate uses. On a would-block
+    or refused decision, logs + emits the ApprovalDispatch* metrics; a
+    refused decision leaves the node pending, same as the release gate.
+
+    Returns ``(refused, refusal_reason)``. Fail-closed the same way as
+    the release gate: if the release-governance package failed to load,
+    this refuses unconditionally rather than silently skipping the check.
+    """
+    if not _RELEASE_GOVERNANCE_AVAILABLE:
+        _logger.error(
+            "approval dispatch refused: release-governance package "
+            "unavailable (%s); workflow_id=%s target_agent=%s",
+            _RELEASE_GOVERNANCE_IMPORT_ERROR, workflow_id, agent_id,
+        )
+        return True, 'approval_governance_package_unavailable'
+
+    state = load_governance_state()
+    enforcement_mode = getattr(state, 'enforcement_mode', 'shadow')
+
+    try:
+        table = _dynamodb.Table(AGENT_CONFIG_TABLE)
+        response = table.get_item(Key={'agentId': agent_id})
+    except Exception as exc:  # noqa: BLE001 — any lookup failure is LOOKUP_FAILED
+        approval_resolution = _gov_pkg.record_approval.ApprovalResolution(
+            status=_gov_pkg.record_approval.ApprovalStatus.LOOKUP_FAILED,
+            detail=f"GetItem failed: {type(exc).__name__}: {exc}",
+        )
+    else:
+        cache_item = response.get('Item')
+        approval_resolution = resolve_record_approval(cache_item)
+
+    approval_decision = approval_decide(
+        approval_resolution, enforcement_mode, getattr(state, 'effective_at', None),
+    )
+
+    _emit_approval_dispatch_metric(
+        mode=enforcement_mode,
+        outcome='refused' if approval_decision.refused else 'proceed',
+        would_block=approval_decision.would_block,
+        workflow_id=workflow_id,
+    )
+
+    if approval_decision.would_block or approval_decision.refused:
+        _logger.error(
+            "approval dispatch %s: %s; workflow_id=%s target_agent=%s "
+            "resolution_status=%s",
+            'refused' if approval_decision.refused else 'would_block',
+            approval_decision.reason, workflow_id, agent_id,
+            approval_resolution.status.value,
+        )
+
+    if approval_decision.refused:
+        return True, approval_decision.reason
+
+    return False, None
+
+
 def _load_workflow(workflow_id: str) -> dict:
     """Load workflow item from DynamoDB."""
     resp = _workflows_table.get_item(Key={'workflowId': workflow_id})
@@ -618,6 +752,16 @@ def invoke_node(
         agent_id, workflow_id, execution_id
     )
     if _release_refused:
+        return
+
+    # Record-approval dispatch gate (this story). Sibling of the release
+    # gate immediately above, evaluated at the same point (before any
+    # state mutation) for the same reason: a strict-mode refusal must
+    # leave no partial dispatch trace — the node simply stays pending.
+    _approval_refused, _approval_refusal_reason = _check_approval_gate(
+        agent_id, workflow_id, execution_id
+    )
+    if _approval_refused:
         return
 
     now = _now_iso()
