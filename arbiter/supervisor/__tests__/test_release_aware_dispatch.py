@@ -105,7 +105,7 @@ def _make_state(enforcement_mode="shadow", effective_at=None):
     return state
 
 
-_AGENTS_CONFIG = {"agents": [{"name": "agent-a", "domain": "billing"}]}
+_AGENTS_CONFIG = {"agents": [{"name": "agent-a", "domain": "billing", "registryStatus": "APPROVED"}]}
 _ORCH = {"orchestrationId": "orch-123"}
 
 

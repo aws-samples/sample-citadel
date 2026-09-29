@@ -14,7 +14,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 import index as supervisor_mod  # noqa: E402
 from governance.models import ArbitrationDecision, GovernanceFinding  # noqa: E402
 
-_AGENTS_CONFIG = {"agents": [{"name": "agent-a", "domain": "default"}]}
+_AGENTS_CONFIG = {
+    "agents": [{"name": "agent-a", "domain": "default", "registryStatus": "APPROVED"}]
+}
 
 
 def _make_finding(decision, **overrides):
@@ -36,6 +38,7 @@ def _make_state(mode):
         composition_contracts = []
         case_law = []
         constitutional_layers = []
+        effective_at = None
     return _State()
 
 
