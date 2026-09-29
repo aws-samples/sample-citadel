@@ -1033,7 +1033,25 @@ def governed_process_agent_call(
         try:
             write_finding(approval_finding)
         except Exception as exc:  # noqa: BLE001 — mode-dependent handling below
-            if enforcement_mode == 'strict':
+            # A ConditionalCheckFailedException means this exact
+            # deterministic finding_id was already written by a prior
+            # (redelivered) attempt at this same dispatch — the record
+            # exists, so the write's purpose is already satisfied. Treat
+            # it as success rather than a write failure: log INFO and
+            # fall through to proceed, in EVERY mode (including strict).
+            # write_finding wraps botocore's ClientError into
+            # LedgerWriteError, so inspect the wrapped cause's error code
+            # rather than the outer exception type.
+            cause = exc.__cause__
+            cause_code = getattr(cause, 'response', {}).get('Error', {}).get('Code') if cause is not None else None
+            if cause_code == 'ConditionalCheckFailedException':
+                logger.info(
+                    "approval-gate finding already recorded (redelivered "
+                    "dispatch); dispatch proceeds: workflow_id=%s "
+                    "target_agent=%s finding_id=%s",
+                    workflow_id, agent_name, approval_finding_id,
+                )
+            elif enforcement_mode == 'strict':
                 # Fail-closed per D9, same as the authority gate's own
                 # write_finding call: a finding-write failure must halt
                 # dispatch in strict mode rather than silently let a
@@ -1056,11 +1074,12 @@ def governed_process_agent_call(
             # failure is observability-only outside strict mode, same
             # posture as every other best-effort telemetry emitter in this
             # module.
-            logger.warning(
-                "approval-gate finding write failed (mode=%s); dispatch "
-                "proceeds: workflow_id=%s target_agent=%s error=%s",
-                enforcement_mode, workflow_id, agent_name, exc,
-            )
+            else:
+                logger.warning(
+                    "approval-gate finding write failed (mode=%s); dispatch "
+                    "proceeds: workflow_id=%s target_agent=%s error=%s",
+                    enforcement_mode, workflow_id, agent_name, exc,
+                )
 
     if approval_decision.refused:
         logger.error(

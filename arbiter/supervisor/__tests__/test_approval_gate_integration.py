@@ -104,7 +104,7 @@ def _make_state(enforcement_mode="shadow", effective_at=None):
 _ORCH = {"orchestrationId": "orch-123"}
 
 
-def _agents_config(registry_status=None, missing=False):
+def _agents_config(registry_status=None, missing=False, created_at=None):
     """Builds the agents_config dict the way agent_config.py now produces
     it post-passthrough: 'registryStatus'/'createdAt' live directly on the
     per-agent dict inside agents_config['agents']."""
@@ -113,6 +113,8 @@ def _agents_config(registry_status=None, missing=False):
     cfg = {"name": "agent-a", "domain": "billing"}
     if registry_status is not None:
         cfg["registryStatus"] = registry_status
+    if created_at is not None:
+        cfg["createdAt"] = created_at
     return {"agents": [cfg]}
 
 
@@ -233,3 +235,77 @@ def test_strict_missing_agent_item_denies_unknown_record(monkeypatch):
     assert result["denied"] is True
     assert result["reason"] == "approval_record_unknown"
     assert mock_write.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# strict + grandfathered MISSING_STATUS + write_finding raises a
+# ConditionalCheckFailedException (wrapped in LedgerWriteError) ->
+# already-recorded, dispatch proceeds.
+# ---------------------------------------------------------------------------
+
+
+def _conditional_check_failed_error():
+    from botocore.exceptions import ClientError
+
+    client_error = ClientError(
+        {"Error": {"Code": "ConditionalCheckFailedException", "Message": "x"}},
+        "PutItem",
+    )
+    return _wrap(client_error)
+
+
+def _wrap(cause):
+    err = supervisor_mod.LedgerWriteError(f"DDB put_item failed: {cause}")
+    err.__cause__ = cause
+    return err
+
+
+def test_strict_grandfathered_redelivery_conditional_check_proceeds(monkeypatch):
+    monkeypatch.setattr(supervisor_mod, "_GOVERNANCE_AVAILABLE", True)
+    finding = _make_finding(ArbitrationDecision.PERMIT)
+    agents_config = _agents_config(created_at="2000-01-01T00:00:00Z")
+
+    with patch.object(
+        supervisor_mod, "load_governance_state",
+        return_value=_make_state("strict", effective_at="2030-01-01T00:00:00Z"),
+    ), patch.object(supervisor_mod, "GovernanceEngine") as MockEngine, \
+            patch.object(supervisor_mod, "write_finding") as mock_write, \
+            patch.object(supervisor_mod, "process_agent_call", return_value={"dispatched": True}) as mock_dispatch:
+        MockEngine.return_value.evaluate.return_value = finding
+        mock_write.side_effect = [None, _conditional_check_failed_error()]
+
+        result = supervisor_mod.governed_process_agent_call(
+            agents_config, _ORCH, "agent-a", {"x": 1}, "use-1",
+        )
+
+    mock_dispatch.assert_called_once()
+    assert result == {"dispatched": True}
+
+
+# ---------------------------------------------------------------------------
+# strict + grandfathered MISSING_STATUS + write_finding raises a generic
+# LedgerWriteError -> strict halts (unchanged behaviour).
+# ---------------------------------------------------------------------------
+
+
+def test_strict_grandfathered_generic_write_error_halts(monkeypatch):
+    monkeypatch.setattr(supervisor_mod, "_GOVERNANCE_AVAILABLE", True)
+    finding = _make_finding(ArbitrationDecision.PERMIT)
+    agents_config = _agents_config(created_at="2000-01-01T00:00:00Z")
+
+    with patch.object(
+        supervisor_mod, "load_governance_state",
+        return_value=_make_state("strict", effective_at="2030-01-01T00:00:00Z"),
+    ), patch.object(supervisor_mod, "GovernanceEngine") as MockEngine, \
+            patch.object(supervisor_mod, "write_finding") as mock_write, \
+            patch.object(supervisor_mod, "process_agent_call", return_value={"dispatched": True}) as mock_dispatch:
+        MockEngine.return_value.evaluate.return_value = finding
+        mock_write.side_effect = [None, supervisor_mod.LedgerWriteError("boom")]
+
+        result = supervisor_mod.governed_process_agent_call(
+            agents_config, _ORCH, "agent-a", {"x": 1}, "use-1",
+        )
+
+    mock_dispatch.assert_not_called()
+    assert result["denied"] is True
+    assert result["reason"] == "approval_finding_write_failed"
