@@ -431,6 +431,7 @@ const gatewayStack = new GatewayStack(app, `citadel-gateway-${environment}`, {
   appsTable: backendStack.appsTable,
   eventBus: backendStack.agentEventBus,
   idempotencyTable: backendStack.idempotencyTable,
+  agentConfigTable: backendStack.agentConfigTable,
 });
 
 // Telemetry stack has already been instantiated above (before FrontendStack)

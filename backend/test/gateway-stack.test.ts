@@ -46,12 +46,20 @@ function createTestStack(): { stack: GatewayStack; template: Template } {
     removalPolicy: cdk.RemovalPolicy.DESTROY,
   });
 
+  const agentConfigTable = new dynamodb.Table(helperStack, "AgentConfigTable", {
+    tableName: "citadel-agents-test",
+    partitionKey: { name: "agentId", type: dynamodb.AttributeType.STRING },
+    billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    removalPolicy: cdk.RemovalPolicy.DESTROY,
+  });
+
   const stack = new GatewayStack(app, "TestGatewayStack", {
     env: { account: "123456789012", region: "us-east-1" },
     environment: "test",
     appsTable,
     eventBus,
     idempotencyTable,
+    agentConfigTable,
   });
 
   const template = Template.fromStack(stack);
@@ -104,6 +112,21 @@ describe("GatewayStack — Shared Lambda Functions (Task 1.1)", () => {
           ENVIRONMENT: "test",
           AUTHORIZER_FUNCTION_ARN: Match.anyValue(),
           IDEMPOTENCY_TABLE: Match.anyValue(),
+        }),
+      },
+    });
+  });
+
+  // Regression guard for the fail-open gap: without AGENT_CONFIG_TABLE,
+  // getLegacyAgentRow always returns null and publishApp silently skips
+  // every unresolved bound agent instead of falling back to the legacy
+  // catalog.
+  test("AppPublishHandler has AGENT_CONFIG_TABLE environment variable", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Handler: "app-publish-handler.handler",
+      Environment: {
+        Variables: Match.objectLike({
+          AGENT_CONFIG_TABLE: Match.anyValue(),
         }),
       },
     });
@@ -432,6 +455,42 @@ describe("GatewayStack — IAM Permissions (Task 1.1)", () => {
         : [stmt.Action];
       expect(actions).toEqual(["agent-registry:GetRegistryRecord"]);
     }
+  });
+
+  // Regression guard: without this grant, getLegacyAgentRow's DynamoDB read
+  // against AGENT_CONFIG_TABLE throws AccessDenied and publishApp silently
+  // skips every unresolved bound agent (fail-open on the approval gate).
+  test("publish handler role grants dynamodb read on the agent config table", () => {
+    const policies = template.findResources("AWS::IAM::Policy");
+    const lambdas = template.findResources("AWS::Lambda::Function");
+    const handlerLogicalId = Object.keys(lambdas).find(
+      (k) => lambdas[k].Properties?.Handler === "app-publish-handler.handler",
+    );
+    expect(handlerLogicalId).toBeDefined();
+    const handlerRoleRef =
+      lambdas[handlerLogicalId!].Properties.Role?.["Fn::GetAtt"]?.[0];
+
+    const handlerPolicies = (
+      Object.values(policies) as CfnPolicyResourceLike[]
+    ).filter((p) =>
+      (p.Properties?.Roles ?? []).some((r) => r.Ref === handlerRoleRef),
+    );
+
+    const matched = handlerPolicies.some((policy: CfnPolicyResourceLike) =>
+      (policy.Properties?.PolicyDocument?.Statement ?? []).some((stmt) => {
+        const actions: string[] = Array.isArray(stmt.Action)
+          ? stmt.Action
+          : [stmt.Action];
+        return (
+          actions.includes("dynamodb:GetItem") &&
+          actions.includes("dynamodb:BatchGetItem") &&
+          !actions.some((a) => a.startsWith("dynamodb:PutItem")) &&
+          !actions.some((a) => a.startsWith("dynamodb:UpdateItem")) &&
+          !actions.some((a) => a.startsWith("dynamodb:DeleteItem"))
+        );
+      }),
+    );
+    expect(matched).toBe(true);
   });
 });
 
