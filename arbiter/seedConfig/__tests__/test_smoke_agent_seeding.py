@@ -118,12 +118,10 @@ class TestProdExclusion:
             handler(_cfn_event(), _ctx())
 
         registry_lookup_names = [c.args[0] for c in list_mock.call_args_list]
-        # list_agent_records is called once for the (always-on) demo echo
-        # agent lookup; it must never be called a second time attributable
-        # to the smoke agent when the gate is off. We assert call count <= 1
-        # (the echo-agent lookup) rather than inspecting args, since
-        # list_agent_records takes only registryId.
-        assert len(registry_lookup_names) <= 1
+        # list_agent_records is called for always-on agents (fabricator +
+        # demo-echo-agent) but must never be called for the smoke agent
+        # when the gate is off. We assert call count <= 2.
+        assert len(registry_lookup_names) <= 2
 
 
 class TestNonProdSeeding:
