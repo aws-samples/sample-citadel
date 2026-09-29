@@ -145,6 +145,136 @@ EXECUTION_SPECS_TABLE = os.environ.get('EXECUTION_SPECS_TABLE')
 CREDENTIAL_VENDER_FUNCTION = os.environ.get('CREDENTIAL_VENDER_FUNCTION')
 AGENT_RUNNER_PATH = os.path.join(os.path.dirname(__file__), 'agent_runner.py')
 
+# ---------------------------------------------------------------------------
+# Record-approval second layer (defence in depth), CIT-041 PR2.
+#
+# Mirrors stepRunner/executor.py's ``_load_release_governance_modules`` /
+# ``_check_approval_gate`` exactly (same private-namespace loading
+# technique, same fail-closed contract, same reuse of the already-loaded
+# ``AGENT_CONFIG_TABLE`` cache item). This is a SEPARATE gate from the
+# exec-spec ExecutionSpecification binding check above — the two are
+# additive, not either/or.
+_workerWrapper_dir = os.path.dirname(os.path.abspath(__file__))
+_arbiter_dir_for_governance = os.path.dirname(_workerWrapper_dir)
+
+
+def _load_approval_governance_modules():
+    """Load hierarchy + record_approval from either the sibling
+    arbiter/governance/ directory (pytest / local dev, where conftest.py
+    puts arbiter/ on sys.path the same way it does for supervisor/
+    stepRunner) or the Lambda layer path /opt/python/governance/ (deployed
+    Worker Lambda). Returns None if neither is available.
+    """
+    import importlib.util as _ilu
+
+    candidates = [
+        os.path.join(_arbiter_dir_for_governance, 'governance'),
+        '/opt/python/governance',
+    ]
+    pkg_dir = next((c for c in candidates if os.path.isfile(os.path.join(c, '__init__.py'))), None)
+    if pkg_dir is None:
+        return None
+
+    pkg_name = '_citadel_governance_workerWrapper'
+    if pkg_name in sys.modules:
+        return sys.modules[pkg_name]
+
+    spec = _ilu.spec_from_file_location(
+        pkg_name, os.path.join(pkg_dir, '__init__.py'),
+        submodule_search_locations=[pkg_dir],
+    )
+    pkg = _ilu.module_from_spec(spec)
+    sys.modules[pkg_name] = pkg
+    spec.loader.exec_module(pkg)
+
+    for submod in ('hierarchy', 'record_approval'):
+        sub_file = os.path.join(pkg_dir, f'{submod}.py')
+        if not os.path.isfile(sub_file):
+            continue
+        sub_spec = _ilu.spec_from_file_location(f'{pkg_name}.{submod}', sub_file)
+        sub_mod = _ilu.module_from_spec(sub_spec)
+        sys.modules[f'{pkg_name}.{submod}'] = sub_mod
+        sub_spec.loader.exec_module(sub_mod)
+        setattr(pkg, submod, sub_mod)
+
+    return pkg
+
+
+try:
+    _approval_gov_pkg = _load_approval_governance_modules()
+    if _approval_gov_pkg is None:
+        raise ImportError("governance package files not found for workerWrapper")
+    load_governance_state = _approval_gov_pkg.hierarchy.load_governance_state
+    resolve_record_approval = _approval_gov_pkg.record_approval.resolve_record_approval
+    approval_decide = _approval_gov_pkg.record_approval.decide
+    ApprovalStatus = _approval_gov_pkg.record_approval.ApprovalStatus
+    ApprovalResolution = _approval_gov_pkg.record_approval.ApprovalResolution
+    RecordNotApprovedError = _approval_gov_pkg.record_approval.RecordNotApprovedError
+    ApprovalStatusReadError = _approval_gov_pkg.record_approval.ApprovalStatusReadError
+    _APPROVAL_GOVERNANCE_AVAILABLE = True
+except ImportError as e:  # pragma: no cover — deployment bundling gap, see module docstring
+    _APPROVAL_GOVERNANCE_AVAILABLE = False
+    _logger_bootstrap_approval = None
+    print(json.dumps({
+        'level': 'WARN',
+        'component': 'WorkerWrapper',
+        'action': 'approval_governance_package_unavailable',
+        'error': str(e),
+    }))
+
+
+def _check_approval_gate(agent_record: dict, agent_id: str) -> None:
+    """Second layer (defence in depth) beside the exec-spec gate: re-check
+    the already-fetched agent record's registry approval status.
+
+    ``agent_record`` is the SAME dict ``load_config_from_dynamodb`` already
+    returned at this call site (the full DDB Item) — no extra GetItem is
+    issued here. Reuses ``registryStatus`` / ``createdAt`` off that item,
+    which the exec-spec gate never reads (only ``config`` is used there).
+
+    Resolves + decides with the governance mode/effective_at loaded via
+    ``load_governance_state()`` (module-level cached, same TTL/semantics
+    the supervisor and stepRunner choke points already rely on).
+
+    strict + refused -> raises ``RecordNotApprovedError`` (classify() maps
+    it to APPROVAL_ABSENT). shadow/permissive -> log only when the
+    decision would_block; never raises. If the governance package failed
+    to load, fails closed: raises ``ApprovalStatusReadError`` (TRANSIENT)
+    so a packaging regression can never silently bypass this gate.
+    """
+    if not _APPROVAL_GOVERNANCE_AVAILABLE:
+        raise ApprovalStatusReadError(
+            "approval-governance package unavailable; refusing to dispatch "
+            f"agent '{agent_id}' without a second-layer approval check."
+        )
+
+    try:
+        state = load_governance_state()
+        enforcement_mode = getattr(state, 'enforcement_mode', 'shadow')
+        effective_at = getattr(state, 'effective_at', None)
+        resolution = resolve_record_approval(agent_record)
+        decision = approval_decide(resolution, enforcement_mode, effective_at)
+    except Exception as exc:  # noqa: BLE001 — a resolve/decide crash is a lookup failure, not a bypass
+        if isinstance(exc, (RecordNotApprovedError, ApprovalStatusReadError)):
+            raise
+        raise ApprovalStatusReadError(
+            f"approval resolution failed for agent '{agent_id}': "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+
+    if decision.would_block or decision.refused:
+        print(json.dumps({
+            'level': 'ERROR' if decision.refused else 'WARN',
+            'component': 'WorkerWrapper',
+            'action': 'approval_dispatch_second_layer',
+            'agentId': agent_id,
+            'outcome': 'refused' if decision.refused else 'would_block',
+            'reason': decision.reason,
+        }))
+
+    if decision.refused:
+        raise RecordNotApprovedError(decision.reason)
+
 
 def _approval_required_tools() -> list[str]:
     """Assemble the OPT-IN approval-required tool set SERVER-SIDE from the
@@ -1371,6 +1501,10 @@ def _process_workflow_node(event, message_attributes=None):
 
             agent = load_config_from_dynamodb(msg.agent_id)
             config = agent['config']
+            # Second layer (defence in depth), CIT-041 PR2: re-check registry
+            # approval on the SAME already-fetched item, beside the exec-spec
+            # gate below. Raises before any further dispatch work on refusal.
+            _check_approval_gate(agent, msg.agent_id)
             config = _parse_agent_config(config, agent_id=msg.agent_id, field_name='config')
 
             # Same mechanism as the supervisor task path (Req 3.6): append the
@@ -1549,6 +1683,10 @@ def process_event(event, context, message_attributes=None):
 
     agent = load_config_from_dynamodb(agent_name)
     config = agent['config']
+    # Second layer (defence in depth), CIT-041 PR2: re-check registry
+    # approval on the SAME already-fetched item, beside the exec-spec gate
+    # below. Raises before any further dispatch work on refusal.
+    _check_approval_gate(agent, agent_name)
 
     config = _parse_agent_config(config, agent_id=agent_name, field_name='config')
 
