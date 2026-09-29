@@ -20,20 +20,20 @@
  * Best-effort by design: this helper never throws. A row that cannot be
  * healed simply leaves the existing verifyAgentsExist failure mode in place.
  */
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
   BatchGetCommand,
   PutCommand,
-} from '@aws-sdk/lib-dynamodb';
-import { buildAgentCacheRecord, toInternalState } from './registry-sync';
-import { getRegistryService } from './agent-config-resolver';
+} from "@aws-sdk/lib-dynamodb";
+import { buildAgentCacheRecord, toInternalState } from "./registry-sync";
+import { getRegistryService } from "./agent-config-resolver";
 
 const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 /** Read at call time — module-load env may not be set under test. */
 function agentConfigTable(): string {
-  return process.env.AGENT_CONFIG_TABLE ?? '';
+  return process.env.AGENT_CONFIG_TABLE ?? "";
 }
 
 export interface EnsureAgentConfigRowsResult {
@@ -50,7 +50,9 @@ export interface EnsureAgentConfigRowsResult {
  * JSON string. Malformed definitions yield [] — the definition validator
  * owns rejecting those.
  */
-export function extractAgentIdsFromDefinition(definitionJson: string): string[] {
+export function extractAgentIdsFromDefinition(
+  definitionJson: string,
+): string[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(definitionJson);
@@ -64,7 +66,11 @@ export function extractAgentIdsFromDefinition(definitionJson: string): string[] 
   const ids: string[] = [];
   for (const node of nodes) {
     const agentId = (node as { agentId?: unknown })?.agentId;
-    if (typeof agentId === 'string' && agentId.length > 0 && !ids.includes(agentId)) {
+    if (
+      typeof agentId === "string" &&
+      agentId.length > 0 &&
+      !ids.includes(agentId)
+    ) {
       ids.push(agentId);
     }
   }
@@ -82,13 +88,13 @@ async function findExistingRows(agentIds: string[]): Promise<Set<string>> {
         RequestItems: {
           [tableName]: {
             Keys: chunk.map((agentId) => ({ agentId })),
-            ProjectionExpression: 'agentId',
+            ProjectionExpression: "agentId",
           },
         },
       }),
     );
     for (const item of result.Responses?.[tableName] ?? []) {
-      if (item && typeof item.agentId === 'string') {
+      if (item && typeof item.agentId === "string") {
         existing.add(item.agentId);
       }
     }
@@ -106,8 +112,14 @@ async function findExistingRows(agentIds: string[]): Promise<Set<string>> {
 export async function ensureAgentConfigRows(
   agentIds: string[],
 ): Promise<EnsureAgentConfigRowsResult> {
-  const result: EnsureAgentConfigRowsResult = { ensured: [], existing: [], failed: [] };
-  const ids = Array.from(new Set(agentIds.filter((id) => typeof id === 'string' && id.length > 0)));
+  const result: EnsureAgentConfigRowsResult = {
+    ensured: [],
+    existing: [],
+    failed: [],
+  };
+  const ids = Array.from(
+    new Set(agentIds.filter((id) => typeof id === "string" && id.length > 0)),
+  );
   if (ids.length === 0) {
     return result;
   }
@@ -117,7 +129,7 @@ export async function ensureAgentConfigRows(
     existing = await findExistingRows(ids);
   } catch (err) {
     // Can't even read the table — leave healing to the next attempt.
-    console.error('ensureAgentConfigRows: BatchGet failed:', err);
+    console.error("ensureAgentConfigRows: BatchGet failed:", err);
     result.failed.push(...ids);
     return result;
   }
@@ -130,9 +142,11 @@ export async function ensureAgentConfigRows(
       continue;
     }
     try {
-      const record = await registryService.getResource('agent', agentId);
+      const record = await registryService.getResource("agent", agentId);
       if (!record) {
-        console.warn(`ensureAgentConfigRows: no registry record for "${agentId}"`);
+        console.warn(
+          `ensureAgentConfigRows: no registry record for "${agentId}"`,
+        );
         result.failed.push(agentId);
         continue;
       }
@@ -140,13 +154,26 @@ export async function ensureAgentConfigRows(
       const item = buildAgentCacheRecord(agentId, {
         description: record.description,
         customDescriptorContent: record.customDescriptorContent ?? null,
-        createdAt: record.createdAt ? record.createdAt.toISOString() : undefined,
-        updatedAt: record.updatedAt ? record.updatedAt.toISOString() : undefined,
+        createdAt: record.createdAt
+          ? record.createdAt.toISOString()
+          : undefined,
+        updatedAt: record.updatedAt
+          ? record.updatedAt.toISOString()
+          : undefined,
       });
       // …with state derived from the record's CURRENT status (the same
       // mapping registry-sync applies on STATUS_CHANGED), not the
       // metadata's self-declared state.
       item.state = toInternalState(record.status);
+      // Denormalize the same three approval-gate fields registry-sync
+      // writes, from this SAME live record already in hand. record.status
+      // is a required string on RegistryRecord, so this path always has a
+      // status source and always sets registryStatus (never leaves it
+      // UNSET) — unlike registry-sync's legacy buildAgentCacheRecord path,
+      // which may have no status signal at all.
+      item.registryStatus = record.status;
+      item.registryRecordId = record.recordId;
+      item.statusUpdatedAt = new Date().toISOString();
 
       await docClient.send(
         new PutCommand({
@@ -154,12 +181,15 @@ export async function ensureAgentConfigRows(
           Item: item,
           // Creation-only: never clobber a row registry-sync or a resolver
           // already owns.
-          ConditionExpression: 'attribute_not_exists(agentId)',
+          ConditionExpression: "attribute_not_exists(agentId)",
         }),
       );
       result.ensured.push(agentId);
     } catch (err: unknown) {
-      if (err instanceof Error && err.name === 'ConditionalCheckFailedException') {
+      if (
+        err instanceof Error &&
+        err.name === "ConditionalCheckFailedException"
+      ) {
         // Concurrent creation — the row exists now, which is all we need.
         result.existing.push(agentId);
         continue;
@@ -172,7 +202,7 @@ export async function ensureAgentConfigRows(
   if (result.ensured.length > 0 || result.failed.length > 0) {
     console.log(
       JSON.stringify({
-        helper: 'ensureAgentConfigRows',
+        helper: "ensureAgentConfigRows",
         ensured: result.ensured,
         existing: result.existing.length,
         failed: result.failed,

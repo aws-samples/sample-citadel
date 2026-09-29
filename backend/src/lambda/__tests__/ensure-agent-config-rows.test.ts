@@ -32,6 +32,11 @@ import {
   ensureAgentConfigRows,
   extractAgentIdsFromDefinition,
 } from "../ensure-agent-config-rows";
+import {
+  REGISTRY_STATUS_FIELD,
+  REGISTRY_RECORD_ID_FIELD,
+  STATUS_UPDATED_AT_FIELD,
+} from "../approval-cache-fields";
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 const getRegistryServiceMock = getRegistryService as jest.MockedFunction<
@@ -159,6 +164,25 @@ describe("ensureAgentConfigRows", () => {
       createdAt: "2026-07-20T00:00:00.000Z",
       updatedAt: "2026-07-20T01:00:00.000Z",
     });
+  });
+
+  it("denormalizes registryStatus/registryRecordId/statusUpdatedAt from the same live registry record", async () => {
+    mockBatchGetExisting([]);
+    mockRegistry({
+      xL0K6QlfKkEx: registryRecord({
+        recordId: "xL0K6QlfKkEx",
+        status: "PENDING_APPROVAL",
+      }),
+    });
+    ddbMock.on(PutCommand).resolves({});
+
+    await ensureAgentConfigRows(["xL0K6QlfKkEx"]);
+
+    const input = ddbMock.commandCalls(PutCommand)[0].args[0].input;
+    // Raw status, not the mapped internal state ("pending").
+    expect(input.Item?.[REGISTRY_STATUS_FIELD]).toBe("PENDING_APPROVAL");
+    expect(input.Item?.[REGISTRY_RECORD_ID_FIELD]).toBe("xL0K6QlfKkEx");
+    expect(input.Item?.[STATUS_UPDATED_AT_FIELD]).toBeDefined();
   });
 
   it("derives state from the registry record status, not the metadata state (DRAFT → maintenance)", async () => {
