@@ -7,6 +7,7 @@
  * Synthetic ids only.
  */
 process.env.REGISTRY_ID = "test-registry-id";
+process.env.AGENT_CONFIG_TABLE = "citadel-agents-test";
 
 jest.mock("../../services/registry-service", () => {
   const { getMockRegistryService } = jest.requireActual(
@@ -46,6 +47,7 @@ import {
   QueryCommand,
   UpdateCommand,
   PutCommand,
+  GetCommand,
 } from "@aws-sdk/lib-dynamodb";
 import {
   EventBridgeClient,
@@ -294,5 +296,71 @@ describe("publishApp: record-approval dispatch gate", () => {
         String(call[0]).includes("would_block"),
       ),
     ).toBe(false);
+  });
+
+  test("legacy agent (no Registry record) falls back to AGENT_CONFIG_TABLE registryStatus, strict + DRAFT throws", async () => {
+    mockGetGovernanceEnforce.mockResolvedValue("strict");
+    // No seedAgentRecord call: "agent-legacy-1" has no Registry record, so
+    // getResource resolves null and the loop must fall back to the legacy
+    // cache row instead of skipping (verify feedback, loop 1).
+    ddbMock.on(QueryCommand).resolves({
+      Items: [
+        makeMetadata({ workflowIds: [] }),
+        {
+          sortId: "AGENT#agent-legacy-1",
+          agentId: "agent-legacy-1",
+          status: "READY",
+        },
+        {
+          sortId: "CONFIG#values",
+          values: { adminEmail: "admin@example.com" },
+        },
+      ],
+    });
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        agentId: "agent-legacy-1",
+        state: "active",
+        registryStatus: "DRAFT",
+      },
+    });
+
+    await expect(
+      publishApp("app-1", "user-1", OWNER_EVENT, defaultDeps),
+    ).rejects.toThrow("approval_absent:DRAFT");
+
+    expect(apiGwMock.commandCalls(CreateApiCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+  });
+
+  test("legacy agent with no AGENT_CONFIG_TABLE row is skipped (not found anywhere), publish proceeds", async () => {
+    mockGetGovernanceEnforce.mockResolvedValue("strict");
+    ddbMock.on(QueryCommand).resolves({
+      Items: [
+        makeMetadata({ workflowIds: [] }),
+        {
+          sortId: "AGENT#agent-ghost-1",
+          agentId: "agent-ghost-1",
+          status: "READY",
+        },
+        {
+          sortId: "CONFIG#values",
+          values: { adminEmail: "admin@example.com" },
+        },
+      ],
+    });
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    ddbMock.on(PutCommand).resolves({});
+    ddbMock.on(UpdateCommand).resolves({});
+
+    const result = await publishApp(
+      "app-1",
+      "user-1",
+      OWNER_EVENT,
+      defaultDeps,
+    );
+
+    expect(result.app.status).toBe("PUBLISHED");
   });
 });

@@ -336,7 +336,14 @@ function getDocClient(): DynamoDBDocumentClient {
  * the table isn't configured or the row doesn't exist, so the caller can
  * distinguish "not found anywhere" from "found but inactive".
  */
-async function getLegacyAgentRow(
+// Exported for reuse by app-publish-handler.ts's publishApp, which needs the
+// SAME resolve-first-then-legacy-fallback shape as updateAgentBinding below
+// for its own record-approval dispatch gate (verify feedback, loop 1):
+// resolving a legacy human-readable agentId via RegistryService.getResource
+// directly throws (the SDK rejects non-recordIds), so the approval check
+// must follow this fallback rather than treating a lookup failure as
+// "not found -> skip".
+export async function getLegacyAgentRow(
   agentId: string,
 ): Promise<{ state: string; registryStatus?: string } | null> {
   if (!AGENT_CONFIG_TABLE) return null;
