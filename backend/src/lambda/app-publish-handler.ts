@@ -40,6 +40,8 @@ import { updateAppMetaFields } from "../utils/apps-table-meta";
 import { hashApiKey, getApiKeyPepper, HASH_ALG } from "../utils/api-key-hash";
 import { RegistryService } from "../services/registry-service";
 import { assertManifestAccess } from "./registry-agent-record-resolver";
+import { getGovernanceEnforce } from "../utils/governance-flag";
+import { assertRecordApprovedForAction } from "./record-approval-check";
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -495,10 +497,7 @@ export async function publishApp(
   // owner-reserved, not editor-reserved. Fails closed on any missing
   // identity, unresolvable org, missing record, or a record with no
   // owner/createdBy (assertManifestAccess's own fail-closed contract).
-  const registryRecord = await getRegistryService().getResource(
-    "agent",
-    appId,
-  );
+  const registryRecord = await getRegistryService().getResource("agent", appId);
   if (!registryRecord) {
     throw new Error(`App not found: ${appId}`);
   }
@@ -516,8 +515,7 @@ export async function publishApp(
 
   const items = componentsResult.Items || [];
   const metadata = items.find((i) => i.sortId === "METADATA") as
-    | AppMetadata
-    | undefined;
+    AppMetadata | undefined;
 
   if (!metadata) {
     throw new Error(`App not found: ${appId}`);
@@ -542,6 +540,25 @@ export async function publishApp(
   );
   if (errors.length > 0) {
     throw new Error(`Publish preconditions not met: ${errors.join("; ")}`);
+  }
+
+  // 3b. Record-approval dispatch gate (governance). Checked for every agent
+  // record being published (the bound agents, not the app's own record
+  // already fetched above for the owner gate). New checkpoint — not
+  // grandfathered for in-flight bindings; see record-approval-check.ts.
+  const enforcementMode = await getGovernanceEnforce(deps.environment);
+  const agentBindingItems = (items as ComponentItem[]).filter((i) =>
+    i.sortId?.startsWith("AGENT#"),
+  );
+  for (const binding of agentBindingItems) {
+    const boundAgentId = binding.agentId as string | undefined;
+    if (!boundAgentId) continue;
+    const boundAgentRecord = await getRegistryService().getResource(
+      "agent",
+      boundAgentId,
+    );
+    if (!boundAgentRecord) continue;
+    assertRecordApprovedForAction(boundAgentRecord, "publish", enforcementMode);
   }
 
   // 4. Aggregate permissions and ensure IAM role (skip if no permissions declared)
@@ -747,10 +764,7 @@ export async function unpublishApp(
   // 0. Owner gate (finding 13a58234) — BEFORE any teardown (API Gateway
   // delete, key revocation, IAM role delete, status write). Same shared
   // gate as publishApp above; see that function's comment for rationale.
-  const registryRecord = await getRegistryService().getResource(
-    "agent",
-    appId,
-  );
+  const registryRecord = await getRegistryService().getResource("agent", appId);
   if (!registryRecord) {
     throw new Error(`App not found: ${appId}`);
   }
@@ -768,8 +782,7 @@ export async function unpublishApp(
 
   const items = componentsResult.Items || [];
   const metadata = items.find((i) => i.sortId === "METADATA") as
-    | AppMetadata
-    | undefined;
+    AppMetadata | undefined;
 
   if (!metadata) {
     throw new Error(`App not found: ${appId}`);
@@ -913,9 +926,7 @@ export const handler = async (
   const { info, arguments: args, identity } = event;
   const fieldName = info?.fieldName;
   const userId =
-    identity?.sub ||
-    (identity?.claims?.sub as string | undefined) ||
-    "unknown";
+    identity?.sub || (identity?.claims?.sub as string | undefined) || "unknown";
 
   switch (fieldName) {
     case "publishApp":
