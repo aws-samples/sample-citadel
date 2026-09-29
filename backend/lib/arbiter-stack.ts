@@ -2445,6 +2445,22 @@ export class ArbiterStack extends cdk.Stack {
         resources: [governanceLedgerTable.tableArn],
       }),
     );
+    // SupervisorAgent also produces approval findings and needs the same
+    // write-once PutItem access to the governance ledger — otherwise its
+    // legibility record writes fail CLOSED identically to the worker's
+    // pre-fix behavior above. Mirrors the worker's env var + grant shape
+    // exactly (PutItem only, scoped to the single ledger table ARN).
+    supervisorLambda.addEnvironment(
+      "GOVERNANCE_LEDGER_TABLE",
+      governanceLedgerTable.tableName,
+    );
+    supervisorLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:PutItem"],
+        resources: [governanceLedgerTable.tableArn],
+      }),
+    );
     // Approval-required tool gating (finding c947aa77): a DISTINCT read-only
     // GetItem statement (never folded into the write-once PutItem statement
     // above — a new read grant stays its own least-privilege statement so the

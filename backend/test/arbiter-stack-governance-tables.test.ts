@@ -280,4 +280,26 @@ describe("ArbiterStack — US-ARB-002 governance tables (Δ8)", () => {
       expect(props.TimeToLiveSpecification).toBeUndefined();
     });
   });
+
+  // ----------------------------------------------------------------
+  // SupervisorAgent must be able to write approval findings to the
+  // governance ledger (same GOVERNANCE_LEDGER_TABLE wiring as the worker
+  // wrapper) — otherwise its legibility record writes fail CLOSED.
+  // ----------------------------------------------------------------
+  test("SupervisorAgent env has GOVERNANCE_LEDGER_TABLE", () => {
+    const fns = template.findResources("AWS::Lambda::Function");
+    const match = Object.entries(fns).find(([id]) =>
+      id.startsWith("SupervisorAgent"),
+    );
+    expect(match).toBeDefined();
+    const vars =
+      (
+        match![1] as {
+          Properties?: {
+            Environment?: { Variables?: Record<string, unknown> };
+          };
+        }
+      ).Properties?.Environment?.Variables ?? {};
+    expect(Object.keys(vars)).toContain("GOVERNANCE_LEDGER_TABLE");
+  });
 });
