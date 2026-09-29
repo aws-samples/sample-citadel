@@ -2096,6 +2096,26 @@ export const ALLOWED_SATELLITE_ADDED_STATEMENTS: Record<
       ],
       conditionKeys: [],
     },
+    // Publish/attach approval gate reads the governance enforcement mode
+    // (getGovernanceEnforce) — scoped ssm:GetParameter on the two rollout
+    // parameters only, same shape as backend-stack.ts / services-stack.ts.
+    // CDK merges same-effect/same-action addToRolePolicy() calls into one
+    // statement, so this covers the pre-existing app-api-key-pepper
+    // ssm:GetParameter resource alongside the two new governance ones —
+    // confirmed via the actual rail 6 satellite-synth diff, not hand-typed.
+    // 000000000000 is rail 6's normalized sandbox account (see
+    // normalizeArnAccount in template-utils.ts); region us-west-2 matches
+    // every other account-scoped ARN in this file.
+    {
+      effect: "Allow",
+      actions: ["ssm:GetParameter"],
+      resources: [
+        "arn:aws:ssm:us-west-2:000000000000:parameter/citadel/dev/app-api-key-pepper",
+        "arn:aws:ssm:us-west-2:000000000000:parameter/citadel/governance/effective_at/dev",
+        "arn:aws:ssm:us-west-2:000000000000:parameter/citadel/governance/enforce/dev",
+      ],
+      conditionKeys: [],
+    },
   ],
   RegistrySyncLambdaC145524B: [
     {

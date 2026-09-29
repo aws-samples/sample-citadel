@@ -1062,6 +1062,20 @@ export class RegistryStack extends cdk.Stack {
         resources: [`arn:aws:kms:${this.region}:${this.account}:alias/aws/ssm`],
       }),
     );
+    // Governance enforcement mode (publish/attach approval gate reads the
+    // rollout flag via getGovernanceEnforce). Mirrors the governance-flag
+    // ssm:GetParameter grant pattern in backend-stack.ts (~lines 1160-1170)
+    // / services-stack.ts (~line 1526).
+    registryAgentRecordResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["ssm:GetParameter"],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/enforce/${props.environment}`,
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/effective_at/${props.environment}`,
+        ],
+      }),
+    );
     registryAgentRecordResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,

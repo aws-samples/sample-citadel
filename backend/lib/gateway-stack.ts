@@ -252,6 +252,21 @@ export class GatewayStack extends cdk.Stack {
       }),
     );
 
+    // --- Publish Handler: governance enforcement mode (publish/attach
+    // approval gate reads the rollout flag via getGovernanceEnforce).
+    // Mirrors the governance-flag ssm:GetParameter grant pattern in
+    // backend-stack.ts (~lines 1160-1170) / services-stack.ts (~line 1526).
+    this.publishHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["ssm:GetParameter"],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/enforce/${props.environment}`,
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/effective_at/${props.environment}`,
+        ],
+      }),
+    );
+
     // --- Publish Handler: Registry read grant (finding 13a58234) ---
     // Least-privilege READ-ONLY: the owner gate calls
     // RegistryService.getResource('agent', appId) to fetch the app's

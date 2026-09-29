@@ -208,6 +208,39 @@ describe("GatewayStack — Shared Lambda Functions (Task 1.1)", () => {
     expect(matched).toBe(true);
   });
 
+  test("AppPublishHandler role grants ssm:GetParameter on the governance enforcement parameters", () => {
+    const policies = template.findResources("AWS::IAM::Policy");
+    const lambdas = template.findResources("AWS::Lambda::Function");
+    const handlerLogicalId = Object.keys(lambdas).find(
+      (k) => lambdas[k].Properties?.Handler === "app-publish-handler.handler",
+    );
+    expect(handlerLogicalId).toBeDefined();
+    const handlerRoleRef =
+      lambdas[handlerLogicalId!].Properties.Role?.["Fn::GetAtt"]?.[0];
+    expect(handlerRoleRef).toBeDefined();
+
+    const handlerPolicies = (
+      Object.values(policies) as CfnPolicyResourceLike[]
+    ).filter((p) =>
+      (p.Properties?.Roles ?? []).some((r) => r.Ref === handlerRoleRef),
+    );
+
+    const matched = handlerPolicies.some((policy: CfnPolicyResourceLike) =>
+      (policy.Properties?.PolicyDocument?.Statement ?? []).some((stmt) => {
+        const actions: string[] = Array.isArray(stmt.Action)
+          ? stmt.Action
+          : [stmt.Action];
+        const resourceStr = JSON.stringify(stmt.Resource ?? "");
+        return (
+          actions.includes("ssm:GetParameter") &&
+          resourceStr.includes("parameter/citadel/governance/enforce/test") &&
+          resourceStr.includes("parameter/citadel/governance/effective_at/test")
+        );
+      }),
+    );
+    expect(matched).toBe(true);
+  });
+
   test("AppPublishHandler role grants kms:Decrypt on the SSM-managed key alias", () => {
     const policies = template.findResources("AWS::IAM::Policy");
     const lambdas = template.findResources("AWS::Lambda::Function");
