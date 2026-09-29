@@ -158,6 +158,10 @@ _CLASSNAME_TO_CLASS: dict[str, FailureClass] = {
     # ABSENT approval is human-grantable — distinct from a settled DENY.
     "ApprovalRequiredError": FailureClass.APPROVAL_ABSENT,
     "ApprovalReadError": FailureClass.TRANSIENT,  # infra: transport blip may recover
+    # --- record-approval dispatch gate (record_approval.py) ----------------
+    # ABSENT approval is human-grantable — distinct from a settled DENY.
+    "RecordNotApprovedError": FailureClass.APPROVAL_ABSENT,
+    "ApprovalStatusReadError": FailureClass.TRANSIENT,  # infra: transport blip may recover
     # --- governance / tool-execution ledger hierarchy ----------------------
     "LedgerError": FailureClass.TRANSIENT,  # base infra refusal — fail-closed, retryable
     "LedgerWriteError": FailureClass.TRANSIENT,  # audit write fail-closed — infra
