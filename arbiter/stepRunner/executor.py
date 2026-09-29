@@ -522,6 +522,24 @@ def _emit_approval_dispatch_metric(
         _logger.warning('approval-dispatch metric emit failed: %s', exc)
 
 
+def _load_approval_governance_state():
+    """Patchable wrapper around ``load_governance_state()`` for the
+    approval gate.
+
+    Extracted (finding: PR213 CI hang) so ``_check_approval_gate`` never
+    calls ``load_governance_state()`` directly: a broken governance read
+    (real DDB error, or — in tests — a leaked env var driving a scan
+    against an unconfigured MagicMock table) is caught here and turned
+    into a state whose ``enforcement_mode``/``effective_at`` drive a
+    LOOKUP_FAILED-equivalent refusal via the caller's fail-closed except
+    branch, rather than ever propagating an unbounded hang or crash into
+    dispatch. Also the single seam ``arbiter/stepRunner/conftest.py``
+    patches by default so ordinary stepRunner tests never touch real
+    governance state at all.
+    """
+    return load_governance_state()
+
+
 def _check_approval_gate(
     agent_id: str, workflow_id: str, execution_id: str = ''
 ) -> tuple[bool, str | None]:
@@ -539,9 +557,14 @@ def _check_approval_gate(
     always constructed by the calling adapter).
 
     Resolves and decides using the SAME ``load_governance_state()``
-    snapshot (mode/effective_at) the release gate uses. On a would-block
-    or refused decision, logs + emits the ApprovalDispatch* metrics; a
-    refused decision leaves the node pending, same as the release gate.
+    snapshot (mode/effective_at) the release gate uses, read through the
+    patchable ``_load_approval_governance_state()`` wrapper above. That
+    read is itself wrapped in try/except (finding: PR213 CI hang) — a
+    governance-state read failure (real DDB error, or a misconfigured
+    test double) now degrades to the same ``LOOKUP_FAILED``/refuse-in-
+    strict, would-block-in-shadow semantics as an agent-record GetItem
+    failure, rather than propagating an exception or hang into dispatch.
+    A broken governance read must never let a dispatch through unchecked.
 
     Returns ``(refused, refusal_reason)``. Fail-closed the same way as
     the release gate: if the release-governance package failed to load,
@@ -555,8 +578,32 @@ def _check_approval_gate(
         )
         return True, 'approval_governance_package_unavailable'
 
-    state = load_governance_state()
-    enforcement_mode = getattr(state, 'enforcement_mode', 'shadow')
+    try:
+        state = _load_approval_governance_state()
+        enforcement_mode = getattr(state, 'enforcement_mode', 'shadow')
+        effective_at = getattr(state, 'effective_at', None)
+    except Exception as exc:  # noqa: BLE001 — a broken governance read must
+        # never dispatch unchecked; degrade to the same LOOKUP_FAILED
+        # semantics an agent-record GetItem failure already produces.
+        _logger.error(
+            "approval dispatch: governance state read failed (%s: %s); "
+            "treating as lookup-failed; workflow_id=%s target_agent=%s",
+            type(exc).__name__, exc, workflow_id, agent_id,
+        )
+        approval_resolution = _gov_pkg.record_approval.ApprovalResolution(
+            status=_gov_pkg.record_approval.ApprovalStatus.LOOKUP_FAILED,
+            detail=f"governance state read failed: {type(exc).__name__}: {exc}",
+        )
+        enforcement_mode = 'strict'
+        effective_at = None
+        approval_decision = approval_decide(approval_resolution, enforcement_mode, effective_at)
+        _emit_approval_dispatch_metric(
+            mode=enforcement_mode,
+            outcome='refused' if approval_decision.refused else 'proceed',
+            would_block=approval_decision.would_block,
+            workflow_id=workflow_id,
+        )
+        return True, approval_decision.reason
 
     try:
         table = _dynamodb.Table(AGENT_CONFIG_TABLE)
@@ -571,7 +618,7 @@ def _check_approval_gate(
         approval_resolution = resolve_record_approval(cache_item)
 
     approval_decision = approval_decide(
-        approval_resolution, enforcement_mode, getattr(state, 'effective_at', None),
+        approval_resolution, enforcement_mode, effective_at,
     )
 
     _emit_approval_dispatch_metric(

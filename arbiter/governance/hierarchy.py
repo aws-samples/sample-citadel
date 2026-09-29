@@ -141,15 +141,38 @@ def _get_dynamodb_resource() -> Any:
 # ---------------------------------------------------------------------------
 
 
+_SCAN_ALL_MAX_PAGES = 10000
+
+
 def _scan_all(table: Any) -> list[dict]:
-    """Scan a DDB table and collect every page into a single list."""
+    """Scan a DDB table and collect every page into a single list.
+
+    Defensive termination (finding: PR213 CI hang): a real DynamoDB
+    response's ``LastEvaluatedKey`` is either absent or a non-empty dict —
+    but in unit tests that stub ``table`` with a bare ``MagicMock``,
+    ``response.get("LastEvaluatedKey")`` returns a fresh (truthy)
+    ``MagicMock`` forever, so the original ``if not last_key: break`` never
+    fires and this loops indefinitely. Real tables are unaffected by either
+    guard below: a well-formed paginated scan always yields a non-empty dict
+    key until the final page, and legitimate scans stay far below
+    ``_SCAN_ALL_MAX_PAGES``.
+    """
     items: list[dict] = []
     kwargs: dict[str, Any] = {}
+    pages = 0
     while True:
         response = table.scan(**kwargs)
         items.extend(response.get("Items", []))
         last_key = response.get("LastEvaluatedKey")
-        if not last_key:
+        if not isinstance(last_key, dict) or not last_key:
+            break
+        pages += 1
+        if pages >= _SCAN_ALL_MAX_PAGES:
+            logger.warning(
+                "Governance loader: _scan_all hit the %d-page cap; "
+                "aborting pagination with a possibly-incomplete result.",
+                _SCAN_ALL_MAX_PAGES,
+            )
             break
         kwargs["ExclusiveStartKey"] = last_key
     return items
