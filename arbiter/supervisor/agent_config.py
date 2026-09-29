@@ -21,6 +21,28 @@ def parse_decimals(data: Any) -> Any:
 
 
 
+def _with_approval_fields(config: dict, item: dict) -> dict:
+    """Stamp the record-approval gate's two DynamoDB fields
+    ('registryStatus', 'createdAt') from the raw agent-config item onto the
+    config dict passed through to the dispatch path (step 5c, CIT-041 PR2).
+
+    ``resolve_record_approval`` (arbiter/governance/record_approval.py)
+    reads these two fields by name (REGISTRY_STATUS_FIELD/CREATED_AT_FIELD)
+    off whatever cache item it is given; the config dict IS that cache item
+    at the supervisor choke point, so both fields must survive the
+    scan/get_item -> config-dict projection this module already performs.
+    Additive only — never overwrites an existing key of the same name on
+    ``config`` itself (there is none today), and absent on the raw item
+    simply means absent on the config (resolve_record_approval already
+    treats a missing 'registryStatus' key as MISSING_STATUS, not a crash).
+    """
+    if 'registryStatus' in item:
+        config['registryStatus'] = item['registryStatus']
+    if 'createdAt' in item:
+        config['createdAt'] = item['createdAt']
+    return config
+
+
 def load_config_from_dynamodb():
     print(CONFIG_TABLE)
     table = dynamodb.Table(CONFIG_TABLE)
@@ -30,7 +52,7 @@ def load_config_from_dynamodb():
     for item in items:
         # Only load agents with state 'active'
         if item.get('state') == 'active':
-            configs.append(item['config'])
+            configs.append(_with_approval_fields(item['config'], item))
     print(f"Loaded {len(configs)} active agents")
     return {'agents': configs}
 
@@ -70,7 +92,7 @@ def load_app_scoped_agents(app_id: str) -> dict:
             print(f"Skipping agent {agent_id}: not found or not active")
             continue
 
-        config = item['config']
+        config = _with_approval_fields(item['config'], item)
 
         # Apply binding overrides
         if binding.get('systemPromptAddition'):

@@ -122,10 +122,17 @@ def test_strict_no_release_but_grandfathered_dispatches():
     # bypass -> grandfathered=True even with a cutoff set.
     fake_state = MagicMock(enforcement_mode='strict', effective_at='2026-05-15T00:00:00Z')
     fake_resolution = MagicMock(status=executor.ReleaseResolutionStatus.NO_POINTER, error=None)
+    fake_agent_table = MagicMock()
+    fake_agent_table.get_item.return_value = {
+        'Item': {'agentId': 'agent-A', 'registryStatus': 'APPROVED'},
+    }
+    fake_dynamodb = MagicMock()
+    fake_dynamodb.Table.return_value = fake_agent_table
 
     with ctx[0], ctx[1], ctx[2], \
          patch.object(executor, 'load_governance_state', return_value=fake_state), \
-         patch.object(executor, 'resolve_release', return_value=fake_resolution):
+         patch.object(executor, 'resolve_release', return_value=fake_resolution), \
+         patch.object(executor, '_dynamodb', fake_dynamodb):
         os.environ['RELEASE_DISPATCH_ENVIRONMENT'] = 'PROD'
         executor.invoke_node('exec-1', 'wf-1', NODE, {'k': 'v'}, {'cfg': 1})
 
@@ -140,10 +147,17 @@ def test_strict_resolved_release_dispatches():
         release={'releaseId': 'r1'},
         error=None,
     )
+    fake_agent_table = MagicMock()
+    fake_agent_table.get_item.return_value = {
+        'Item': {'agentId': 'agent-A', 'registryStatus': 'APPROVED'},
+    }
+    fake_dynamodb = MagicMock()
+    fake_dynamodb.Table.return_value = fake_agent_table
 
     with ctx[0], ctx[1], ctx[2], \
          patch.object(executor, 'load_governance_state', return_value=fake_state), \
-         patch.object(executor, 'resolve_release', return_value=fake_resolution):
+         patch.object(executor, 'resolve_release', return_value=fake_resolution), \
+         patch.object(executor, '_dynamodb', fake_dynamodb):
         os.environ['RELEASE_DISPATCH_ENVIRONMENT'] = 'PROD'
         executor.invoke_node('exec-1', 'wf-1', NODE, {'k': 'v'}, {'cfg': 1})
 

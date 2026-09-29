@@ -236,7 +236,9 @@ class TestGovernedProcessAgentCallStampsEvalRunId:
             "evalRunId": "eval-run-42",
             "conversation": [],
         }
-        agents_config = {"agents": [{"name": "agent1", "domain": "default"}]}
+        agents_config = {
+            "agents": [{"name": "agent1", "domain": "default", "registryStatus": "APPROVED"}]
+        }
 
         index.governed_process_agent_call(
             agents_config, orchestration, "agent1", {"x": 1}, "use-1",
@@ -272,7 +274,9 @@ class TestGovernedProcessAgentCallStampsEvalRunId:
         )
 
         orchestration = {"orchestrationId": "orch-normal-1", "conversation": []}
-        agents_config = {"agents": [{"name": "agent1", "domain": "default"}]}
+        agents_config = {
+            "agents": [{"name": "agent1", "domain": "default", "registryStatus": "APPROVED"}]
+        }
 
         index.governed_process_agent_call(
             agents_config, orchestration, "agent1", {"x": 1}, "use-1",

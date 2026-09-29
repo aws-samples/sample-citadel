@@ -105,3 +105,13 @@ DIMENSION_RELEASE_OUTCOME = 'ReleaseDispatchOutcome'
 # backend/src/utils/metrics-constants.ts.
 METRIC_CANARY_ASSIGNMENT = 'CanaryAssignment'
 DIMENSION_RELEASE_ARM = 'ReleaseArm'
+
+# Record-approval dispatch gate (step 5c, CIT-041 PR2): mirrors the
+# ReleaseDispatch* counter family above exactly — same dimensions
+# (DIMENSION_RELEASE_MODE, DIMENSION_WORKFLOW_ID, DIMENSION_RELEASE_OUTCOME),
+# same semantics (Evaluated always, WouldBlock in permissive/shadow,
+# Refused only in strict), separate metric names so the approval gate's
+# rollout can be measured independently of the release gate's.
+METRIC_APPROVAL_DISPATCH_EVALUATED = 'ApprovalDispatchEvaluated'
+METRIC_APPROVAL_DISPATCH_WOULD_BLOCK = 'ApprovalDispatchWouldBlock'
+METRIC_APPROVAL_DISPATCH_REFUSED = 'ApprovalDispatchRefused'

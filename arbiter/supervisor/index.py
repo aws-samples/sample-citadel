@@ -101,6 +101,9 @@ from common.metrics_constants import (
     DIMENSION_RELEASE_OUTCOME,
     METRIC_CANARY_ASSIGNMENT,
     DIMENSION_RELEASE_ARM,
+    METRIC_APPROVAL_DISPATCH_EVALUATED,
+    METRIC_APPROVAL_DISPATCH_WOULD_BLOCK,
+    METRIC_APPROVAL_DISPATCH_REFUSED,
 )
 
 # Tracing foundation (architect task 5459301e-1e7b-4bfd-bccb-b106aba2748c):
@@ -145,7 +148,7 @@ def _load_governance_package():
     # Explicitly load the submodules the supervisor needs. They use relative
     # imports (``from .models import ...``) which need the parent package
     # (``_citadel_governance``) to already be registered — done above.
-    for submod in ('models', 'hierarchy', 'engine', 'ledger', 'release_resolution', 'grandfathering'):
+    for submod in ('models', 'hierarchy', 'engine', 'ledger', 'release_resolution', 'grandfathering', 'record_approval'):
         sub_file = os.path.join(pkg_dir, f'{submod}.py')
         if not os.path.isfile(sub_file):
             continue
@@ -183,6 +186,14 @@ try:
     ReleaseResolution = _gov_pkg.release_resolution.ReleaseResolution
     ReleaseResolutionStatus = _gov_pkg.release_resolution.ReleaseResolutionStatus
     is_grandfathered_pure = _gov_pkg.grandfathering.is_grandfathered_pure
+    # Record-approval dispatch gate (step 5c, this story). Same
+    # single-try/except load as every other governance symbol above — a
+    # packaging regression that drops record_approval.py surfaces as the
+    # SAME fail-closed governance_package_unavailable refusal, never a
+    # silent approval-gate bypass.
+    resolve_record_approval = _gov_pkg.record_approval.resolve_record_approval
+    approval_decide = _gov_pkg.record_approval.decide
+    ApprovalStatus = _gov_pkg.record_approval.ApprovalStatus
     _GOVERNANCE_AVAILABLE = True
     _GOVERNANCE_IMPORT_ERROR: str | None = None
 except ImportError as e:
@@ -594,6 +605,52 @@ def _emit_canary_assignment_metric(arm: str, workflow_id: str = '') -> None:
         logger.warning('canary-assignment metric emit failed: %s', exc)
 
 
+def _emit_approval_dispatch_metric(
+    *,
+    mode: str,
+    outcome: str,
+    would_block: bool,
+    workflow_id: str = '',
+) -> None:
+    """Best-effort CloudWatch telemetry for the record-approval dispatch
+    gate (step 5c). Mirrors ``_emit_release_dispatch_metric`` exactly (same
+    never-raises discipline, same dimension shape) using the
+    ApprovalDispatch* metric names instead of ReleaseDispatch* — a separate
+    counter family so the two gates' rollout can be measured independently.
+    """
+    try:
+        cw = _get_cloudwatch()
+        dimensions = [{'Name': DIMENSION_RELEASE_MODE, 'Value': mode}]
+        if workflow_id:
+            dimensions.append({'Name': DIMENSION_WORKFLOW_ID, 'Value': workflow_id})
+        outcome_dimensions = dimensions + [
+            {'Name': DIMENSION_RELEASE_OUTCOME, 'Value': outcome},
+        ]
+        metric_data = [{
+            'MetricName': METRIC_APPROVAL_DISPATCH_EVALUATED,
+            'Value': 1.0,
+            'Unit': UNIT_COUNT,
+            'Dimensions': outcome_dimensions,
+        }]
+        if would_block:
+            metric_data.append({
+                'MetricName': METRIC_APPROVAL_DISPATCH_WOULD_BLOCK,
+                'Value': 1.0,
+                'Unit': UNIT_COUNT,
+                'Dimensions': dimensions,
+            })
+        if outcome == 'refused':
+            metric_data.append({
+                'MetricName': METRIC_APPROVAL_DISPATCH_REFUSED,
+                'Value': 1.0,
+                'Unit': UNIT_COUNT,
+                'Dimensions': dimensions,
+            })
+        cw.put_metric_data(Namespace=METRIC_NAMESPACE, MetricData=metric_data)
+    except Exception as exc:  # noqa: BLE001 — telemetry must never raise
+        logger.warning('approval-dispatch metric emit failed: %s', exc)
+
+
 def governed_process_agent_call(
     agents_config: dict,
     orchestration: dict,
@@ -922,6 +979,122 @@ def governed_process_agent_call(
                 'target_agent': agent_name,
                 'agent_use_id': agent_use_id,
             }
+
+    # 5c. Record-approval dispatch gate (this story). A separate, additive
+    # gate layered after the release gate: resolve_record_approval reads
+    # the SAME agent_cfg item already scanned out of agents_config at step
+    # 2 above (agent_config.py now passes through 'registryStatus' and
+    # 'createdAt' from the DynamoDB item onto that dict) — no second
+    # lookup. A missing agent_cfg item (agent not found in agents_config)
+    # resolves to UNKNOWN_RECORD, mirroring resolve_record_approval's own
+    # cache_item=None contract.
+    approval_resolution = resolve_record_approval(agent_cfg)
+    approval_decision = approval_decide(
+        approval_resolution, enforcement_mode, state.effective_at,
+    )
+
+    _emit_approval_dispatch_metric(
+        mode=enforcement_mode,
+        outcome='refused' if approval_decision.refused else 'proceed',
+        would_block=approval_decision.would_block,
+        workflow_id=workflow_id,
+    )
+
+    if approval_decision.would_block or approval_decision.refused:
+        # Deterministic finding id — same tuple-hash convention the
+        # authority gate's finding_id does NOT use (that one is a fresh
+        # uuid4 per GovernanceFinding.create call), because THIS finding
+        # must be safely re-write-attempted on a duplicate delivery
+        # (SQS-style at-least-once redelivery of the same dispatch) without
+        # producing two ledger rows for the same underlying refusal —
+        # write_finding's existing ConditionExpression='attribute_not_exists(findingId)'
+        # write-once semantics (ledger.py) already give us the "conditional
+        # put" the brief asks for, for free, once the id is deterministic
+        # rather than random.
+        approval_finding_id = uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            '|'.join([
+                str(workflow_id),
+                str(agent_use_id),
+                str(agent_name),
+                'record_approval',
+                str(approval_resolution.registry_status),
+            ]),
+        ).hex
+        approval_finding = GovernanceFinding(
+            workflow_id=workflow_id,
+            decision=ArbitrationDecision.DENY if approval_decision.refused else ArbitrationDecision.PERMIT,
+            requesting_agent=requesting_agent_id,
+            target_agent=agent_name,
+            reason=approval_decision.reason or 'approval_would_block',
+            scope_evaluated=approval_resolution.status.value,
+            finding_id=approval_finding_id,
+        )
+        try:
+            write_finding(approval_finding)
+        except Exception as exc:  # noqa: BLE001 — mode-dependent handling below
+            # A ConditionalCheckFailedException means this exact
+            # deterministic finding_id was already written by a prior
+            # (redelivered) attempt at this same dispatch — the record
+            # exists, so the write's purpose is already satisfied. Treat
+            # it as success rather than a write failure: log INFO and
+            # fall through to proceed, in EVERY mode (including strict).
+            # write_finding wraps botocore's ClientError into
+            # LedgerWriteError, so inspect the wrapped cause's error code
+            # rather than the outer exception type.
+            cause = exc.__cause__
+            cause_code = getattr(cause, 'response', {}).get('Error', {}).get('Code') if cause is not None else None
+            if cause_code == 'ConditionalCheckFailedException':
+                logger.info(
+                    "approval-gate finding already recorded (redelivered "
+                    "dispatch); dispatch proceeds: workflow_id=%s "
+                    "target_agent=%s finding_id=%s",
+                    workflow_id, agent_name, approval_finding_id,
+                )
+            elif enforcement_mode == 'strict':
+                # Fail-closed per D9, same as the authority gate's own
+                # write_finding call: a finding-write failure must halt
+                # dispatch in strict mode rather than silently let a
+                # not-approved agent through unrecorded.
+                logger.error(
+                    "approval-gate finding write failed in strict mode; "
+                    "halting dispatch: workflow_id=%s target_agent=%s "
+                    "error=%s",
+                    workflow_id, agent_name, exc,
+                )
+                return {
+                    'denied': True,
+                    'reason': 'approval_finding_write_failed',
+                    'detail': str(exc),
+                    'workflow_id': workflow_id,
+                    'target_agent': agent_name,
+                    'agent_use_id': agent_use_id,
+                }
+            # shadow/permissive: log and proceed — the finding-write
+            # failure is observability-only outside strict mode, same
+            # posture as every other best-effort telemetry emitter in this
+            # module.
+            else:
+                logger.warning(
+                    "approval-gate finding write failed (mode=%s); dispatch "
+                    "proceeds: workflow_id=%s target_agent=%s error=%s",
+                    enforcement_mode, workflow_id, agent_name, exc,
+                )
+
+    if approval_decision.refused:
+        logger.error(
+            "approval dispatch refused: %s; workflow_id=%s target_agent=%s "
+            "registry_status=%s",
+            approval_decision.reason, workflow_id, agent_name,
+            approval_resolution.registry_status,
+        )
+        return {
+            'denied': True,
+            'reason': approval_decision.reason,
+            'workflow_id': workflow_id,
+            'target_agent': agent_name,
+            'agent_use_id': agent_use_id,
+        }
 
     # 6. Branch on mode + decision.
     #    permissive/shadow (or the emergency bypass override): evaluate +
