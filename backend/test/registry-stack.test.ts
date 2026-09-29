@@ -397,6 +397,42 @@ describe("RegistryStack — backend-stack-split phase 2", () => {
     });
   });
 
+  test("registry-agent-record-resolver role grants ssm:GetParameter on the governance enforcement parameters", () => {
+    const fns = template.findResources("AWS::Lambda::Function", {
+      Properties: Match.objectLike({
+        Handler: "registry-agent-record-resolver.handler",
+      }),
+    });
+    const fnIds = Object.keys(fns);
+    expect(fnIds.length).toBe(1);
+    const roleRef = (fns[fnIds[0]] as CfnLambdaFunctionResource).Properties
+      ?.Role?.["Fn::GetAtt"]?.[0];
+    expect(roleRef).toBeDefined();
+
+    const policies = template.findResources("AWS::IAM::Policy");
+    const matched = Object.values(policies).some((policy) => {
+      const rolesRef = JSON.stringify(
+        (policy as CfnIamPolicyResource).Properties?.Roles,
+      );
+      if (!rolesRef?.includes(roleRef)) return false;
+      const statements =
+        (policy as CfnIamPolicyResource).Properties?.PolicyDocument
+          ?.Statement ?? [];
+      return statements.some((stmt) => {
+        const actions = Array.isArray(stmt.Action)
+          ? stmt.Action
+          : [stmt.Action];
+        const resourceStr = JSON.stringify(stmt.Resource ?? "");
+        return (
+          actions.includes("ssm:GetParameter") &&
+          resourceStr.includes("parameter/citadel/governance/enforce/test") &&
+          resourceStr.includes("parameter/citadel/governance/effective_at/test")
+        );
+      });
+    });
+    expect(matched).toBe(true);
+  });
+
   test("no other moved Lambda has functionName pinning (auto-named, invoked via in-stack grantInvoke)", () => {
     const fns = template.findResources("AWS::Lambda::Function");
     for (const [_logicalId, fn] of Object.entries(fns)) {

@@ -87,6 +87,17 @@ jest.mock("../../utils/appsync-publish", () => ({
   publishAppStatusEvent: jest.fn().mockResolvedValue({}),
 }));
 
+// Deterministic governance mode for all tests in this file — avoids a real
+// SSM call (governance-flag.ts falls back to 'shadow' on any read failure,
+// but a live network attempt in CI is undesirable). Individual tests for
+// the record-approval gate itself live in
+// registry-agent-record-resolver-approval-gate.test.ts, which overrides
+// this mock's resolved value per case.
+jest.mock("../../utils/governance-flag", () => ({
+  __esModule: true,
+  getGovernanceEnforce: jest.fn().mockResolvedValue("shadow"),
+}));
+
 jest.mock("uuid", () => ({
   v4: jest.fn().mockReturnValue("test-correlation-id"),
 }));

@@ -39,6 +39,9 @@
  */
 import type { AppSyncResolverHandler } from "aws-lambda";
 import { ORGLESS_CALLER_ORG as SENTINEL_ORGLESS_CALLER_ORG } from "./utils/org-sentinel";
+import { getGovernanceEnforce } from "../utils/governance-flag";
+import { assertRecordApprovedForAction } from "./record-approval-check";
+import { REGISTRY_STATUS_FIELD } from "./approval-cache-fields";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
@@ -274,6 +277,7 @@ function recordFromInput(
 // ---------------------------------------------------------------------------
 
 const APPS_TABLE = process.env.APPS_TABLE!;
+const ENVIRONMENT = process.env.ENVIRONMENT || "dev";
 // Denormalized Registry -> DynamoDB projection (kept in sync by
 // registry-sync.ts off `citadel.agentcore.*` EventBridge events). Used ONLY
 // for the agentBindings[].name enrichment's fast path: a single
@@ -332,9 +336,16 @@ function getDocClient(): DynamoDBDocumentClient {
  * the table isn't configured or the row doesn't exist, so the caller can
  * distinguish "not found anywhere" from "found but inactive".
  */
-async function getLegacyAgentRow(
+// Exported for reuse by app-publish-handler.ts's publishApp, which needs the
+// SAME resolve-first-then-legacy-fallback shape as updateAgentBinding below
+// for its own record-approval dispatch gate (verify feedback, loop 1):
+// resolving a legacy human-readable agentId via RegistryService.getResource
+// directly throws (the SDK rejects non-recordIds), so the approval check
+// must follow this fallback rather than treating a lookup failure as
+// "not found -> skip".
+export async function getLegacyAgentRow(
   agentId: string,
-): Promise<{ state: string } | null> {
+): Promise<{ state: string; registryStatus?: string } | null> {
   if (!AGENT_CONFIG_TABLE) return null;
   try {
     const result = await getDocClient().send(
@@ -344,7 +355,10 @@ async function getLegacyAgentRow(
       }),
     );
     if (!result.Item) return null;
-    return { state: result.Item.state || "active" };
+    return {
+      state: result.Item.state || "active",
+      registryStatus: result.Item[REGISTRY_STATUS_FIELD],
+    };
   } catch (err) {
     console.warn("getLegacyAgentRow: DynamoDB lookup failed", {
       agentId,
@@ -2214,6 +2228,17 @@ export async function updateAgentBinding(
         "updateAgentBinding: READY gate satisfied by legacy agents table",
         { agentId: input.agentId },
       );
+      // Record-approval dispatch gate (governance), attach action. No
+      // Registry record exists on this path, so approval is derived from
+      // the legacy row's denormalized registryStatus field (may be
+      // undefined -> approval_absent_missing_status in strict mode). New
+      // checkpoint — not grandfathered; see record-approval-check.ts.
+      const legacyEnforcementMode = await getGovernanceEnforce(ENVIRONMENT);
+      assertRecordApprovedForAction(
+        { [REGISTRY_STATUS_FIELD]: legacyRow.registryStatus },
+        "attach",
+        legacyEnforcementMode,
+      );
     } else {
       // The agent's state is derived from the AUTHORITATIVE record.status
       // via toInternalState — never from the descriptor's `state` mirror,
@@ -2231,6 +2256,16 @@ export async function updateAgentBinding(
           "Agent must be active before it can be marked as ready",
         );
       }
+      // Record-approval dispatch gate (governance), attach action. Checked
+      // for the record being bound/attached (targetAgent, already fetched
+      // above). New checkpoint — not grandfathered; see
+      // record-approval-check.ts.
+      const enforcementMode = await getGovernanceEnforce(ENVIRONMENT);
+      assertRecordApprovedForAction(
+        targetAgent ?? {},
+        "attach",
+        enforcementMode,
+      );
     }
   }
 

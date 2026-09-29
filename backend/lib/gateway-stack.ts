@@ -13,6 +13,11 @@ export interface GatewayStackProps extends cdk.StackProps {
   appsTable: dynamodb.ITable;
   eventBus: events.IEventBus;
   idempotencyTable: dynamodb.ITable;
+  // Legacy agents table (finding: publishApp's getLegacyAgentRow fallback
+  // returns null and silently skips every unresolved bound agent when this
+  // is unset — same table backendStack exposes to agent-config-resolver /
+  // workflow-resolver via AGENT_CONFIG_TABLE).
+  agentConfigTable: dynamodb.ITable;
 }
 
 export class GatewayStack extends cdk.Stack {
@@ -97,6 +102,10 @@ export class GatewayStack extends cdk.Stack {
         // shared assertManifestAccess (registry-agent-record-resolver.ts).
         REGISTRY_ID: registryId,
         REGISTRY_GENERATION,
+        // Legacy agents table lookup (getLegacyAgentRow) — without this,
+        // every bound agent unresolved in the Registry silently fails the
+        // publish approval-gate check instead of falling back correctly.
+        AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
       },
       timeout: cdk.Duration.seconds(120),
       logGroup: new logs.LogGroup(this, "AppPublishHandlerLogs", {
@@ -131,6 +140,11 @@ export class GatewayStack extends cdk.Stack {
 
     // idempotencyTable read/write to publish handler
     props.idempotencyTable.grantReadWriteData(this.publishHandler);
+
+    // agentConfigTable read-only to publish handler — legacy fallback
+    // lookups only (getLegacyAgentRow), matches workflowResolverFunction's
+    // grantReadData in registry-stack.ts.
+    props.agentConfigTable.grantReadData(this.publishHandler);
 
     // --- Publish Handler: API Gateway management permissions ---
     this.publishHandler.addToRolePolicy(
@@ -249,6 +263,21 @@ export class GatewayStack extends cdk.Stack {
         effect: iam.Effect.ALLOW,
         actions: ["lambda:AddPermission", "lambda:RemovePermission"],
         resources: [this.authorizerFunction.functionArn],
+      }),
+    );
+
+    // --- Publish Handler: governance enforcement mode (publish/attach
+    // approval gate reads the rollout flag via getGovernanceEnforce).
+    // Mirrors the governance-flag ssm:GetParameter grant pattern in
+    // backend-stack.ts (~lines 1160-1170) / services-stack.ts (~line 1526).
+    this.publishHandler.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["ssm:GetParameter"],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/enforce/${props.environment}`,
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/effective_at/${props.environment}`,
+        ],
       }),
     );
 

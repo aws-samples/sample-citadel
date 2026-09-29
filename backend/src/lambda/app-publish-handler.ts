@@ -38,8 +38,18 @@ import {
 import { PolicyManager } from "../utils/policy-manager";
 import { updateAppMetaFields } from "../utils/apps-table-meta";
 import { hashApiKey, getApiKeyPepper, HASH_ALG } from "../utils/api-key-hash";
-import { RegistryService } from "../services/registry-service";
-import { assertManifestAccess } from "./registry-agent-record-resolver";
+import {
+  RegistryService,
+  TypeMismatchError,
+  RecordResolutionTimeoutError,
+} from "../services/registry-service";
+import {
+  assertManifestAccess,
+  getLegacyAgentRow,
+} from "./registry-agent-record-resolver";
+import { getGovernanceEnforce } from "../utils/governance-flag";
+import { assertRecordApprovedForAction } from "./record-approval-check";
+import { REGISTRY_STATUS_FIELD } from "./approval-cache-fields";
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -495,10 +505,7 @@ export async function publishApp(
   // owner-reserved, not editor-reserved. Fails closed on any missing
   // identity, unresolvable org, missing record, or a record with no
   // owner/createdBy (assertManifestAccess's own fail-closed contract).
-  const registryRecord = await getRegistryService().getResource(
-    "agent",
-    appId,
-  );
+  const registryRecord = await getRegistryService().getResource("agent", appId);
   if (!registryRecord) {
     throw new Error(`App not found: ${appId}`);
   }
@@ -516,8 +523,7 @@ export async function publishApp(
 
   const items = componentsResult.Items || [];
   const metadata = items.find((i) => i.sortId === "METADATA") as
-    | AppMetadata
-    | undefined;
+    AppMetadata | undefined;
 
   if (!metadata) {
     throw new Error(`App not found: ${appId}`);
@@ -542,6 +548,76 @@ export async function publishApp(
   );
   if (errors.length > 0) {
     throw new Error(`Publish preconditions not met: ${errors.join("; ")}`);
+  }
+
+  // 3b. Record-approval dispatch gate (governance). Checked for every agent
+  // record being published (the bound agents, not the app's own record
+  // already fetched above for the owner gate). New checkpoint — not
+  // grandfathered for in-flight bindings; see record-approval-check.ts.
+  const enforcementMode = await getGovernanceEnforce(deps.environment);
+  const agentBindingItems = (items as ComponentItem[]).filter((i) =>
+    i.sortId?.startsWith("AGENT#"),
+  );
+  for (const binding of agentBindingItems) {
+    const boundAgentId = binding.agentId as string | undefined;
+    if (!boundAgentId) continue;
+    // Bindings may carry a human-readable agentId (legacy DynamoDB agents)
+    // OR a 12-char Registry recordId — the Registry SDK's GetRegistryRecord
+    // rejects anything that isn't a recordId. Resolve first, mirroring
+    // updateAgentBinding's READY-transition gate (registry-agent-record-
+    // resolver.ts ~L2150+), so a legacy id doesn't surface an unrelated SDK
+    // regex error, and so a genuine resolution failure falls back to the
+    // legacy cache's denormalized status instead of being fail-open
+    // (verify feedback, loop 1: skip null here was inconsistent with
+    // updateAgentBinding's fail-closed legacy fallback).
+    let boundAgentRecord;
+    let notFoundInRegistry = false;
+    try {
+      const boundRecordId = await getRegistryService().resolveRecordId(
+        "agent",
+        boundAgentId,
+      );
+      boundAgentRecord = await getRegistryService().getResource(
+        "agent",
+        boundRecordId,
+      );
+      if (!boundAgentRecord) {
+        notFoundInRegistry = true;
+      }
+    } catch (err) {
+      if (err instanceof TypeMismatchError) {
+        // Record exists but is the wrong type — not an approval signal;
+        // preserve prior behavior (skip) rather than inventing a status.
+        continue;
+      }
+      if (err instanceof RecordResolutionTimeoutError) {
+        throw err;
+      }
+      if (err instanceof Error && /not found/i.test(err.message)) {
+        notFoundInRegistry = true;
+      } else {
+        throw err;
+      }
+    }
+    if (notFoundInRegistry) {
+      // No Registry record resolved. Legacy agents live only in the
+      // DynamoDB agents table and therefore never have a Registry record —
+      // derive approval from the denormalized registryStatus field there
+      // (may be undefined -> approval_absent_missing_status in strict).
+      const legacyRow = await getLegacyAgentRow(boundAgentId);
+      if (!legacyRow) continue;
+      assertRecordApprovedForAction(
+        { [REGISTRY_STATUS_FIELD]: legacyRow.registryStatus },
+        "publish",
+        enforcementMode,
+      );
+    } else {
+      assertRecordApprovedForAction(
+        boundAgentRecord!,
+        "publish",
+        enforcementMode,
+      );
+    }
   }
 
   // 4. Aggregate permissions and ensure IAM role (skip if no permissions declared)
@@ -747,10 +823,7 @@ export async function unpublishApp(
   // 0. Owner gate (finding 13a58234) — BEFORE any teardown (API Gateway
   // delete, key revocation, IAM role delete, status write). Same shared
   // gate as publishApp above; see that function's comment for rationale.
-  const registryRecord = await getRegistryService().getResource(
-    "agent",
-    appId,
-  );
+  const registryRecord = await getRegistryService().getResource("agent", appId);
   if (!registryRecord) {
     throw new Error(`App not found: ${appId}`);
   }
@@ -768,8 +841,7 @@ export async function unpublishApp(
 
   const items = componentsResult.Items || [];
   const metadata = items.find((i) => i.sortId === "METADATA") as
-    | AppMetadata
-    | undefined;
+    AppMetadata | undefined;
 
   if (!metadata) {
     throw new Error(`App not found: ${appId}`);
@@ -913,9 +985,7 @@ export const handler = async (
   const { info, arguments: args, identity } = event;
   const fieldName = info?.fieldName;
   const userId =
-    identity?.sub ||
-    (identity?.claims?.sub as string | undefined) ||
-    "unknown";
+    identity?.sub || (identity?.claims?.sub as string | undefined) || "unknown";
 
   switch (fieldName) {
     case "publishApp":
