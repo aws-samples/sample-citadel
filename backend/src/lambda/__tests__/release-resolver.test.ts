@@ -819,7 +819,7 @@ describe("handler — AppSync dispatch", () => {
       info: { fieldName: "cutAgentRelease" },
       identity: {
         sub: "architect-1",
-        "custom:role": "architect",
+        "cognito:groups": ["architect"],
         claims: { "custom:organization": "org-1" },
       },
       arguments: { input: baseCutInput() } as never,
@@ -839,7 +839,7 @@ describe("handler — AppSync dispatch", () => {
     await expect(
       handler({
         info: { fieldName: "cutAgentRelease" },
-        identity: { sub: "architect-1", "custom:role": "architect" },
+        identity: { sub: "architect-1", "cognito:groups": ["architect"] },
         arguments: { input: baseCutInput() } as never,
       } as never),
     ).rejects.toThrow(/ValidationError.*organization/i);

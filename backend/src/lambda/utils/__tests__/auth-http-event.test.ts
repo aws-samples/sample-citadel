@@ -78,6 +78,17 @@ describe("isAdminFromHttpEvent", () => {
     expect(isAdminFromHttpEvent(event)).toBe(false);
   });
 
+  // CIT-213: this module's only role predicate is admin; the claim shape it
+  // reads is cognito:groups exclusively. A caller with a non-admin group and
+  // a forged custom:role=admin is still not admin.
+  test("KEY ESCALATION TEST (CIT-213): custom:role === 'admin' with a non-admin group (architect) is not admin", () => {
+    const event = makeEvent({
+      "custom:role": "admin",
+      "cognito:groups": ["architect"],
+    });
+    expect(isAdminFromHttpEvent(event)).toBe(false);
+  });
+
   test("true when cognito:groups is a JS array containing 'admin'", () => {
     const event = makeEvent({ "cognito:groups": ["viewer", "admin"] });
     expect(isAdminFromHttpEvent(event)).toBe(true);

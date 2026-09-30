@@ -509,7 +509,7 @@ describe("adr-resolver", () => {
         identity: {
           sub: `user-${role}`,
           username: role,
-          "custom:role": role,
+          "cognito:groups": [role],
           "custom:organization": "org-shared",
         },
       };
@@ -1186,7 +1186,7 @@ describe("adr-resolver", () => {
         identity: {
           sub: "user-architect",
           username: "architect",
-          "custom:role": "architect",
+          "cognito:groups": ["architect"],
           "custom:organization": "org-shared",
         },
       };

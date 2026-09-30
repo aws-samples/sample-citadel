@@ -148,7 +148,7 @@ const architectSameOrgEvent = {
   identity: {
     claims: {
       "custom:organization": "test-org-a",
-      "custom:role": "architect",
+      "cognito:groups": ["architect"],
     },
   },
 };
@@ -200,7 +200,7 @@ describe("agent-config-resolver — tenancy + role gate (finding 1fcfd11e)", () 
         identity: {
           claims: {
             "custom:organization": "other-org",
-            "custom:role": "architect",
+            "cognito:groups": ["architect"],
           },
         },
       });
@@ -262,7 +262,7 @@ describe("agent-config-resolver — tenancy + role gate (finding 1fcfd11e)", () 
           identity: {
             claims: {
               "custom:organization": "other-org",
-              "custom:role": "architect",
+              "cognito:groups": ["architect"],
             },
           },
         }),

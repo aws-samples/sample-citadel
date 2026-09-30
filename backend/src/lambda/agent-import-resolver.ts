@@ -794,8 +794,9 @@ function requireAuthenticated(event: ImportAgentEvent): void {
  * `describeAgentCandidate`). These enumerate/inspect the customer's AWS
  * ACCOUNT infrastructure, so authentication alone is insufficient — only the
  * `admin` or `architect` roles may run them. Admin is recognised via
- * {@link isAdminFromEvent} (custom:role or cognito:groups); architect via
- * {@link hasRoleFromEvent}. Throws an authorization error otherwise.
+ * {@link isAdminFromEvent} and architect via {@link hasRoleFromEvent} — both
+ * read `cognito:groups` only (never `custom:role`, CIT-213). Throws an
+ * authorization error otherwise.
  *
  * `importAgent` keeps its own org-scoped flow (tenant derived from the
  * caller's identity) and is gated separately, inline in {@link importAgent}

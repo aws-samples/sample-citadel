@@ -339,7 +339,7 @@ describe("handler switch dispatch (task 6.5)", () => {
             sub: "test-user",
             claims: {
               "custom:organization": "test-org-a",
-              "custom:role": "architect",
+              "cognito:groups": ["architect"],
             },
           },
         ),
@@ -368,7 +368,7 @@ describe("handler switch dispatch (task 6.5)", () => {
             sub: "test-user",
             claims: {
               "custom:organization": "test-org-a",
-              "custom:role": "architect",
+              "cognito:groups": ["architect"],
             },
           },
         ),

@@ -362,9 +362,9 @@ export const handler = async (
  * Dual-source list: fetches tool configs from both Registry and DynamoDB,
  * merges them with Registry records taking precedence on duplicate toolIds.
  *
- * Results are filtered to the caller's organization unless the caller has
- * `custom:role=admin`, in which case the full list (across all orgs) is
- * returned. A non-admin caller without an orgId receives an empty list
+ * Results are filtered to the caller's organization unless the caller is a
+ * group admin (`cognito:groups` includes `admin`), in which case the full
+ * list (across all orgs) is returned. A non-admin caller without an orgId receives an empty list
  * with a warning.
  */
 export async function listToolConfigsRegistry(

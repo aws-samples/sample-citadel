@@ -643,7 +643,7 @@ describe("handler dispatch — getEvalCaseArtifactDiff field", () => {
       arguments: baseArgs,
       identity: {
         sub: "user-1",
-        "custom:role": "developer",
+        "cognito:groups": ["developer"],
         "custom:organization": "org-1",
       },
     } as never)) as { baseline: { availability: string } };

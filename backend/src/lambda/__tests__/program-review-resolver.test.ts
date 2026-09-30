@@ -653,7 +653,7 @@ describe("program-review-resolver", () => {
         arguments: { projectId: "proj-1" },
         identity: {
           sub: "user-architect",
-          "custom:role": "architect",
+          "cognito:groups": ["architect"],
           "custom:organization": "org-shared",
         },
       };
@@ -680,7 +680,7 @@ describe("program-review-resolver", () => {
         arguments: { reviewId: "rv-1" },
         identity: {
           sub: "user-architect",
-          "custom:role": "architect",
+          "cognito:groups": ["architect"],
           "custom:organization": "org-shared",
         },
       };
@@ -698,7 +698,7 @@ describe("program-review-resolver", () => {
         arguments: { projectId: "proj-x" },
         identity: {
           sub: "user-architect",
-          "custom:role": "architect",
+          "cognito:groups": ["architect"],
           "custom:organization": "org-shared",
         },
       };
@@ -710,7 +710,7 @@ describe("program-review-resolver", () => {
       const event = {
         info: { fieldName: "bogus" },
         arguments: {},
-        identity: { sub: "u", "custom:role": "architect" },
+        identity: { sub: "u", "cognito:groups": ["architect"] },
       };
       await expect(handler(event)).rejects.toThrow(/Unsupported field/);
     });

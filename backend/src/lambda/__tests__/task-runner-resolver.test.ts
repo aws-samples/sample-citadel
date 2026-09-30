@@ -186,7 +186,7 @@ describe("task-runner-resolver", () => {
               {
                 sub: "user-dev",
                 "custom:organization": "org-caller",
-                "custom:role": "developer",
+                "cognito:groups": ["developer"],
               },
             ),
           ),
@@ -197,7 +197,7 @@ describe("task-runner-resolver", () => {
         expect(eventBridgeMock.commandCalls(PutEventsCommand)).toHaveLength(0);
       });
 
-      test("architect caller (custom:role) passes", async () => {
+      test("architect caller (cognito:groups) passes", async () => {
         mockExtractOrgFromEvent.mockResolvedValue("org-caller");
         eventBridgeMock.on(PutEventsCommand).resolves({});
 
@@ -207,7 +207,7 @@ describe("task-runner-resolver", () => {
             {
               sub: "user-arch",
               "custom:organization": "org-caller",
-              "custom:role": "architect",
+              "cognito:groups": ["architect"],
             },
           ),
         );

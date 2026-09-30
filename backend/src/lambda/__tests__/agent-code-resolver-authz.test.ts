@@ -104,7 +104,7 @@ describe("agent-code-resolver — authorization (finding 1a9181a4)", () => {
   const orgAArchitect = {
     sub: "architect-a",
     "custom:organization": ORG_A,
-    "custom:role": "architect",
+    "cognito:groups": ["architect"],
   };
   const orgBCaller = { sub: "user-b", "custom:organization": ORG_B };
   const adminCaller = {

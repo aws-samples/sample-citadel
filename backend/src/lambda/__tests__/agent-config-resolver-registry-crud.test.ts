@@ -776,7 +776,7 @@ describe("Registry-backed CRUD functions (task 6.4)", () => {
       identity: {
         claims: {
           "custom:organization": "test-org-a",
-          "custom:role": "architect",
+          "cognito:groups": ["architect"],
         },
       },
     };
@@ -835,7 +835,7 @@ describe("Registry-backed CRUD functions (task 6.4)", () => {
         identity: {
           claims: {
             "custom:organization": "other-org",
-            "custom:role": "architect",
+            "cognito:groups": ["architect"],
           },
         },
       };
@@ -857,7 +857,7 @@ describe("Registry-backed CRUD functions (task 6.4)", () => {
       identity: {
         claims: {
           "custom:organization": "test-org-a",
-          "custom:role": "architect",
+          "cognito:groups": ["architect"],
         },
       },
     };

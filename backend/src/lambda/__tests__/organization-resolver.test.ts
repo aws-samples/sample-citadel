@@ -90,7 +90,10 @@ describe("organization-resolver", () => {
     "custom:role": "admin",
     "cognito:groups": ["admin"],
   };
-  const nonAdminIdentity = { sub: "user-1", "custom:role": "project_manager" };
+  const nonAdminIdentity = {
+    sub: "user-1",
+    "cognito:groups": ["project_manager"],
+  };
 
   describe("createOrganization — admin authorization gate (finding c79cd4f6)", () => {
     // RED: a non-admin caller must be refused BEFORE any AWS call — zero
@@ -111,8 +114,8 @@ describe("organization-resolver", () => {
       expect(cognitoMock.commandCalls(ListUsersCommand)).toHaveLength(0);
     });
 
-    // RED: identity that resolves to no role at all (missing custom:role
-    // claim entirely) must also be refused — fail closed, never fail open.
+    // RED: identity that resolves to no role at all (no cognito:groups
+    // claim) must also be refused — fail closed, never fail open.
     test("refuses when identity has no resolvable role", async () => {
       await expect(
         handler(
@@ -141,8 +144,9 @@ describe("organization-resolver", () => {
       expect(dynamoMock.commandCalls(PutCommand)).toHaveLength(0);
     });
 
-    // RED: a malformed claim (custom:role present but empty string) must
-    // resolve to no role and be refused — fail closed on garbage input.
+    // RED: a malformed custom:role claim (present but empty string) and no
+    // groups must resolve to no role and be refused — fail closed on garbage
+    // input. (custom:role is never a role signal anyway — CIT-213.)
     test("refuses when custom:role claim is malformed (empty string)", async () => {
       await expect(
         handler(
@@ -451,8 +455,8 @@ describe("organization-resolver", () => {
       expect(cognitoMock.commandCalls(ListUsersCommand)).toHaveLength(0);
     });
 
-    // RED: identity that resolves to no role at all (missing custom:role
-    // claim entirely) must also be refused — fail closed, never fail open.
+    // RED: identity that resolves to no role at all (no cognito:groups
+    // claim) must also be refused — fail closed, never fail open.
     test("refuses when identity has no resolvable role", async () => {
       await expect(
         handler(

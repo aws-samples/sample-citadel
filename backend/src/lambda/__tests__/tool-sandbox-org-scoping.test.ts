@@ -136,7 +136,7 @@ describe("handler — server-derives org from identity, never trusts the argumen
     mockHasPermission.mockReturnValue(true);
 
     const event = {
-      identity: { sub: "user-1", "custom:role": "architect" },
+      identity: { sub: "user-1", "cognito:groups": ["architect"] },
       arguments: {
         toolId: "tool-1",
         inputs: JSON.stringify({ a: 1 }),
