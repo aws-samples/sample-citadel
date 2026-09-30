@@ -18,7 +18,11 @@ import {
   ListUsersCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, ScanCommand } from "@aws-sdk/lib-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  ScanCommand,
+} from "@aws-sdk/lib-dynamodb";
 import { mockClient } from "aws-sdk-client-mock";
 import * as fs from "fs";
 import * as os from "os";
@@ -401,6 +405,7 @@ describe("runAudit", () => {
       ROLE_MISMATCH: 0,
       ORG_UNKNOWN: 0,
       ORG_MISSING: 0,
+      ORG_NO_MEMBERSHIP: 0,
     });
     expect(cognitoMock.commandCalls(ListUsersCommand)).toHaveLength(2);
     expect(
@@ -514,6 +519,7 @@ describe("runAudit", () => {
       ROLE_MISMATCH: 1,
       ORG_UNKNOWN: 1,
       ORG_MISSING: 1,
+      ORG_NO_MEMBERSHIP: 0,
     });
     expect(writeCommandCount()).toBe(0);
     // Table + JSON summary printed.
@@ -842,5 +848,256 @@ describe("main flag parsing", () => {
 
   it("rejects --out without a path", async () => {
     await expect(main(["--out"])).rejects.toThrow(/--out/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ORG_NO_MEMBERSHIP (decision 00d40a31): attribute set, no membership row
+// ---------------------------------------------------------------------------
+
+describe("ORG_NO_MEMBERSHIP — classifyUser / planRemediation (pure)", () => {
+  it("flags ORG_NO_MEMBERSHIP when custom:organization is a live org but the membership lookup found no row", () => {
+    const u = user({
+      username: "alice",
+      groups: ["architect"],
+      role: "architect",
+      organization: "Acme",
+      membershipRow: null,
+    });
+    const findings = classifyUser(u, VALID_ORGS);
+    expect(kinds(findings)).toEqual(["ORG_NO_MEMBERSHIP"]);
+    expect(findings[0].detail).toContain("Acme");
+  });
+
+  it("does NOT flag when the membership row exists (any orgName — mismatch is out of scope here)", () => {
+    const u = user({
+      username: "alice",
+      groups: ["architect"],
+      role: "architect",
+      organization: "Acme",
+      membershipRow: { sub: "sub-alice", orgName: "Acme" },
+    });
+    expect(classifyUser(u, VALID_ORGS)).toEqual([]);
+  });
+
+  it("does NOT flag when the membership table was not checked (membershipRow undefined — USER_ORG_MEMBERSHIP_TABLE unset)", () => {
+    const u = user({
+      username: "alice",
+      groups: ["architect"],
+      role: "architect",
+      organization: "Acme",
+    });
+    expect(classifyUser(u, VALID_ORGS)).toEqual([]);
+  });
+
+  it("does NOT double-report: an ORG_UNKNOWN attribute with no row is ORG_UNKNOWN only (the remediation deletes the attribute)", () => {
+    const u = user({
+      username: "dave",
+      groups: ["developer"],
+      role: "developer",
+      organization: "Initech",
+      membershipRow: null,
+    });
+    expect(kinds(classifyUser(u, VALID_ORGS))).toEqual(["ORG_UNKNOWN"]);
+  });
+
+  it("does NOT flag a user with no custom:organization (nothing to have a row for)", () => {
+    const u = user({ username: "ghost", membershipRow: null });
+    expect(classifyUser(u, VALID_ORGS)).toEqual([]);
+  });
+
+  it("is a manual-review item: planRemediation issues no write and no sign-out, and points at the backfill script", () => {
+    const u = user({
+      username: "alice",
+      groups: ["architect"],
+      role: "architect",
+      organization: "Acme",
+      membershipRow: null,
+    });
+    const plan = planRemediation(u, classifyUser(u, VALID_ORGS));
+    expect(plan.actions).toEqual([]);
+    expect(plan.manual).toEqual([
+      expect.objectContaining({
+        username: "alice",
+        kind: "ORG_NO_MEMBERSHIP",
+        reason: expect.stringContaining("backfill:user-org-membership"),
+      }),
+    ]);
+  });
+});
+
+describe("ORG_NO_MEMBERSHIP — runAudit orchestration", () => {
+  beforeEach(() => {
+    cognitoMock.reset();
+    ddbMock.reset();
+    jest.spyOn(console, "log").mockImplementation(() => undefined);
+    jest.spyOn(console, "error").mockImplementation(() => undefined);
+    ddbMock.on(ScanCommand).resolves({
+      Items: [
+        { orgId: "org-1", name: "Acme" },
+        { orgId: "org-2", name: "Globex" },
+      ],
+    });
+    cognitoMock.on(ListUsersCommand).resolves({
+      Users: [
+        {
+          Username: "alice",
+          Attributes: attrs({
+            sub: "s1",
+            "custom:role": "architect",
+            "custom:organization": "Acme",
+          }),
+        },
+        {
+          Username: "ghost",
+          Attributes: attrs({ sub: "s9" }),
+        },
+      ],
+    });
+    cognitoMock
+      .on(AdminListGroupsForUserCommand, { Username: "alice" })
+      .resolves({ Groups: [{ GroupName: "architect" }] })
+      .on(AdminListGroupsForUserCommand, { Username: "ghost" })
+      .resolves({ Groups: [] });
+  });
+
+  afterEach(() => {
+    (console.log as jest.Mock).mockRestore?.();
+    (console.error as jest.Mock).mockRestore?.();
+  });
+
+  function clients() {
+    const cognito = new CognitoIdentityProviderClient({ region: "us-west-2" });
+    const doc = DynamoDBDocumentClient.from(
+      new DynamoDBClient({ region: "us-west-2" }),
+    );
+    return { cognito, doc };
+  }
+
+  it("without membershipTable: issues no GetCommand and never reports ORG_NO_MEMBERSHIP", async () => {
+    const { cognito, doc } = clients();
+    const result = await runAudit({
+      cognito,
+      doc,
+      userPoolId: "pool",
+      organisationTable: "orgs",
+      apply: false,
+      sleepMs: 0,
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.summary.findings.ORG_NO_MEMBERSHIP).toBe(0);
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
+  });
+
+  it("with membershipTable: GetItem by sub ONLY for users with an attribute; a missing row is ORG_NO_MEMBERSHIP (exit 3, no writes even under --apply)", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    const { cognito, doc } = clients();
+    const result = await runAudit({
+      cognito,
+      doc,
+      userPoolId: "pool",
+      organisationTable: "orgs",
+      membershipTable: "membership",
+      apply: true,
+      sleepMs: 0,
+    });
+
+    expect(result.exitCode).toBe(3);
+    expect(result.summary.findings.ORG_NO_MEMBERSHIP).toBe(1);
+    expect(result.summary.manualReview).toBe(1);
+    expect(result.findings).toEqual([
+      expect.objectContaining({
+        username: "alice",
+        sub: "s1",
+        kind: "ORG_NO_MEMBERSHIP",
+      }),
+    ]);
+    const gets = ddbMock.commandCalls(GetCommand);
+    expect(gets).toHaveLength(1);
+    expect(gets[0].args[0].input).toMatchObject({
+      TableName: "membership",
+      Key: { sub: "s1" },
+    });
+    expect(
+      cognitoMock.commandCalls(AdminUpdateUserAttributesCommand),
+    ).toHaveLength(0);
+    expect(
+      cognitoMock.commandCalls(AdminUserGlobalSignOutCommand),
+    ).toHaveLength(0);
+  });
+
+  it("with membershipTable: a present row produces no finding (exit 0)", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { sub: "s1", orgName: "Acme" } });
+    const { cognito, doc } = clients();
+    const result = await runAudit({
+      cognito,
+      doc,
+      userPoolId: "pool",
+      organisationTable: "orgs",
+      membershipTable: "membership",
+      apply: false,
+      sleepMs: 0,
+    });
+    expect(result.exitCode).toBe(0);
+    expect(result.summary.findings.ORG_NO_MEMBERSHIP).toBe(0);
+  });
+
+  it("a failed membership GetItem is counted as an error (exit 1) rather than silently reported as a missing row", async () => {
+    ddbMock.on(GetCommand).rejects(new Error("AccessDeniedException"));
+    const { cognito, doc } = clients();
+    const result = await runAudit({
+      cognito,
+      doc,
+      userPoolId: "pool",
+      organisationTable: "orgs",
+      membershipTable: "membership",
+      apply: false,
+      sleepMs: 0,
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.summary.errors).toBe(1);
+    expect(result.summary.findings.ORG_NO_MEMBERSHIP).toBe(0);
+  });
+});
+
+describe("ORG_NO_MEMBERSHIP — main wires USER_ORG_MEMBERSHIP_TABLE when set", () => {
+  const env = { ...process.env };
+
+  beforeEach(() => {
+    cognitoMock.reset();
+    ddbMock.reset();
+    jest.spyOn(console, "log").mockImplementation(() => undefined);
+    jest.spyOn(console, "error").mockImplementation(() => undefined);
+    process.env.USER_POOL_ID = "pool";
+    process.env.ORGANISATION_TABLE = "orgs";
+    ddbMock.on(ScanCommand).resolves({ Items: [{ name: "Acme" }] });
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    cognitoMock.on(ListUsersCommand).resolves({
+      Users: [
+        {
+          Username: "alice",
+          Attributes: attrs({ sub: "s1", "custom:organization": "Acme" }),
+        },
+      ],
+    });
+    cognitoMock.on(AdminListGroupsForUserCommand).resolves({ Groups: [] });
+  });
+
+  afterEach(() => {
+    (console.log as jest.Mock).mockRestore?.();
+    (console.error as jest.Mock).mockRestore?.();
+    process.env = { ...env };
+  });
+
+  it("USER_ORG_MEMBERSHIP_TABLE unset → membership check skipped, exit 0", async () => {
+    delete process.env.USER_ORG_MEMBERSHIP_TABLE;
+    expect(await main(["--dry-run"])).toBe(0);
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
+  });
+
+  it("USER_ORG_MEMBERSHIP_TABLE set → membership checked, missing row → exit 3", async () => {
+    process.env.USER_ORG_MEMBERSHIP_TABLE = "membership";
+    expect(await main(["--dry-run"])).toBe(3);
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(1);
   });
 });

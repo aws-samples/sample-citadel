@@ -11,6 +11,8 @@ import {
   DeleteCommand,
   GetCommand,
   ScanCommand,
+  QueryCommand,
+  BatchWriteCommand,
 } from "@aws-sdk/lib-dynamodb";
 import {
   CognitoIdentityProviderClient,
@@ -30,6 +32,11 @@ const cognitoClient = new CognitoIdentityProviderClient({});
 
 const ORGANIZATIONS_TABLE = process.env.ORGANIZATIONS_TABLE || "";
 const USER_POOL_ID = process.env.USER_POOL_ID || "";
+// Authoritative user↔org store (decision 00d40a31). deleteOrganization
+// sweeps its rows for the deleted org NAME via the `orgName-index` GSI.
+const USER_ORG_MEMBERSHIP_TABLE = process.env.USER_ORG_MEMBERSHIP_TABLE || "";
+/** DynamoDB BatchWriteItem hard limit on request items per call. */
+const BATCH_WRITE_MAX = 25;
 
 interface CreateOrganizationInput {
   name: string;
@@ -282,6 +289,88 @@ async function createOrganization(
   return organization;
 }
 
+/**
+ * Best-effort deletion of every UserOrgMembership row whose `orgName`
+ * equals the deleted org's name, via the `orgName-index` GSI, in
+ * BatchWriteItem chunks of at most 25. Never throws — failures are logged
+ * with enough context to sweep manually.
+ */
+async function sweepMembershipRows(
+  orgName: string,
+  orgId: string,
+): Promise<void> {
+  if (!USER_ORG_MEMBERSHIP_TABLE) {
+    console.error(
+      `USER_ORG_MEMBERSHIP_TABLE is not configured; membership rows for "${orgName}" (orgId ${orgId}) were NOT swept.`,
+    );
+    return;
+  }
+
+  const subs: string[] = [];
+  try {
+    let exclusiveStartKey: Record<string, unknown> | undefined;
+    do {
+      const page = await docClient.send(
+        new QueryCommand({
+          TableName: USER_ORG_MEMBERSHIP_TABLE,
+          IndexName: "orgName-index",
+          KeyConditionExpression: "orgName = :orgName",
+          ExpressionAttributeValues: { ":orgName": orgName },
+          ProjectionExpression: "#sub",
+          ExpressionAttributeNames: { "#sub": "sub" },
+          ExclusiveStartKey: exclusiveStartKey,
+        }),
+      );
+      for (const item of page?.Items ?? []) {
+        const sub = (item as { sub?: unknown }).sub;
+        if (typeof sub === "string" && sub.length > 0) subs.push(sub);
+      }
+      exclusiveStartKey = page?.LastEvaluatedKey as
+        | Record<string, unknown>
+        | undefined;
+    } while (exclusiveStartKey);
+  } catch (error: unknown) {
+    console.error(
+      `Could not query membership rows for "${orgName}" (orgId ${orgId}); ` +
+        "the org row is deleted but stale membership rows may remain.",
+      error,
+    );
+    return;
+  }
+
+  if (subs.length === 0) return;
+  console.log(
+    `Sweeping ${subs.length} membership row(s) for deleted org "${orgName}" (orgId ${orgId})`,
+  );
+
+  for (let i = 0; i < subs.length; i += BATCH_WRITE_MAX) {
+    const chunk = subs.slice(i, i + BATCH_WRITE_MAX);
+    try {
+      const result = await docClient.send(
+        new BatchWriteCommand({
+          RequestItems: {
+            [USER_ORG_MEMBERSHIP_TABLE]: chunk.map((sub) => ({
+              DeleteRequest: { Key: { sub } },
+            })),
+          },
+        }),
+      );
+      const unprocessed =
+        result?.UnprocessedItems?.[USER_ORG_MEMBERSHIP_TABLE]?.length ?? 0;
+      if (unprocessed > 0) {
+        console.error(
+          `${unprocessed} membership row(s) for "${orgName}" (orgId ${orgId}) were left unprocessed by BatchWriteItem; sweep manually.`,
+        );
+      }
+    } catch (error: unknown) {
+      console.error(
+        `Could not delete membership rows ${JSON.stringify(chunk)} for "${orgName}" (orgId ${orgId}); sweep manually.`,
+        error,
+      );
+    }
+  }
+}
+
 async function deleteOrganization(
   orgId: string,
 ): Promise<UserManagementResponse> {
@@ -425,6 +514,15 @@ async function deleteOrganization(
       error,
     );
   }
+
+  // 5. Sweep membership rows (decision 00d40a31, option A). The
+  //    UserOrgMembership table is the AUTHORITATIVE user↔org store the
+  //    pre-token trigger mints the claim from. Step 2 already refused the
+  //    delete if any user attribute still pointed here, so this normally
+  //    finds nothing — it exists so a stale/orphaned row can never keep
+  //    minting a claim for an org that no longer exists. Best-effort: the
+  //    org row is already gone, so log and continue on any failure.
+  await sweepMembershipRows(orgName, orgId);
 
   console.log("Organization deleted:", orgId);
   return {

@@ -6,13 +6,15 @@ import {
 /**
  * CANONICAL TENANCY RULE (ratified decision 228b3cc8): the organisation
  * NAME — never the generated `orgId` — is canonical for the
- * `custom:organization` Cognito claim and for EVERY tenancy comparison in
- * this codebase (this file's `extractOrgFromEvent`/`lookupUserOrganization`,
- * `assignUserRole`'s Cognito attribute write, `user-management-resolver.ts`'s
- * org-scoping filters, the governance ledger, and the projects family).
- * `assignUserRole` writes the organisation's NAME (never its orgId) into
- * `custom:organization`; every reader of that claim MUST compare it against
- * a row's `name` field, never against `orgId`. Organisation names are
+ * `custom:organization` Cognito claim, for the UserOrgMembership table's
+ * `orgName` attribute, and for EVERY tenancy comparison in this codebase
+ * (this file's `extractOrgFromEvent`/`lookupUserOrganization`,
+ * `assignUserRole`'s membership-table + Cognito attribute writes,
+ * `user-management-resolver.ts`'s org-scoping filters, the governance
+ * ledger, and the projects family). `assignUserRole` writes the
+ * organisation's NAME (never its orgId) into the membership row's `orgName`
+ * and mirrors it onto `custom:organization`; every reader of that claim
+ * MUST compare it against a row's `name` field, never against `orgId`. Organisation names are
  * IMMUTABLE by design (no update/rename mutation exists — see
  * org-name-canonical-guard.test.ts) precisely so this claim never needs to
  * be re-synced after creation. Do NOT reintroduce a `row.orgId ===
@@ -52,15 +54,25 @@ function readClaim(event: unknown, name: string): string | undefined {
 }
 
 /**
- * Looks up a user's `custom:organization` attribute via Cognito
- * AdminGetUser. `username` accepts the Cognito sub or username (both are
- * valid AdminGetUser lookups). Returns null when USER_POOL_ID is not
- * configured, the user cannot be found, or the attribute is absent —
+ * Looks up a user's stored `custom:organization` user-pool ATTRIBUTE via
+ * Cognito AdminGetUser. `username` accepts the Cognito sub or username
+ * (both are valid AdminGetUser lookups). Returns null when USER_POOL_ID is
+ * not configured, the user cannot be found, or the attribute is absent —
  * callers decide what null means.
  *
- * Shared by {@link extractOrgFromEvent} (caller-identity fallback) and the
- * intake-orchestration resolver (project-owner fallback for org-less
- * project rows created before the pre-token-generation trigger existed).
+ * THIS IS NOT AN AUTHORIZATION PATH (decision 00d40a31, option A). The
+ * stored attribute is a display/back-compat mirror; the authoritative
+ * user↔org link is the UserOrgMembership DynamoDB table, which the
+ * pre-token-generation trigger reads to mint the `custom:organization`
+ * claim. {@link extractOrgFromEvent} deliberately does NOT call this
+ * function any more — a caller with no claim resolves to null (fail
+ * closed), never to the attribute.
+ *
+ * Remaining callers are informational/ownership fallbacks only: the
+ * intake-orchestration resolver (project-owner org for org-less project
+ * rows created before the trigger existed) and release-resolver's
+ * project-owner derivation. Do NOT add this as a fallback to any
+ * caller-identity or row-access check.
  */
 export async function lookupUserOrganization(
   username: string,
@@ -86,28 +98,30 @@ export async function lookupUserOrganization(
 }
 
 /**
- * Extracts the caller's organization.
+ * Extracts the caller's organization from the `custom:organization` JWT
+ * CLAIM — and ONLY the claim.
  *
- * Preferred path: JWT claim `custom:organization` (populated by the pre-token
- * generation trigger). Fallback path: AdminGetUserCommand against Cognito.
- * The fallback exists for the transition window after this deploys but
- * before every active token has been refreshed.
+ * The claim is minted server-side by the pre-token-generation trigger
+ * (backend/src/lambda/pre-token-generation.ts) from the UserOrgMembership
+ * DynamoDB table, keyed by the caller's Cognito `sub`. It is therefore the
+ * one org signal a caller cannot forge with their own token.
  *
- * Returns null if neither source yields an orgId (e.g. anonymous or
- * api-key auth). Callers are responsible for deciding whether null means
- * "deny" or "allow through".
+ * Decision 00d40a31 (option A) REMOVED the former Cognito AdminGetUser
+ * fallback that read the stored `custom:organization` user attribute when
+ * the claim was absent. That attribute is display/back-compat only; a
+ * caller whose token carries no claim (no membership row, stale token,
+ * access token instead of ID token, anonymous/api-key auth) now resolves
+ * to null. Callers are responsible for deciding whether null means "deny"
+ * or "allow through" — every row-access gate in this file fails closed.
+ *
+ * Remains `async` so the ~40 existing call sites (`await
+ * extractOrgFromEvent(event)`) are unaffected.
  */
 export async function extractOrgFromEvent(
   event: unknown,
 ): Promise<string | null> {
   const claimOrg = readClaim(event, "custom:organization");
-  if (claimOrg) return claimOrg;
-
-  const identity: IdentityBag = (event as EventWithIdentity)?.identity || {};
-  const userId = (identity.sub || identity.username) as string | undefined;
-  if (!userId) return null;
-
-  return lookupUserOrganization(userId);
+  return claimOrg ? claimOrg : null;
 }
 
 /**

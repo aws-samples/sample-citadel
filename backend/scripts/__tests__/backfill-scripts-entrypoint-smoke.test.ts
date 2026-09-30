@@ -34,8 +34,64 @@ function strippedEnv(): NodeJS.ProcessEnv {
   delete env.USER_POOL_ID;
   delete env.AGENT_CONFIG_TABLE;
   delete env.TOOL_CONFIG_TABLE;
+  delete env.USER_ORG_MEMBERSHIP_TABLE;
   return env;
 }
+
+describe("backfill-user-org-membership.ts entrypoint", () => {
+  it("via `npm run backfill:user-org-membership` exits non-zero with a clean env-var error, no crash", () => {
+    const result = spawnSync("npm", ["run", "backfill:user-org-membership"], {
+      cwd: BACKEND_ROOT,
+      env: strippedEnv(),
+      encoding: "utf8",
+      timeout: 20000,
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.status).not.toBeNull();
+    const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+    expect(output).toContain("USER_POOL_ID env var required");
+    expect(output).not.toContain("Cannot find name");
+    expect(output).not.toContain("ERR_REQUIRE_ESM");
+  });
+
+  it("via `node scripts/backfill-user-org-membership.ts` (native TS execution) exits non-zero with the same clean error", () => {
+    const result = spawnSync(
+      process.execPath,
+      ["scripts/backfill-user-org-membership.ts"],
+      {
+        cwd: BACKEND_ROOT,
+        env: strippedEnv(),
+        encoding: "utf8",
+        timeout: 20000,
+      },
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.status).not.toBeNull();
+    const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+    expect(output).toContain("USER_POOL_ID env var required");
+    expect(output).not.toContain("ReferenceError: require is not defined");
+    expect(output).not.toContain("Cannot find name");
+  });
+
+  it("--dry-run / --apply arg parsing does not crash before the env-var check", () => {
+    const result = spawnSync(
+      "npm",
+      ["run", "backfill:user-org-membership", "--", "--dry-run"],
+      {
+        cwd: BACKEND_ROOT,
+        env: strippedEnv(),
+        encoding: "utf8",
+        timeout: 20000,
+      },
+    );
+
+    expect(result.status).not.toBe(0);
+    const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+    expect(output).toContain("USER_POOL_ID env var required");
+  });
+});
 
 describe("backfill-org-name-reservations.ts entrypoint", () => {
   it("via `npm run backfill:org-name-reservations` exits non-zero with a clean env-var error, no crash", () => {

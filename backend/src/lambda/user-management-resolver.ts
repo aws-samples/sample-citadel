@@ -13,7 +13,11 @@ import {
 } from "@aws-sdk/client-cognito-identity-provider";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import * as crypto from "crypto";
-import { DynamoDBDocumentClient, ScanCommand } from "@aws-sdk/lib-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  PutCommand,
+  ScanCommand,
+} from "@aws-sdk/lib-dynamodb";
 import { extractOrgFromEvent } from "../utils/auth-event";
 import { assertOrgNameExists } from "../utils/org-name";
 
@@ -21,6 +25,10 @@ const cognitoClient = new CognitoIdentityProviderClient({});
 const dynamoClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const USER_POOL_ID = process.env.USER_POOL_ID!;
 const ORGANISATION_TABLE = process.env.ORGANISATION_TABLE!;
+// Authoritative user↔org store (decision 00d40a31, option A). The
+// pre-token-generation trigger mints the `custom:organization` claim from
+// this table by Cognito `sub`; the user attribute is display/back-compat.
+const USER_ORG_MEMBERSHIP_TABLE = process.env.USER_ORG_MEMBERSHIP_TABLE;
 
 // Cache for user groups to reduce Cognito API calls
 // Cache persists across warm Lambda invocations
@@ -390,13 +398,15 @@ async function assignUserRole(
     }),
   );
 
-  // Update organization custom attribute if provided
+  // Update organization if provided: membership table FIRST (authoritative),
+  // then the custom attribute (display/back-compat mirror).
   if (organization) {
     // Detect a REAL organization change (Wave-3B design item 2): read the
     // target's CURRENT custom:organization before writing the new value,
     // using an exact string compare (no normalization — matches the
     // canonical-name rule this codebase applies to every tenancy
-    // comparison; see auth-event.ts).
+    // comparison; see auth-event.ts). The same AdminGetUser response also
+    // yields the target's Cognito `sub`, the membership-table key.
     const currentUser = await cognitoClient.send(
       new AdminGetUserCommand({
         UserPoolId: USER_POOL_ID,
@@ -406,7 +416,42 @@ async function assignUserRole(
     const previousOrg = currentUser.UserAttributes?.find(
       (attr) => attr.Name === "custom:organization",
     )?.Value;
+    const targetSub = currentUser.UserAttributes?.find(
+      (attr) => attr.Name === "sub",
+    )?.Value;
 
+    // decision 00d40a31 (option A): the UserOrgMembership table is the
+    // AUTHORITATIVE source of the user's organization — the
+    // pre-token-generation trigger mints the `custom:organization` claim
+    // from it and NEVER reads the user attribute. Write the row BEFORE the
+    // attribute so the two can never disagree in the dangerous direction
+    // (attribute says X, claim says nothing/other). If this write fails,
+    // abort here: the attribute is not touched and the user is not signed
+    // out, so their current (correct) claim keeps working.
+    if (!targetSub) {
+      throw new Error(
+        `Cannot assign organization: Cognito user ${userId} has no sub attribute`,
+      );
+    }
+    if (!USER_ORG_MEMBERSHIP_TABLE) {
+      throw new Error(
+        "Cannot assign organization: USER_ORG_MEMBERSHIP_TABLE is not configured",
+      );
+    }
+    await dynamoClient.send(
+      new PutCommand({
+        TableName: USER_ORG_MEMBERSHIP_TABLE,
+        Item: {
+          sub: targetSub,
+          orgName: organization,
+          updatedAt: new Date().toISOString(),
+          updatedBy: callerUsername,
+        },
+      }),
+    );
+
+    // Display/back-compat mirror of the membership row (listUsers and the
+    // admin UI read it; no authorization path does).
     await cognitoClient.send(
       new AdminUpdateUserAttributesCommand({
         UserPoolId: USER_POOL_ID,
@@ -421,11 +466,12 @@ async function assignUserRole(
     );
 
     // Sign out the target's existing sessions ONLY on a real change, and
-    // ONLY AFTER the attribute write completes — the next login then
-    // regenerates a token carrying the NEW custom:organization claim (via
-    // the pre-token-generation trigger). This revokes refresh tokens; an
-    // already-issued, unexpired access/ID token remains valid at AppSync
-    // until its own TTL (known limitation, see design notes).
+    // ONLY AFTER both writes complete — the next login then regenerates a
+    // token whose custom:organization claim the pre-token-generation
+    // trigger reads from the membership row written above. This revokes
+    // refresh tokens; an already-issued, unexpired access/ID token remains
+    // valid at AppSync until its own TTL (known limitation, see design
+    // notes).
     if (organization !== previousOrg) {
       await cognitoClient.send(
         new AdminUserGlobalSignOutCommand({

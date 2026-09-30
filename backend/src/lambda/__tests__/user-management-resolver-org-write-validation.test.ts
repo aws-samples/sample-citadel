@@ -6,6 +6,7 @@
  */
 process.env.USER_POOL_ID = "us-east-1_testpool";
 process.env.ORGANISATION_TABLE = "test-orgs";
+process.env.USER_ORG_MEMBERSHIP_TABLE = "test-user-org-membership";
 
 jest.mock("../../utils/org-name", () => ({
   ...jest.requireActual("../../utils/org-name"),
@@ -21,10 +22,14 @@ import {
   AdminGetUserCommand,
   AdminListGroupsForUserCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
+import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { mockClient } from "aws-sdk-client-mock";
 import { assertOrgNameExists } from "../../utils/org-name";
 
 const cognitoMock = mockClient(CognitoIdentityProviderClient);
+// decision 00d40a31: assignUserRole writes the membership row before the
+// attribute; stub it so the validation-ordering assertions still run.
+const dynamoMock = mockClient(DynamoDBDocumentClient);
 const mockAssertOrgNameExists = assertOrgNameExists as jest.Mock;
 
 import { handler } from "../user-management-resolver";
@@ -45,6 +50,8 @@ function buildEvent(
 
 beforeEach(() => {
   cognitoMock.reset();
+  dynamoMock.reset();
+  dynamoMock.on(PutCommand).resolves({});
   mockAssertOrgNameExists.mockReset();
   mockAssertOrgNameExists.mockResolvedValue(undefined);
   cognitoMock
@@ -58,7 +65,7 @@ beforeEach(() => {
   cognitoMock.on(AdminUpdateUserAttributesCommand).resolves({});
   cognitoMock.on(AdminGetUserCommand).resolves({
     Username: "target-user",
-    UserAttributes: [],
+    UserAttributes: [{ Name: "sub", Value: "target-sub-0000" }],
   });
   cognitoMock.on(AdminCreateUserCommand).resolves({});
 });

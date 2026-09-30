@@ -22,6 +22,14 @@
  *                  same name (covers custom:role=admin without admin group).
  *   ORG_UNKNOWN    custom:organization is set but is not a valid org name.
  *   ORG_MISSING    user is in ≥1 group but has no custom:organization.
+ *   ORG_NO_MEMBERSHIP
+ *                  custom:organization is a live org name but the user has
+ *                  NO row in the UserOrgMembership table (decision 00d40a31:
+ *                  the pre-token trigger mints the org claim from that table
+ *                  only, so this user's next token carries no org claim and
+ *                  every org-scoped resolver fails closed on them). Only
+ *                  evaluated when USER_ORG_MEMBERSHIP_TABLE is set; skipped
+ *                  for ORG_UNKNOWN users (deleting the attribute is the fix).
  *
  * Remediation (`--apply` only):
  *   ROLE_MISMATCH  exactly one group  → set custom:role to that group name
@@ -29,6 +37,10 @@
  *                  several groups     → NO write; listed for manual review
  *   ORG_UNKNOWN    delete custom:organization
  *   ORG_MISSING    NO write (the right org is unknowable); manual review
+ *   ORG_NO_MEMBERSHIP
+ *                  NO write here — run `npm run backfill:user-org-membership`
+ *                  (scripts/backfill-user-org-membership.ts), which fills
+ *                  the gap from the attribute with a conditional PutItem.
  *   Every modified user then gets AdminUserGlobalSignOut so their next
  *   login re-mints claims (mirrors assignUserRole in
  *   user-management-resolver.ts). Groups are NEVER added or removed.
@@ -52,6 +64,9 @@
  * Required env:
  *   USER_POOL_ID         – Cognito user pool id
  *   ORGANISATION_TABLE   – organisations DynamoDB table name
+ *   USER_ORG_MEMBERSHIP_TABLE
+ *                        – optional; when set, enables ORG_NO_MEMBERSHIP
+ *                          (one GetItem by sub per user with an attribute)
  *   AWS_REGION           – optional, defaults to us-west-2
  *
  * Exit codes:
@@ -78,6 +93,7 @@ import {
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
+  GetCommand,
   ScanCommand,
   type NativeAttributeValue,
 } from "@aws-sdk/lib-dynamodb";
@@ -87,7 +103,8 @@ import * as fs from "fs";
 // Pure logic (exported for unit tests — no AWS involvement)
 // ---------------------------------------------------------------------------
 
-export type FindingKind = "ROLE_MISMATCH" | "ORG_UNKNOWN" | "ORG_MISSING";
+export type FindingKind =
+  "ROLE_MISMATCH" | "ORG_UNKNOWN" | "ORG_MISSING" | "ORG_NO_MEMBERSHIP";
 
 export interface AuditUser {
   username: string;
@@ -98,6 +115,14 @@ export interface AuditUser {
   role?: string | null;
   /** Value of `custom:organization`, or null/undefined when absent. */
   organization?: string | null;
+  /**
+   * UserOrgMembership row keyed by this user's `sub`:
+   *   - `undefined` → the table was NOT consulted (USER_ORG_MEMBERSHIP_TABLE
+   *     unset); ORG_NO_MEMBERSHIP is never raised.
+   *   - `null`      → consulted, no row.
+   *   - object      → consulted, row present.
+   */
+  membershipRow?: Record<string, unknown> | null;
 }
 
 export interface Finding {
@@ -187,6 +212,19 @@ export function classifyUser(
     });
   }
 
+  // Only when the membership table was actually consulted (null, not
+  // undefined) and the attribute names a LIVE org — an ORG_UNKNOWN user is
+  // already reported and the fix there is to delete the attribute.
+  if (org !== "" && validOrgNames.has(org) && user.membershipRow === null) {
+    findings.push({
+      username: user.username,
+      sub: user.sub,
+      kind: "ORG_NO_MEMBERSHIP",
+      previous,
+      detail: `custom:organization=${org} but no UserOrgMembership row for sub=${user.sub ?? "-"}; next token will carry no org claim`,
+    });
+  }
+
   return findings;
 }
 
@@ -242,6 +280,15 @@ export function planRemediation(
           kind: f.kind,
           reason:
             "no custom:organization; the correct organisation must be assigned by an admin via assignUserRole",
+        });
+        break;
+      case "ORG_NO_MEMBERSHIP":
+        manual.push({
+          username: user.username,
+          sub: user.sub,
+          kind: f.kind,
+          reason:
+            "attribute set but no UserOrgMembership row; run `npm run backfill:user-org-membership -- --apply` (fills the gap from the attribute), or re-assign via assignUserRole",
         });
         break;
     }
@@ -445,6 +492,12 @@ export interface RunAuditOptions {
   doc: DynamoDBDocumentClient;
   userPoolId: string;
   organisationTable: string;
+  /**
+   * UserOrgMembership table name. When set, every user with a
+   * custom:organization attribute costs one GetItem by `sub` and a missing
+   * row is reported as ORG_NO_MEMBERSHIP. When unset the check is skipped.
+   */
+  membershipTable?: string;
   apply: boolean;
   /** Print ONLY the JSON document to stdout (for `--json > file`). */
   json?: boolean;
@@ -512,6 +565,7 @@ export async function runAudit(opts: RunAuditOptions): Promise<AuditResult> {
     doc,
     userPoolId,
     organisationTable,
+    membershipTable,
     apply,
     json = false,
     out,
@@ -526,7 +580,12 @@ export async function runAudit(opts: RunAuditOptions): Promise<AuditResult> {
     mode: apply ? "apply" : "dry-run",
     scanned: 0,
     usersWithFindings: 0,
-    findings: { ROLE_MISMATCH: 0, ORG_UNKNOWN: 0, ORG_MISSING: 0 },
+    findings: {
+      ROLE_MISMATCH: 0,
+      ORG_UNKNOWN: 0,
+      ORG_MISSING: 0,
+      ORG_NO_MEMBERSHIP: 0,
+    },
     plannedActions: 0,
     appliedActions: 0,
     modifiedUsers: 0,
@@ -542,6 +601,33 @@ export async function runAudit(opts: RunAuditOptions): Promise<AuditResult> {
 
   for await (const user of iterateUsers(cognito, userPoolId, sleepMs)) {
     summary.scanned++;
+
+    // Membership check: one GetItem per user that HAS an attribute (no
+    // attribute → nothing to have a row for). A lookup failure is an error,
+    // not a "missing row" — reporting ORG_NO_MEMBERSHIP on a transient
+    // DynamoDB fault would send an operator chasing a phantom.
+    if (membershipTable && user.organization && user.sub) {
+      try {
+        await sleep(sleepMs);
+        const res = await doc.send(
+          new GetCommand({
+            TableName: membershipTable,
+            Key: { sub: user.sub },
+          }),
+        );
+        user.membershipRow =
+          (res.Item as Record<string, unknown> | undefined) ?? null;
+      } catch (err) {
+        summary.errors++;
+        if (!quiet) {
+          log(
+            "error",
+            `username=${user.username} membership GetItem failed: ${String(err)}`,
+          );
+        }
+      }
+    }
+
     const findings = classifyUser(user, validOrgNames);
     if (findings.length === 0) continue;
 
@@ -662,6 +748,7 @@ export async function main(
 
   const userPoolId = process.env.USER_POOL_ID;
   const organisationTable = process.env.ORGANISATION_TABLE;
+  const membershipTable = process.env.USER_ORG_MEMBERSHIP_TABLE || undefined;
   const region = process.env.AWS_REGION || "us-west-2";
 
   if (!userPoolId) throw new Error("USER_POOL_ID env var required");
@@ -672,7 +759,7 @@ export async function main(
     log("info", `Mode: ${apply ? "APPLY" : "DRY-RUN"}`);
     log(
       "info",
-      `USER_POOL_ID=${userPoolId} ORGANISATION_TABLE=${organisationTable} REGION=${region}${out ? ` OUT=${out}` : ""}`,
+      `USER_POOL_ID=${userPoolId} ORGANISATION_TABLE=${organisationTable} USER_ORG_MEMBERSHIP_TABLE=${membershipTable ?? "<unset; ORG_NO_MEMBERSHIP skipped>"} REGION=${region}${out ? ` OUT=${out}` : ""}`,
     );
   }
 
@@ -684,6 +771,7 @@ export async function main(
     doc,
     userPoolId,
     organisationTable,
+    membershipTable,
     apply,
     json,
     out,

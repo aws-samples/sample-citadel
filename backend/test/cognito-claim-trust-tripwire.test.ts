@@ -59,6 +59,31 @@
  *       that reads the claim, so a silent scanner regression cannot turn
  *       this file into a no-op.
  *
+ * `custom:organization` (decision 00d40a31, option A, 2026-09-30). The org
+ * claim is minted by pre-token-generation.ts from the UserOrgMembership
+ * DynamoDB table (GetItem by Cognito `sub`) and read back by
+ * auth-event.ts's `extractOrgFromEvent` from the JWT ONLY. The stored
+ * `custom:organization` user-pool attribute is a display/back-compat mirror
+ * written by `assignUserRole`; it is never an authorization input.
+ *   T5. pre-token-generation.ts contains no
+ *       `userAttributes["custom:organization"]` expression (the trigger
+ *       never consults the stored attribute — not even as a fallback when
+ *       the membership lookup fails; that path fails closed).
+ *   T6. The body of `function extractOrgFromEvent` in auth-event.ts contains
+ *       no call to `lookupUserOrganization` (the former AdminGetUser
+ *       fallback for a missing claim). Scoped to the function body by AST,
+ *       so the remaining informational callers elsewhere are unaffected.
+ *   T7. Negative self-test for T5/T6 against fixtures that WOULD violate.
+ *   T8. pre-token-generation.ts WRITES `claimsToSuppress` (AST: object
+ *       property or assignment target). Omitting the org claim from
+ *       claimsToAddOrOverride is not fail-closed on its own: the pool
+ *       client's readAttributes includes `custom:organization`, so Cognito's
+ *       default mapping would copy the stored attribute into the ID token as
+ *       that claim. The three omission paths are pinned behaviourally in
+ *       src/lambda/__tests__/pre-token-generation.test.ts.
+ *   T9. Negative self-test for T8 (the historical un-suppressed handler shape
+ *       is NOT detected; the fixed shapes are).
+ *
  * WHAT THIS TRIPWIRE DOES **NOT** CATCH (known, accepted residual risk)
  *   - A read via a computed/concatenated key (`identity["custom:" + "role"]`)
  *     or through a variable holding the literal. The scan matches the
@@ -197,6 +222,113 @@ export function expressionTexts(
   };
   visit(sf);
   return out;
+}
+
+// ————————————————————————————————————————————————————————————————————————
+// `custom:organization` helpers (T5/T6/T7 — decision 00d40a31)
+// ————————————————————————————————————————————————————————————————————————
+
+/** Whitespace-normalised element-access text of the historical trigger
+ * fallback: `userAttributes["custom:organization"]` (any quote style). */
+const USER_ATTR_ORG_READ = /^userAttributes\[["'`]custom:organization["'`]\]$/;
+
+function orgTripwire(condition: boolean, detail: string): void {
+  if (!condition) {
+    throw new Error(
+      `TRIPWIRE FIRED — the \`custom:organization\` claim is no longer server-derived only ` +
+        `(decision 00d40a31, option A, 2026-09-30).\n${detail}\n` +
+        `The claim is minted by pre-token-generation.ts from the UserOrgMembership table (GetItem by sub) and ` +
+        `read back by extractOrgFromEvent from the JWT ONLY. The stored user-pool attribute is display/back-compat ` +
+        `and must never be consulted for authorization — not in the trigger, not as a fallback in auth-event.ts. ` +
+        `See docs/ORG_SCOPING.md "Claim trust model". Do NOT simply update the pinned expectations.`,
+    );
+  }
+}
+
+/**
+ * Collects the callee text of every call expression lexically inside the
+ * top-level `function <name>(...)` declaration (direct or `await`ed — the
+ * `await` is not part of the CallExpression node, so it is transparent
+ * here). `found` is false when no such declaration exists, so a pin can
+ * fail loudly instead of passing vacuously on an empty list.
+ */
+export function callsInsideFunction(
+  sourceText: string,
+  fileName: string,
+  functionName: string,
+): { found: boolean; callees: string[] } {
+  const sf = ts.createSourceFile(
+    fileName,
+    sourceText,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  let target: ts.FunctionDeclaration | undefined;
+  for (const stmt of sf.statements) {
+    if (ts.isFunctionDeclaration(stmt) && stmt.name?.text === functionName) {
+      target = stmt;
+      break;
+    }
+  }
+  if (!target || !target.body) return { found: false, callees: [] };
+
+  const callees: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      callees.push(node.expression.getText(sf).replace(/\s+/g, ""));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(target.body);
+  return { found: true, callees };
+}
+
+/**
+ * True when the source WRITES `claimsToSuppress` — either as a property in
+ * an object literal (`{ ..., claimsToSuppress }` / `claimsToSuppress: x`)
+ * or as an assignment target (`x.claimsToSuppress = ...`). Comments are
+ * invisible to the AST, so prose mentions never count. Used by T8: the
+ * trigger must actively suppress `custom:organization` on its omission
+ * paths, because the pool client's readAttributes would otherwise let the
+ * stored attribute surface as that very claim in the ID token.
+ */
+export function writesClaimsToSuppress(
+  sourceText: string,
+  fileName: string,
+): boolean {
+  const sf = ts.createSourceFile(
+    fileName,
+    sourceText,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (
+      (ts.isPropertyAssignment(node) ||
+        ts.isShorthandPropertyAssignment(node)) &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === "claimsToSuppress"
+    ) {
+      found = true;
+      return;
+    }
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isPropertyAccessExpression(node.left) &&
+      node.left.name.text === "claimsToSuppress"
+    ) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return found;
 }
 
 function listProductionSources(root: string): string[] {
@@ -380,6 +512,219 @@ describe("cognito claim-trust tripwire (finding 7aa877f8, escalation 2026-09-30)
           /^readClaim\([A-Za-z_$][\w$]*,["'`]custom:role["'`]\)$/.test(t),
         ),
       ).toBe(true);
+    });
+  });
+
+  // ————————————————————————————————————————————————————————————————————
+  // T5 / T6 — the `custom:organization` claim is server-derived only
+  // ————————————————————————————————————————————————————————————————————
+  describe("T5/T6 — custom:organization is minted from the membership table and read from the claim only (decision 00d40a31)", () => {
+    test('T5: pre-token-generation.ts never evaluates userAttributes["custom:organization"]', () => {
+      const texts = expressionTexts(
+        fs.readFileSync(PRE_TOKEN_GENERATION, "utf8"),
+        PRE_TOKEN_GENERATION,
+      );
+      const hits = texts.filter((t) => USER_ATTR_ORG_READ.test(t));
+      orgTripwire(
+        hits.length === 0,
+        `${rel(PRE_TOKEN_GENERATION)} reads the stored custom:organization attribute (${hits.join(", ")}). ` +
+          `The claim must be derived from the UserOrgMembership table (GetItem by sub) only — not from the attribute, not even as a fallback.`,
+      );
+    });
+
+    test("T6: auth-event.ts extractOrgFromEvent never calls lookupUserOrganization (no Cognito-attribute fallback)", () => {
+      const calls = callsInsideFunction(
+        fs.readFileSync(AUTH_EVENT, "utf8"),
+        AUTH_EVENT,
+        "extractOrgFromEvent",
+      );
+      orgTripwire(
+        calls.found,
+        `${rel(AUTH_EVENT)} no longer declares \`function extractOrgFromEvent\` — this pin must be re-targeted, not deleted.`,
+      );
+      const hits = calls.callees.filter((c) => c === "lookupUserOrganization");
+      orgTripwire(
+        hits.length === 0,
+        `${rel(AUTH_EVENT)} extractOrgFromEvent calls lookupUserOrganization (${hits.length}x). ` +
+          `A caller with no claim must resolve to null (fail closed), never to the display-only attribute.`,
+      );
+    });
+  });
+
+  // ————————————————————————————————————————————————————————————————————
+  // T7 — negative self-test for T5/T6: the matchers really do catch the
+  //      historical shapes, so a silent matcher regression cannot turn the
+  //      org pins into a no-op.
+  // ————————————————————————————————————————————————————————————————————
+  describe("T7 — org-claim matcher self-test (fixtures that WOULD violate are detected)", () => {
+    const BAD_TRIGGER = `
+      export const handler = async (event: { request: { userAttributes: Record<string, string> } }) => {
+        const userAttributes = event.request.userAttributes || {};
+        // the historical fallback shape:
+        const org = row?.orgName ?? userAttributes["custom:organization"];
+        return org;
+      };
+    `;
+    const BAD_AUTH_EVENT = `
+      async function lookupUserOrganization(u: string): Promise<string | null> { return u; }
+      export async function extractOrgFromEvent(event: unknown): Promise<string | null> {
+        const claimOrg = readClaim(event, "custom:organization");
+        if (claimOrg) return claimOrg;
+        const username = readClaim(event, "sub");
+        return username ? await lookupUserOrganization(username) : null;  // the removed fallback
+      }
+      export async function unrelated(u: string) { return lookupUserOrganization(u); } // outside the function: ignored
+    `;
+    const GOOD_AUTH_EVENT = `
+      export async function extractOrgFromEvent(event: unknown): Promise<string | null> {
+        const claimOrg = readClaim(event, "custom:organization");
+        return claimOrg ? claimOrg : null;
+      }
+      export async function other(u: string) { return lookupUserOrganization(u); }
+    `;
+
+    test('T5 matcher detects userAttributes["custom:organization"] (any quote style)', () => {
+      const texts = expressionTexts(BAD_TRIGGER, "fixture.ts");
+      expect(texts.some((t) => USER_ATTR_ORG_READ.test(t))).toBe(true);
+      expect(
+        USER_ATTR_ORG_READ.test("userAttributes['custom:organization']"),
+      ).toBe(true);
+      expect(
+        USER_ATTR_ORG_READ.test("userAttributes[`custom:organization`]"),
+      ).toBe(true);
+      // near-miss: a different attribute must NOT match
+      expect(USER_ATTR_ORG_READ.test('userAttributes["custom:role"]')).toBe(
+        false,
+      );
+    });
+
+    test("T6 matcher scopes to the extractOrgFromEvent body: flags the fallback call inside, ignores calls outside", () => {
+      const bad = callsInsideFunction(
+        BAD_AUTH_EVENT,
+        "fixture.ts",
+        "extractOrgFromEvent",
+      );
+      expect(bad.found).toBe(true);
+      expect(
+        bad.callees.filter((c) => c === "lookupUserOrganization"),
+      ).toHaveLength(1);
+
+      const good = callsInsideFunction(
+        GOOD_AUTH_EVENT,
+        "fixture.ts",
+        "extractOrgFromEvent",
+      );
+      expect(good.found).toBe(true);
+      expect(good.callees).not.toContain("lookupUserOrganization");
+      expect(good.callees).toContain("readClaim");
+    });
+
+    test("T6 matcher reports found=false when the function is absent (so the pin fails loudly instead of passing vacuously)", () => {
+      const missing = callsInsideFunction(
+        "export const x = 1;",
+        "fixture.ts",
+        "extractOrgFromEvent",
+      );
+      expect(missing.found).toBe(false);
+      expect(missing.callees).toEqual([]);
+    });
+  });
+
+  // ————————————————————————————————————————————————————————————————————
+  // T8 — omission is not enough: the trigger must SUPPRESS the org claim.
+  //      Cognito's default ID-token mapping copies every client-readable
+  //      attribute (readAttributes includes custom:organization) into the
+  //      token, so an un-suppressed omission still lets the stored attribute
+  //      surface as the claim extractOrgFromEvent reads.
+  // ————————————————————————————————————————————————————————————————————
+  describe("T8 — pre-token-generation.ts actively suppresses custom:organization on its omission paths", () => {
+    test("T8: the trigger writes claimsToSuppress", () => {
+      const src = fs.readFileSync(PRE_TOKEN_GENERATION, "utf8");
+      orgTripwire(
+        writesClaimsToSuppress(src, PRE_TOKEN_GENERATION),
+        `${rel(PRE_TOKEN_GENERATION)} never writes \`claimsToSuppress\`. ` +
+          `When no membership row resolves, the trigger must add "custom:organization" to ` +
+          `response.claimsOverrideDetails.claimsToSuppress — omitting it from claimsToAddOrOverride is NOT fail-closed, ` +
+          `because the pool client's readAttributes lets the stored attribute flow into the ID token as that claim. ` +
+          `The behavioural contract (all three omission paths) is pinned in src/lambda/__tests__/pre-token-generation.test.ts.`,
+      );
+    });
+
+    test("T8: the trigger still names the org claim literally (so the suppress can target it)", () => {
+      const src = fs.readFileSync(PRE_TOKEN_GENERATION, "utf8");
+      const sf = ts.createSourceFile(
+        PRE_TOKEN_GENERATION,
+        src,
+        ts.ScriptTarget.Latest,
+        true,
+        ts.ScriptKind.TS,
+      );
+      let literal = false;
+      const visit = (node: ts.Node): void => {
+        if (isStringLiteralLike(node) && node.text === "custom:organization")
+          literal = true;
+        ts.forEachChild(node, visit);
+      };
+      visit(sf);
+      orgTripwire(
+        literal,
+        `${rel(PRE_TOKEN_GENERATION)} has no "custom:organization" string literal; the claim can be neither minted nor suppressed.`,
+      );
+    });
+  });
+
+  // ————————————————————————————————————————————————————————————————————
+  // T9 — negative self-test for T8: the historical un-suppressed handler
+  //      shape is detected as NOT writing claimsToSuppress; the fixed shapes
+  //      (object-literal property, shorthand, assignment) are all detected.
+  // ————————————————————————————————————————————————————————————————————
+  describe("T9 — claimsToSuppress matcher self-test", () => {
+    const UNSUPPRESSED_TRIGGER = `
+      // claimsToSuppress mentioned only in a comment — must not count
+      export const handler = async (event: any) => {
+        const claimsToAddOrOverride: Record<string, string> = {};
+        const org = await resolveOrgClaim(event.userName);
+        if (org) claimsToAddOrOverride["custom:organization"] = org;
+        event.response.claimsOverrideDetails = {
+          ...(event.response.claimsOverrideDetails || {}),
+          claimsToAddOrOverride,
+        };
+        return event;
+      };
+    `;
+    const PROPERTY_SHAPE = `
+      event.response.claimsOverrideDetails = {
+        claimsToAddOrOverride,
+        claimsToSuppress: ["custom:organization"],
+      };
+    `;
+    const SHORTHAND_SHAPE = `
+      const claimsToSuppress = ["custom:organization"];
+      event.response.claimsOverrideDetails = { claimsToAddOrOverride, claimsToSuppress };
+    `;
+    const ASSIGNMENT_SHAPE = `
+      event.response.claimsOverrideDetails.claimsToSuppress = ["custom:organization"];
+    `;
+
+    test("the historical un-suppressed handler is NOT detected as a suppress write (comment mentions ignored)", () => {
+      expect(writesClaimsToSuppress(UNSUPPRESSED_TRIGGER, "fixture.ts")).toBe(
+        false,
+      );
+    });
+
+    test("object-literal property, shorthand property and property assignment shapes are all detected", () => {
+      expect(writesClaimsToSuppress(PROPERTY_SHAPE, "fixture.ts")).toBe(true);
+      expect(writesClaimsToSuppress(SHORTHAND_SHAPE, "fixture.ts")).toBe(true);
+      expect(writesClaimsToSuppress(ASSIGNMENT_SHAPE, "fixture.ts")).toBe(true);
+    });
+
+    test("a near-miss property name does not match", () => {
+      expect(
+        writesClaimsToSuppress(
+          "const x = { claimsToSuppressed: [] }; y.claimsToAddOrOverride = {};",
+          "fixture.ts",
+        ),
+      ).toBe(false);
     });
   });
 });
