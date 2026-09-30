@@ -32,6 +32,10 @@ import {
   shouldWarnOnPlaceholder,
 } from "../lib/frontend-origin";
 import { resolveAlarmDeliveryConfig } from "../lib/alarm-delivery";
+import {
+  applyGitProvenanceTags,
+  resolveGitProvenance,
+} from "../lib/git-provenance";
 
 const app = new cdk.App();
 
@@ -481,6 +485,19 @@ cdk.Tags.of(app).add("Environment", environment);
 cdk.Tags.of(app).add("Team", "platform");
 cdk.Tags.of(app).add("CostCenter", "citadel");
 cdk.Tags.of(app).add("ManagedBy", "cdk");
+
+// CIT-215: Deployment provenance — GitSha / GitRef tags on every stack.
+// Resolved from CDK context `gitSha`/`gitRef` (passed by deploy.sh via
+// `--context gitSha=$(git rev-parse HEAD)`), falling back to env
+// CITADEL_GIT_SHA / CITADEL_GIT_REF, else `unknown`. Never shells out to git
+// and never throws, so synth stays deterministic and CI without .git works.
+// Read the tag back with
+//   aws cloudformation describe-stacks --stack-name <stack> --query 'Stacks[0].Tags'
+// then answer "is fix X deployed?" with `git merge-base --is-ancestor <fix> <GitSha>`.
+applyGitProvenanceTags(
+  app,
+  resolveGitProvenance({ context: (key) => app.node.tryGetContext(key) }),
+);
 
 // cdk-nag: AwsSolutions pack. Errors fail `cdk synth`. Escape hatch: -c nag=false
 if (app.node.tryGetContext("nag") !== "false") {

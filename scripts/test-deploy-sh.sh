@@ -1036,6 +1036,123 @@ else
 fi
 
 ########################################
+# CIT-215: every cdk invocation carries --context gitSha=<full sha> / gitRef=<branch>
+########################################
+section "provenance: cdk deploy/diff/list receive --context gitSha=<full sha> and gitRef=<branch>"
+reset_fakes
+write_fake_git
+export FAKE_BRANCH="feat/deploy-sha-stack-tag"
+export FAKE_FULL_SHA="0123456789abcdef0123456789abcdef01234567"
+export FAKE_SHORT_SHA="0123456"
+cat > "$FAKE_BIN/aws" <<'FAKE_AWS_EOF'
+#!/bin/bash
+if [ "$1" = "cloudformation" ] && [ "$2" = "describe-stacks" ]; then
+  echo "NOT_FOUND"; exit 0
+fi
+exit 0
+FAKE_AWS_EOF
+chmod +x "$FAKE_BIN/aws"
+# Fake `cdk list` must echo EXACTLY the KNOWN_STACKS-derived names, otherwise
+# verify_stack_coverage calls `exit 1` (which fires the EXIT trap even inside
+# a subshell and would wipe TMP_DIR mid-scenario).
+printf '%s-test\n' "${KNOWN_STACKS[@]}" > "$TMP_DIR/prov-cdk-list"
+cat > "$FAKE_BIN/npx" <<FAKE_NPX_EOF
+#!/bin/bash
+echo "\$*" >> "$TMP_DIR/prov-npx-log"
+if [ "\$1" = "cdk" ] && [ "\$2" = "list" ]; then
+  cat "$TMP_DIR/prov-cdk-list"
+fi
+exit 0
+FAKE_NPX_EOF
+chmod +x "$FAKE_BIN/npx"
+cat > "$FAKE_BIN/docker" <<'FAKE_DOCKER_EOF'
+#!/bin/bash
+exit 0
+FAKE_DOCKER_EOF
+chmod +x "$FAKE_BIN/docker"
+mkdir -p "$TMP_DIR/backend"
+(
+  cd "$TMP_DIR" || exit 1
+  export PATH="$FAKE_BIN:$PATH" DEPLOY_LOG="$TMP_DIR/deploy.log"
+  # capture_git_info is what main flow runs before any cdk call; it must
+  # resolve the FULL sha (not the short one) for the tag.
+  capture_git_info >/dev/null 2>&1
+  deploy_stack "citadel-backend-test" </dev/null >/dev/null 2>&1
+  cdk_diff >/dev/null 2>&1
+  verify_stack_coverage >/dev/null 2>&1
+)
+prov_log="$TMP_DIR/prov-npx-log"
+deploy_line=$(grep '^cdk deploy' "$prov_log" 2>/dev/null | head -1 || true)
+diff_line=$(grep '^cdk diff' "$prov_log" 2>/dev/null | head -1 || true)
+list_line=$(grep '^cdk list' "$prov_log" 2>/dev/null | head -1 || true)
+for pair in "deploy:$deploy_line" "diff:$diff_line" "list:$list_line"; do
+  kind="${pair%%:*}"
+  line="${pair#*:}"
+  if [ -z "$line" ]; then
+    fail "no 'cdk $kind' invocation recorded: $(cat "$prov_log" 2>/dev/null)"
+    continue
+  fi
+  if echo "$line" | grep -q -- "--context gitSha=${FAKE_FULL_SHA}"; then
+    pass "cdk $kind receives --context gitSha=<full 40-char sha>"
+  else
+    fail "cdk $kind missing --context gitSha=<full sha>: $line"
+  fi
+  if echo "$line" | grep -q -- "--context gitRef=${FAKE_BRANCH}"; then
+    pass "cdk $kind receives --context gitRef=<branch>"
+  else
+    fail "cdk $kind missing --context gitRef=<branch>: $line"
+  fi
+  if echo "$line" | grep -q -- "gitSha=${FAKE_SHORT_SHA} \|gitSha=${FAKE_SHORT_SHA}\$"; then
+    fail "cdk $kind passed the SHORT sha — merge-base needs the full sha: $line"
+  else
+    pass "cdk $kind does not pass the short sha"
+  fi
+done
+unset FAKE_BRANCH FAKE_FULL_SHA FAKE_SHORT_SHA
+
+section "provenance: no git available -> gitSha=unknown, deploy still invoked (never fails)"
+reset_fakes
+cat > "$FAKE_BIN/git" <<'FAKE_GIT_EOF'
+#!/bin/bash
+echo "fatal: not a git repository" >&2
+exit 128
+FAKE_GIT_EOF
+chmod +x "$FAKE_BIN/git"
+cat > "$FAKE_BIN/aws" <<'FAKE_AWS_EOF'
+#!/bin/bash
+if [ "$1" = "cloudformation" ] && [ "$2" = "describe-stacks" ]; then
+  echo "NOT_FOUND"; exit 0
+fi
+exit 0
+FAKE_AWS_EOF
+chmod +x "$FAKE_BIN/aws"
+cat > "$FAKE_BIN/npx" <<FAKE_NPX_EOF
+#!/bin/bash
+echo "\$*" >> "$TMP_DIR/prov-unknown-npx-log"
+exit 0
+FAKE_NPX_EOF
+chmod +x "$FAKE_BIN/npx"
+cat > "$FAKE_BIN/docker" <<'FAKE_DOCKER_EOF'
+#!/bin/bash
+exit 0
+FAKE_DOCKER_EOF
+chmod +x "$FAKE_BIN/docker"
+mkdir -p "$TMP_DIR/backend"
+(
+  cd "$TMP_DIR" || exit 1
+  export PATH="$FAKE_BIN:$PATH" DEPLOY_LOG="$TMP_DIR/deploy.log"
+  capture_git_info >/dev/null 2>&1
+  deploy_stack "citadel-backend-test" </dev/null >/dev/null 2>&1
+)
+unknown_rc=$?
+unknown_line=$(grep '^cdk deploy' "$TMP_DIR/prov-unknown-npx-log" 2>/dev/null | head -1 || true)
+if [ $unknown_rc -eq 0 ] && echo "$unknown_line" | grep -q -- "--context gitSha=unknown"; then
+  pass "without git, cdk deploy still runs with --context gitSha=unknown"
+else
+  fail "expected rc=0 and gitSha=unknown; rc=$unknown_rc line=$unknown_line"
+fi
+
+########################################
 # Summary
 ########################################
 echo ""
