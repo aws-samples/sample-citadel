@@ -20,9 +20,13 @@ import {
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { mockClient } from "aws-sdk-client-mock";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 
 import {
   classifyUser,
+  main,
   planRemediation,
   runAudit,
   type AuditUser,
@@ -405,7 +409,7 @@ describe("runAudit", () => {
     expect(writeCommandCount()).toBe(0);
   });
 
-  it("requests only sub + the two custom attributes from ListUsers (never email)", async () => {
+  it("never passes a custom: attribute name in ListUsers AttributesToGet (Cognito rejects it with InvalidParameterException; finding c8ccaea5)", async () => {
     cognitoMock.on(ListUsersCommand).resolves({ Users: [] });
     const { cognito, doc } = clients();
     await runAudit({
@@ -417,10 +421,53 @@ describe("runAudit", () => {
       sleepMs: 0,
     });
     const call = cognitoMock.commandCalls(ListUsersCommand)[0];
-    expect(call.args[0].input.AttributesToGet).toEqual(
-      expect.arrayContaining(["sub", "custom:role", "custom:organization"]),
-    );
-    expect(call.args[0].input.AttributesToGet).not.toContain("email");
+    const toGet = call.args[0].input.AttributesToGet;
+    // Either omitted entirely (all attributes returned, projected
+    // client-side) or restricted to standard attribute names.
+    for (const name of toGet ?? []) {
+      expect(name).not.toMatch(/^custom:/);
+    }
+  });
+
+  it("projects custom:role / custom:organization client-side from each user's Attributes array (ignores unrelated attributes such as email)", async () => {
+    cognitoMock.on(ListUsersCommand).resolves({
+      Users: [
+        {
+          Username: "dave",
+          Attributes: attrs({
+            sub: "s2",
+            email: "dave@example.com",
+            given_name: "Dave",
+            "custom:role": "developer",
+            "custom:organization": "Initech",
+          }),
+        },
+      ],
+    });
+    cognitoMock
+      .on(AdminListGroupsForUserCommand)
+      .resolves({ Groups: [{ GroupName: "developer" }] });
+
+    const { cognito, doc } = clients();
+    const result = await runAudit({
+      cognito,
+      doc,
+      userPoolId: "pool",
+      organisationTable: "orgs",
+      apply: false,
+      sleepMs: 0,
+    });
+
+    expect(result.summary.findings.ORG_UNKNOWN).toBe(1);
+    expect(result.findings[0]).toMatchObject({
+      username: "dave",
+      sub: "s2",
+      previous: { role: "developer", organization: "Initech" },
+    });
+    // Output hygiene: email / given_name are never printed.
+    const out = logs.join("\n");
+    expect(out).not.toContain("dave@example.com");
+    expect(out).not.toContain("Dave");
   });
 
   it("dry-run: reports findings, exits 3, and issues ZERO write commands", async () => {
@@ -673,5 +720,127 @@ describe("runAudit", () => {
       sub: "s3",
       kind: "ORG_MISSING",
     });
+  });
+
+  describe("--out <file> export", () => {
+    let dir: string;
+
+    beforeEach(() => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), "cognito-audit-test-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("writes the full JSON document to the file when the run completes", async () => {
+      cognitoMock.on(ListUsersCommand).resolves({
+        Users: [
+          {
+            Username: "frank",
+            Attributes: attrs({ sub: "s3", "custom:role": "developer" }),
+          },
+        ],
+      });
+      cognitoMock
+        .on(AdminListGroupsForUserCommand)
+        .resolves({ Groups: [{ GroupName: "developer" }] });
+
+      const out = path.join(dir, "audit.json");
+      const { cognito, doc } = clients();
+      const result = await runAudit({
+        cognito,
+        doc,
+        userPoolId: "pool",
+        organisationTable: "orgs",
+        apply: false,
+        out,
+        sleepMs: 0,
+      });
+
+      expect(result.exitCode).toBe(3);
+      const parsed = JSON.parse(fs.readFileSync(out, "utf8"));
+      expect(parsed.summary.scanned).toBe(1);
+      expect(parsed.findings[0]).toMatchObject({
+        username: "frank",
+        kind: "ORG_MISSING",
+        previous: { role: "developer", organization: null },
+      });
+      // No temp/partial file left behind next to the export.
+      expect(fs.readdirSync(dir)).toEqual(["audit.json"]);
+    });
+
+    it("leaves NO file (not even a 0-byte one) when the run fails before producing a document", async () => {
+      cognitoMock
+        .on(ListUsersCommand)
+        .rejects(
+          new Error(
+            "InvalidParameterException: Input fails to satisfy the constraints",
+          ),
+        );
+
+      const out = path.join(dir, "audit.json");
+      const { cognito, doc } = clients();
+      await expect(
+        runAudit({
+          cognito,
+          doc,
+          userPoolId: "pool",
+          organisationTable: "orgs",
+          apply: false,
+          out,
+          sleepMs: 0,
+        }),
+      ).rejects.toThrow(/InvalidParameterException/);
+
+      expect(fs.existsSync(out)).toBe(false);
+      expect(fs.readdirSync(dir)).toEqual([]);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// main — CLI flag parsing
+// ---------------------------------------------------------------------------
+
+describe("main flag parsing", () => {
+  const env = { ...process.env };
+
+  beforeEach(() => {
+    cognitoMock.reset();
+    ddbMock.reset();
+    jest.spyOn(console, "log").mockImplementation(() => undefined);
+    jest.spyOn(console, "error").mockImplementation(() => undefined);
+    process.env.USER_POOL_ID = "pool";
+    process.env.ORGANISATION_TABLE = "orgs";
+    ddbMock.on(ScanCommand).resolves({ Items: [] });
+    cognitoMock.on(ListUsersCommand).resolves({ Users: [] });
+  });
+
+  afterEach(() => {
+    (console.log as jest.Mock).mockRestore?.();
+    (console.error as jest.Mock).mockRestore?.();
+    process.env = { ...env };
+  });
+
+  it("accepts --dry-run as an explicit no-op alias for the default mode", async () => {
+    const code = await main(["--dry-run"]);
+    expect(code).toBe(0);
+    // Dry-run never issues a write; ListUsers was still called.
+    expect(cognitoMock.commandCalls(ListUsersCommand)).toHaveLength(1);
+    expect(
+      cognitoMock.commandCalls(AdminUpdateUserAttributesCommand),
+    ).toHaveLength(0);
+  });
+
+  it("rejects --dry-run combined with --apply instead of guessing", async () => {
+    await expect(main(["--dry-run", "--apply"])).rejects.toThrow(
+      /--dry-run.*--apply|--apply.*--dry-run/,
+    );
+    expect(cognitoMock.commandCalls(ListUsersCommand)).toHaveLength(0);
+  });
+
+  it("rejects --out without a path", async () => {
+    await expect(main(["--out"])).rejects.toThrow(/--out/);
   });
 });
