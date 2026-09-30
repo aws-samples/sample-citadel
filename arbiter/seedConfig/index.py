@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 import boto3
 import cfnresponse
 from botocore.exceptions import ClientError
@@ -45,6 +46,40 @@ SMOKE_IDEMPOTENCY_DESCRIPTION = (
     'harmless side-effecting tool call. Non-prod only. Not a product agent.'
 )
 SMOKE_FIXTURES_ENABLED = bool(os.environ.get('SMOKE_FIXTURES_ENABLED'))
+
+
+# ---------------------------------------------------------------------------
+# Registry settle + approve constants
+# ---------------------------------------------------------------------------
+# System agents that must be dispatchable (approval-gate readiness) are
+# auto-submitted for approval after create. The smoke fixture is
+# intentionally excluded — it stays DRAFT.
+SYSTEM_AGENTS = frozenset({FABRICATOR_AGENT_ID, DEMO_ECHO_AGENT_ID})
+
+# Settle poll: wait for create_registry_record's async transition out of
+# CREATING/UPDATING.  Patchable in tests via ``index._SETTLE_SLEEP``.
+_SETTLE_MAX_ATTEMPTS = 10
+_SETTLE_SLEEP = 1  # seconds between polls
+_UNSETTLED_STATUSES = frozenset({'CREATING', 'UPDATING'})
+
+
+def _resolve_settled_record(registry_id, agent_id, list_agent_records):
+    """Poll ``list_agent_records`` until the record for *agent_id* has left
+    the CREATING/UPDATING transient states **and** carries a ``recordId``.
+
+    Returns the settled record dict, or ``None`` if the record did not
+    settle within ``_SETTLE_MAX_ATTEMPTS`` polls.
+    """
+    for attempt in range(1, _SETTLE_MAX_ATTEMPTS + 1):
+        for rec in list_agent_records(registry_id):
+            if isinstance(rec, dict) and rec.get('name') == agent_id:
+                status = rec.get('status')
+                record_id = rec.get('recordId')
+                if status not in _UNSETTLED_STATUSES and record_id:
+                    return rec
+        if attempt < _SETTLE_MAX_ATTEMPTS:
+            time.sleep(_SETTLE_SLEEP)
+    return None
 
 
 def _seed_agent_registry_record(agent_id, description, module_filename, worker_queue_url):
@@ -187,13 +222,63 @@ def _seed_agent_registry_record(agent_id, description, module_filename, worker_q
         return None
     print(
         f"Created registry record for {agent_id} "
-        f"(status={response.get('status')}); leaving it in its post-create "
-        'DRAFT status like fabricator-created records'
+        f"(status={response.get('status')})"
     )
+
+    # ---- Settle: wait for the record to leave CREATING/UPDATING ----
+    raw_status = response.get('status')
+    raw_record_id = response.get('recordId')
+    if raw_status in _UNSETTLED_STATUSES or not raw_record_id:
+        print(
+            f"Registry record for {agent_id} returned transient "
+            f"status={raw_status} — polling until settled"
+        )
+        settled = _resolve_settled_record(
+            registry_id, agent_id, list_agent_records,
+        )
+        if settled is None:
+            print(
+                f"WARNING: registry record for {agent_id} did not settle "
+                f"after {_SETTLE_MAX_ATTEMPTS} attempts — linkage fields "
+                "will be absent"
+            )
+            return None
+    else:
+        settled = {
+            'recordId': raw_record_id,
+            'status': raw_status,
+            'createdAt': response.get('createdAt'),
+        }
+
+    # ---- Auto-approve system agents that must be dispatchable ----
+    if agent_id in SYSTEM_AGENTS and settled.get('status') == 'DRAFT':
+        try:
+            approve_resp = client.submit_registry_record_for_approval(
+                registryId=registry_id,
+                recordId=settled['recordId'],
+            )
+            print(
+                f"Submitted {agent_id} for approval "
+                f"(status={approve_resp.get('status')})"
+            )
+            # Re-fetch to get the canonical post-approval state
+            refreshed = _resolve_settled_record(
+                registry_id, agent_id, list_agent_records,
+            )
+            if refreshed is not None:
+                settled = refreshed
+        except ClientError as exc:
+            error_code = exc.response.get('Error', {}).get('Code', 'Unknown')
+            print(
+                f"WARNING: submit_registry_record_for_approval failed for "
+                f"{agent_id} (errorCode={error_code}) — stamping from "
+                "pre-approval state"
+            )
+
     return {
-        'recordId': response.get('recordId'),
-        'status': response.get('status'),
-        'createdAt': response.get('createdAt'),
+        'recordId': settled.get('recordId'),
+        'status': settled.get('status'),
+        'createdAt': settled.get('createdAt'),
     }
 
 
@@ -218,15 +303,23 @@ def _stamp_registry_linkage(item, record_info):
       - ``createdAt``        — the record's createdAt ISO timestamp, but ONLY
         when the item does not already carry a ``createdAt`` value
 
-    When *record_info* is None (registry unavailable/denied), the three
-    fields are left **absent** — never fabricate APPROVED.
+    When *record_info* is None (registry unavailable/denied), OR when the
+    record's status is transient (CREATING/UPDATING), the three fields are
+    left **absent** — never stamp an unsettled status.
 
     Mutates *item* in place and returns it for convenience.
     """
     if record_info is None:
         return item
-    if record_info.get('status') is not None:
-        item['registryStatus'] = record_info['status']
+    status = record_info.get('status')
+    if status in _UNSETTLED_STATUSES:
+        print(
+            f"WARNING: not stamping linkage for {item.get('agentId', '?')} "
+            f"— record status is transient ({status})"
+        )
+        return item
+    if status is not None:
+        item['registryStatus'] = status
     if record_info.get('recordId') is not None:
         item['registryRecordId'] = record_info['recordId']
     if 'createdAt' not in item and record_info.get('createdAt') is not None:
@@ -278,6 +371,15 @@ def _seed_smoke_idempotency_agent(table, worker_queue_url, agent_bucket):
         'state': 'active',
         'categories': ['built-in', 'worker', 'smoke', 'diagnostic'],
     }
+
+    # Registry record first (same dual-store contract as echo/fabricator),
+    # then stamp linkage, then write the DDB row with linkage included.
+    smoke_record = _seed_agent_registry_record(
+        SMOKE_IDEMPOTENCY_AGENT_ID, SMOKE_IDEMPOTENCY_DESCRIPTION,
+        SMOKE_IDEMPOTENCY_MODULE_FILENAME, worker_queue_url,
+    )
+    _stamp_registry_linkage(smoke_agent, smoke_record)
+
     table.put_item(Item=smoke_agent)
     print(
         f"Seeded agent: {SMOKE_IDEMPOTENCY_AGENT_ID} (smoke fixture) with "
@@ -306,10 +408,7 @@ def _seed_smoke_idempotency_agent(table, worker_queue_url, agent_bucket):
             "module upload (partial deploy?). Agent config still seeded."
         )
 
-    return _seed_agent_registry_record(
-        SMOKE_IDEMPOTENCY_AGENT_ID, SMOKE_IDEMPOTENCY_DESCRIPTION,
-        SMOKE_IDEMPOTENCY_MODULE_FILENAME, worker_queue_url,
-    )
+    return smoke_record
 
 
 def _registry_seeded(record_info):
