@@ -9,8 +9,10 @@ adding a new resource type and wondering whether it needs `orgId`, start here.
 
 ## TL;DR
 
-- **Identity**: each user carries `custom:organization` (their org) and either
-  `custom:role: admin` or membership in the Cognito `admin` group.
+- **Identity**: each user carries `custom:organization` (their org, as the
+  canonical organisation NAME). Admin is determined SOLELY by membership in
+  the Cognito `admin` group (`cognito:groups`). `custom:role` is a
+  display/legacy attribute and never grants admin.
 - **Source of truth**: AgentCore Registry for apps/agents, DynamoDB for tools
   and per-org tables (workflows, executions, integrations, datastores).
 - **Read scaling**: AppsTable `#META` mirror + `OrgIndex` GSI eliminates the
@@ -25,18 +27,46 @@ Rules of thumb:
 - A resolver resolves the caller's org from the JWT, not from the request
   payload. Inputs that include an `orgId` field are accepted only when the
   caller is an admin.
-- `isAdminFromEvent(event)` recognises EITHER `custom:role === 'admin'` OR
-  membership in the `admin` Cognito group. Both signals are first-class.
+- `isAdminFromEvent(event)` recognises membership in the `admin` Cognito
+  group ONLY (`cognito:groups`). A `custom:role === 'admin'` claim on its own
+  is ignored (`39b2de8`).
 - The 'All Organizations' selector in the frontend short-circuits the org
   filter only when `isAdminFromEvent` is true; non-admins sending the magic
   string get a permission error from the backend.
+
+### Claim trust model
+
+Finding 7aa877f8 showed that `custom:role` could not be trusted: the user pool
+client had no `WriteAttributes` allow-list, so Cognito's permissive default let
+any signed-in user set `custom:role=admin` on their own record through
+`UpdateUserAttributes`. Two commits close this, and both must be deployed:
+
+- `1c025bc` — the user pool client pins an explicit `writeAttributes`
+  allow-list (`email`, `given_name`, `family_name`). `custom:role` and
+  `custom:organization` are excluded, so only the Admin* API used by
+  `assignUserRole` (`user-management-resolver.ts`) can write them.
+- `39b2de8` — `isAdminFromEvent` / `isAdminFromHttpEvent` and the shared
+  `deriveRoles()` in `auth-event.ts` derive admin from `cognito:groups` only.
+  The pre-token trigger (`pre-token-generation.ts`) forces the promoted
+  `custom:role` claim to `admin` for admin-group members and drops a stored
+  `custom:role=admin` when the user is not in the group, so an unearned admin
+  claim is never minted.
+
+Consequences: a Cognito group is the sanctioned role carrier; `custom:role`
+mirrors it for display; `custom:organization` is the canonical org NAME and is
+validated against the organisations table at write time (`assertOrgNameExists`
+in `utils/org-name.ts`). Stale attribute values left over from before these
+commits are found and cleaned by
+`backend/scripts/audit-cognito-custom-attributes.ts`
+(see `docs/runbooks/cognito-attribute-sweep.md`).
 
 Key helpers (`backend/src/utils/auth-event.ts`):
 
 - `extractOrgFromEvent(event)`: claim-first, falls back to
   `AdminGetUserCommand` during the re-auth window. Returns `null` when there
   is no caller org at all.
-- `isAdminFromEvent(event)`: claim-only — no Cognito API call. Tolerant of
+- `isAdminFromEvent(event)`: reads only the `cognito:groups` claim — no
+  Cognito API call, no `custom:role`. Tolerant of
   array vs comma-separated-string serialisations of `cognito:groups`.
 
 ## Where orgId lives
@@ -231,6 +261,8 @@ until the user gets a fresh token.
 | `2165036` | Fabricator-emitted `#META` at agent creation |
 | `b279257` | `isAdminFromEvent` recognises `cognito:groups` |
 | (this commit) | Scheduled reconciler Lambda + `ORG_SCOPING.md` doc |
+| `1c025bc` | User pool client `writeAttributes` allow-list excludes `custom:role` / `custom:organization` (finding 7aa877f8, layer 1) |
+| `39b2de8` | Admin determination group-authoritative; pre-token trigger drops unearned `custom:role=admin` (finding 7aa877f8, layer 2) |
 
 ## Limits / known gaps
 
@@ -240,7 +272,5 @@ until the user gets a fresh token.
   `UpdateItem` against the relevant table or extend the backfill script.
 - `resolveRecordId` re-lists the entire Registry on every name-based agent
   lookup. Add an LRU if this becomes a hotspot.
-- The pre-token Lambda only promotes the `custom:role` attribute; admin
-  group membership is recognised at read time. Could overlay
-  `custom:role: admin` for admin-group members in the trigger to unify the
-  data model. Requires re-auth.
+- `ORG_MISSING` users (in a group, no `custom:organization`) are reported by
+  the attribute sweep but not auto-fixed; an admin must assign the org.

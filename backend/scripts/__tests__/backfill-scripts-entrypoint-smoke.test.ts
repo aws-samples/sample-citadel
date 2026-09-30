@@ -29,6 +29,7 @@ const BACKEND_ROOT = path.resolve(__dirname, "..", "..");
 function strippedEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   delete env.ORGANIZATIONS_TABLE;
+  delete env.ORGANISATION_TABLE;
   delete env.REGISTRY_ID;
   delete env.USER_POOL_ID;
   delete env.AGENT_CONFIG_TABLE;
@@ -156,5 +157,64 @@ describe("backfill-org-ids.ts entrypoint", () => {
     expect(result.status).not.toBe(0);
     const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
     expect(output).toContain("REGISTRY_ID env var required");
+  });
+});
+
+describe("audit-cognito-custom-attributes.ts entrypoint", () => {
+  it("via `npm run audit:cognito-custom-attributes` exits non-zero with a clean env-var error, no crash", () => {
+    const result = spawnSync(
+      "npm",
+      ["run", "audit:cognito-custom-attributes"],
+      {
+        cwd: BACKEND_ROOT,
+        env: strippedEnv(),
+        encoding: "utf8",
+        timeout: 20000,
+      },
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.status).not.toBeNull();
+    const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+    expect(output).toContain("USER_POOL_ID env var required");
+    expect(output).not.toContain("Cannot find name");
+    expect(output).not.toContain("ERR_REQUIRE_ESM");
+  });
+
+  it("via `node scripts/audit-cognito-custom-attributes.ts` (native TS execution) exits non-zero with the same clean error", () => {
+    const result = spawnSync(
+      process.execPath,
+      ["scripts/audit-cognito-custom-attributes.ts"],
+      {
+        cwd: BACKEND_ROOT,
+        env: strippedEnv(),
+        encoding: "utf8",
+        timeout: 20000,
+      },
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.status).not.toBeNull();
+    const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+    expect(output).toContain("USER_POOL_ID env var required");
+    expect(output).not.toContain("ReferenceError: require is not defined");
+    expect(output).not.toContain("Cannot find name");
+  });
+
+  it("--apply / --json arg parsing does not crash before the env-var check", () => {
+    const result = spawnSync(
+      "npm",
+      ["run", "audit:cognito-custom-attributes", "--", "--apply", "--json"],
+      {
+        cwd: BACKEND_ROOT,
+        env: strippedEnv(),
+        encoding: "utf8",
+        timeout: 20000,
+      },
+    );
+
+    expect(result.status).not.toBe(0);
+    const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+    expect(output).toContain("USER_POOL_ID env var required");
   });
 });
