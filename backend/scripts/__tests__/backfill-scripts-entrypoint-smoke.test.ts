@@ -217,4 +217,28 @@ describe("audit-cognito-custom-attributes.ts entrypoint", () => {
     const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
     expect(output).toContain("USER_POOL_ID env var required");
   });
+
+  it("--dry-run / --out arg parsing does not crash before the env-var check", () => {
+    const result = spawnSync(
+      "npm",
+      [
+        "run",
+        "audit:cognito-custom-attributes",
+        "--",
+        "--dry-run",
+        "--out",
+        "/dev/null",
+      ],
+      {
+        cwd: BACKEND_ROOT,
+        env: strippedEnv(),
+        encoding: "utf8",
+        timeout: 20000,
+      },
+    );
+
+    expect(result.status).not.toBe(0);
+    const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+    expect(output).toContain("USER_POOL_ID env var required");
+  });
 });

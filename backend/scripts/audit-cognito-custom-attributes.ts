@@ -35,8 +35,19 @@
  *
  * Usage:
  *   npm run audit:cognito-custom-attributes                  (dry-run)
+ *   npm run audit:cognito-custom-attributes -- --dry-run     (same; explicit)
+ *   npm run audit:cognito-custom-attributes -- --out audit.json
  *   npm run audit:cognito-custom-attributes -- --apply
- *   npm run audit:cognito-custom-attributes -- --json > audit.json
+ *   npm run audit:cognito-custom-attributes -- --json        (JSON on stdout)
+ *
+ *   --dry-run   explicit no-op alias for the default mode; mutually
+ *               exclusive with --apply.
+ *   --out FILE  write the JSON export to FILE. The file is written
+ *               atomically and ONLY after the audit completed, so a failed
+ *               run never leaves a 0-byte or partial export behind. Use this
+ *               for the rollback record rather than `--json > FILE` (a shell
+ *               redirect creates the file before the script runs).
+ *   --json      print only the JSON document to stdout.
  *
  * Required env:
  *   USER_POOL_ID         – Cognito user pool id
@@ -48,9 +59,12 @@
  *   1  fatal error, or one or more remediation writes failed
  *   3  findings remain (dry-run always; apply when manual items remain)
  *
- * Output hygiene: only `username` and `sub` are ever printed. The script
- * requests only sub/custom:role/custom:organization from ListUsers, so
- * email and other PII are never even fetched.
+ * Output hygiene: only `username` and `sub` are ever printed or exported.
+ * ListUsers is called WITHOUT AttributesToGet (Cognito rejects `custom:`
+ * names there — finding c8ccaea5), so the full attribute record is returned
+ * per page; the script immediately projects sub/custom:role/
+ * custom:organization and discards everything else. Email and other PII
+ * are never retained, logged, or written to the export.
  */
 import {
   AdminDeleteUserAttributesCommand,
@@ -67,6 +81,7 @@ import {
   ScanCommand,
   type NativeAttributeValue,
 } from "@aws-sdk/lib-dynamodb";
+import * as fs from "fs";
 
 // ---------------------------------------------------------------------------
 // Pure logic (exported for unit tests — no AWS involvement)
@@ -340,8 +355,13 @@ async function* iterateUsers(
     const page = await cognito.send(
       new ListUsersCommand({
         UserPoolId: userPoolId,
-        // Deliberately narrow: no email / names → no PII in memory or logs.
-        AttributesToGet: ["sub", "custom:role", "custom:organization"],
+        // AttributesToGet is deliberately OMITTED. Cognito ListUsers only
+        // accepts standard attribute names there; a `custom:` name makes the
+        // whole call fail with InvalidParameterException ("Input fails to
+        // satisfy the constraints") — finding c8ccaea5. Passing just ["sub"]
+        // would silently drop the two custom attributes we are auditing. So
+        // we take the full attribute list and project the three fields we
+        // need right here; nothing else from the record is retained.
         PaginationToken: paginationToken,
       }),
     );
@@ -428,7 +448,36 @@ export interface RunAuditOptions {
   apply: boolean;
   /** Print ONLY the JSON document to stdout (for `--json > file`). */
   json?: boolean;
+  /**
+   * Write the JSON document to this path — but only once the audit has run
+   * to completion, and atomically (temp file + rename). A run that throws
+   * part-way leaves NO file behind, so an operator can never mistake an
+   * empty/partial export for a rollback record. Prefer this over
+   * `--json > file`: with a shell redirect the shell creates the file before
+   * the script starts, so a failed run still leaves a 0-byte file.
+   */
+  out?: string;
   sleepMs?: number;
+}
+
+/**
+ * Atomic write: the document is fully written to a sibling temp file and
+ * then renamed over the target, so the target either does not exist or
+ * holds the complete document. The temp file is removed on failure.
+ */
+export function writeExportAtomically(target: string, contents: string): void {
+  const tmp = `${target}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, contents, { encoding: "utf8", flag: "wx" });
+    fs.renameSync(tmp, target);
+  } catch (err) {
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch (cleanupErr) {
+      log("warn", `could not remove temp export ${tmp}: ${String(cleanupErr)}`);
+    }
+    throw err;
+  }
 }
 
 function pad(s: string, w: number): string {
@@ -465,6 +514,7 @@ export async function runAudit(opts: RunAuditOptions): Promise<AuditResult> {
     organisationTable,
     apply,
     json = false,
+    out,
   } = opts;
   const sleepMs = opts.sleepMs ?? DEFAULT_COGNITO_SLEEP_MS;
   const quiet = json;
@@ -545,10 +595,18 @@ export async function runAudit(opts: RunAuditOptions): Promise<AuditResult> {
     manual: allManual,
     actions: allActions,
   };
+  const serialized = JSON.stringify(document, null, 2);
+
+  // Only reached when the audit ran to completion: the export is written
+  // before any console output so a later stdout failure cannot lose it.
+  if (out) {
+    writeExportAtomically(out, serialized);
+    info(`wrote export to ${out}`);
+  }
 
   if (json) {
     // eslint-disable-next-line no-console
-    console.log(JSON.stringify(document, null, 2));
+    console.log(serialized);
   } else {
     if (allFindings.length > 0) {
       printTable(allFindings);
@@ -566,11 +624,41 @@ export async function runAudit(opts: RunAuditOptions): Promise<AuditResult> {
 // Main
 // ---------------------------------------------------------------------------
 
+export interface CliFlags {
+  apply: boolean;
+  json: boolean;
+  out?: string;
+}
+
+/**
+ * Parses CLI flags. `--dry-run` is accepted as an explicit no-op alias for
+ * the default mode so the invocation shape matches the sibling backfill
+ * scripts; combining it with `--apply` is a contradiction and is rejected
+ * rather than resolved by precedence.
+ */
+export function parseFlags(argv: string[]): CliFlags {
+  const apply = argv.includes("--apply");
+  const dryRun = argv.includes("--dry-run");
+  const json = argv.includes("--json");
+  if (apply && dryRun) {
+    throw new Error("--dry-run and --apply are mutually exclusive");
+  }
+  let out: string | undefined;
+  const outIdx = argv.indexOf("--out");
+  if (outIdx !== -1) {
+    const value = argv[outIdx + 1];
+    if (value === undefined || value.startsWith("--")) {
+      throw new Error("--out requires a file path argument");
+    }
+    out = value;
+  }
+  return { apply, json, out };
+}
+
 export async function main(
   argv: string[] = process.argv.slice(2),
 ): Promise<number> {
-  const apply = argv.includes("--apply");
-  const json = argv.includes("--json");
+  const { apply, json, out } = parseFlags(argv);
 
   const userPoolId = process.env.USER_POOL_ID;
   const organisationTable = process.env.ORGANISATION_TABLE;
@@ -584,7 +672,7 @@ export async function main(
     log("info", `Mode: ${apply ? "APPLY" : "DRY-RUN"}`);
     log(
       "info",
-      `USER_POOL_ID=${userPoolId} ORGANISATION_TABLE=${organisationTable} REGION=${region}`,
+      `USER_POOL_ID=${userPoolId} ORGANISATION_TABLE=${organisationTable} REGION=${region}${out ? ` OUT=${out}` : ""}`,
     );
   }
 
@@ -598,6 +686,7 @@ export async function main(
     organisationTable,
     apply,
     json,
+    out,
   });
   return result.exitCode;
 }

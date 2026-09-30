@@ -23,7 +23,16 @@ Findings:
 
 Every modified user is signed out (`AdminUserGlobalSignOut`) so the next login
 re-mints claims. Groups are never added or removed. Only `username` and `sub`
-are printed; email is never fetched.
+are printed or exported. `ListUsers` is called without `AttributesToGet`
+(Cognito rejects `custom:` names there), so each page carries the full
+attribute record; the script projects `sub`, `custom:role` and
+`custom:organization` immediately and discards the rest, so email is never
+retained, logged, or exported.
+
+Flags: none (dry-run, the default), `--dry-run` (explicit alias for the
+default; cannot be combined with `--apply`), `--apply`, `--out FILE` (write the
+JSON export to FILE, atomically and only after the run completes), `--json`
+(JSON only on stdout).
 
 Exit codes: `0` no findings (or all remediated), `3` findings remain, `1` a
 write failed or a fatal error.
@@ -70,7 +79,10 @@ cd backend
 export AWS_PROFILE=<profile> USER_POOL_ID=<pool> ORGANISATION_TABLE=<table>
 
 # 1. Dry-run and keep an export (this is your rollback record).
-npm run audit:cognito-custom-attributes -- --json > cognito-audit-$(date -u +%Y%m%dT%H%M%SZ).json
+#    Use --out, not `--json > file`: --out writes the file only after the
+#    audit completed, so a failed run (exit 1) leaves no file at all. A shell
+#    redirect would leave a 0-byte file that looks like an export.
+npm run audit:cognito-custom-attributes -- --dry-run --out cognito-audit-$(date -u +%Y%m%dT%H%M%SZ).json
 npm run audit:cognito-custom-attributes            # human-readable table
 
 # 2. Review ROLE_MISMATCH rows with several groups and every ORG_MISSING row;
@@ -83,11 +95,14 @@ npm run audit:cognito-custom-attributes -- --apply
 npm run audit:cognito-custom-attributes
 ```
 
+If step 1 exits `1`, no export file exists; do not proceed to step 3 until the
+dry-run completes.
+
 Affected users are signed out and must log in again.
 
 ## Rollback
 
-Deleted attribute values are not recoverable from Cognito. The `--json` export
+Deleted attribute values are not recoverable from Cognito. The `--out` export
 from step 1 holds the previous `custom:role` / `custom:organization` for every
 finding; restore an individual value with
 `aws cognito-idp admin-update-user-attributes --user-pool-id $USER_POOL_ID
