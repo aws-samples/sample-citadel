@@ -5,9 +5,12 @@
   "high": true,
   "critical": true,
   "allowlist": [
-    "GHSA-rgw5-rvv9-x895"
+    "GHSA-rgw5-rvv9-x895",
+    "GHSA-6j4f-fj2g-mc7p",
+    "GHSA-q2hr-2g5m-vwhr",
+    "GHSA-qhr7-859c-m2p7"
   ],
   "report": true,
   "skip-dev": false,
-  "_comment": "Carries GHSA-rgw5-rvv9-x895 (brace-expansion, bundled in aws-cdk-lib, unreachable by overrides). GHSA-mh99-v99m-4gvg resolved by the aws-cdk-lib 2.264.0 bump (bundled subtree now 5.0.8). GHSA-qwww-vcr4-c8h2 (react-router) fully resolved since PR #67/#70; entry removed. See audit-ci-allowlist-justifications.md for details and remediation path."
+  "_comment": "Carries GHSA-rgw5-rvv9-x895, GHSA-6j4f-fj2g-mc7p, GHSA-q2hr-2g5m-vwhr, GHSA-qhr7-859c-m2p7 (all brace-expansion, bundled in aws-cdk-lib@2.264.0, unreachable by overrides). GHSA-mh99-v99m-4gvg resolved by the aws-cdk-lib 2.264.0 bump (bundled subtree now 5.0.8). GHSA-qwww-vcr4-c8h2 (react-router) fully resolved since PR #67/#70; entry removed. See audit-ci-allowlist-justifications.md for details and remediation path."
 }

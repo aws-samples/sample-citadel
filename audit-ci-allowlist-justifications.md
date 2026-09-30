@@ -109,3 +109,45 @@ and `8.3.0` respectively). `frontend/package.json` declares `"react-router-dom":
 merged into main with no conflicts, so that deferred cleanup is applied here: the entry and its
 stale `_comment` claim have been removed from the root `.audit-ci.json` allowlist. The advisory
 is fully resolved with no remaining allowlist entries anywhere in the repo.
+
+
+## GHSA-6j4f-fj2g-mc7p — brace-expansion (HIGH DoS via uncontrolled recursion in parseCommaParts)
+
+**Added: 2026-09-30** | **revisitBy: 2026-11-30**
+
+**Affected instances:**
+- `node_modules/aws-cdk-lib/node_modules/brace-expansion@5.0.8` (`inBundle: true`; advisory range `4.0.0 - 5.0.11`, fix `5.0.12`)
+
+**Why remediation is blocked:**
+Same bundled `aws-cdk-lib@2.264.0` copy as GHSA-rgw5-rvv9-x895. npm `overrides` cannot
+rewrite `bundleDependencies` content. The override `aws-cdk-lib.minimatch.brace-expansion:
+">=5.0.12 <6"` is structurally ineffective against this bundled copy.
+
+**Exposure & Risk Acceptance:**
+- Build-time-only, non-deployed devDependency (CDK synth). DoS-only; requires attacker-controlled
+  unbounded brace-expansion syntax. Not exposed to runtime/production traffic.
+- Acceptance: risk is minimal; no remediation path until aws-cdk-lib ships >=5.0.12.
+
+## GHSA-q2hr-2g5m-vwhr — brace-expansion (MODERATE Quadratic-time expansion of `{a},b}` rewrite)
+
+**Added: 2026-09-30** | **revisitBy: 2026-11-30**
+
+**Affected instances:**
+- `node_modules/aws-cdk-lib/node_modules/brace-expansion@5.0.8` (`inBundle: true`; advisory range `4.0.0 - 5.0.11`, fix `5.0.12`)
+
+**Why remediation is blocked:**
+Same bundled aws-cdk-lib copy. See GHSA-6j4f-fj2g-mc7p justification above.
+
+**Exposure & Risk Acceptance:** Same as GHSA-6j4f-fj2g-mc7p — build-time-only, DoS-only, minimal risk.
+
+## GHSA-qhr7-859c-m2p7 — brace-expansion (HIGH DoS via uncontrolled recursion on nested brace groups)
+
+**Added: 2026-09-30** | **revisitBy: 2026-11-30**
+
+**Affected instances:**
+- `node_modules/aws-cdk-lib/node_modules/brace-expansion@5.0.8` (`inBundle: true`; advisory range `4.0.0 - 5.0.11`, fix `5.0.12`)
+
+**Why remediation is blocked:**
+Same bundled aws-cdk-lib copy. See GHSA-6j4f-fj2g-mc7p justification above.
+
+**Exposure & Risk Acceptance:** Same as GHSA-6j4f-fj2g-mc7p — build-time-only, DoS-only, minimal risk.
