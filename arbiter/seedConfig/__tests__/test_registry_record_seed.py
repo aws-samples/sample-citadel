@@ -10,15 +10,18 @@ payload shape (arbiter/fabricator/index.py) — while keeping the existing DDB
 row for worker dispatch.
 
 Contract under test:
-  - When REGISTRY_ID + REGISTRY_ENABLED are present, the handler creates one
-    Registry record named 'demo-echo-agent' via CreateRegistryRecord with the
-    fabricator-shaped CUSTOM descriptor (categories/icon/state/manifest/
-    config/createdBy/orgId), state 'active', config.filename pointing at the
-    S3 module key, and a non-empty description.
-  - Like the fabricator, the record is left in its post-create DRAFT state —
+  - When REGISTRY_ID + REGISTRY_ENABLED are present, the handler creates
+    Registry records for both 'fabricator' and 'demo-echo-agent' via
+    CreateRegistryRecord with the fabricator-shaped CUSTOM descriptor
+    (categories/icon/state/manifest/config/createdBy/orgId), state 'active',
+    config.filename pointing at the S3 module key, and a non-empty description.
+  - Like the fabricator, records are left in their post-create DRAFT state —
     no UpdateRegistryRecordStatus / SubmitRegistryRecordForApproval calls.
-  - IDEMPOTENT: when a record with that name already exists (lookup first),
+  - IDEMPOTENT: when a record with the same name already exists (lookup first),
     CreateRegistryRecord is skipped.
+  - Registry linkage fields (registryStatus, registryRecordId, createdAt)
+    are stamped on the DDB items when registry resolves successfully.
+  - When registry is unavailable/denied, linkage fields are ABSENT.
   - Skipped entirely (no registry API calls) when the registry env vars are
     absent, and when catalog.registry_client is unavailable (DDB-only envs).
   - DDB row seeding is unchanged in all cases.
@@ -59,7 +62,7 @@ def _ctx():
     return type("Ctx", (), {"log_stream_name": "stream"})()
 
 
-def _make_registry_client(record_id="abc123def456"):
+def _make_registry_client(record_id="abc123def456", created_at="2026-09-29T00:00:00Z"):
     client = MagicMock(name="agent-registry-control-mock")
     client.create_registry_record.return_value = {
         "recordArn": (
@@ -68,6 +71,7 @@ def _make_registry_client(record_id="abc123def456"):
         ),
         "recordId": record_id,
         "status": "DRAFT",
+        "createdAt": created_at,
     }
     return client
 
@@ -107,32 +111,48 @@ def _run_handler(registry_env, existing_records, registry_client):
 
 
 class TestRegistryRecordCreated:
-    def test_creates_record_with_fabricator_shaped_payload(self):
+    def test_creates_records_for_fabricator_and_echo(self):
         client = _make_registry_client()
         _, _, mock_send, list_mock = _run_handler(
             registry_env=True, existing_records=[], registry_client=client
         )
 
         assert mock_send.call_args[0][2] == "SUCCESS"
-        list_mock.assert_called_once_with(REGISTRY_ID)
-        client.create_registry_record.assert_called_once()
-        kwargs = client.create_registry_record.call_args.kwargs
+        # list_agent_records called once per agent that goes through registry
+        assert list_mock.call_count == 2
+        # create called for both fabricator and echo
+        assert client.create_registry_record.call_count == 2
+        created_names = [
+            c.kwargs["name"]
+            for c in client.create_registry_record.call_args_list
+        ]
+        assert "fabricator" in created_names
+        assert "demo-echo-agent" in created_names
+
+    def test_echo_record_has_fabricator_shaped_payload(self):
+        client = _make_registry_client()
+        _run_handler(
+            registry_env=True, existing_records=[], registry_client=client
+        )
+        # Find the echo-agent create call
+        echo_call = [
+            c for c in client.create_registry_record.call_args_list
+            if c.kwargs["name"] == "demo-echo-agent"
+        ]
+        assert len(echo_call) == 1
+        kwargs = echo_call[0].kwargs
 
         assert kwargs["registryId"] == REGISTRY_ID
-        assert kwargs["name"] == "demo-echo-agent"
         assert kwargs["displayName"] == "demo-echo-agent"
         assert isinstance(kwargs["description"], str) and kwargs["description"]
         assert kwargs["recordType"] == "CUSTOM"
 
         metadata = json.loads(kwargs["descriptors"]["custom"]["data"])
-        # Fabricator descriptor shape (store_agent_config_registry).
         for field in (
             "categories", "icon", "state", "manifest", "config",
             "createdBy", "orgId",
         ):
             assert field in metadata, f"missing descriptor field: {field}"
-        # READY flip gate: updateAgentBinding requires descriptor state
-        # 'active' before a binding may transition to READY.
         assert metadata["state"] == "active"
         assert metadata["config"]["name"] == "demo-echo-agent"
         assert metadata["config"]["filename"] == "demo_echo_agent.py"
@@ -163,6 +183,94 @@ class TestRegistryRecordCreated:
         assert len(echo) == 1
         assert echo[0]["state"] == "active"
         assert echo[0]["config"]["filename"] == "demo_echo_agent.py"
+
+
+class TestRegistryLinkageStamped:
+    """Verify that resolved registry records stamp linkage fields on DDB items."""
+
+    def test_echo_agent_carries_linkage_fields(self):
+        client = _make_registry_client(
+            record_id="echo-rec-001", created_at="2026-09-29T12:00:00Z"
+        )
+        mock_table, _, _, _ = _run_handler(
+            registry_env=True, existing_records=[], registry_client=client
+        )
+        items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
+        echo = [i for i in items if i.get("agentId") == "demo-echo-agent"][0]
+        assert echo["registryStatus"] == "DRAFT"
+        assert echo["registryRecordId"] == "echo-rec-001"
+        assert echo["createdAt"] == "2026-09-29T12:00:00Z"
+
+    def test_fabricator_carries_linkage_fields(self):
+        client = _make_registry_client(
+            record_id="fab-rec-001", created_at="2026-09-29T12:00:00Z"
+        )
+        mock_table, _, _, _ = _run_handler(
+            registry_env=True, existing_records=[], registry_client=client
+        )
+        items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
+        fab = [i for i in items if i.get("agentId") == "fabricator"][0]
+        assert fab["registryStatus"] == "DRAFT"
+        assert fab["registryRecordId"] == "fab-rec-001"
+        assert fab["createdAt"] == "2026-09-29T12:00:00Z"
+
+    def test_linkage_from_existing_approved_record(self):
+        """When a record already exists as APPROVED, stamp that status."""
+        client = _make_registry_client()
+        existing = [
+            {"recordId": "approved-001", "name": "demo-echo-agent",
+             "status": "APPROVED", "createdAt": "2026-01-01T00:00:00Z"},
+            {"recordId": "approved-002", "name": "fabricator",
+             "status": "APPROVED", "createdAt": "2026-01-01T00:00:00Z"},
+        ]
+        mock_table, _, _, _ = _run_handler(
+            registry_env=True, existing_records=existing,
+            registry_client=client,
+        )
+        items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
+        echo = [i for i in items if i.get("agentId") == "demo-echo-agent"][0]
+        assert echo["registryStatus"] == "APPROVED"
+        assert echo["registryRecordId"] == "approved-001"
+        assert echo["createdAt"] == "2026-01-01T00:00:00Z"
+
+    def test_registry_denied_leaves_linkage_absent(self):
+        """When registry is unavailable, the three linkage fields are absent."""
+        client = _make_registry_client()
+        mock_table, _, _, _ = _run_handler(
+            registry_env=False, existing_records=[], registry_client=client
+        )
+        items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
+        echo = [i for i in items if i.get("agentId") == "demo-echo-agent"][0]
+        fab = [i for i in items if i.get("agentId") == "fabricator"][0]
+        for item in (echo, fab):
+            assert "registryStatus" not in item
+            assert "registryRecordId" not in item
+            assert "createdAt" not in item
+
+    def test_rerun_idempotent_linkage(self):
+        """Re-run with existing records still stamps linkage, no duplicates."""
+        client = _make_registry_client()
+        existing = [
+            {"recordId": "abc123", "name": "demo-echo-agent",
+             "status": "APPROVED", "createdAt": "2026-01-01T00:00:00Z"},
+            {"recordId": "fab456", "name": "fabricator",
+             "status": "DRAFT", "createdAt": "2026-02-01T00:00:00Z"},
+        ]
+        mock_table, _, mock_send, _ = _run_handler(
+            registry_env=True, existing_records=existing,
+            registry_client=client,
+        )
+        assert mock_send.call_args[0][2] == "SUCCESS"
+        # No creates — both found by name
+        client.create_registry_record.assert_not_called()
+        # Linkage still stamped from existing records
+        items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
+        echo = [i for i in items if i.get("agentId") == "demo-echo-agent"][0]
+        assert echo["registryStatus"] == "APPROVED"
+        assert echo["registryRecordId"] == "abc123"
+        fab = [i for i in items if i.get("agentId") == "fabricator"][0]
+        assert fab["registryStatus"] == "DRAFT"
+        assert fab["registryRecordId"] == "fab456"
 
 
 class TestRegistrySkippedWhenNotConfigured:
@@ -216,14 +324,16 @@ class TestIdempotency:
             {"recordId": "zzz999zzz999", "name": "some-other-agent",
              "status": "DRAFT", "updatedAt": None},
             {"recordId": "abc123def456", "name": "demo-echo-agent",
-             "status": "DRAFT", "updatedAt": None},
+             "status": "DRAFT", "updatedAt": None, "createdAt": None},
+            {"recordId": "fab999fab999", "name": "fabricator",
+             "status": "DRAFT", "updatedAt": None, "createdAt": None},
         ]
         mock_table, _, mock_send, list_mock = _run_handler(
             registry_env=True, existing_records=existing,
             registry_client=client,
         )
         assert mock_send.call_args[0][2] == "SUCCESS"
-        list_mock.assert_called_once_with(REGISTRY_ID)
+        assert list_mock.call_count == 2
         client.create_registry_record.assert_not_called()
         # DDB seeding unchanged.
         assert mock_table.put_item.call_count == 5
@@ -239,4 +349,5 @@ class TestIdempotency:
             registry_env=True, existing_records=existing,
             registry_client=client,
         )
-        client.create_registry_record.assert_called_once()
+        # Both fabricator and echo should attempt create (no exact match)
+        assert client.create_registry_record.call_count == 2

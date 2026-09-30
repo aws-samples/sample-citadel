@@ -12,6 +12,8 @@ Contract under test:
     handler still returns SUCCESS to CloudFormation.
   - DynamoDB rows (fabricator, demo-echo-agent, authority units,
     constitutional layer) are still written when registry seeding is denied.
+  - When registry is denied, linkage fields (registryStatus,
+    registryRecordId, createdAt) are ABSENT from agent DDB items.
   - The SUCCESS response data carries `registrySeeded: False` when the
     registry create was denied/unavailable, and `registrySeeded: True` when
     it succeeded.
@@ -71,6 +73,7 @@ def _run_handler(create_side_effect, existing_records=None):
         registry_client.create_registry_record.return_value = {
             "recordId": "abc123def456",
             "status": "DRAFT",
+            "createdAt": "2026-09-29T00:00:00Z",
         }
 
     def _client_factory(service_name, *args, **kwargs):
@@ -113,6 +116,20 @@ class TestRegistryDeniedIsNonFatal:
         assert "fabricator" in agent_ids
         assert "demo-echo-agent" in agent_ids
 
+    def test_access_denied_leaves_linkage_absent(self):
+        """When registry create is denied, linkage fields must not appear."""
+        mock_table, _, _ = _run_handler(
+            create_side_effect=_client_error("AccessDeniedException"),
+        )
+        items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
+        for agent_id in ("fabricator", "demo-echo-agent"):
+            agent = [i for i in items if i.get("agentId") == agent_id][0]
+            assert "registryStatus" not in agent, (
+                f"{agent_id} must not have registryStatus when denied"
+            )
+            assert "registryRecordId" not in agent
+            assert "createdAt" not in agent
+
     def test_resource_not_found_returns_success(self):
         _, mock_send, _ = _run_handler(
             create_side_effect=_client_error("ResourceNotFoundException"),
@@ -127,7 +144,8 @@ class TestRegistryDeniedIsNonFatal:
         assert mock_send.call_args[0][2] == "SUCCESS"
         data = mock_send.call_args[0][3]
         assert data["registrySeeded"] is True
-        client.create_registry_record.assert_called_once()
+        # Both fabricator and echo get a create call
+        assert client.create_registry_record.call_count == 2
 
     def test_ddb_failure_still_fails_the_deploy(self):
         """DynamoDB/S3 seeding stays authoritative — its own errors must
@@ -143,8 +161,11 @@ class TestRegistryDeniedIsNonFatal:
         env_patch["REGISTRY_ID"] = REGISTRY_ID
         env_patch["REGISTRY_ENABLED"] = "true"
 
+        list_mock = MagicMock(return_value=[])
+
         with patch.dict(os.environ, env_patch, clear=True), \
              patch("index.boto3") as mock_boto3, \
+             patch("catalog.registry_client.list_agent_records", list_mock), \
              patch("cfnresponse.send") as mock_send:
             mock_boto3.resource.return_value = mock_dynamodb
             mock_boto3.client.return_value = MagicMock()

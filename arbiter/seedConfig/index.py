@@ -23,6 +23,12 @@ DEMO_ECHO_AGENT_ID = 'demo-echo-agent'
 DEMO_ECHO_MODULE_FILENAME = 'demo_echo_agent.py'
 DEMO_ECHO_DESCRIPTION = 'Demo agent that echoes its input back as output.'
 
+# Fabricator agent — creates capabilities that may be missing.
+FABRICATOR_AGENT_ID = 'fabricator'
+FABRICATOR_DESCRIPTION = (
+    'Creates a capability that may be missing from the set of available tools.'
+)
+
 # ---------------------------------------------------------------------------
 # Idempotency-seam smoke agent — DIAGNOSTIC FIXTURE, never a product agent.
 #
@@ -47,24 +53,15 @@ def _seed_agent_registry_record(agent_id, description, module_filename, worker_q
     Generalized from the original demo-echo-only helper so the same
     dual-store contract (DDB row for worker dispatch + AgentCore Registry
     record for the app-publish readiness gate) can be reused for any
-    seeded worker agent — currently ``demo-echo-agent`` and the
-    diagnostic ``smoke-idempotency-agent`` fixture.
+    seeded worker agent — currently ``demo-echo-agent``, ``fabricator``,
+    and the diagnostic ``smoke-idempotency-agent`` fixture.
 
-    The DDB AGENT_CONFIG_TABLE row alone is not enough for the out-of-box
-    demo flow: app publish gates on the agent BINDING flipping DESIGN→READY,
-    and updateAgentBinding (backend/src/lambda/registry-agent-record-
-    resolver.ts) resolves the target agent BY NAME in the AgentCore Registry
-    and requires the record descriptor's ``state`` to be 'active'. This
-    helper mirrors the fabricator's ``store_agent_config_registry`` payload
-    (arbiter/fabricator/index.py): a CUSTOM-descriptor record whose
-    inlineContent carries categories/icon/state/manifest/config/createdBy/
-    orgId. Deliberate deviation: ``state`` is 'active' (these agents are
-    seeded immediately runnable, matching their DDB rows) where fabricated
-    agents land 'inactive' pending activation. Like the fabricator, the
-    record is left in its post-create DRAFT status — no
-    UpdateRegistryRecordStatus/Submit call (the registry rejects a
-    DRAFT→DRAFT transition, and the READY gate reads descriptor state, not
-    record status).
+    The DDB AGENT_CONFIG_TABLE row alone is not enough for the dispatch
+    approval gate: the gate evaluates ``registryStatus``,
+    ``registryRecordId``, and ``createdAt`` fields on the agent item.
+    This helper resolves (lookup-by-name or create) the registry record
+    and returns enough info for the caller to stamp those linkage fields
+    on the DDB item.
 
     Guards:
       - No-op (with a log) when REGISTRY_ID/REGISTRY_ENABLED are unset —
@@ -82,8 +79,9 @@ def _seed_agent_registry_record(agent_id, description, module_filename, worker_q
         this handler performs elsewhere stays authoritative and unaffected.
 
     Returns:
-        True if a registry record was created (or already existed), False
-        if the seed was skipped or denied for any reason.
+        A dict ``{'recordId': str, 'status': str, 'createdAt': str|None}``
+        when a record was created or already existed, or ``None`` if the
+        seed was skipped or denied for any reason.
     """
     registry_id = os.environ.get('REGISTRY_ID')
     registry_enabled = os.environ.get('REGISTRY_ENABLED')
@@ -92,7 +90,7 @@ def _seed_agent_registry_record(agent_id, description, module_filename, worker_q
             'Registry not configured (REGISTRY_ID/REGISTRY_ENABLED unset) — '
             f'skipping {agent_id} registry record seed'
         )
-        return False
+        return None
 
     try:
         # Shared client from the arbiter catalog layer (same import pattern
@@ -104,7 +102,7 @@ def _seed_agent_registry_record(agent_id, description, module_filename, worker_q
             'WARNING: catalog.registry_client unavailable (catalog layer '
             f'not attached?) — skipping {agent_id} registry record seed'
         )
-        return False
+        return None
 
     # Idempotency lookup first (mirrors the fabricator's
     # _find_existing_record_id): exact name match on the record name.
@@ -117,7 +115,11 @@ def _seed_agent_registry_record(agent_id, description, module_filename, worker_q
                 f"Registry record '{agent_id}' already exists "
                 f"(recordId={record.get('recordId')}); skipping create"
             )
-            return True
+            return {
+                'recordId': record.get('recordId'),
+                'status': record.get('status'),
+                'createdAt': record.get('createdAt'),
+            }
 
     # Fabricator-shaped executable config + manifest + custom metadata
     # (see store_agent_config_registry in arbiter/fabricator/index.py).
@@ -182,13 +184,17 @@ def _seed_agent_registry_record(agent_id, description, module_filename, worker_q
             f"{agent_id} (errorCode={error_code}) — continuing without a "
             "registry record; DynamoDB/S3 seeding is unaffected"
         )
-        return False
+        return None
     print(
         f"Created registry record for {agent_id} "
         f"(status={response.get('status')}); leaving it in its post-create "
         'DRAFT status like fabricator-created records'
     )
-    return True
+    return {
+        'recordId': response.get('recordId'),
+        'status': response.get('status'),
+        'createdAt': response.get('createdAt'),
+    }
 
 
 def _seed_demo_agent_registry_record(worker_queue_url):
@@ -196,12 +202,36 @@ def _seed_demo_agent_registry_record(worker_queue_url):
     kept so the demo-echo-agent call site (and its existing tests) do not
     need to change shape.
 
-    Returns the underlying seeder's success flag (True if a record was
-    created or already existed, False if skipped/denied)."""
+    Returns the underlying seeder's record-info dict (or None)."""
     return _seed_agent_registry_record(
         DEMO_ECHO_AGENT_ID, DEMO_ECHO_DESCRIPTION, DEMO_ECHO_MODULE_FILENAME,
         worker_queue_url,
     )
+
+
+def _stamp_registry_linkage(item, record_info):
+    """Stamp registry linkage fields on a DynamoDB agent item dict.
+
+    When *record_info* is a dict (registry resolved successfully), adds:
+      - ``registryStatus``   — the raw record status (e.g. 'DRAFT', 'APPROVED')
+      - ``registryRecordId`` — the record id
+      - ``createdAt``        — the record's createdAt ISO timestamp, but ONLY
+        when the item does not already carry a ``createdAt`` value
+
+    When *record_info* is None (registry unavailable/denied), the three
+    fields are left **absent** — never fabricate APPROVED.
+
+    Mutates *item* in place and returns it for convenience.
+    """
+    if record_info is None:
+        return item
+    if record_info.get('status') is not None:
+        item['registryStatus'] = record_info['status']
+    if record_info.get('recordId') is not None:
+        item['registryRecordId'] = record_info['recordId']
+    if 'createdAt' not in item and record_info.get('createdAt') is not None:
+        item['createdAt'] = record_info['createdAt']
+    return item
 
 
 def _seed_smoke_idempotency_agent(table, worker_queue_url, agent_bucket):
@@ -282,6 +312,11 @@ def _seed_smoke_idempotency_agent(table, worker_queue_url, agent_bucket):
     )
 
 
+def _registry_seeded(record_info):
+    """Return True if *record_info* represents a resolved registry record."""
+    return record_info is not None
+
+
 def handler(event, context):
     print('Event:', json.dumps(event))
     
@@ -322,7 +357,17 @@ def handler(event, context):
             'state': 'active',
             'categories': ['built-in', 'developer']
         }
-        
+
+        # Registry record for fabricator (same create-if-missing + submit
+        # treatment as demo-echo-agent). Uses fabricator_queue_url as the
+        # action target; module_filename is empty — fabricator is not a
+        # file-backed worker module.
+        fabricator_record = _seed_agent_registry_record(
+            FABRICATOR_AGENT_ID, FABRICATOR_DESCRIPTION, '',
+            fabricator_queue_url,
+        )
+        _stamp_registry_linkage(fabricator_agent, fabricator_record)
+
         table.put_item(Item=fabricator_agent)
         print(f"Seeded agent: fabricator with queue: {fabricator_queue_url}")
 
@@ -360,8 +405,18 @@ def handler(event, context):
             'state': 'active',
             'categories': ['built-in', 'worker', 'demo'],
         }
+
+        # Dual-store seam: resolve the AgentCore Registry record (lookup or
+        # create) BEFORE writing the DDB row so the linkage fields land in a
+        # single put_item. Non-fatal: any denial or unavailability is caught
+        # inside the helper and only lowers registry_seeded.
+        echo_record = _seed_demo_agent_registry_record(worker_queue_url)
+        _stamp_registry_linkage(echo_agent, echo_record)
+
         table.put_item(Item=echo_agent)
         print(f"Seeded agent: {DEMO_ECHO_AGENT_ID} with queue: {worker_queue_url}")
+
+        registry_seeded = _registry_seeded(echo_record)
 
         # Upload the echo module so the config's ``filename`` is genuinely
         # reachable. The module is bundled next to this handler in the Lambda
@@ -393,14 +448,6 @@ def handler(event, context):
                 "upload (partial deploy?). Agent config still seeded."
             )
 
-        # Dual-store seam: the DDB row above serves worker dispatch; the
-        # AgentCore Registry record below is what the app-publish readiness
-        # gate (agent binding DESIGN→READY) resolves by name. Guarded +
-        # idempotent — see the helper docstring. Non-fatal: any denial or
-        # unavailability is caught inside the helper and only lowers
-        # registry_seeded; DDB/S3 seeding above already happened.
-        registry_seeded = _seed_demo_agent_registry_record(worker_queue_url)
-
         # ------------------------------------------------------------------
         # Idempotency-seam smoke agent — DIAGNOSTIC FIXTURE, non-prod only.
         # ------------------------------------------------------------------
@@ -413,7 +460,7 @@ def handler(event, context):
             smoke_registry_seeded = _seed_smoke_idempotency_agent(
                 table, worker_queue_url, agent_bucket
             )
-            registry_seeded = registry_seeded and smoke_registry_seeded
+            registry_seeded = registry_seeded and _registry_seeded(smoke_registry_seeded)
         else:
             print(
                 "SMOKE_FIXTURES_ENABLED unset — skipping smoke-idempotency "
