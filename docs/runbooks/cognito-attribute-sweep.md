@@ -55,14 +55,21 @@ write failed or a fatal error.
 Running `--apply` against a pool whose client still allows self-writes only
 cleans up until the next self-write. Check each environment:
 
-1. Read the deployed sha from the provenance manifest written by `deploy.sh`
-   (`deployment-manifest.json` at the repo root of the clone that deployed,
-   field `git_sha`; gitignored, so read it on the deploy host). If that file is
-   not available, use the CloudFormation deploy timestamp as a weaker signal:
-   `aws cloudformation describe-stacks --stack-name citadel-backend-<env>
-   --query 'Stacks[0].LastUpdatedTime'` must be after the commit dates of
-   `1c025bc` and `39b2de8` (`git show -s --format=%ci <sha>`). Stack tags carry
-   `Project`/`Environment`/`Team` only, not a sha.
+1. Read the deployed sha from the `GitSha` stack tag (set by `deploy.sh` on
+   every stack; see "Deployment provenance" in `docs/DEPLOYMENT.md`):
+   ```bash
+   deployed_sha=$(aws cloudformation describe-stacks --stack-name citadel-backend-<env> \
+     --query "Stacks[0].Tags[?Key=='GitSha'].Value" --output text)
+   ```
+   If the tag is missing or reads `unknown` (stack last deployed before the tag
+   existed, or outside `deploy.sh`), fall back to the provenance manifest
+   written by `deploy.sh` (`deployment-manifest.json` at the repo root of the
+   clone that deployed, field `git_full_sha`/`git_sha`; gitignored, so read it
+   on the deploy host). As a last resort use the CloudFormation deploy
+   timestamp as a weaker signal: `aws cloudformation describe-stacks
+   --stack-name citadel-backend-<env> --query 'Stacks[0].LastUpdatedTime'` must
+   be after the commit dates of `1c025bc` and `39b2de8`
+   (`git show -s --format=%ci <sha>`).
 2. Verify the deployed sha contains both commits:
    ```bash
    git merge-base --is-ancestor 1c025bc <deployed_sha> && echo "1c025bc: ok"
