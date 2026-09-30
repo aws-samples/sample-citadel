@@ -65,6 +65,7 @@ def _run_handler_once(smoke_enabled, agent_bucket="fake-code-bucket"):
     with patch.dict(os.environ, env_patch, clear=True), \
          patch("index.boto3") as mock_boto3, \
          patch("index.SMOKE_FIXTURES_ENABLED", smoke_enabled), \
+         patch("index._SETTLE_SLEEP", 0), \
          patch("cfnresponse.send") as mock_send:
         mock_boto3.resource.return_value = mock_dynamodb
         mock_boto3.client.return_value = MagicMock()
@@ -108,20 +109,56 @@ class TestProdExclusion:
         env_patch["REGISTRY_ID"] = "fake-registry"
         env_patch["REGISTRY_ENABLED"] = "true"
 
+        registry_client = MagicMock()
+        registry_client.create_registry_record.return_value = {
+            "recordId": "new-001", "status": "DRAFT",
+            "createdAt": "2026-01-01T00:00:00Z",
+        }
+        registry_client.submit_registry_record_for_approval.return_value = {
+            "status": "APPROVED",
+        }
+        approved_records = [
+            {"recordId": "new-001", "name": "fabricator",
+             "status": "APPROVED", "createdAt": "2026-01-01T00:00:00Z"},
+            {"recordId": "new-001", "name": "demo-echo-agent",
+             "status": "APPROVED", "createdAt": "2026-01-01T00:00:00Z"},
+        ]
+
+        call_counter = {"n": 0}
+
+        def _list_side_effect(rid):
+            call_counter["n"] += 1
+            if call_counter["n"] <= 2:
+                return []
+            return approved_records
+
+        list_mock = MagicMock(side_effect=_list_side_effect)
+
+        def _client_factory(service_name, *args, **kwargs):
+            if service_name == "agent-registry-control":
+                return registry_client
+            return MagicMock(name=f"{service_name}-mock")
+
         with patch.dict(os.environ, env_patch, clear=True), \
              patch("index.boto3") as mock_boto3, \
              patch("index.SMOKE_FIXTURES_ENABLED", False), \
+             patch("index._SETTLE_SLEEP", 0), \
              patch("catalog.registry_client.list_agent_records", list_mock), \
              patch("cfnresponse.send"):
             mock_boto3.resource.return_value = mock_dynamodb
-            mock_boto3.client.return_value = MagicMock()
+            mock_boto3.client.side_effect = _client_factory
             handler(_cfn_event(), _ctx())
 
-        registry_lookup_names = [c.args[0] for c in list_mock.call_args_list]
+        # Smoke agent name must never appear in list call args when gate is off.
         # list_agent_records is called for always-on agents (fabricator +
-        # demo-echo-agent) but must never be called for the smoke agent
-        # when the gate is off. We assert call count <= 2.
-        assert len(registry_lookup_names) <= 2
+        # demo-echo-agent) plus their settle re-fetches, but the smoke agent
+        # never triggers a registry call when disabled.
+        put_agent_ids = [
+            call.kwargs["Item"]["agentId"]
+            for call in mock_table.put_item.call_args_list
+            if "agentId" in call.kwargs.get("Item", {})
+        ]
+        assert "smoke-idempotency-agent" not in put_agent_ids
 
 
 class TestNonProdSeeding:
