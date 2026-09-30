@@ -535,7 +535,7 @@ describe("eval-resolver", () => {
         identity: {
           sub: `user-${role}`,
           username: role,
-          "custom:role": role,
+          "cognito:groups": [role],
           "custom:organization": "org-1",
         },
       };

@@ -32,7 +32,10 @@ import {
   UpdateCommand,
   QueryCommand,
 } from "@aws-sdk/lib-dynamodb";
-import { EventBridgeClient, PutEventsCommand } from "@aws-sdk/client-eventbridge";
+import {
+  EventBridgeClient,
+  PutEventsCommand,
+} from "@aws-sdk/client-eventbridge";
 import { mockClient } from "aws-sdk-client-mock";
 import type { AuthContext } from "../../types";
 
@@ -84,7 +87,7 @@ function crossOrgEvent(
     identity: {
       sub: `user-${role}-org-b`,
       username: role,
-      "custom:role": role,
+      "cognito:groups": [role],
       "custom:organization": "org-b",
     },
   };
@@ -101,7 +104,7 @@ function sameOrgEvent(
     identity: {
       sub: `user-${role}-org-a`,
       username: role,
-      "custom:role": role,
+      "cognito:groups": [role],
       "custom:organization": "org-a",
     },
   };

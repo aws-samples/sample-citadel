@@ -93,7 +93,7 @@ const PUBLIC_TARGET = 'https://agent.example.com/invoke';
 const PRIVATE_TARGET = 'https://10.0.0.5/invoke';
 
 const adminEvent = { identity: { claims: { 'custom:role': 'admin' }, sub: 'admin-1' } };
-const architectEvent = { identity: { claims: { 'custom:role': 'architect' }, sub: 'arch-1' } };
+const architectEvent = { identity: { claims: { 'cognito:groups': ['architect'] }, sub: 'arch-1' } };
 const developerEvent = { identity: { claims: { 'custom:organization': ORG }, sub: 'dev-1' } };
 
 function baseMeta(overrides: Record<string, unknown> = {}): Record<string, unknown> {

@@ -18,21 +18,19 @@ import { mockClient } from "aws-sdk-client-mock";
 // extractOrgFromEvent hits Cognito; stub it to a deterministic caller org.
 // deriveRoles is given a lightweight real-ish implementation (rather than a
 // static stub) so role-gated tests (e.g. "architect role is permitted")
-// still see the fixture's custom:role claim, while admin remains
-// group-authoritative per finding 7aa877f8 — mirrors the real
+// still see the fixture's cognito:groups claim — every role is
+// group-authoritative (finding 7aa877f8 for admin, CIT-213 for the rest);
+// the client-writable custom:role claim is never read. Mirrors the real
 // auth-event.ts derivation without pulling in its Cognito dependency.
 jest.mock("../../utils/auth-event", () => ({
   extractOrgFromEvent: jest.fn(),
   deriveRoles: jest.fn((event: unknown) => {
     const identity =
       (event as { identity?: Record<string, unknown> })?.identity || {};
-    const claimRole = identity["custom:role"] as string | undefined;
     const groups = identity["cognito:groups"];
-    const isGroupAdmin = Array.isArray(groups) && groups.includes("admin");
-    const roles: string[] = [];
-    if (claimRole && claimRole !== "admin") roles.push(claimRole);
-    if (isGroupAdmin) roles.push("admin");
-    return roles;
+    return Array.isArray(groups)
+      ? Array.from(new Set(groups.filter((g) => typeof g === "string")))
+      : [];
   }),
 }));
 import { extractOrgFromEvent } from "../../utils/auth-event";
@@ -57,7 +55,7 @@ function architectEvent(inputOverrides: Record<string, unknown> = {}) {
     identity: {
       sub: "user-alice",
       username: "alice",
-      "custom:role": "architect",
+      "cognito:groups": ["architect"],
     },
     arguments: {
       input: {
@@ -74,7 +72,7 @@ describe("decideToolApproval — authz", () => {
   test("missing tool:approve permission ⇒ Unauthorized (developer role)", async () => {
     const event = {
       info: { fieldName: "decideToolApproval" },
-      identity: { sub: "u", username: "u", "custom:role": "developer" },
+      identity: { sub: "u", username: "u", "cognito:groups": ["developer"] },
       arguments: {
         input: { workflowDefinitionId: "w", nodeId: "n", toolName: "t" },
       },
@@ -137,7 +135,11 @@ describe("decideToolApproval — decidedBy is server-derived (hostile-cast red p
     (extractOrgFromEvent as jest.Mock).mockResolvedValue(CALLER_ORG);
     const event = {
       info: { fieldName: "decideToolApproval" },
-      identity: { sub: "sub-123", username: "bob", "custom:role": "architect" },
+      identity: {
+        sub: "sub-123",
+        username: "bob",
+        "cognito:groups": ["architect"],
+      },
       arguments: {
         input: { workflowDefinitionId: "w", nodeId: "n", toolName: "t" },
       },

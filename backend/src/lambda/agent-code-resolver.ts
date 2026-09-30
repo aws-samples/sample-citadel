@@ -63,9 +63,9 @@ interface UpdateAgentCodeArgs {
  * id) as used by agent-config-resolver.ts) carry a flat `orgId` in their
  * customDescriptorContent, with NO per-record access/ACL map to check a
  * manifest role against. The available role signal is the caller's own
- * platform role claim (custom:role / cognito:groups), whose vocabulary is
- * admin / project manager / architect / developer (README.md "Access
- * Control"). 'architect' is chosen — not 'developer' — because overwriting
+ * platform role (the `cognito:groups` claim — never `custom:role`, CIT-213),
+ * whose vocabulary is admin / project manager / architect / developer
+ * (README.md "Access Control"). 'architect' is chosen — not 'developer' — because overwriting
  * an agent's Python source is equivalent to deploying code that will run
  * with that agent's scoped credentials and tool bindings (per the finding),
  * the same trust tier already required for comparable agent-lifecycle

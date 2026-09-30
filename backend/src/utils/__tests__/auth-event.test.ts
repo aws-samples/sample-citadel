@@ -2,9 +2,13 @@
  * Unit tests for the shared auth-event helper.
  *
  * Covers both code paths of `extractOrgFromEvent` (claim-first, Cognito
- * fallback) and the claim-only `isAdminFromEvent`. The Cognito fallback
- * path is asserted never to trigger when a claim is present — that
+ * fallback) and the group-only role derivation (`readGroups`,
+ * `isAdminFromEvent`, `hasRoleFromEvent`, `deriveRoles`). The Cognito
+ * fallback path is asserted never to trigger when a claim is present — that
  * guarantee is the reason this helper exists.
+ *
+ * finding 7aa877f8 made ADMIN group-only; CIT-213 extended that to every
+ * role: the `custom:role` claim is never read as an authorization signal.
  */
 import { mockClient } from "aws-sdk-client-mock";
 import {
@@ -15,6 +19,7 @@ import {
   extractOrgFromEvent,
   isAdminFromEvent,
   hasRoleFromEvent,
+  readGroups,
   assertRowOrg,
   CrossOrgAccessError,
   deriveRoles,
@@ -268,9 +273,49 @@ describe("auth-event", () => {
       expect(roles).toContain("admin");
     });
 
-    test("non-admin custom:role values (e.g. architect) are preserved for non-admin permission checks", () => {
+    // CIT-213: non-admin roles are group-authoritative too. A custom:role
+    // claim — even a non-admin value — is never read as a role signal.
+    test("KEY ESCALATION TEST (CIT-213): custom:role='architect' alone (no architect group) does NOT produce roles containing architect", () => {
       const event = { identity: { "custom:role": "architect" } };
+      expect(deriveRoles(event)).toEqual([]);
+    });
+
+    test("KEY ESCALATION TEST (CIT-213): custom:role='architect' with only the developer group yields exactly ['developer']", () => {
+      const event = {
+        identity: {
+          "custom:role": "architect",
+          "cognito:groups": ["developer"],
+        },
+      };
+      expect(deriveRoles(event)).toEqual(["developer"]);
+    });
+
+    test("non-admin group membership (e.g. architect) is returned as a role", () => {
+      const event = { identity: { "cognito:groups": ["architect"] } };
       expect(deriveRoles(event)).toEqual(["architect"]);
+    });
+
+    test("multiple group memberships are all returned as roles", () => {
+      const event = {
+        identity: { "cognito:groups": ["developer", "architect", "admin"] },
+      };
+      expect(deriveRoles(event).sort()).toEqual([
+        "admin",
+        "architect",
+        "developer",
+      ]);
+    });
+
+    test("comma-separated string groups claim is split and trimmed into roles", () => {
+      const event = { identity: { "cognito:groups": "architect, developer" } };
+      expect(deriveRoles(event)).toEqual(["architect", "developer"]);
+    });
+
+    test('honours groups at identity.claims["cognito:groups"] (proxy/IAM mode)', () => {
+      const event = {
+        identity: { claims: { "cognito:groups": ["project_manager"] } },
+      };
+      expect(deriveRoles(event)).toEqual(["project_manager"]);
     });
 
     test("no roles when neither claim is present", () => {
@@ -285,17 +330,68 @@ describe("auth-event", () => {
       const roles = deriveRoles(event);
       expect(roles.filter((r) => r === "admin").length).toBe(1);
     });
+
+    test("dedupes a group that appears twice in the claim", () => {
+      const event = {
+        identity: { "cognito:groups": ["architect", "architect"] },
+      };
+      expect(deriveRoles(event)).toEqual(["architect"]);
+    });
+  });
+
+  describe("readGroups (CIT-213 shared groups-claim reader)", () => {
+    test("returns the array shape verbatim (strings only)", () => {
+      const event = { identity: { "cognito:groups": ["admin", "developer"] } };
+      expect(readGroups(event)).toEqual(["admin", "developer"]);
+    });
+
+    test("drops non-string entries from an array claim", () => {
+      const event = {
+        identity: { "cognito:groups": ["admin", 42, null, "developer"] },
+      };
+      expect(readGroups(event)).toEqual(["admin", "developer"]);
+    });
+
+    test("splits and trims a comma-separated string, dropping empty segments", () => {
+      const event = { identity: { "cognito:groups": " admin , developer,, " } };
+      expect(readGroups(event)).toEqual(["admin", "developer"]);
+    });
+
+    test('reads identity.claims["cognito:groups"] when the direct shape is absent', () => {
+      const event = { identity: { claims: { "cognito:groups": "architect" } } };
+      expect(readGroups(event)).toEqual(["architect"]);
+    });
+
+    test("returns [] when the claim is absent, when identity is absent, and for a non-string/non-array value", () => {
+      expect(readGroups({ identity: { sub: "u1" } })).toEqual([]);
+      expect(readGroups({})).toEqual([]);
+      expect(readGroups(undefined)).toEqual([]);
+      expect(readGroups({ identity: { "cognito:groups": 7 } })).toEqual([]);
+    });
   });
 
   describe("hasRoleFromEvent", () => {
-    test('returns true when identity["custom:role"] equals the requested role', () => {
+    // CIT-213: the claim-compare path was deleted. A custom:role claim is
+    // never a role signal, whichever identity shape carries it.
+    test('KEY ESCALATION TEST (CIT-213): identity["custom:role"] equal to the requested role does NOT grant it', () => {
       const event = { identity: { "custom:role": "architect" } };
-      expect(hasRoleFromEvent(event, "architect")).toBe(true);
+      expect(hasRoleFromEvent(event, "architect")).toBe(false);
     });
 
-    test('returns true when identity.claims["custom:role"] equals the requested role', () => {
+    test('KEY ESCALATION TEST (CIT-213): identity.claims["custom:role"] equal to the requested role does NOT grant it', () => {
       const event = { identity: { claims: { "custom:role": "architect" } } };
-      expect(hasRoleFromEvent(event, "architect")).toBe(true);
+      expect(hasRoleFromEvent(event, "architect")).toBe(false);
+    });
+
+    test("KEY ESCALATION TEST (CIT-213): custom:role=architect with only the developer group does NOT grant architect", () => {
+      const event = {
+        identity: {
+          "custom:role": "architect",
+          "cognito:groups": ["developer"],
+        },
+      };
+      expect(hasRoleFromEvent(event, "architect")).toBe(false);
+      expect(hasRoleFromEvent(event, "developer")).toBe(true);
     });
 
     test("returns false when custom:role is a different role", () => {

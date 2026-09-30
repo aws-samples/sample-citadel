@@ -667,7 +667,7 @@ describe('execspec-resolver', () => {
         identity: {
           sub: `user-${role}`,
           username: role,
-          'custom:role': role,
+          'cognito:groups': [role],
           'custom:organization': 'org-shared',
         },
       };

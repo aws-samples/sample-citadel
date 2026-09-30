@@ -193,7 +193,7 @@ describe("handler — AppSync dispatch", () => {
     mockExtractOrgFromEvent.mockResolvedValue("org-1");
     const event = {
       info: { fieldName: "setPromotionPolicy" },
-      identity: { sub: "user-1", "custom:role": "developer" },
+      identity: { sub: "user-1", "cognito:groups": ["developer"] },
       arguments: { orgId: "org-1", input: { policy: {} } },
     };
 

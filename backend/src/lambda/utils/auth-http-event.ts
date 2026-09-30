@@ -3,9 +3,10 @@
  * extraction for the cost query surface.
  *
  * Mirrors backend/src/utils/auth-event.ts's claim-reading discipline
- * (`custom:organization`, `custom:role`, `cognito:groups` tolerant of both
- * JS-array and comma-separated-string shapes) but targets the claims shape
- * the API Gateway HttpUserPoolAuthorizer injects for HTTP APIs:
+ * (`custom:organization` for tenancy; `cognito:groups` — tolerant of both
+ * JS-array and comma-separated-string shapes — as the SOLE role signal;
+ * `custom:role` never read) but targets the claims shape the API Gateway
+ * HttpUserPoolAuthorizer injects for HTTP APIs:
  * `event.requestContext.authorizer.jwt.claims`.
  *
  * Deliberately has NO Cognito AdminGetUser fallback (unlike
@@ -52,6 +53,11 @@ export function extractOrgFromHttpEvent(
  * authorization signal. Group membership can only be changed via the
  * Admin* Cognito API. Mirrors backend/src/utils/auth-event.ts's
  * isAdminFromEvent, which received the same fix.
+ *
+ * CIT-213 (escalation 2026-09-30): the same rule applies to EVERY role on
+ * this surface. This module exposes no role check other than admin; if one
+ * is ever added it must read `cognito:groups` only, never `custom:role`
+ * (pinned by backend/test/cognito-claim-trust-tripwire.test.ts).
  */
 export function isAdminFromHttpEvent(
   event: APIGatewayProxyEventV2WithJWTAuthorizer,

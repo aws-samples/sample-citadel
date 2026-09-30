@@ -25,7 +25,7 @@ const makeEvent = (
   identity: Record<string, unknown> = {
     sub: "user-123",
     "custom:organization": "org-caller",
-    "custom:role": "architect",
+    "cognito:groups": ["architect"],
   },
 ) => ({
   info: { fieldName },
@@ -127,7 +127,7 @@ describe("fabricator-request-resolver", () => {
             {
               sub: "user-dev",
               "custom:organization": "org-caller",
-              "custom:role": "developer",
+              "cognito:groups": ["developer"],
             },
           ),
         ),
@@ -148,7 +148,7 @@ describe("fabricator-request-resolver", () => {
             {
               sub: "user-dev",
               "custom:organization": "org-caller",
-              "custom:role": "developer",
+              "cognito:groups": ["developer"],
             },
           ),
         ),
@@ -166,7 +166,7 @@ describe("fabricator-request-resolver", () => {
           makeEvent(
             "requestAgentCreation",
             { agentName: "NoOrgAgent", taskDescription: "desc" },
-            { sub: "user-no-org", "custom:role": "developer" },
+            { sub: "user-no-org", "cognito:groups": ["developer"] },
           ),
         ),
       ).rejects.toThrow("Access denied: no organization is provisioned");
@@ -174,7 +174,7 @@ describe("fabricator-request-resolver", () => {
       expect(sqsMock.commandCalls(SendMessageCommand)).toHaveLength(0);
     });
 
-    test("architect caller (custom:role) passes for requestAgentCreation", async () => {
+    test("architect caller (cognito:groups) passes for requestAgentCreation", async () => {
       const result = await handler(
         makeEvent(
           "requestAgentCreation",
@@ -182,7 +182,7 @@ describe("fabricator-request-resolver", () => {
           {
             sub: "user-arch",
             "custom:organization": "org-caller",
-            "custom:role": "architect",
+            "cognito:groups": ["architect"],
           },
         ),
       );

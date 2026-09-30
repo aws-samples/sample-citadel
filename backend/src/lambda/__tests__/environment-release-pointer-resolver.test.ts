@@ -968,7 +968,7 @@ describe("handler — AppSync dispatch", () => {
       info: { fieldName: "promoteEnvironmentReleasePointer" },
       identity: {
         sub: "user-1",
-        "custom:role": "architect",
+        "cognito:groups": ["architect"],
         "custom:organization": "org-1",
       },
       arguments: {
@@ -987,7 +987,7 @@ describe("handler — AppSync dispatch", () => {
   test("rejects when the caller organization cannot be determined", async () => {
     const event = {
       info: { fieldName: "promoteEnvironmentReleasePointer" },
-      identity: { sub: "user-1", "custom:role": "architect" },
+      identity: { sub: "user-1", "cognito:groups": ["architect"] },
       arguments: {
         input: {
           agentTargetId: "agent-1",
@@ -2411,7 +2411,7 @@ describe("handler — environmentReleasePointerHistory query (G6)", () => {
       info: { fieldName: "environmentReleasePointerHistory" },
       identity: {
         sub: "user-1",
-        "custom:role": "architect",
+        "cognito:groups": ["architect"],
         "custom:organization": "org-1",
       },
       arguments: {

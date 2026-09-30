@@ -47,7 +47,7 @@ const READER_IDENTITY = { sub: "reader-1", "custom:organization": ORG_ID };
 const WRITER_IDENTITY = {
   sub: "writer-1",
   "custom:organization": ORG_ID,
-  "custom:role": "architect",
+  "cognito:groups": ["architect"],
 };
 
 /** Mocks a same-org Registry record for the given agentId so the org/role gate passes. */

@@ -3,10 +3,25 @@ import {
   GetUserCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { AuthContext } from "../types";
-import { isAdminFromEvent } from "./auth-event";
+import { deriveRoles, readGroups } from "./auth-event";
 
 const cognitoClient = new CognitoIdentityProviderClient({});
 
+/**
+ * Builds an AuthContext from a raw access token via Cognito GetUser.
+ *
+ * ROLES ARE ALWAYS EMPTY ON THIS PATH — fail closed (CIT-213). GetUser
+ * returns user ATTRIBUTES only; it carries no group membership, and
+ * `cognito:groups` is the sole authorization signal for every role
+ * (finding 7aa877f8 for admin, CIT-213 for project_manager / architect /
+ * developer). The only role-shaped attribute available here is
+ * `custom:role`, which is client-writable (absent an explicit Cognito
+ * client WriteAttributes allow-list, any authenticated user can set it via
+ * UpdateUserAttributes) and therefore must never populate `roles`.
+ * Callers that need roles must use a verified JWT (`createAuthContext` on
+ * an AppSync identity, or the HTTP-API authorizer claims) where the groups
+ * claim is present.
+ */
 export async function validateCognitoToken(
   accessToken: string,
 ): Promise<AuthContext | null> {
@@ -18,36 +33,12 @@ export async function validateCognitoToken(
     const response = await cognitoClient.send(command);
 
     const userId = response.Username!;
-    const attributes = response.UserAttributes || [];
-
-    const groups: string[] = [];
-    const roles: string[] = [];
-    let claimRole: string | undefined;
-
-    // Extract custom attributes
-    for (const attr of attributes) {
-      if (attr.Name === "custom:role") {
-        claimRole = attr.Value;
-      }
-    }
-
-    // finding 7aa877f8: custom:role is a client-writable attribute (absent
-    // an explicit Cognito client WriteAttributes allow-list, any
-    // authenticated user could self-grant custom:role=admin via
-    // UpdateUserAttributes). GetUserCommand does not return group
-    // membership, so admin cannot be verified group-authoritatively from
-    // this attributes-only response — treat 'admin' as untrusted here and
-    // never push it into roles. Non-admin role claims are preserved for
-    // permission checks that don't gate on the admin bypass.
-    if (claimRole && claimRole !== "admin") {
-      roles.push(claimRole);
-    }
 
     return {
       userId,
       username: userId,
-      groups,
-      roles,
+      groups: [],
+      roles: [],
     };
   } catch (error) {
     console.error("Token validation failed:", error);
@@ -185,22 +176,16 @@ export function extractUserIdFromEvent(event: unknown): string {
 export function createAuthContext(event: unknown): AuthContext {
   const identity: IdentityBag = (event as EventWithIdentity).identity || {};
 
-  // finding 7aa877f8: admin must be group-authoritative (isAdminFromEvent),
-  // never derived from the client-writable custom:role attribute alone.
-  // Non-admin custom:role claims are preserved for other permission checks.
-  const claimRole = identity["custom:role"] as string | undefined;
-  const roles: string[] = [];
-  if (claimRole && claimRole !== "admin") {
-    roles.push(claimRole);
-  }
-  if (isAdminFromEvent(event)) {
-    roles.push("admin");
-  }
-
+  // finding 7aa877f8 made admin group-authoritative; CIT-213 made EVERY
+  // role group-authoritative. `roles` is exactly the deduplicated
+  // `cognito:groups` claim (deriveRoles → readGroups, tolerant of the
+  // array / comma-separated-string shapes and of both identity[...] and
+  // identity.claims[...] locations). The client-writable `custom:role`
+  // claim is never read.
   return {
     userId: identity.sub || identity.username || "anonymous",
     username: identity.username,
-    groups: (identity["cognito:groups"] as string[] | undefined) || [],
-    roles,
+    groups: readGroups(event),
+    roles: deriveRoles(event),
   };
 }

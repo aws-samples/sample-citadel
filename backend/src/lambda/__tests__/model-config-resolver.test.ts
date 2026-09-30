@@ -45,7 +45,8 @@ describe("model-config-resolver", () => {
   });
 
   // isAdminFromEvent is the REAL implementation (not mocked): admin via the
-  // cognito:groups claim, and once via custom:role, prove both shapes work.
+  // cognito:groups claim only; a custom:role claim alongside it is ignored
+  // (finding 7aa877f8 / CIT-213).
   const adminIdentity = { username: "admin-user", "cognito:groups": ["admin"] };
   const nonAdminIdentity = {
     username: "dev-user",
@@ -314,7 +315,7 @@ describe("model-config-resolver", () => {
       expect(result.modelKey).toBe("vendor.model-standard");
     });
 
-    test("admin via custom:role is also authorised", async () => {
+    test("admin group with a redundant custom:role=admin claim is authorised (claim ignored, group decides)", async () => {
       dynamoMock
         .on(GetCommand)
         .resolves({ Item: catalogEntry("vendor.model-standard", "enabled") });

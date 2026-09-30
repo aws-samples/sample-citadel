@@ -346,9 +346,9 @@ export async function getAgentConfigRegistry(
  * Dual-source list: fetches agent configs from both Registry and DynamoDB,
  * merges them with Registry records taking precedence on duplicate agentIds.
  *
- * Results are filtered to the caller's organization unless the caller has
- * `custom:role=admin`, in which case the full list (across all orgs) is
- * returned — matching the "All Organizations" admin UX. Agents with an
+ * Results are filtered to the caller's organization unless the caller is a
+ * group admin (`cognito:groups` includes `admin`), in which case the full
+ * list (across all orgs) is returned — matching the "All Organizations" admin UX. Agents with an
  * empty orgId ('') are system-shared (e.g. seeded demo agents) and are
  * visible to every org-scoped caller. A non-admin caller without an orgId
  * receives an empty list with a warning, so anonymous / api-key callers
