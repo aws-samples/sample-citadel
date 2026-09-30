@@ -67,14 +67,46 @@ def _run_handler(create_side_effect, existing_records=None):
     mock_dynamodb.Table.return_value = mock_table
 
     registry_client = MagicMock(name="agent-registry-control-mock")
+
+    # Track dynamically created/approved records
+    created = {}
+    create_return = None
+
     if create_side_effect is not None:
-        registry_client.create_registry_record.side_effect = create_side_effect
+        orig_side_effect = create_side_effect
+
+        def _create_wrapper(**kwargs):
+            raise orig_side_effect
+
+        registry_client.create_registry_record.side_effect = _create_wrapper
     else:
-        registry_client.create_registry_record.return_value = {
+        create_return = {
             "recordId": "abc123def456",
             "status": "DRAFT",
             "createdAt": "2026-09-29T00:00:00Z",
         }
+
+        def _create_wrapper(**kwargs):
+            name = kwargs.get("name", "")
+            rid = create_return["recordId"]
+            created[name] = {
+                "recordId": rid,
+                "name": name,
+                "status": "DRAFT",
+                "createdAt": create_return["createdAt"],
+            }
+            return dict(create_return)
+
+        registry_client.create_registry_record.side_effect = _create_wrapper
+
+        def _submit_wrapper(**kwargs):
+            rid = kwargs.get("recordId", "")
+            for name, rec in created.items():
+                if rec["recordId"] == rid:
+                    rec["status"] = "APPROVED"
+            return {"status": "APPROVED"}
+
+        registry_client.submit_registry_record_for_approval.side_effect = _submit_wrapper
 
     def _client_factory(service_name, *args, **kwargs):
         if service_name == "agent-registry-control":
@@ -85,10 +117,18 @@ def _run_handler(create_side_effect, existing_records=None):
     env_patch["REGISTRY_ID"] = REGISTRY_ID
     env_patch["REGISTRY_ENABLED"] = "true"
 
-    list_mock = MagicMock(return_value=existing_records or [])
+    def _list_side_effect(rid):
+        result = list(existing_records or [])
+        for name, rec in created.items():
+            if not any(r.get("name") == name for r in result):
+                result.append(dict(rec))
+        return result
+
+    list_mock = MagicMock(side_effect=_list_side_effect)
 
     with patch.dict(os.environ, env_patch, clear=True), \
          patch("index.boto3") as mock_boto3, \
+         patch("index._SETTLE_SLEEP", 0), \
          patch("catalog.registry_client.list_agent_records", list_mock), \
          patch("cfnresponse.send") as mock_send:
         mock_boto3.resource.return_value = mock_dynamodb
@@ -146,6 +186,8 @@ class TestRegistryDeniedIsNonFatal:
         assert data["registrySeeded"] is True
         # Both fabricator and echo get a create call
         assert client.create_registry_record.call_count == 2
+        # Both get submitted for approval (system agents)
+        assert client.submit_registry_record_for_approval.call_count == 2
 
     def test_ddb_failure_still_fails_the_deploy(self):
         """DynamoDB/S3 seeding stays authoritative — its own errors must
@@ -165,6 +207,7 @@ class TestRegistryDeniedIsNonFatal:
 
         with patch.dict(os.environ, env_patch, clear=True), \
              patch("index.boto3") as mock_boto3, \
+             patch("index._SETTLE_SLEEP", 0), \
              patch("catalog.registry_client.list_agent_records", list_mock), \
              patch("cfnresponse.send") as mock_send:
             mock_boto3.resource.return_value = mock_dynamodb

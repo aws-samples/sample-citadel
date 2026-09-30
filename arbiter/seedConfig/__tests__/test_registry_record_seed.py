@@ -76,14 +76,55 @@ def _make_registry_client(record_id="abc123def456", created_at="2026-09-29T00:00
     return client
 
 
-def _run_handler(registry_env, existing_records, registry_client):
+def _run_handler(registry_env, existing_records, registry_client,
+                 post_approve_status="APPROVED"):
     """Invoke the Create handler with mocked boto3 + catalog lookup.
+
+    The list_agent_records mock dynamically reflects creates and approvals
+    that happen during the handler run: initially returns *existing_records*;
+    once ``create_registry_record`` is called for an agent, subsequent list
+    calls include that agent with DRAFT status; once
+    ``submit_registry_record_for_approval`` is called, the record moves to
+    *post_approve_status*.
 
     Returns (mock_table, mock_boto3, mock_send, list_mock).
     """
     mock_table = MagicMock()
     mock_dynamodb = MagicMock()
     mock_dynamodb.Table.return_value = mock_table
+
+    # Track dynamically created/approved records
+    created = {}  # name -> record dict
+    approved = set()  # names that have been submitted
+
+    orig_create = registry_client.create_registry_record
+    orig_submit = registry_client.submit_registry_record_for_approval
+
+    def _create_side_effect(**kwargs):
+        result = orig_create.return_value
+        if orig_create.side_effect and orig_create.side_effect is not _create_side_effect:
+            result = orig_create.side_effect(**kwargs)
+        name = kwargs.get("name", "")
+        rid = (result or {}).get("recordId") or f"created-{name}"
+        created[name] = {
+            "recordId": rid,
+            "name": name,
+            "status": (result or {}).get("status", "DRAFT"),
+            "createdAt": (result or {}).get("createdAt", "2026-09-29T00:00:00Z"),
+        }
+        return result
+
+    def _submit_side_effect(**kwargs):
+        result = orig_submit.return_value
+        rid = kwargs.get("recordId", "")
+        for name, rec in created.items():
+            if rec["recordId"] == rid:
+                approved.add(name)
+                rec["status"] = post_approve_status
+        return result
+
+    registry_client.create_registry_record.side_effect = _create_side_effect
+    registry_client.submit_registry_record_for_approval.side_effect = _submit_side_effect
 
     def _client_factory(service_name, *args, **kwargs):
         if service_name == "agent-registry-control":
@@ -97,10 +138,20 @@ def _run_handler(registry_env, existing_records, registry_client):
         env_patch["REGISTRY_ID"] = REGISTRY_ID
         env_patch["REGISTRY_ENABLED"] = "true"
 
-    list_mock = MagicMock(return_value=existing_records)
+    def _list_side_effect(rid):
+        # Combine existing_records with dynamically created records
+        result = list(existing_records)
+        for name, rec in created.items():
+            # Don't duplicate if already in existing
+            if not any(r.get("name") == name for r in existing_records):
+                result.append(dict(rec))
+        return result
+
+    list_mock = MagicMock(side_effect=_list_side_effect)
 
     with patch.dict(os.environ, env_patch, clear=True), \
          patch("index.boto3") as mock_boto3, \
+         patch("index._SETTLE_SLEEP", 0), \
          patch("catalog.registry_client.list_agent_records", list_mock), \
          patch("cfnresponse.send") as mock_send:
         mock_boto3.resource.return_value = mock_dynamodb
@@ -114,12 +165,11 @@ class TestRegistryRecordCreated:
     def test_creates_records_for_fabricator_and_echo(self):
         client = _make_registry_client()
         _, _, mock_send, list_mock = _run_handler(
-            registry_env=True, existing_records=[], registry_client=client
+            registry_env=True, existing_records=[],
+            registry_client=client,
         )
 
         assert mock_send.call_args[0][2] == "SUCCESS"
-        # list_agent_records called once per agent that goes through registry
-        assert list_mock.call_count == 2
         # create called for both fabricator and echo
         assert client.create_registry_record.call_count == 2
         created_names = [
@@ -132,7 +182,8 @@ class TestRegistryRecordCreated:
     def test_echo_record_has_fabricator_shaped_payload(self):
         client = _make_registry_client()
         _run_handler(
-            registry_env=True, existing_records=[], registry_client=client
+            registry_env=True, existing_records=[],
+            registry_client=client,
         )
         # Find the echo-agent create call
         echo_call = [
@@ -163,19 +214,20 @@ class TestRegistryRecordCreated:
         assert metadata["manifest"]["name"] == "demo-echo-agent"
         assert metadata["manifest"]["description"] == kwargs["description"]
 
-    def test_no_status_mutation_after_create(self):
-        """Mirror the fabricator: the record stays in post-create DRAFT."""
+    def test_system_agents_submitted_for_approval_after_create(self):
+        """System agents (fabricator, demo-echo-agent) are submitted for
+        approval so they're dispatchable immediately."""
         client = _make_registry_client()
         _run_handler(
             registry_env=True, existing_records=[], registry_client=client
         )
-        client.update_registry_record_status.assert_not_called()
-        client.submit_registry_record_for_approval.assert_not_called()
+        assert client.submit_registry_record_for_approval.call_count == 2
 
     def test_ddb_seeding_unchanged_when_registry_configured(self):
         client = _make_registry_client()
         mock_table, _, _, _ = _run_handler(
-            registry_env=True, existing_records=[], registry_client=client
+            registry_env=True, existing_records=[],
+            registry_client=client,
         )
         assert mock_table.put_item.call_count == 5
         items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
@@ -193,11 +245,12 @@ class TestRegistryLinkageStamped:
             record_id="echo-rec-001", created_at="2026-09-29T12:00:00Z"
         )
         mock_table, _, _, _ = _run_handler(
-            registry_env=True, existing_records=[], registry_client=client
+            registry_env=True, existing_records=[],
+            registry_client=client,
         )
         items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
         echo = [i for i in items if i.get("agentId") == "demo-echo-agent"][0]
-        assert echo["registryStatus"] == "DRAFT"
+        assert echo["registryStatus"] == "APPROVED"
         assert echo["registryRecordId"] == "echo-rec-001"
         assert echo["createdAt"] == "2026-09-29T12:00:00Z"
 
@@ -206,11 +259,12 @@ class TestRegistryLinkageStamped:
             record_id="fab-rec-001", created_at="2026-09-29T12:00:00Z"
         )
         mock_table, _, _, _ = _run_handler(
-            registry_env=True, existing_records=[], registry_client=client
+            registry_env=True, existing_records=[],
+            registry_client=client,
         )
         items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
         fab = [i for i in items if i.get("agentId") == "fabricator"][0]
-        assert fab["registryStatus"] == "DRAFT"
+        assert fab["registryStatus"] == "APPROVED"
         assert fab["registryRecordId"] == "fab-rec-001"
         assert fab["createdAt"] == "2026-09-29T12:00:00Z"
 
@@ -282,11 +336,7 @@ class TestRegistrySkippedWhenNotConfigured:
         assert mock_send.call_args[0][2] == "SUCCESS"
         list_mock.assert_not_called()
         client.create_registry_record.assert_not_called()
-        service_names = [
-            c.args[0] for c in mock_boto3.client.call_args_list if c.args
-        ]
-        assert "bedrock-agentcore-control" not in service_names
-        assert "agent-registry-control" not in service_names
+        client.submit_registry_record_for_approval.assert_not_called()
         # DDB seeding still runs.
         assert mock_table.put_item.call_count == 5
 
@@ -307,6 +357,7 @@ class TestRegistrySkippedWhenNotConfigured:
                  {"catalog": None, "catalog.registry_client": None},
              ), \
              patch("index.boto3") as mock_boto3, \
+             patch("index._SETTLE_SLEEP", 0), \
              patch("cfnresponse.send") as mock_send:
             mock_boto3.resource.return_value = mock_dynamodb
             mock_boto3.client.return_value = MagicMock()
@@ -333,8 +384,11 @@ class TestIdempotency:
             registry_client=client,
         )
         assert mock_send.call_args[0][2] == "SUCCESS"
-        assert list_mock.call_count == 2
+        # Idempotency lookup for each agent — at least 2 calls
+        assert list_mock.call_count >= 2
         client.create_registry_record.assert_not_called()
+        # No submit for existing records (early-return path)
+        client.submit_registry_record_for_approval.assert_not_called()
         # DDB seeding unchanged.
         assert mock_table.put_item.call_count == 5
 
@@ -351,3 +405,208 @@ class TestIdempotency:
         )
         # Both fabricator and echo should attempt create (no exact match)
         assert client.create_registry_record.call_count == 2
+
+
+class TestSettleAndApprove:
+    """Tests for the create -> settle -> submit-for-approval flow."""
+
+    def test_creating_status_settles_to_draft_then_approved(self):
+        """create_registry_record returns CREATING with no recordId;
+        settle poll finds DRAFT; submit makes it APPROVED."""
+        client = _make_registry_client()
+        # create returns CREATING, no recordId
+        client.create_registry_record.return_value = {
+            "recordArn": "arn:...",
+            "recordId": None,
+            "status": "CREATING",
+            "createdAt": None,
+        }
+        client.submit_registry_record_for_approval.return_value = {
+            "status": "APPROVED",
+        }
+        # After settle poll, records appear as DRAFT (first settle call),
+        # then APPROVED (re-fetch after submit)
+        draft_records = [
+            {"recordId": "settled-fab-001", "name": "fabricator",
+             "status": "DRAFT", "createdAt": "2026-09-30T00:00:00Z"},
+            {"recordId": "settled-echo-001", "name": "demo-echo-agent",
+             "status": "DRAFT", "createdAt": "2026-09-30T00:00:00Z"},
+        ]
+        approved_records = [
+            {"recordId": "settled-fab-001", "name": "fabricator",
+             "status": "APPROVED", "createdAt": "2026-09-30T00:00:00Z"},
+            {"recordId": "settled-echo-001", "name": "demo-echo-agent",
+             "status": "APPROVED", "createdAt": "2026-09-30T00:00:00Z"},
+        ]
+
+        # Build a custom sequence: first call per agent returns [] (lookup),
+        # second returns draft (settle), third+ returns approved (post-submit)
+        call_seq = [
+            [],               # fabricator idempotency lookup
+            draft_records,    # fabricator settle poll
+            approved_records, # fabricator post-submit re-fetch
+            [],               # echo idempotency lookup
+            draft_records,    # echo settle poll
+            approved_records, # echo post-submit re-fetch
+        ]
+        list_mock = MagicMock(side_effect=call_seq)
+
+        mock_table = MagicMock()
+        mock_dynamodb = MagicMock()
+        mock_dynamodb.Table.return_value = mock_table
+
+        def _client_factory(service_name, *args, **kwargs):
+            if service_name == "agent-registry-control":
+                return client
+            return MagicMock(name=f"{service_name}-mock")
+
+        env_patch = dict(os.environ)
+        env_patch["REGISTRY_ID"] = REGISTRY_ID
+        env_patch["REGISTRY_ENABLED"] = "true"
+
+        with patch.dict(os.environ, env_patch, clear=True), \
+             patch("index.boto3") as mock_boto3, \
+             patch("index._SETTLE_SLEEP", 0), \
+             patch("catalog.registry_client.list_agent_records", list_mock), \
+             patch("cfnresponse.send") as mock_send:
+            mock_boto3.resource.return_value = mock_dynamodb
+            mock_boto3.client.side_effect = _client_factory
+            handler(_cfn_event(), _ctx())
+
+        assert mock_send.call_args[0][2] == "SUCCESS"
+        # Both agents created and submitted
+        assert client.create_registry_record.call_count == 2
+        assert client.submit_registry_record_for_approval.call_count == 2
+
+        # Both DDB items carry APPROVED linkage
+        items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
+        fab = [i for i in items if i.get("agentId") == "fabricator"][0]
+        echo = [i for i in items if i.get("agentId") == "demo-echo-agent"][0]
+        assert fab["registryStatus"] == "APPROVED"
+        assert fab["registryRecordId"] == "settled-fab-001"
+        assert echo["registryStatus"] == "APPROVED"
+        assert echo["registryRecordId"] == "settled-echo-001"
+
+    def test_unsettled_after_max_polls_leaves_linkage_absent(self):
+        """When the record never leaves CREATING within the poll window,
+        linkage fields are absent and a WARNING is printed."""
+        client = _make_registry_client()
+        client.create_registry_record.return_value = {
+            "recordArn": "arn:...",
+            "recordId": None,
+            "status": "CREATING",
+            "createdAt": None,
+        }
+        # list_agent_records always returns CREATING (never settles)
+        stuck_records = [
+            {"recordId": None, "name": "fabricator",
+             "status": "CREATING", "createdAt": None},
+            {"recordId": None, "name": "demo-echo-agent",
+             "status": "CREATING", "createdAt": None},
+        ]
+
+        # First call per agent: [] (idempotency lookup returns no match),
+        # then all subsequent calls return stuck_records (never settles).
+        call_counter = {"n": 0}
+
+        def _list_side_effect(rid):
+            call_counter["n"] += 1
+            # First two calls are idempotency lookups
+            if call_counter["n"] <= 2:
+                return []
+            return stuck_records
+
+        list_mock = MagicMock(side_effect=_list_side_effect)
+
+        mock_table = MagicMock()
+        mock_dynamodb = MagicMock()
+        mock_dynamodb.Table.return_value = mock_table
+
+        def _client_factory(service_name, *args, **kwargs):
+            if service_name == "agent-registry-control":
+                return client
+            return MagicMock(name=f"{service_name}-mock")
+
+        env_patch = dict(os.environ)
+        env_patch["REGISTRY_ID"] = REGISTRY_ID
+        env_patch["REGISTRY_ENABLED"] = "true"
+
+        with patch.dict(os.environ, env_patch, clear=True), \
+             patch("index.boto3") as mock_boto3, \
+             patch("index._SETTLE_SLEEP", 0), \
+             patch("index._SETTLE_MAX_ATTEMPTS", 3), \
+             patch("catalog.registry_client.list_agent_records", list_mock), \
+             patch("cfnresponse.send") as mock_send:
+            mock_boto3.resource.return_value = mock_dynamodb
+            mock_boto3.client.side_effect = _client_factory
+            handler(_cfn_event(), _ctx())
+
+        assert mock_send.call_args[0][2] == "SUCCESS"
+        # DDB items must NOT have linkage fields
+        items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
+        fab = [i for i in items if i.get("agentId") == "fabricator"][0]
+        echo = [i for i in items if i.get("agentId") == "demo-echo-agent"][0]
+        for item in (fab, echo):
+            assert "registryStatus" not in item
+            assert "registryRecordId" not in item
+            assert "createdAt" not in item
+        # No submit attempted — record never settled
+        client.submit_registry_record_for_approval.assert_not_called()
+
+
+class TestSmokeLinkage:
+    """Smoke fixture stamped from existing DRAFT record (no submit)."""
+
+    def test_smoke_stamped_from_existing_draft_record(self):
+        """When SMOKE_FIXTURES_ENABLED and the smoke record already exists
+        as DRAFT, the DDB item carries registryStatus=DRAFT and recordId."""
+        client = _make_registry_client()
+        client.submit_registry_record_for_approval.return_value = {
+            "status": "APPROVED",
+        }
+        existing = [
+            {"recordId": "smoke-rec-001", "name": "smoke-idempotency-agent",
+             "status": "DRAFT", "createdAt": "2026-09-30T01:00:00Z"},
+            {"recordId": "fab-001", "name": "fabricator",
+             "status": "APPROVED", "createdAt": "2026-01-01T00:00:00Z"},
+            {"recordId": "echo-001", "name": "demo-echo-agent",
+             "status": "APPROVED", "createdAt": "2026-01-01T00:00:00Z"},
+        ]
+
+        mock_table = MagicMock()
+        mock_dynamodb = MagicMock()
+        mock_dynamodb.Table.return_value = mock_table
+
+        def _client_factory(service_name, *args, **kwargs):
+            if service_name == "agent-registry-control":
+                return client
+            return MagicMock(name=f"{service_name}-mock")
+
+        env_patch = dict(os.environ)
+        env_patch["REGISTRY_ID"] = REGISTRY_ID
+        env_patch["REGISTRY_ENABLED"] = "true"
+        env_patch["SMOKE_FIXTURES_ENABLED"] = "true"
+
+        list_mock = MagicMock(return_value=existing)
+
+        with patch.dict(os.environ, env_patch, clear=True), \
+             patch("index.boto3") as mock_boto3, \
+             patch("index.SMOKE_FIXTURES_ENABLED", True), \
+             patch("index._SETTLE_SLEEP", 0), \
+             patch("catalog.registry_client.list_agent_records", list_mock), \
+             patch("cfnresponse.send") as mock_send:
+            mock_boto3.resource.return_value = mock_dynamodb
+            mock_boto3.client.side_effect = _client_factory
+            handler(_cfn_event(), _ctx())
+
+        assert mock_send.call_args[0][2] == "SUCCESS"
+        items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
+        smoke = [i for i in items
+                 if i.get("agentId") == "smoke-idempotency-agent"][0]
+        # Smoke stays DRAFT — not a system agent, no submit
+        assert smoke["registryStatus"] == "DRAFT"
+        assert smoke["registryRecordId"] == "smoke-rec-001"
+        assert smoke["createdAt"] == "2026-09-30T01:00:00Z"
+        # No create or submit for smoke (existing record)
+        # (fabricator+echo also exist so no create calls at all)
+        client.create_registry_record.assert_not_called()

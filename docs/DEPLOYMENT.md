@@ -234,12 +234,44 @@ you pass `--allow-deletions`. It **fails closed**: if the diff is empty or
 ### 4. Provenance record (`deployment-manifest.json`)
 
 After a successful run, `deploy.sh` writes `deployment-manifest.json` at the
-repo root capturing `environment`, `git_branch`, resolved `git_sha`,
+repo root capturing `environment`, `git_branch`, resolved `git_sha` (short) and
+`git_full_sha` (the same value as the `GitSha` stack tag below),
 `git_dirty`, `expected_ref`, `deployer`, the concrete `stacks` deployed, and
 `started_at`/`completed_at` timestamps — so what is running can be **read**
 rather than recalled from scrollback. The file is **gitignored** (matched by the
 `deployment-*.json` rule in `.gitignore`), so it is never committed. It is
 written ONLY on a successful run — a refused/failed deploy writes no manifest.
+
+### 5. Deployment provenance — `GitSha` / `GitRef` stack tags
+
+Every stack is tagged with the commit it was deployed from, so "is fix X
+deployed to `<env>`?" is answerable from CloudFormation alone, on any machine
+with the repo cloned — no access to the deploy host's manifest required.
+`deploy.sh` passes `--context gitSha=$(git rev-parse HEAD) --context
+gitRef=<branch>` to every `cdk deploy`/`diff`/`list`, and `backend/bin/app.ts`
+applies them as `GitSha`/`GitRef` tags at the App scope (see
+`backend/lib/git-provenance.ts`). The CDK app never shells out to git: when
+neither the context nor the `CITADEL_GIT_SHA`/`CITADEL_GIT_REF` env fallback is
+set (e.g. a `cdk synth` outside `deploy.sh`), the tags read `unknown` rather
+than failing synth.
+
+```bash
+# 1. Read the deployed sha from the stack tags
+aws cloudformation describe-stacks --stack-name citadel-backend-<env> \
+  --query 'Stacks[0].Tags'                       # all tags, incl. GitSha/GitRef
+sha=$(aws cloudformation describe-stacks --stack-name citadel-backend-<env> \
+  --query "Stacks[0].Tags[?Key=='GitSha'].Value" --output text)
+
+# 2. Is commit <fix> contained in what is running?
+git fetch --all --quiet
+git merge-base --is-ancestor <fix-sha> "$sha" && echo "deployed" || echo "NOT deployed"
+```
+
+A `GitSha` of `unknown` means the stack was last deployed outside `deploy.sh`
+(or from a checkout without git history); fall back to the manifest or the
+`LastUpdatedTime` heuristic in that case. Because the tag is applied per stack,
+check the stack that owns the resource the fix touched — stacks deployed in
+separate `deploy.sh <stack>` runs can legitimately carry different shas.
 
 ### RETAIN on data-bearing resources — the tradeoff, and recovery
 

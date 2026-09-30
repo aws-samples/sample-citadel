@@ -160,10 +160,24 @@ resolve_frontend_origin() {
 
 capture_git_info() {
   GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+  # Full 40-char sha for the GitSha stack tag (CIT-215): `git merge-base
+  # --is-ancestor <fix> <sha>` needs an unambiguous object name, and a short
+  # sha can become ambiguous as the repo grows.
+  GIT_FULL_SHA=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
   GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
   GIT_DIRTY=$(git diff --quiet 2>/dev/null && echo "clean" || echo "dirty")
-  export GIT_SHA GIT_BRANCH GIT_DIRTY
+  export GIT_SHA GIT_FULL_SHA GIT_BRANCH GIT_DIRTY
   ok "Git: $GIT_BRANCH@$GIT_SHA ($GIT_DIRTY)"
+}
+
+# --- CDK provenance context (CIT-215) ---
+# Every cdk invocation (deploy / diff / list) gets the resolved git sha and
+# ref as CDK context so bin/app.ts can tag every stack with GitSha/GitRef.
+# `--context` is used (not env) so the value is part of the cdk command line
+# in the deploy log. Falls back to "unknown" so a clone without git history
+# still deploys — bin/app.ts applies the same fallback and never fails synth.
+cdk_provenance_context() {
+  echo "--context gitSha=${GIT_FULL_SHA:-unknown} --context gitRef=${GIT_BRANCH:-unknown}"
 }
 
 # --- Build frontend ---
@@ -200,6 +214,7 @@ cdk_diff() {
   pushd backend > /dev/null
   local diff_cmd="npx cdk diff"
   [ -n "${AWS_PROFILE:-}" ] && diff_cmd="$diff_cmd --profile $AWS_PROFILE"
+  diff_cmd="$diff_cmd $(cdk_provenance_context)"
   local admin_email="${ADMIN_EMAIL_ARG:-${ADMIN_EMAIL:-}}"
   [ -n "$admin_email" ] && diff_cmd="$diff_cmd -c adminEmail=$admin_email"
   # cdk diff stays non-blocking by design (it's a preview, not a gate) —
@@ -235,6 +250,7 @@ verify_stack_coverage() {
   pushd backend > /dev/null
   local list_cmd="npx cdk list"
   [ -n "${AWS_PROFILE:-}" ] && list_cmd="$list_cmd --profile $AWS_PROFILE"
+  list_cmd="$list_cmd $(cdk_provenance_context)"
   local admin_email="${ADMIN_EMAIL_ARG:-${ADMIN_EMAIL:-}}"
   [ -n "$admin_email" ] && list_cmd="$list_cmd -c adminEmail=$admin_email"
 
@@ -458,6 +474,8 @@ deploy_stack() {
     local cmd="npx cdk deploy $stack_name --require-approval never --outputs-file ../cdk-outputs.json"
     [ "$exclusively" = "true" ] && cmd="$cmd --exclusively"
     [ -n "${AWS_PROFILE:-}" ] && cmd="$cmd --profile $AWS_PROFILE"
+    # CIT-215: GitSha/GitRef provenance tags on every stack
+    cmd="$cmd $(cdk_provenance_context)"
 
     # Pass admin email as CDK context if provided via --admin-email or ADMIN_EMAIL env var
     local admin_email="${ADMIN_EMAIL_ARG:-${ADMIN_EMAIL:-}}"
@@ -696,6 +714,7 @@ write_manifest() {
   "region": "$CDK_DEFAULT_REGION",
   "account": "$CDK_DEFAULT_ACCOUNT",
   "git_sha": "$GIT_SHA",
+  "git_full_sha": "${GIT_FULL_SHA:-unknown}",
   "git_branch": "$GIT_BRANCH",
   "git_dirty": "$GIT_DIRTY",
   "expected_ref": ${expected_ref_json},
