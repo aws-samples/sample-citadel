@@ -150,11 +150,40 @@ def _seed_agent_registry_record(agent_id, description, module_filename, worker_q
                 f"Registry record '{agent_id}' already exists "
                 f"(recordId={record.get('recordId')}); skipping create"
             )
-            return {
+            existing = {
                 'recordId': record.get('recordId'),
                 'status': record.get('status'),
                 'createdAt': record.get('createdAt'),
             }
+            # Pre-existing DRAFT system agents still need approval
+            if agent_id in SYSTEM_AGENTS and existing.get('status') == 'DRAFT':
+                client = boto3.client('agent-registry-control')
+                try:
+                    approve_resp = client.submit_registry_record_for_approval(
+                        registryId=registry_id,
+                        recordId=existing['recordId'],
+                    )
+                    print(
+                        f"Submitted pre-existing {agent_id} for approval "
+                        f"(status={approve_resp.get('status')})"
+                    )
+                    refreshed = _resolve_settled_record(
+                        registry_id, agent_id, list_agent_records,
+                    )
+                    if refreshed is not None:
+                        existing = {
+                            'recordId': refreshed.get('recordId'),
+                            'status': refreshed.get('status'),
+                            'createdAt': refreshed.get('createdAt'),
+                        }
+                except ClientError as exc:
+                    error_code = exc.response.get('Error', {}).get('Code', 'Unknown')
+                    print(
+                        f"WARNING: submit_registry_record_for_approval failed "
+                        f"for pre-existing {agent_id} (errorCode={error_code}) "
+                        "— stamping from pre-approval state"
+                    )
+            return existing
 
     # Fabricator-shaped executable config + manifest + custom metadata
     # (see store_agent_config_registry in arbiter/fabricator/index.py).

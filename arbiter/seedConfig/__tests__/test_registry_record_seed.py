@@ -117,9 +117,15 @@ def _run_handler(registry_env, existing_records, registry_client,
     def _submit_side_effect(**kwargs):
         result = orig_submit.return_value
         rid = kwargs.get("recordId", "")
+        # Check dynamically created records
         for name, rec in created.items():
             if rec["recordId"] == rid:
                 approved.add(name)
+                rec["status"] = post_approve_status
+        # Check pre-existing records too
+        for rec in existing_records:
+            if isinstance(rec, dict) and rec.get("recordId") == rid:
+                approved.add(rec.get("name", ""))
                 rec["status"] = post_approve_status
         return result
 
@@ -317,13 +323,15 @@ class TestRegistryLinkageStamped:
         assert mock_send.call_args[0][2] == "SUCCESS"
         # No creates — both found by name
         client.create_registry_record.assert_not_called()
+        # Fabricator was DRAFT → submitted for approval; echo already APPROVED
+        assert client.submit_registry_record_for_approval.call_count == 1
         # Linkage still stamped from existing records
         items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
         echo = [i for i in items if i.get("agentId") == "demo-echo-agent"][0]
         assert echo["registryStatus"] == "APPROVED"
         assert echo["registryRecordId"] == "abc123"
         fab = [i for i in items if i.get("agentId") == "fabricator"][0]
-        assert fab["registryStatus"] == "DRAFT"
+        assert fab["registryStatus"] == "APPROVED"
         assert fab["registryRecordId"] == "fab456"
 
 
@@ -387,8 +395,8 @@ class TestIdempotency:
         # Idempotency lookup for each agent — at least 2 calls
         assert list_mock.call_count >= 2
         client.create_registry_record.assert_not_called()
-        # No submit for existing records (early-return path)
-        client.submit_registry_record_for_approval.assert_not_called()
+        # Pre-existing DRAFT system agents still get submitted for approval
+        assert client.submit_registry_record_for_approval.call_count == 2
         # DDB seeding unchanged.
         assert mock_table.put_item.call_count == 5
 
@@ -556,6 +564,56 @@ class TestSettleAndApprove:
 
 class TestSmokeLinkage:
     """Smoke fixture stamped from existing DRAFT record (no submit)."""
+
+    def test_existing_draft_system_agent_submitted_and_approved(self):
+        """Pre-existing DRAFT fabricator record -> submit called once -> APPROVED stamped."""
+        client = _make_registry_client()
+        client.submit_registry_record_for_approval.return_value = {
+            "status": "APPROVED",
+        }
+        existing = [
+            {"recordId": "fab-draft-001", "name": "fabricator",
+             "status": "DRAFT", "createdAt": "2026-09-29T00:00:00Z"},
+            {"recordId": "echo-draft-001", "name": "demo-echo-agent",
+             "status": "DRAFT", "createdAt": "2026-09-29T00:00:00Z"},
+        ]
+        mock_table, _, mock_send, _ = _run_handler(
+            registry_env=True, existing_records=existing,
+            registry_client=client,
+        )
+        assert mock_send.call_args[0][2] == "SUCCESS"
+        client.create_registry_record.assert_not_called()
+        # Both DRAFT system agents submitted
+        assert client.submit_registry_record_for_approval.call_count == 2
+        items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
+        fab = [i for i in items if i.get("agentId") == "fabricator"][0]
+        assert fab["registryStatus"] == "APPROVED"
+        assert fab["registryRecordId"] == "fab-draft-001"
+        echo = [i for i in items if i.get("agentId") == "demo-echo-agent"][0]
+        assert echo["registryStatus"] == "APPROVED"
+        assert echo["registryRecordId"] == "echo-draft-001"
+
+    def test_existing_approved_system_agent_not_resubmitted(self):
+        """Pre-existing APPROVED record -> no submit call."""
+        client = _make_registry_client()
+        existing = [
+            {"recordId": "fab-appr-001", "name": "fabricator",
+             "status": "APPROVED", "createdAt": "2026-09-29T00:00:00Z"},
+            {"recordId": "echo-appr-001", "name": "demo-echo-agent",
+             "status": "APPROVED", "createdAt": "2026-09-29T00:00:00Z"},
+        ]
+        mock_table, _, mock_send, _ = _run_handler(
+            registry_env=True, existing_records=existing,
+            registry_client=client,
+        )
+        assert mock_send.call_args[0][2] == "SUCCESS"
+        client.create_registry_record.assert_not_called()
+        client.submit_registry_record_for_approval.assert_not_called()
+        items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
+        fab = [i for i in items if i.get("agentId") == "fabricator"][0]
+        assert fab["registryStatus"] == "APPROVED"
+        echo = [i for i in items if i.get("agentId") == "demo-echo-agent"][0]
+        assert echo["registryStatus"] == "APPROVED"
 
     def test_smoke_stamped_from_existing_draft_record(self):
         """When SMOKE_FIXTURES_ENABLED and the smoke record already exists
