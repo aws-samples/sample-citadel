@@ -157,3 +157,42 @@ def test_approved_proceeds():
     fake_sqs.send_message.assert_called_once()
     assert mock_metric.call_args.kwargs['outcome'] == 'proceed'
     assert mock_metric.call_args.kwargs['would_block'] is False
+
+
+# ---------------------------------------------------------------------------
+# shadow + DRAFT -> WARNING log with reason token (not ERROR, not None).
+# ---------------------------------------------------------------------------
+
+
+def test_shadow_draft_logs_warning_with_reason_token(caplog):
+    """The shadow would-block path must log at WARNING (not ERROR) and
+    include a decision reason token like 'approval_absent:DRAFT' plus
+    the registry status — never 'None'."""
+    import logging
+
+    executor, ctx, fake_sqs, fake_agent_table = _patched_executor()
+    fake_agent_table.get_item.return_value = {
+        'Item': {'agentId': 'agent-A', 'registryStatus': 'DRAFT'},
+    }
+    fake_state = _make_state('shadow')
+
+    with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4], \
+         patch.object(executor, 'load_governance_state', return_value=fake_state), \
+         patch.object(executor, '_emit_approval_dispatch_metric'), \
+         caplog.at_level(logging.WARNING, logger='executor'):
+        executor.invoke_node('exec-1', 'wf-1', NODE, {'k': 'v'}, {'cfg': 1})
+
+    # Verify the would-block line was logged at WARNING, not ERROR.
+    would_block_records = [
+        r for r in caplog.records
+        if 'would_block' in r.message and 'approval dispatch' in r.message
+    ]
+    assert len(would_block_records) == 1, (
+        f"Expected exactly 1 would_block log record, got {len(would_block_records)}"
+    )
+    rec = would_block_records[0]
+    assert rec.levelno == logging.WARNING
+    assert 'approval_absent:DRAFT' in rec.message
+    assert 'registry_status=DRAFT' in rec.message
+    # Must NOT contain the string 'None' as the reason.
+    assert 'would_block: None;' not in rec.message

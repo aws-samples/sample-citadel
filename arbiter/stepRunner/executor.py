@@ -628,13 +628,29 @@ def _check_approval_gate(
         workflow_id=workflow_id,
     )
 
-    if approval_decision.would_block or approval_decision.refused:
+    if approval_decision.refused:
         _logger.error(
-            "approval dispatch %s: %s; workflow_id=%s target_agent=%s "
-            "resolution_status=%s",
-            'refused' if approval_decision.refused else 'would_block',
+            "approval dispatch refused: %s; workflow_id=%s target_agent=%s "
+            "resolution_status=%s registry_status=%s",
             approval_decision.reason, workflow_id, agent_id,
             approval_resolution.status.value,
+            approval_resolution.registry_status,
+        )
+    elif approval_decision.would_block:
+        # Shadow / permissive: the decision reason is None (decide() only
+        # populates it for strict refusals), so synthesise a descriptive
+        # token from the resolution status + raw registry value.
+        reason_token = (
+            f"approval_absent:{approval_resolution.registry_status}"
+            if approval_resolution.registry_status is not None
+            else f"approval_{approval_resolution.status.value}"
+        )
+        _logger.warning(
+            "approval dispatch would_block: %s; workflow_id=%s target_agent=%s "
+            "resolution_status=%s registry_status=%s",
+            reason_token, workflow_id, agent_id,
+            approval_resolution.status.value,
+            approval_resolution.registry_status,
         )
 
     if approval_decision.refused:
