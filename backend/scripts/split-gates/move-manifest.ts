@@ -1927,6 +1927,23 @@ export const ADDITION_ALLOWLIST: AllowlistEntry[] = [
       "resolve it without a cross-stack Fn::ImportValue (mirrors the E19 " +
       "registry id/arn SSM channel, decision 06077146).",
   },
+
+  // --- CIT-214: server-derived custom:organization claim (PR #226) ---
+  {
+    logicalId: "UserOrgMembershipTable7D8BD3BE",
+    justification:
+      "CIT-214 (decision 00d40a31, option A): authoritative " +
+      "user->organisation membership DynamoDB table; the Cognito " +
+      "pre-token-generation trigger mints custom:organization from it " +
+      "server-side (fail closed). Escalation finding 7aa877f8.",
+  },
+  {
+    logicalId: "PreTokenGenerationFunctionServiceRoleDefaultPolicy63BFB755",
+    justification:
+      "CIT-214: grantReadData on UserOrgMembershipTable for the " +
+      "pre-token-generation Lambda — the first IAM grant that function has " +
+      "needed, so CDK now emits a DefaultPolicy for its service role.",
+  },
 ];
 
 /**
