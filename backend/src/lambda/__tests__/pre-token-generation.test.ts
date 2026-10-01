@@ -1,22 +1,35 @@
 /**
  * Unit tests for pre-token-generation Lambda.
  *
- * Covers the trigger behaviour the Phase 1 org-scoping work depends on:
- * the handler promotes the `custom:organization` attribute onto
- * `claimsToAddOrOverride` while preserving any other
- * `claimsOverrideDetails` keys already set upstream.
+ * `custom:organization` claim (decision 00d40a31, option A): the claim is
+ * minted SERVER-SIDE from the UserOrgMembership DynamoDB table, keyed by
+ * the caller's Cognito `sub`. The stored `custom:organization` user-pool
+ * attribute is display/back-compat only and is NEVER read by this trigger.
+ * Row absent or DynamoDB error → the claim is OMITTED (fail closed).
  *
  * The promoted `custom:role` claim is DISPLAY/LEGACY ONLY and, since
  * CIT-213, is derived exclusively from Cognito group membership
  * (`groupConfiguration.groupsToOverride`) — the stored, client-writable
  * `custom:role` attribute is never read (finding 7aa877f8).
  */
-import { handler } from "../pre-token-generation";
+process.env.USER_ORG_MEMBERSHIP_TABLE = "test-user-org-membership";
+
+import { mockClient } from "aws-sdk-client-mock";
+import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
+
+const dynamoMock = mockClient(DynamoDBDocumentClient);
+
+import {
+  handler,
+  deriveOrgClaim,
+  deriveDisplayRole,
+} from "../pre-token-generation";
 
 type HandlerEvent = Parameters<typeof handler>[0];
 
 /** Loose overrides: request.userAttributes merges, everything else replaces. */
 interface EventOverrides extends Record<string, unknown> {
+  userName?: string;
   request?: {
     userAttributes?: Record<string, string>;
     groupConfiguration?: {
@@ -34,7 +47,7 @@ function makeEvent(overrides: EventOverrides = {}): HandlerEvent {
     triggerSource: "TokenGeneration_HostedAuth",
     region: "us-east-1",
     userPoolId: "us-east-1_test",
-    userName: "user-123",
+    userName: overrides.userName ?? "user-123",
     callerContext: { awsSdkVersion: "1", clientId: "client-1" },
     request: {
       userAttributes: {
@@ -60,44 +73,295 @@ function claims(result: HandlerEvent) {
   return result.response?.claimsOverrideDetails?.claimsToAddOrOverride;
 }
 
+/** Stub a membership row for the given sub. */
+function withMembership(sub: string, orgName: string) {
+  dynamoMock
+    .on(GetCommand, { TableName: "test-user-org-membership", Key: { sub } })
+    .resolves({ Item: { sub, orgName, updatedAt: "2026-01-01T00:00:00Z" } });
+}
+
+let warnSpy: jest.SpyInstance;
+
+beforeEach(() => {
+  dynamoMock.reset();
+  // Default: no membership row for anyone.
+  dynamoMock.on(GetCommand).resolves({ Item: undefined });
+  warnSpy = jest.spyOn(console, "warn").mockImplementation(() => undefined);
+});
+
+afterEach(() => {
+  warnSpy.mockRestore();
+});
+
 describe("pre-token-generation", () => {
   // -------------------------------------------------------------------
-  // custom:organization promotion (unchanged — CIT-214 scope)
+  // custom:organization — derived from the membership table ONLY
+  // (decision 00d40a31, option A)
   // -------------------------------------------------------------------
+  describe("custom:organization claim (server-derived from membership table)", () => {
+    test("row present → claim custom:organization = row.orgName", async () => {
+      withMembership("user-123", "org-a");
+      const event = makeEvent();
 
-  test("adds custom:organization from the stored attribute", async () => {
-    const event = makeEvent({
-      request: { userAttributes: { "custom:organization": "org-a" } },
+      const result = await handler(event);
+
+      expect(claims(result)).toEqual({ "custom:organization": "org-a" });
     });
 
-    const result = await handler(event);
+    test("looks the row up by userAttributes.sub in the configured table", async () => {
+      withMembership("user-123", "org-a");
 
-    expect(claims(result)).toEqual({ "custom:organization": "org-a" });
-  });
+      await handler(makeEvent());
 
-  test("produces an empty claimsToAddOrOverride when no attribute and no group is present", async () => {
-    const event = makeEvent({ request: { userAttributes: {} } });
-
-    const result = await handler(event);
-
-    expect(claims(result)).toEqual({});
-  });
-
-  test("preserves existing claimsOverrideDetails keys (e.g. groupOverrideDetails)", async () => {
-    const existingGroupOverride = groups(["admin"]);
-
-    const event = makeEvent({
-      request: { userAttributes: { "custom:organization": "org-a" } },
-      response: {
-        claimsOverrideDetails: { groupOverrideDetails: existingGroupOverride },
-      },
+      const calls = dynamoMock.commandCalls(GetCommand);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].args[0].input).toMatchObject({
+        TableName: "test-user-org-membership",
+        Key: { sub: "user-123" },
+      });
     });
 
-    const result = await handler(event);
+    test("falls back to event.userName as the lookup key when userAttributes.sub is absent", async () => {
+      withMembership("name-only-user", "org-from-username");
+      const event = makeEvent({ userName: "name-only-user" });
+      delete event.request.userAttributes.sub;
 
-    expect(result.response?.claimsOverrideDetails).toEqual({
-      groupOverrideDetails: existingGroupOverride,
-      claimsToAddOrOverride: { "custom:organization": "org-a" },
+      const result = await handler(event);
+
+      expect(claims(result)).toEqual({
+        "custom:organization": "org-from-username",
+      });
+      expect(
+        dynamoMock.commandCalls(GetCommand)[0].args[0].input,
+      ).toMatchObject({ Key: { sub: "name-only-user" } });
+    });
+
+    test("row absent → claim OMITTED and a warning is logged (fail closed)", async () => {
+      const event = makeEvent();
+
+      const result = await handler(event);
+
+      expect(claims(result)).toEqual({});
+      expect(claims(result)).not.toHaveProperty("custom:organization");
+      expect(warnSpy).toHaveBeenCalled();
+    });
+
+    test("DynamoDB error → claim OMITTED, handler does not throw, warning logged (fail closed)", async () => {
+      dynamoMock
+        .on(GetCommand)
+        .rejects(new Error("ProvisionedThroughputExceeded"));
+      const event = makeEvent();
+
+      const result = await handler(event);
+
+      expect(claims(result)).toEqual({});
+      expect(warnSpy).toHaveBeenCalled();
+    });
+
+    test("KEY ESCALATION TEST: the stored custom:organization attribute is NEVER promoted when no membership row exists", async () => {
+      const event = makeEvent({
+        request: { userAttributes: { "custom:organization": "forged-org" } },
+      });
+
+      const result = await handler(event);
+
+      expect(claims(result)).toEqual({});
+    });
+
+    test("KEY ESCALATION TEST: the membership row wins over a conflicting stored custom:organization attribute", async () => {
+      withMembership("user-123", "real-org");
+      const event = makeEvent({
+        request: { userAttributes: { "custom:organization": "forged-org" } },
+      });
+
+      const result = await handler(event);
+
+      expect(claims(result)).toEqual({ "custom:organization": "real-org" });
+    });
+
+    test("KEY ESCALATION TEST: a DynamoDB error never falls back to the stored attribute", async () => {
+      dynamoMock.on(GetCommand).rejects(new Error("boom"));
+      const event = makeEvent({
+        request: { userAttributes: { "custom:organization": "forged-org" } },
+      });
+
+      const result = await handler(event);
+
+      expect(claims(result)).toEqual({});
+    });
+
+    test("a membership row whose orgName is empty/non-string yields no claim", async () => {
+      dynamoMock
+        .on(GetCommand)
+        .resolves({ Item: { sub: "user-123", orgName: "" } });
+
+      const result = await handler(makeEvent());
+
+      expect(claims(result)).toEqual({});
+    });
+
+    test("USER_ORG_MEMBERSHIP_TABLE unset → claim OMITTED, no DynamoDB call, warning logged", async () => {
+      const saved = process.env.USER_ORG_MEMBERSHIP_TABLE;
+      delete process.env.USER_ORG_MEMBERSHIP_TABLE;
+      try {
+        const result = await handler(makeEvent());
+        expect(claims(result)).toEqual({});
+        expect(dynamoMock.commandCalls(GetCommand)).toHaveLength(0);
+        expect(warnSpy).toHaveBeenCalled();
+      } finally {
+        process.env.USER_ORG_MEMBERSHIP_TABLE = saved;
+      }
+    });
+
+    // Cognito's default ID-token mapping emits every client-READABLE user
+    // attribute as a claim, and the user pool client's readAttributes
+    // includes custom:organization. Omitting the claim from
+    // claimsToAddOrOverride is therefore NOT enough: the stored attribute
+    // would still surface as `custom:organization` in the ID token, which
+    // AppSync accepts and extractOrgFromEvent reads. Every omission path
+    // must actively SUPPRESS the claim.
+    describe("claim suppression on every omission path (fail closed against the readable attribute)", () => {
+      function suppressed(result: HandlerEvent) {
+        return result.response?.claimsOverrideDetails?.claimsToSuppress;
+      }
+
+      test("row absent → claimsToSuppress includes custom:organization even when the stored attribute is set", async () => {
+        const event = makeEvent({
+          request: {
+            userAttributes: { "custom:organization": "forged-org" },
+          },
+        });
+
+        const result = await handler(event);
+
+        expect(claims(result)).not.toHaveProperty("custom:organization");
+        expect(suppressed(result)).toEqual(["custom:organization"]);
+      });
+
+      test("DynamoDB error → claimsToSuppress includes custom:organization", async () => {
+        dynamoMock.on(GetCommand).rejects(new Error("boom"));
+        const event = makeEvent({
+          request: {
+            userAttributes: { "custom:organization": "forged-org" },
+          },
+        });
+
+        const result = await handler(event);
+
+        expect(suppressed(result)).toEqual(["custom:organization"]);
+      });
+
+      test("USER_ORG_MEMBERSHIP_TABLE unset → claimsToSuppress includes custom:organization", async () => {
+        const saved = process.env.USER_ORG_MEMBERSHIP_TABLE;
+        delete process.env.USER_ORG_MEMBERSHIP_TABLE;
+        try {
+          const result = await handler(
+            makeEvent({
+              request: {
+                userAttributes: { "custom:organization": "forged-org" },
+              },
+            }),
+          );
+          expect(suppressed(result)).toEqual(["custom:organization"]);
+        } finally {
+          process.env.USER_ORG_MEMBERSHIP_TABLE = saved;
+        }
+      });
+
+      test("membership row with empty orgName → claimsToSuppress includes custom:organization", async () => {
+        dynamoMock
+          .on(GetCommand)
+          .resolves({ Item: { sub: "user-123", orgName: "" } });
+
+        const result = await handler(makeEvent());
+
+        expect(suppressed(result)).toEqual(["custom:organization"]);
+      });
+
+      test("row present → the claim is minted and NOT suppressed", async () => {
+        withMembership("user-123", "org-a");
+
+        const result = await handler(makeEvent());
+
+        expect(claims(result)).toEqual({ "custom:organization": "org-a" });
+        expect(suppressed(result)).toBeUndefined();
+      });
+
+      test("merges with an existing claimsToSuppress list without duplicating", async () => {
+        const event = makeEvent({
+          response: {
+            claimsOverrideDetails: {
+              claimsToSuppress: ["email_verified", "custom:organization"],
+            },
+          },
+        });
+
+        const result = await handler(event);
+
+        expect(suppressed(result)).toEqual([
+          "email_verified",
+          "custom:organization",
+        ]);
+      });
+
+      test("row present leaves a pre-existing unrelated claimsToSuppress untouched", async () => {
+        withMembership("user-123", "org-a");
+        const event = makeEvent({
+          response: {
+            claimsOverrideDetails: { claimsToSuppress: ["email_verified"] },
+          },
+        });
+
+        const result = await handler(event);
+
+        expect(suppressed(result)).toEqual(["email_verified"]);
+        expect(claims(result)).toEqual({ "custom:organization": "org-a" });
+      });
+    });
+
+    test("preserves existing claimsOverrideDetails keys (e.g. groupOverrideDetails)", async () => {
+      withMembership("user-123", "org-a");
+      const existingGroupOverride = groups(["admin"]);
+
+      const event = makeEvent({
+        response: {
+          claimsOverrideDetails: {
+            groupOverrideDetails: existingGroupOverride,
+          },
+        },
+      });
+
+      const result = await handler(event);
+
+      expect(result.response?.claimsOverrideDetails).toEqual({
+        groupOverrideDetails: existingGroupOverride,
+        claimsToAddOrOverride: { "custom:organization": "org-a" },
+      });
+    });
+  });
+
+  describe("deriveOrgClaim (pure)", () => {
+    test("returns orgName for a well-formed row", () => {
+      expect(deriveOrgClaim({ sub: "u", orgName: "Acme" })).toBe("Acme");
+    });
+
+    test("returns undefined for a missing row", () => {
+      expect(deriveOrgClaim(undefined)).toBeUndefined();
+      expect(deriveOrgClaim(null)).toBeUndefined();
+    });
+
+    test("returns undefined for an empty or non-string orgName", () => {
+      expect(deriveOrgClaim({ sub: "u", orgName: "" })).toBeUndefined();
+      expect(deriveOrgClaim({ sub: "u", orgName: 42 })).toBeUndefined();
+      expect(deriveOrgClaim({ sub: "u" })).toBeUndefined();
+    });
+  });
+
+  describe("deriveDisplayRole (pure, unchanged)", () => {
+    test("admin wins; otherwise precedence order; otherwise undefined", () => {
+      expect(deriveDisplayRole(["developer", "admin"])).toBe("admin");
+      expect(deriveDisplayRole(["developer", "architect"])).toBe("architect");
+      expect(deriveDisplayRole(["analyst"])).toBeUndefined();
     });
   });
 
@@ -110,12 +374,10 @@ describe("pre-token-generation", () => {
   // nor to promote a non-admin role. These are the KEY ESCALATION TESTS
   // for the trigger side.
   test("KEY ESCALATION TEST: a stored custom:role=admin attribute WITHOUT admin group membership is NOT promoted to the admin claim", async () => {
+    withMembership("user-123", "org-a");
     const event = makeEvent({
       request: {
-        userAttributes: {
-          "custom:organization": "org-a",
-          "custom:role": "admin",
-        },
+        userAttributes: { "custom:role": "admin" },
         groupConfiguration: groups(["project_manager"]),
       },
     });
@@ -129,12 +391,10 @@ describe("pre-token-generation", () => {
   });
 
   test("KEY ESCALATION TEST (CIT-213): a stored non-admin custom:role attribute with NO group membership is NOT promoted", async () => {
+    withMembership("user-123", "org-a");
     const event = makeEvent({
       request: {
-        userAttributes: {
-          "custom:organization": "org-a",
-          "custom:role": "project_manager",
-        },
+        userAttributes: { "custom:role": "project_manager" },
         groupConfiguration: groups([]),
       },
     });
@@ -194,9 +454,10 @@ describe("pre-token-generation", () => {
   });
 
   test("a single non-admin group is promoted as the display role", async () => {
+    withMembership("user-123", "org-a");
     const event = makeEvent({
       request: {
-        userAttributes: { "custom:organization": "org-a" },
+        userAttributes: {},
         groupConfiguration: groups(["architect"]),
       },
     });

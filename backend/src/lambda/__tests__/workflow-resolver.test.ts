@@ -41,7 +41,14 @@ function makeEvent(
   return {
     info: { fieldName },
     arguments: args,
-    identity: { sub, claims: { sub } },
+    identity: {
+      sub,
+      ...(callerOrg ? { "custom:organization": callerOrg } : {}),
+      claims: {
+        sub,
+        ...(callerOrg ? { "custom:organization": callerOrg } : {}),
+      },
+    },
   } as unknown as HandlerEvent;
 }
 
@@ -59,11 +66,39 @@ async function invoke<T = Record<string, unknown>>(
 }
 
 /** Helper: configure Cognito mock to return orgId for user */
+/**
+ * decision 00d40a31 (option A): the caller's organisation is read from the
+ * server-minted `custom:organization` JWT claim ONLY — extractOrgFromEvent
+ * no longer falls back to the Cognito user attribute. `makeEvent` stamps
+ * `callerOrg` onto the identity (the real ID-token shape). The AdminGetUser
+ * stub is kept so any residual attribute read would be observable.
+ */
+let callerOrg: string | undefined;
+
 function mockCognitoOrg(orgId: string) {
+  callerOrg = orgId;
   cognitoMock.on(AdminGetUserCommand).resolves({
     UserAttributes: [
       { Name: "sub", Value: "user-123" },
       { Name: "custom:organization", Value: orgId },
+    ],
+  });
+}
+
+/**
+ * Caller with NO resolvable org: no claim on the identity. Cognito is
+ * stubbed to RESOLVE an org so that a regression reintroducing the
+ * attribute fallback would grant access and break the fail-closed tests.
+ */
+function mockCallerOrgUnresolvable() {
+  callerOrg = undefined;
+  cognitoMock.on(AdminGetUserCommand).resolves({
+    UserAttributes: [
+      { Name: "sub", Value: "user-123" },
+      {
+        Name: "custom:organization",
+        Value: "org-from-attribute-must-not-be-used",
+      },
     ],
   });
 }
@@ -81,6 +116,7 @@ describe("workflow-resolver", () => {
     ddbMock.reset();
     ebMock.reset();
     cognitoMock.reset();
+    callerOrg = undefined;
     mockCognitoOrg("org-1");
     ebMock.on(PutEventsCommand).resolves({});
   });
@@ -198,7 +234,8 @@ describe("workflow-resolver", () => {
     // unchecked. assertRowOrg denies instead.
     test("denies a non-admin caller whose org cannot be resolved", async () => {
       cognitoMock.reset();
-      cognitoMock.on(AdminGetUserCommand).rejects(new Error("user not found"));
+      callerOrg = undefined;
+      mockCallerOrgUnresolvable();
       ddbMock.on(GetCommand).resolves({
         Item: {
           workflowId: "wf-1",
@@ -249,7 +286,8 @@ describe("workflow-resolver", () => {
     // org into the CLIENT-SUPPLIED orgId argument instead of denying).
     test("DENIES a non-admin caller with no resolvable org claim, regardless of the orgId argument supplied — no rows leak", async () => {
       cognitoMock.reset();
-      cognitoMock.on(AdminGetUserCommand).resolves({ UserAttributes: [] });
+      callerOrg = undefined;
+      mockCallerOrgUnresolvable();
       ddbMock.on(QueryCommand).resolves({
         Items: [
           { workflowId: "wf-1", orgId: "org-real", isBlueprint: "false" },
@@ -292,7 +330,8 @@ describe("workflow-resolver", () => {
 
     test("an admin caller may still query a specified org explicitly", async () => {
       cognitoMock.reset();
-      cognitoMock.on(AdminGetUserCommand).resolves({ UserAttributes: [] });
+      callerOrg = undefined;
+      mockCallerOrgUnresolvable();
       const items = [
         { workflowId: "wf-real", orgId: "org-real", isBlueprint: "false" },
       ];
@@ -410,7 +449,7 @@ describe("workflow-resolver", () => {
     });
 
     test("fails closed when caller org is unresolvable (no claim, Cognito lookup fails)", async () => {
-      cognitoMock.on(AdminGetUserCommand).rejects(new Error("user not found"));
+      mockCallerOrgUnresolvable();
 
       await expect(
         invoke(
@@ -1437,7 +1476,7 @@ describe("workflow-resolver", () => {
     });
 
     test("org-less (unresolvable) caller is denied", async () => {
-      cognitoMock.on(AdminGetUserCommand).rejects(new Error("user not found"));
+      mockCallerOrgUnresolvable();
       ddbMock
         .on(GetCommand)
         .resolvesOnce({
@@ -1675,7 +1714,7 @@ describe("workflow-resolver", () => {
     });
 
     test("fails closed when caller org is unresolvable", async () => {
-      cognitoMock.on(AdminGetUserCommand).rejects(new Error("user not found"));
+      mockCallerOrgUnresolvable();
       const workflowJson = JSON.stringify({
         name: "Unresolvable",
         definition: JSON.stringify({ nodes: [], edges: [] }),
@@ -2013,7 +2052,7 @@ describe("workflow-resolver", () => {
     });
 
     test("org-less (unresolvable) caller is denied", async () => {
-      cognitoMock.on(AdminGetUserCommand).rejects(new Error("user not found"));
+      mockCallerOrgUnresolvable();
       ddbMock.on(GetCommand).resolves({
         Item: {
           appId: "app-1",

@@ -1,11 +1,14 @@
 /**
  * Unit tests for the shared auth-event helper.
  *
- * Covers both code paths of `extractOrgFromEvent` (claim-first, Cognito
- * fallback) and the group-only role derivation (`readGroups`,
- * `isAdminFromEvent`, `hasRoleFromEvent`, `deriveRoles`). The Cognito
- * fallback path is asserted never to trigger when a claim is present — that
- * guarantee is the reason this helper exists.
+ * Covers `extractOrgFromEvent` (CLAIM ONLY — decision 00d40a31, option A:
+ * the `custom:organization` claim is minted server-side by the pre-token
+ * trigger from the membership table, and there is NO Cognito
+ * AdminGetUser fallback to the client-writable attribute) and the
+ * group-only role derivation (`readGroups`, `isAdminFromEvent`,
+ * `hasRoleFromEvent`, `deriveRoles`). `lookupUserOrganization` remains
+ * exported for the intake-orchestration project-owner fallback but is NOT
+ * an authorization path and is never called from `extractOrgFromEvent`.
  *
  * finding 7aa877f8 made ADMIN group-only; CIT-213 extended that to every
  * role: the `custom:role` claim is never read as an authorization signal.
@@ -25,6 +28,7 @@ import {
   deriveRoles,
   resolveScopedOrgFromEvent,
   canCallerSeeRow,
+  lookupUserOrganization,
 } from "../auth-event";
 
 const cognitoMock = mockClient(CognitoIdentityProviderClient);
@@ -73,7 +77,7 @@ describe("auth-event", () => {
       expect(cognitoMock.commandCalls(AdminGetUserCommand).length).toBe(0);
     });
 
-    test("falls back to Cognito AdminGetUser and returns attribute value when no claim is present", async () => {
+    test("KEY ESCALATION TEST (00d40a31): with NO claim, does NOT fall back to Cognito AdminGetUser — returns null even when the stored attribute holds an org", async () => {
       cognitoMock.on(AdminGetUserCommand).resolves({
         Username: "user-123",
         UserAttributes: [
@@ -86,41 +90,11 @@ describe("auth-event", () => {
 
       const result = await extractOrgFromEvent(event);
 
-      expect(result).toBe("org-cognito-c");
-      expect(cognitoMock.commandCalls(AdminGetUserCommand).length).toBe(1);
-    });
-
-    test("returns null (without throwing) when Cognito fallback errors", async () => {
-      cognitoMock.on(AdminGetUserCommand).rejects(new Error("boom"));
-
-      const event = { identity: { sub: "user-123" } };
-
-      const result = await extractOrgFromEvent(event);
-
-      expect(result).toBeNull();
-    });
-
-    test("returns null when event has no identity", async () => {
-      const result = await extractOrgFromEvent({});
       expect(result).toBeNull();
       expect(cognitoMock.commandCalls(AdminGetUserCommand).length).toBe(0);
     });
 
-    test("returns null when USER_POOL_ID is unset (no Cognito call)", async () => {
-      const originalPoolId = process.env.USER_POOL_ID;
-      delete process.env.USER_POOL_ID;
-
-      try {
-        const event = { identity: { sub: "user-123" } };
-        const result = await extractOrgFromEvent(event);
-        expect(result).toBeNull();
-        expect(cognitoMock.commandCalls(AdminGetUserCommand).length).toBe(0);
-      } finally {
-        process.env.USER_POOL_ID = originalPoolId;
-      }
-    });
-
-    test("falls back to Cognito using identity.username when sub is absent", async () => {
+    test("with NO claim and identity.username only, still returns null and never calls Cognito", async () => {
       cognitoMock.on(AdminGetUserCommand).resolves({
         Username: "name-only-user",
         UserAttributes: [
@@ -131,8 +105,51 @@ describe("auth-event", () => {
       const event = { identity: { username: "name-only-user" } };
 
       const result = await extractOrgFromEvent(event);
-      expect(result).toBe("org-from-username");
-      expect(cognitoMock.commandCalls(AdminGetUserCommand).length).toBe(1);
+
+      expect(result).toBeNull();
+      expect(cognitoMock.commandCalls(AdminGetUserCommand).length).toBe(0);
+    });
+
+    test("returns null when event has no identity", async () => {
+      const result = await extractOrgFromEvent({});
+      expect(result).toBeNull();
+      expect(cognitoMock.commandCalls(AdminGetUserCommand).length).toBe(0);
+    });
+
+    test("an empty-string claim is treated as absent (null), with no Cognito call", async () => {
+      const event = {
+        identity: { sub: "user-123", "custom:organization": "" },
+      };
+      const result = await extractOrgFromEvent(event);
+      expect(result).toBeNull();
+      expect(cognitoMock.commandCalls(AdminGetUserCommand).length).toBe(0);
+    });
+  });
+
+  describe("lookupUserOrganization (NOT an authz path — intake project-owner fallback only)", () => {
+    test("still resolves the stored attribute for its remaining non-authz caller", async () => {
+      cognitoMock.on(AdminGetUserCommand).resolves({
+        Username: "owner-1",
+        UserAttributes: [{ Name: "custom:organization", Value: "owner-org" }],
+      });
+      await expect(lookupUserOrganization("owner-1")).resolves.toBe(
+        "owner-org",
+      );
+    });
+
+    test("returns null on Cognito error and when USER_POOL_ID is unset", async () => {
+      cognitoMock.on(AdminGetUserCommand).rejects(new Error("boom"));
+      await expect(lookupUserOrganization("owner-1")).resolves.toBeNull();
+
+      const saved = process.env.USER_POOL_ID;
+      delete process.env.USER_POOL_ID;
+      try {
+        cognitoMock.reset();
+        await expect(lookupUserOrganization("owner-1")).resolves.toBeNull();
+        expect(cognitoMock.commandCalls(AdminGetUserCommand).length).toBe(0);
+      } finally {
+        process.env.USER_POOL_ID = saved;
+      }
     });
   });
 
@@ -464,8 +481,12 @@ describe("auth-event", () => {
     });
 
     test("throws when the caller org is unresolvable, even if the row has an orgId (fail closed)", async () => {
-      const event = { identity: { sub: "u1" } }; // no org claim, no USER_POOL_ID Cognito fallback match
-      cognitoMock.rejects(new Error("user not found"));
+      const event = { identity: { sub: "u1" } }; // no org claim → unresolvable (no Cognito fallback)
+      // A residual Cognito fallback would resolve an org here and break the
+      // fail-closed expectation below (decision 00d40a31: claim only).
+      cognitoMock.on(AdminGetUserCommand).resolves({
+        UserAttributes: [{ Name: "custom:organization", Value: "org-a" }],
+      });
       await expect(
         assertRowOrg({ orgId: "org-a" }, event),
       ).rejects.toBeInstanceOf(CrossOrgAccessError);
@@ -530,8 +551,8 @@ describe("auth-event", () => {
     test("extractOrgFromEvent returns null for an access-token-shaped identity lacking custom:organization (documents the bug this fix prevents)", async () => {
       // An access token never carries custom:organization — this is the
       // exact shape that reached extractOrgFromEvent for every caller
-      // before the frontend was switched to send the ID token. Without a
-      // resolvable USER_POOL_ID fallback match, this must resolve to null
+      // before the frontend was switched to send the ID token. There is no
+      // Cognito fallback (decision 00d40a31), so this must resolve to null
       // (fail closed), not silently succeed.
       const accessTokenEvent = {
         identity: {
@@ -543,7 +564,11 @@ describe("auth-event", () => {
           "cognito:groups": ["admin"],
         },
       };
-      cognitoMock.rejects(new Error("user not found"));
+      // A residual Cognito fallback would resolve an org here and break the
+      // fail-closed expectation below (decision 00d40a31: claim only).
+      cognitoMock.on(AdminGetUserCommand).resolves({
+        UserAttributes: [{ Name: "custom:organization", Value: "org-a" }],
+      });
 
       const result = await extractOrgFromEvent(accessTokenEvent);
 
@@ -604,7 +629,11 @@ describe("auth-event", () => {
       const event = {
         identity: { sub: "admin-1", "cognito:groups": ["admin"] },
       };
-      cognitoMock.rejects(new Error("user not found"));
+      // A residual Cognito fallback would resolve an org here and break the
+      // fail-closed expectation below (decision 00d40a31: claim only).
+      cognitoMock.on(AdminGetUserCommand).resolves({
+        UserAttributes: [{ Name: "custom:organization", Value: "org-a" }],
+      });
       const result = await resolveScopedOrgFromEvent(event, undefined);
       expect(result).toBeNull();
     });
@@ -627,7 +656,11 @@ describe("auth-event", () => {
 
     test("non-admin caller with an unresolvable org returns null (never forwards the client value)", async () => {
       const event = { identity: { sub: "u1" } };
-      cognitoMock.rejects(new Error("user not found"));
+      // A residual Cognito fallback would resolve an org here and break the
+      // fail-closed expectation below (decision 00d40a31: claim only).
+      cognitoMock.on(AdminGetUserCommand).resolves({
+        UserAttributes: [{ Name: "custom:organization", Value: "org-a" }],
+      });
       const result = await resolveScopedOrgFromEvent(event, "org-victim");
       expect(result).toBeNull();
     });
@@ -685,7 +718,11 @@ describe("auth-event", () => {
 
     test("returns false when the caller org is unresolvable, even though the row has an orgId (fail closed)", async () => {
       const event = { identity: { sub: "u1" } };
-      cognitoMock.rejects(new Error("user not found"));
+      // A residual Cognito fallback would resolve an org here and break the
+      // fail-closed expectation below (decision 00d40a31: claim only).
+      cognitoMock.on(AdminGetUserCommand).resolves({
+        UserAttributes: [{ Name: "custom:organization", Value: "org-a" }],
+      });
       await expect(canCallerSeeRow({ orgId: "org-a" }, event)).resolves.toBe(
         false,
       );

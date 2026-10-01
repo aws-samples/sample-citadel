@@ -24,6 +24,13 @@
  * assignUserRole / removeUserRole / adminCreateUser are explicitly OUT OF
  * SCOPE (finding 59e5a79c, separately accepted risk) — no test here asserts
  * on their org-confinement behavior changing.
+ *
+ * Decision 00d40a31 (option A): the caller's org is read from the
+ * server-minted `custom:organization` JWT CLAIM only — extractOrgFromEvent
+ * no longer falls back to the caller's Cognito attribute. Non-admin caller
+ * identities below therefore carry the claim (the real ID-token shape); the
+ * AdminGetUser stubs for the CALLER are retained only where the resolver
+ * still fetches the caller for other reasons.
  */
 
 import {
@@ -131,7 +138,7 @@ describe("listUsers — org scoping", () => {
       .on(AdminListGroupsForUserCommand, { Username: "carol" })
       .resolves({ Groups: [{ GroupName: "developer" }] });
 
-    const event = buildEvent("listUsers", { username: "alice" });
+    const event = buildEvent("listUsers", { username: "alice", "custom:organization": "org-a" });
     const result = (await handler(event)) as UserResult[];
 
     const ids = result.map((u) => u.userId).sort();
@@ -207,7 +214,7 @@ describe("getUser — org scoping", () => {
 
     const event = buildEvent(
       "getUser",
-      { username: "alice" },
+      { username: "alice", "custom:organization": "org-a" },
       { userId: "bob" },
     );
     const result = (await handler(event)) as UserResult;
@@ -238,7 +245,7 @@ describe("getUser — org scoping", () => {
 
     const event = buildEvent(
       "getUser",
-      { username: "alice" },
+      { username: "alice", "custom:organization": "org-a" },
       { userId: "carol" },
     );
 
@@ -310,7 +317,7 @@ describe("listOrganizations — org scoping", () => {
     });
     dynamoMock.on(ScanCommand).resolves({ Items: orgItems });
 
-    const event = buildEvent("listOrganizations", { username: "alice" });
+    const event = buildEvent("listOrganizations", { username: "alice", "custom:organization": "Org A" });
     const result = (await handler(event)) as OrganizationResult[];
 
     expect(result.map((o) => o.name)).toEqual(["Org A"]);

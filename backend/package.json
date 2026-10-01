@@ -27,6 +27,7 @@
     "backfill:org-ids": "ts-node scripts/backfill-org-ids.ts",
     "backfill:org-name-reservations": "ts-node scripts/backfill-org-name-reservations.ts",
     "backfill:registry-status": "ts-node scripts/backfill-registry-status.ts",
+    "backfill:user-org-membership": "ts-node scripts/backfill-user-org-membership.ts",
     "audit:cognito-custom-attributes": "ts-node scripts/audit-cognito-custom-attributes.ts"
   },
   "dependencies": {

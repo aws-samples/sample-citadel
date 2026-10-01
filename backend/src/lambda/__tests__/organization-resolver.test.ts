@@ -28,6 +28,7 @@
 // captures process.env values into top-level constants at import time.
 process.env.ORGANIZATIONS_TABLE = "test-orgs";
 process.env.USER_POOL_ID = "us-east-1_testpool";
+process.env.USER_ORG_MEMBERSHIP_TABLE = "test-user-org-membership";
 
 import {
   DynamoDBDocumentClient,
@@ -36,6 +37,8 @@ import {
   DeleteCommand,
   GetCommand,
   ScanCommand,
+  QueryCommand,
+  BatchWriteCommand,
 } from "@aws-sdk/lib-dynamodb";
 import {
   CognitoIdentityProviderClient,
@@ -70,6 +73,10 @@ describe("organization-resolver", () => {
     // default to "no existing org row with this name" unless a test
     // overrides this with a more specific `.on(ScanCommand, {...})` stub.
     dynamoMock.on(ScanCommand).resolves({ Items: [] });
+    // Membership cleanup (decision 00d40a31): default to "no membership
+    // rows for this org" unless a test overrides the Query stub.
+    dynamoMock.on(QueryCommand).resolves({ Items: [] });
+    dynamoMock.on(BatchWriteCommand).resolves({ UnprocessedItems: {} });
   });
 
   // REAL AppSync $context shape: the field name lives under `info.fieldName`,
@@ -726,6 +733,188 @@ describe("organization-resolver", () => {
 
       expect(result.success).toBe(true);
       expect(dynamoMock.commandCalls(DeleteCommand)).toHaveLength(1);
+    });
+  });
+
+  // decision 00d40a31 (option A): the UserOrgMembership table is the
+  // authoritative user↔org store. A successful delete must sweep any
+  // membership rows still pointing at the deleted org NAME via the
+  // `orgName-index` GSI — best-effort, logged, never blocking the delete.
+  describe("deleteOrganization — membership table cleanup (decision 00d40a31)", () => {
+    function happyOrgRow() {
+      dynamoMock.on(ScanCommand).resolves({
+        Items: [{ orgId: "org-1", name: "Operations" }],
+      });
+      cognitoMock.on(ListUsersCommand).resolves({ Users: [] });
+      dynamoMock.on(DeleteCommand).resolves({});
+    }
+
+    test("queries orgName-index on USER_ORG_MEMBERSHIP_TABLE by the deleted org NAME", async () => {
+      happyOrgRow();
+
+      await handler(
+        makeEvent("deleteOrganization", { orgId: "org-1" }, adminIdentity),
+      );
+
+      const queries = dynamoMock.commandCalls(QueryCommand);
+      expect(queries).toHaveLength(1);
+      const input = queries[0].args[0].input;
+      expect(input.TableName).toBe("test-user-org-membership");
+      expect(input.IndexName).toBe("orgName-index");
+      expect(Object.values(input.ExpressionAttributeValues ?? {})).toContain(
+        "Operations",
+      );
+    });
+
+    test("batch-deletes every membership row returned by the index, keyed by sub", async () => {
+      happyOrgRow();
+      dynamoMock.on(QueryCommand).resolves({
+        Items: [
+          { sub: "sub-a", orgName: "Operations" },
+          { sub: "sub-b", orgName: "Operations" },
+        ],
+      });
+
+      const result = await handler(
+        makeEvent("deleteOrganization", { orgId: "org-1" }, adminIdentity),
+      );
+
+      expect(result.success).toBe(true);
+      const batches = dynamoMock.commandCalls(BatchWriteCommand);
+      expect(batches).toHaveLength(1);
+      const requests =
+        batches[0].args[0].input.RequestItems?.["test-user-org-membership"];
+      expect(requests).toEqual(
+        expect.arrayContaining([
+          { DeleteRequest: { Key: { sub: "sub-a" } } },
+          { DeleteRequest: { Key: { sub: "sub-b" } } },
+        ]),
+      );
+      expect(requests).toHaveLength(2);
+    });
+
+    test("chunks deletes into batches of at most 25 (DynamoDB BatchWriteItem limit)", async () => {
+      happyOrgRow();
+      const items = Array.from({ length: 30 }, (_, i) => ({
+        sub: `sub-${i}`,
+        orgName: "Operations",
+      }));
+      dynamoMock.on(QueryCommand).resolves({ Items: items });
+
+      await handler(
+        makeEvent("deleteOrganization", { orgId: "org-1" }, adminIdentity),
+      );
+
+      const batches = dynamoMock.commandCalls(BatchWriteCommand);
+      expect(batches).toHaveLength(2);
+      const sizes = batches.map(
+        (b) =>
+          b.args[0].input.RequestItems?.["test-user-org-membership"]?.length,
+      );
+      expect(Math.max(...(sizes as number[]))).toBeLessThanOrEqual(25);
+      expect((sizes as number[]).reduce((a, b) => a + b, 0)).toBe(30);
+    });
+
+    test("follows LastEvaluatedKey pagination on the index query", async () => {
+      happyOrgRow();
+      dynamoMock
+        .on(QueryCommand)
+        .resolvesOnce({
+          Items: [{ sub: "sub-a", orgName: "Operations" }],
+          LastEvaluatedKey: { sub: "sub-a", orgName: "Operations" },
+        })
+        .resolvesOnce({ Items: [{ sub: "sub-b", orgName: "Operations" }] });
+
+      await handler(
+        makeEvent("deleteOrganization", { orgId: "org-1" }, adminIdentity),
+      );
+
+      const queries = dynamoMock.commandCalls(QueryCommand);
+      expect(queries).toHaveLength(2);
+      expect(queries[1].args[0].input.ExclusiveStartKey).toEqual({
+        sub: "sub-a",
+        orgName: "Operations",
+      });
+      const deleted = dynamoMock
+        .commandCalls(BatchWriteCommand)
+        .flatMap(
+          (b) => b.args[0].input.RequestItems?.["test-user-org-membership"] ?? [],
+        );
+      expect(deleted).toHaveLength(2);
+    });
+
+    test("no membership rows → no BatchWrite, delete still succeeds", async () => {
+      happyOrgRow();
+
+      const result = await handler(
+        makeEvent("deleteOrganization", { orgId: "org-1" }, adminIdentity),
+      );
+
+      expect(result.success).toBe(true);
+      expect(dynamoMock.commandCalls(BatchWriteCommand)).toHaveLength(0);
+    });
+
+    test("cleanup is best-effort: a Query failure is logged and the delete still succeeds", async () => {
+      happyOrgRow();
+      dynamoMock.on(QueryCommand).rejects(new Error("index unavailable"));
+      const errSpy = jest
+        .spyOn(console, "error")
+        .mockImplementation(() => undefined);
+
+      try {
+        const result = await handler(
+          makeEvent("deleteOrganization", { orgId: "org-1" }, adminIdentity),
+        );
+        expect(result.success).toBe(true);
+        expect(dynamoMock.commandCalls(DeleteCommand)).toHaveLength(1);
+        expect(errSpy).toHaveBeenCalled();
+      } finally {
+        errSpy.mockRestore();
+      }
+    });
+
+    test("cleanup is best-effort: a BatchWrite failure is logged and the delete still succeeds", async () => {
+      happyOrgRow();
+      dynamoMock.on(QueryCommand).resolves({
+        Items: [{ sub: "sub-a", orgName: "Operations" }],
+      });
+      dynamoMock.on(BatchWriteCommand).rejects(new Error("throttled"));
+      const errSpy = jest
+        .spyOn(console, "error")
+        .mockImplementation(() => undefined);
+
+      try {
+        const result = await handler(
+          makeEvent("deleteOrganization", { orgId: "org-1" }, adminIdentity),
+        );
+        expect(result.success).toBe(true);
+        expect(errSpy).toHaveBeenCalled();
+      } finally {
+        errSpy.mockRestore();
+      }
+    });
+
+    test("cleanup runs only AFTER the org row is deleted (a blocked delete never touches membership rows)", async () => {
+      dynamoMock.on(ScanCommand).resolves({
+        Items: [{ orgId: "org-1", name: "Operations" }],
+      });
+      cognitoMock.on(ListUsersCommand).resolves({
+        Users: [
+          {
+            Username: "u1",
+            Attributes: [{ Name: "custom:organization", Value: "Operations" }],
+          },
+        ],
+      });
+
+      await expect(
+        handler(
+          makeEvent("deleteOrganization", { orgId: "org-1" }, adminIdentity),
+        ),
+      ).rejects.toThrow(/still assigned/);
+
+      expect(dynamoMock.commandCalls(QueryCommand)).toHaveLength(0);
+      expect(dynamoMock.commandCalls(BatchWriteCommand)).toHaveLength(0);
     });
   });
 

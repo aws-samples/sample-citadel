@@ -15,11 +15,12 @@ request, cleans them up.
 
 Findings:
 
-| Kind | Meaning | `--apply` action |
-|---|---|---|
-| `ROLE_MISMATCH` | `custom:role` set but user is not in a group of that name (includes `admin` without the `admin` group) | one group: set `custom:role` to it; no groups: delete `custom:role`; several groups: manual |
-| `ORG_UNKNOWN` | `custom:organization` is not a live organisation name | delete `custom:organization` |
-| `ORG_MISSING` | user is in a group but has no `custom:organization` | manual (assign via `assignUserRole`) |
+| Kind                | Meaning                                                                                                                                                                                                                                                        | `--apply` action                                                                                                                         |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `ROLE_MISMATCH`     | `custom:role` set but user is not in a group of that name (includes `admin` without the `admin` group)                                                                                                                                                         | one group: set `custom:role` to it; no groups: delete `custom:role`; several groups: manual                                              |
+| `ORG_UNKNOWN`       | `custom:organization` is not a live organisation name                                                                                                                                                                                                          | delete `custom:organization`                                                                                                             |
+| `ORG_MISSING`       | user is in a group but has no `custom:organization`                                                                                                                                                                                                            | manual (assign via `assignUserRole`)                                                                                                     |
+| `ORG_NO_MEMBERSHIP` | `custom:organization` is a live org name but the user has no row in the `UserOrgMembership` table, so their next token will carry no org claim (decision 00d40a31). Only evaluated when `USER_ORG_MEMBERSHIP_TABLE` is set; not raised for `ORG_UNKNOWN` users | manual: run `npm run backfill:user-org-membership -- --apply` (see `user-org-membership-backfill.md`), or re-assign via `assignUserRole` |
 
 Every modified user is signed out (`AdminUserGlobalSignOut`) so the next login
 re-mints claims. Groups are never added or removed. Only `username` and `sub`
@@ -45,8 +46,11 @@ write failed or a fatal error.
   `dynamodb:Scan` on the organisations table. Read-only credentials suffice
   for dry-run.
 - Env: `USER_POOL_ID`, `ORGANISATION_TABLE`, optional `AWS_REGION`
-  (default `us-west-2`). `USER_POOL_ID` is in `cdk-outputs.json` under
-  `citadel-backend-dev`; the table name is the `ORGANISATION_TABLE` env of the
+  (default `us-west-2`), optional `USER_ORG_MEMBERSHIP_TABLE` (enables the
+  `ORG_NO_MEMBERSHIP` check; needs `dynamodb:GetItem` on that table and costs
+  one read per user with an attribute). `USER_POOL_ID` is in
+  `cdk-outputs.json` under `citadel-backend-dev`; the table names are the
+  `ORGANISATION_TABLE` / `USER_ORG_MEMBERSHIP_TABLE` env of the
   `user-management-resolver` Lambda (`aws lambda get-function-configuration`).
 - `cd backend && npm ci`.
 
@@ -76,7 +80,7 @@ cleans up until the next self-write. Check each environment:
    git merge-base --is-ancestor 39b2de8 <deployed_sha> && echo "39b2de8: ok"
    ```
 3. Cross-check live: `aws cognito-idp describe-user-pool-client --user-pool-id
-   $USER_POOL_ID --client-id <id> --query 'UserPoolClient.WriteAttributes'`
+$USER_POOL_ID --client-id <id> --query 'UserPoolClient.WriteAttributes'`
    must list only `email`, `given_name`, `family_name`.
 
 ## Procedure
@@ -84,6 +88,7 @@ cleans up until the next self-write. Check each environment:
 ```bash
 cd backend
 export AWS_PROFILE=<profile> USER_POOL_ID=<pool> ORGANISATION_TABLE=<table>
+export USER_ORG_MEMBERSHIP_TABLE=<membership table>   # optional; enables ORG_NO_MEMBERSHIP
 
 # 1. Dry-run and keep an export (this is your rollback record).
 #    Use --out, not `--json > file`: --out writes the file only after the
@@ -94,6 +99,8 @@ npm run audit:cognito-custom-attributes            # human-readable table
 
 # 2. Review ROLE_MISMATCH rows with several groups and every ORG_MISSING row;
 #    these are not auto-fixed. Fix them through the admin UI / assignUserRole.
+#    ORG_NO_MEMBERSHIP rows are fixed by the membership backfill, not here:
+#    npm run backfill:user-org-membership -- --apply
 
 # 3. Apply.
 npm run audit:cognito-custom-attributes -- --apply

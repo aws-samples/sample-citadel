@@ -26,11 +26,28 @@ function makeEvent(fieldName: string, args: Record<string, unknown>, sub = 'user
   return {
     info: { fieldName },
     arguments: args,
-    identity: { sub, claims: { sub } },
+    identity: {
+      sub,
+      ...(callerOrg ? { 'custom:organization': callerOrg } : {}),
+      claims: {
+        sub,
+        ...(callerOrg ? { 'custom:organization': callerOrg } : {}),
+      },
+    },
   } as unknown as HandlerEvent;
 }
 
+/**
+ * decision 00d40a31 (option A): the caller's organisation is read from the
+ * server-minted `custom:organization` JWT claim ONLY — extractOrgFromEvent
+ * no longer falls back to the Cognito user attribute. `makeEvent` stamps
+ * `callerOrg` onto the identity (the real ID-token shape). The AdminGetUser
+ * stub is kept so any residual attribute read would be observable.
+ */
+let callerOrg: string | undefined;
+
 function mockCognitoOrg(orgId: string) {
+  callerOrg = orgId;
   cognitoMock.on(AdminGetUserCommand).resolves({
     UserAttributes: [
       { Name: 'sub', Value: 'user-123' },
@@ -140,6 +157,7 @@ describe('Property 5: Optimistic Lock Conflict Detection', () => {
           // Reset mocks for each iteration
           ddbMock.reset();
           cognitoMock.reset();
+    callerOrg = undefined;
           ebMock.reset();
 
           // Setup: caller belongs to org-1

@@ -7,6 +7,7 @@
  */
 process.env.USER_POOL_ID = "us-east-1_testpool";
 process.env.ORGANISATION_TABLE = "test-orgs";
+process.env.USER_ORG_MEMBERSHIP_TABLE = "test-user-org-membership";
 
 jest.mock("../../utils/org-name", () => ({
   ...jest.requireActual("../../utils/org-name"),
@@ -22,9 +23,13 @@ import {
   AdminAddUserToGroupCommand,
   AdminRemoveUserFromGroupCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
+import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { mockClient } from "aws-sdk-client-mock";
 
 const cognitoMock = mockClient(CognitoIdentityProviderClient);
+// decision 00d40a31: assignUserRole now writes the membership row before
+// the attribute; stub it so this suite keeps exercising the sign-out path.
+const dynamoMock = mockClient(DynamoDBDocumentClient);
 
 import { handler } from "../user-management-resolver";
 
@@ -45,12 +50,19 @@ function buildEvent(
 function withPreviousOrg(org: string | undefined) {
   cognitoMock.on(AdminGetUserCommand, { Username: "target-user" }).resolves({
     Username: "target-user",
-    UserAttributes: org ? [{ Name: "custom:organization", Value: org }] : [],
+    UserAttributes: [
+      // Every real Cognito user carries `sub`; assignUserRole keys the
+      // membership row by it (decision 00d40a31).
+      { Name: "sub", Value: "target-sub-0000" },
+      ...(org ? [{ Name: "custom:organization", Value: org }] : []),
+    ],
   });
 }
 
 beforeEach(() => {
   cognitoMock.reset();
+  dynamoMock.reset();
+  dynamoMock.on(PutCommand).resolves({});
   cognitoMock
     .on(AdminListGroupsForUserCommand, { Username: "admin-user" })
     .resolves({ Groups: [{ GroupName: "admin" }] });

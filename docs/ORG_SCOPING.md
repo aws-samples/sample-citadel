@@ -9,10 +9,12 @@ adding a new resource type and wondering whether it needs `orgId`, start here.
 
 ## TL;DR
 
-- **Identity**: each user carries `custom:organization` (their org, as the
-  canonical organisation NAME). Admin is determined SOLELY by membership in
-  the Cognito `admin` group (`cognito:groups`). `custom:role` is a
-  display/legacy attribute and never grants admin.
+- **Identity**: each user's token carries a `custom:organization` claim (their
+  org, as the canonical organisation NAME), minted server-side by the
+  pre-token trigger from the `UserOrgMembership` DynamoDB table. The stored
+  `custom:organization` attribute is display-only. Admin is determined SOLELY
+  by membership in the Cognito `admin` group (`cognito:groups`).
+  `custom:role` is a display/legacy attribute and never grants admin.
 - **Source of truth**: AgentCore Registry for apps/agents, DynamoDB for tools
   and per-org tables (workflows, executions, integrations, datastores).
 - **Read scaling**: AppsTable `#META` mirror + `OrgIndex` GSI eliminates the
@@ -60,27 +62,94 @@ commits are found and cleaned by
 `backend/scripts/audit-cognito-custom-attributes.ts`
 (see `docs/runbooks/cognito-attribute-sweep.md`).
 
+#### The `custom:organization` claim is server-derived (decision 00d40a31)
+
+The same reasoning was then applied to the org claim. Before this change the
+pre-token trigger copied the stored `custom:organization` attribute into the
+JWT, and `extractOrgFromEvent` fell back to `AdminGetUser` on the attribute
+when a token had no claim. Both paths trusted a user-pool attribute as the
+tenancy boundary. The `WriteAttributes` allow-list makes that attribute
+admin-only today, but it is still one misconfigured pool client (or one hand
+edit in the console) away from being a caller-controlled input.
+
+The model is now:
+
+- **`UserOrgMembership` table is authoritative.** A DynamoDB table
+  (`backend/lib/backend-stack.ts`, pk `sub`, GSI `orgName-index`) holds
+  `{ sub, orgName, updatedAt, updatedBy }`. `orgName` is the canonical
+  organisation NAME (decision 228b3cc8), never an `orgId`.
+- **The attribute is display-only.** `assignUserRole`
+  (`user-management-resolver.ts`) writes the membership row FIRST and only
+  then mirrors the value onto `custom:organization`. If the row write fails,
+  the attribute is not touched and the user is not signed out, so the two
+  can never disagree in the dangerous direction (attribute says X, claim says
+  nothing). `listUsers` and the admin UI read the attribute; no authorization
+  path does. `lookupUserOrganization` (`auth-event.ts`) still exists for two
+  informational owner-derivation callers and is documented as not an
+  authorization path.
+- **The trigger fails closed.** `pre-token-generation.ts` does a
+  `GetItem` by `sub` (`ConsistentRead`, so a row written by `assignUserRole`
+  milliseconds before a re-login is seen). Row present → claim minted from
+  `row.orgName`. Row absent, `USER_ORG_MEMBERSHIP_TABLE` unset, or any
+  DynamoDB error → the claim is **omitted from `claimsToAddOrOverride` and
+  added to `claimsToSuppress`**, and a warning is logged. It never falls
+  back to the stored attribute.
+- **Suppression is load-bearing, not tidiness.** Cognito's default ID-token
+  mapping copies every attribute in the pool client's `readAttributes` into
+  the token, and that list includes `custom:organization`
+  (`backend/lib/backend-stack.ts`, so `listUsers` and the admin UI can show
+  it). If the trigger merely left the claim out, a user with no membership
+  row (pre-backfill, swept by `deleteOrganization`, or a hand-edited
+  attribute) would still get `custom:organization=<stored attribute>` in
+  their ID token — which AppSync accepts and `extractOrgFromEvent` reads.
+  The explicit `claimsToSuppress` entry is what makes "no row" mean "no
+  claim". Any pre-existing suppress list is merged, never replaced.
+- **Readers see the claim or nothing.** `extractOrgFromEvent` returns the
+  `custom:organization` claim, or `null`. Every row-access gate in
+  `auth-event.ts` (`assertRowOrg`, `canCallerSeeRow`,
+  `resolveScopedOrgFromEvent`) treats `null` as "deny". A token minted while a
+  user has no membership row therefore cannot reach any org-scoped data.
+- **Deleting an organisation sweeps its rows.** `deleteOrganization`
+  (`organization-resolver.ts`) queries `orgName-index` and batch-deletes the
+  membership rows (best-effort), so a user whose org is gone stops receiving
+  the claim on their next token.
+
+Operational consequence: users assigned before this change have an attribute
+and no row. Their next token after the deploy carries no org claim until
+`backend/scripts/backfill-user-org-membership.ts` runs — see
+`docs/runbooks/user-org-membership-backfill.md` for the deploy order and the
+token window. The attribute sweep reports these users as `ORG_NO_MEMBERSHIP`
+when `USER_ORG_MEMBERSHIP_TABLE` is set.
+
+Pinned by `backend/test/cognito-claim-trust-tripwire.test.ts` (T5: the
+trigger never reads `userAttributes["custom:organization"]`; T6:
+`extractOrgFromEvent` never calls `lookupUserOrganization`; T8: the trigger
+writes `claimsToSuppress`), the behavioural suppression tests for all three
+omission paths in `backend/src/lambda/__tests__/pre-token-generation.test.ts`,
+and `backend/test/backend-stack-user-org-membership-table.test.ts` (table
+shape, env wiring, IAM grants).
+
 Key helpers (`backend/src/utils/auth-event.ts`):
 
-- `extractOrgFromEvent(event)`: claim-first, falls back to
-  `AdminGetUserCommand` during the re-auth window. Returns `null` when there
-  is no caller org at all.
+- `extractOrgFromEvent(event)`: reads the `custom:organization` JWT claim
+  and ONLY the claim. Returns `null` when the token has no claim; there is no
+  Cognito API fallback. Still `async` so the ~40 call sites are unchanged.
 - `isAdminFromEvent(event)`: reads only the `cognito:groups` claim — no
   Cognito API call, no `custom:role`. Tolerant of
   array vs comma-separated-string serialisations of `cognito:groups`.
 
 ## Where orgId lives
 
-| Resource | Storage | orgId source | Visibility check |
-|---|---|---|---|
-| RegistryAgentRecord (apps) | AgentCore Registry + AppsTable `#META` mirror | `manifest.orgId` | `OrgIndex` GSI Query (admin gets Scan) |
-| AgentConfig (catalog agents) | AgentCore Registry | `customMetadata.orgId` | resolver filter, admin bypass |
-| ToolConfig | AgentCore Registry | `customMetadata.orgId` | resolver filter, admin bypass |
-| Workflow | DynamoDB | row attribute | `OrgStatusIndex` GSI; resolver checks `userOrg` |
-| Integration | DynamoDB | composite PK `ORG#<orgId>` | implicit via PK |
-| DataStore | DynamoDB | row attribute | `OrgIndex` GSI |
-| Execution | DynamoDB | row attribute | resolver checks `userOrg` |
-| Organization | DynamoDB | PK | N/A (admin-only operations) |
+| Resource                     | Storage                                       | orgId source               | Visibility check                                |
+| ---------------------------- | --------------------------------------------- | -------------------------- | ----------------------------------------------- |
+| RegistryAgentRecord (apps)   | AgentCore Registry + AppsTable `#META` mirror | `manifest.orgId`           | `OrgIndex` GSI Query (admin gets Scan)          |
+| AgentConfig (catalog agents) | AgentCore Registry                            | `customMetadata.orgId`     | resolver filter, admin bypass                   |
+| ToolConfig                   | AgentCore Registry                            | `customMetadata.orgId`     | resolver filter, admin bypass                   |
+| Workflow                     | DynamoDB                                      | row attribute              | `OrgStatusIndex` GSI; resolver checks `userOrg` |
+| Integration                  | DynamoDB                                      | composite PK `ORG#<orgId>` | implicit via PK                                 |
+| DataStore                    | DynamoDB                                      | row attribute              | `OrgIndex` GSI                                  |
+| Execution                    | DynamoDB                                      | row attribute              | resolver checks `userOrg`                       |
+| Organization                 | DynamoDB                                      | PK                         | N/A (admin-only operations)                     |
 
 Things deliberately NOT org-scoped: ADRs, ProgramReviews,
 ExecutionSpecifications, AgentDesignAssessments, AuthorityUnits, CaseLaw,
@@ -149,12 +218,12 @@ excludes them because they don't carry both `orgId` and `createdAt`.
 `--apply` mode. It walks the Registry and the AppsTable `#META` rows and
 classifies each record:
 
-| Classification | Meaning | Reconciler action |
-|---|---|---|
-| `in-sync` | both sides match on the comparison set | nothing |
-| `missing` | Registry record exists, no `#META` row | upserts the `#META` row |
-| `stale` | both sides exist but `name` / `status` / `orgId` / `version` differ | logs only |
-| `orphan` | `#META` row exists, no Registry record | logs only |
+| Classification | Meaning                                                             | Reconciler action       |
+| -------------- | ------------------------------------------------------------------- | ----------------------- |
+| `in-sync`      | both sides match on the comparison set                              | nothing                 |
+| `missing`      | Registry record exists, no `#META` row                              | upserts the `#META` row |
+| `stale`        | both sides exist but `name` / `status` / `orgId` / `version` differ | logs only               |
+| `orphan`       | `#META` row exists, no Registry record                              | logs only               |
 
 `stale` and `orphan` stay log-only by design. They are admin-judgment cases:
 `stale` could mean the legacy row is intentionally newer; `orphan` could
@@ -195,10 +264,21 @@ resolver-side filtering (no separate index).
 
 Deploys that change the pre-token Lambda or add new claims require users to
 re-auth before their tokens carry the new claims. Phase 1 (`ee3c443`) added
-`custom:organization` and `custom:role` to issued JWTs. The fallback to
-`AdminGetUserCommand` in `extractOrgFromEvent` keeps things working during
-the re-auth window — each request just costs one extra Cognito API call
-until the user gets a fresh token.
+`custom:organization` and `custom:role` to issued JWTs.
+
+There is no longer an `AdminGetUser` fallback in `extractOrgFromEvent`
+(decision 00d40a31): a token without the claim resolves to `null` and every
+org-scoped gate denies. Two windows follow from this:
+
+- **Already-issued tokens stay valid** until they expire (access/ID tokens:
+  1 hour by default) or the user is signed out with `AdminUserGlobalSignOut`.
+  Their existing claim keeps working; nothing is re-evaluated mid-token.
+- **Freshly minted tokens reflect the membership table at mint time.** If a
+  user has no row (pre-existing user before the backfill has run), the new
+  token carries no org claim and the user is locked out of org-scoped data
+  until the row exists and they re-authenticate. This is why the backfill
+  must run immediately after the stack deploy — see
+  `docs/runbooks/user-org-membership-backfill.md`.
 
 ## Operational runbook
 
@@ -208,7 +288,11 @@ until the user gets a fresh token.
 2. `cdk synth` to confirm no IAM regressions.
 3. Deploy.
 4. If the change required new claims (rare — only when modifying the
-   pre-token Lambda), force or wait for re-auth.
+   pre-token Lambda), force or wait for re-auth. If the change touches how
+   the org claim is derived (membership table), run
+   `npm run backfill:user-org-membership -- --apply` IMMEDIATELY after the
+   deploy, before users start re-minting tokens
+   (`docs/runbooks/user-org-membership-backfill.md`).
 5. Smoke-test as both an admin and a non-admin user.
 6. The 6-hourly reconciler will catch any drift introduced during the
    deploy window. To verify sooner, invoke it manually:
@@ -252,17 +336,18 @@ until the user gets a fresh token.
 
 ## Commit history reference
 
-| Commit | Topic |
-|---|---|
-| `ee3c443` | Phase 1: JWT claims (`custom:organization`, `custom:role`) + auth-event helpers + admin bypass gating |
-| `43a6f49` | Phase 2: `orgId` on AgentConfig + ToolConfig resolvers + backfill script |
-| `1872391` | Phase 3: AppsTable `#META` mirror + `listApps` via `OrgIndex` GSI + reconciler CLI |
-| `104b0e6` | Phase 3 schema fix: align with AppsTable's actual key shape |
-| `2165036` | Fabricator-emitted `#META` at agent creation |
-| `b279257` | `isAdminFromEvent` recognises `cognito:groups` |
-| (this commit) | Scheduled reconciler Lambda + `ORG_SCOPING.md` doc |
-| `1c025bc` | User pool client `writeAttributes` allow-list excludes `custom:role` / `custom:organization` (finding 7aa877f8, layer 1) |
-| `39b2de8` | Admin determination group-authoritative; pre-token trigger drops unearned `custom:role=admin` (finding 7aa877f8, layer 2) |
+| Commit              | Topic                                                                                                                                                                                                                                                                          |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ee3c443`           | Phase 1: JWT claims (`custom:organization`, `custom:role`) + auth-event helpers + admin bypass gating                                                                                                                                                                          |
+| `43a6f49`           | Phase 2: `orgId` on AgentConfig + ToolConfig resolvers + backfill script                                                                                                                                                                                                       |
+| `1872391`           | Phase 3: AppsTable `#META` mirror + `listApps` via `OrgIndex` GSI + reconciler CLI                                                                                                                                                                                             |
+| `104b0e6`           | Phase 3 schema fix: align with AppsTable's actual key shape                                                                                                                                                                                                                    |
+| `2165036`           | Fabricator-emitted `#META` at agent creation                                                                                                                                                                                                                                   |
+| `b279257`           | `isAdminFromEvent` recognises `cognito:groups`                                                                                                                                                                                                                                 |
+| (this commit)       | Scheduled reconciler Lambda + `ORG_SCOPING.md` doc                                                                                                                                                                                                                             |
+| `1c025bc`           | User pool client `writeAttributes` allow-list excludes `custom:role` / `custom:organization` (finding 7aa877f8, layer 1)                                                                                                                                                       |
+| `39b2de8`           | Admin determination group-authoritative; pre-token trigger drops unearned `custom:role=admin` (finding 7aa877f8, layer 2)                                                                                                                                                      |
+| (decision 00d40a31) | `UserOrgMembership` table; pre-token trigger mints `custom:organization` from it and fails closed; `extractOrgFromEvent` claim-only (no `AdminGetUser` fallback); `assignUserRole` writes row before attribute; membership backfill script + `ORG_NO_MEMBERSHIP` sweep finding |
 
 ## Limits / known gaps
 
@@ -274,3 +359,15 @@ until the user gets a fresh token.
   lookup. Add an LRU if this becomes a hotspot.
 - `ORG_MISSING` users (in a group, no `custom:organization`) are reported by
   the attribute sweep but not auto-fixed; an admin must assign the org.
+- `ORG_NO_MEMBERSHIP` users (attribute set, no membership row) are reported
+  by the sweep when `USER_ORG_MEMBERSHIP_TABLE` is set, and fixed by the
+  membership backfill, not by the sweep itself.
+- The membership backfill never overwrites an existing row: a row whose
+  `orgName` disagrees with the attribute is reported as
+  `SKIPPED_ROW_MISMATCH` for manual reconciliation (the table is
+  authoritative, so the attribute is the suspect side).
+- `deleteOrganization`'s membership sweep is best-effort; a failed batch
+  leaves rows pointing at a deleted org. Those users still receive a claim
+  naming a non-existent org, which no live row can match, so access is
+  denied — but the stale rows are only cleaned up by re-running the delete
+  or by hand.

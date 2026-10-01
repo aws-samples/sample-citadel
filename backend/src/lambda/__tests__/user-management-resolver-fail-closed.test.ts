@@ -255,7 +255,10 @@ describe("empty-org safety: org-less user records never match on loose equality"
       .on(AdminListGroupsForUserCommand, { Username: "ghost" })
       .resolves({ Groups: [{ GroupName: "developer" }] });
 
-    const event = buildEvent("listUsers", { username: "alice" });
+    const event = buildEvent("listUsers", {
+      username: "alice",
+      "custom:organization": "org-a",
+    });
     const result = (await handler(event)) as UserResult[];
 
     expect(result.map((u) => u.userId)).toEqual(["alice"]);
@@ -282,7 +285,7 @@ describe("empty-org safety: org-less user records never match on loose equality"
 
     const event = buildEvent(
       "getUser",
-      { username: "alice" },
+      { username: "alice", "custom:organization": "org-a" },
       { userId: "ghost" },
     );
 

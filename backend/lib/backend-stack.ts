@@ -315,6 +315,32 @@ export class BackendStack extends cdk.Stack {
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     });
 
+    // User ↔ organisation membership (decision 00d40a31, option A). This
+    // table — NOT the client-facing `custom:organization` Cognito user
+    // attribute — is the AUTHORITATIVE source of a user's organisation. The
+    // pre-token-generation trigger reads it (by Cognito `sub`) to mint the
+    // `custom:organization` JWT claim server-side; `assignUserRole` writes it
+    // BEFORE mirroring the org name onto the (display/back-compat only) user
+    // attribute; `deleteOrganization` sweeps rows for the deleted org via
+    // the `orgName-index` GSI. Encryption/removal/PITR settings deliberately
+    // match the sibling OrganisationTable above.
+    const userOrgMembershipTable = new dynamodb.Table(
+      this,
+      "UserOrgMembershipTable",
+      {
+        tableName: `citadel-user-org-membership-${props.environment}`,
+        partitionKey: { name: "sub", type: dynamodb.AttributeType.STRING },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      },
+    );
+    userOrgMembershipTable.addGlobalSecondaryIndex({
+      indexName: "orgName-index",
+      partitionKey: { name: "orgName", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
     const agentStatusTable = (this.agentStatusTable = new dynamodb.Table(
       this,
       "AgentStatusTable",
@@ -761,10 +787,12 @@ export class BackendStack extends cdk.Stack {
       }),
     );
 
-    // Pre-token-generation trigger: promotes `custom:organization` and
-    // `custom:role` attributes onto JWT claims so downstream resolvers can
-    // read org/role identity without an AdminGetUserCommand per request.
-    // Phase 1 org-scoping foundation.
+    // Pre-token-generation trigger: mints the `custom:organization` JWT
+    // claim SERVER-SIDE from UserOrgMembershipTable (decision 00d40a31 —
+    // the stored user attribute is never read; row absent → claim omitted)
+    // and synthesises the display-only `custom:role` claim from Cognito
+    // group membership. Downstream resolvers read org identity from the
+    // claim without an AdminGetUserCommand per request.
     const preTokenGenerationLambda = new lambda.Function(
       this,
       "PreTokenGenerationFunction",
@@ -774,12 +802,17 @@ export class BackendStack extends cdk.Stack {
         code: lambda.Code.fromAsset("dist/lambda"),
         functionName: `citadel-pre-token-gen-${props.environment}`,
         timeout: cdk.Duration.seconds(5),
+        environment: {
+          USER_ORG_MEMBERSHIP_TABLE: userOrgMembershipTable.tableName,
+        },
         logGroup: new logs.LogGroup(this, "PreTokenGenerationFunctionLogs", {
           retention: logs.RetentionDays.ONE_WEEK,
           removalPolicy: cdk.RemovalPolicy.DESTROY,
         }),
       },
     );
+    // Read-only: the trigger only ever GetItems by `sub`.
+    userOrgMembershipTable.grantReadData(preTokenGenerationLambda);
 
     // Cognito User Pool
     this.userPool = new cognito.UserPool(this, "UserPool", {
@@ -1288,6 +1321,9 @@ export class BackendStack extends cdk.Stack {
         environment: {
           USER_POOL_ID: this.userPool.userPoolId,
           ORGANISATION_TABLE: organisationTable.tableName,
+          // Authoritative user↔org store written by assignUserRole
+          // (decision 00d40a31).
+          USER_ORG_MEMBERSHIP_TABLE: userOrgMembershipTable.tableName,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(
@@ -1638,6 +1674,7 @@ export class BackendStack extends cdk.Stack {
 
     // Grant DynamoDB permissions to user management function
     organisationTable.grantReadData(userManagementResolverFunction);
+    userOrgMembershipTable.grantReadWriteData(userManagementResolverFunction);
 
     // Organization Management Resolver
     const organizationResolverFunction = new lambda.Function(
@@ -1652,6 +1689,9 @@ export class BackendStack extends cdk.Stack {
           // Required for orphan-user verification on deleteOrganization
           // (Cognito ListUsers with custom:organization filter).
           USER_POOL_ID: this.userPool.userPoolId,
+          // deleteOrganization sweeps membership rows for the deleted org
+          // via the orgName-index GSI (decision 00d40a31).
+          USER_ORG_MEMBERSHIP_TABLE: userOrgMembershipTable.tableName,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, "OrganizationResolverFunctionLogs", {
@@ -1663,6 +1703,7 @@ export class BackendStack extends cdk.Stack {
 
     // Grant DynamoDB permissions to organization management function
     organisationTable.grantReadWriteData(organizationResolverFunction);
+    userOrgMembershipTable.grantReadWriteData(organizationResolverFunction);
 
     // Grant Cognito ListUsers for orphan-user verification before
     // deleteOrganization. Scoped to the user pool ARN — least privilege.
