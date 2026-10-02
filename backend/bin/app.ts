@@ -270,13 +270,16 @@ const arbiterStack = new ArbiterStack(app, `citadel-arbiter-${environment}`, {
   // agentReleasesTable/environmentReleasePointersTable prop doc comment).
   agentReleasesTable: backendStack.agentReleasesTable,
   environmentReleasePointersTable: backendStack.environmentReleasePointersTable,
-  // G3 — named org seam for release-aware dispatch. Operator-provisioned
-  // via env or CDK context (never derived), so a deployment opts its
-  // arbiter into resolving a specific org's pointers. Absent → omitted →
-  // resolve_release falls to NO_POINTER (safe no-op).
+  // G3 — named org seam for release-aware dispatch. Resolved from env or
+  // CDK context; defaults to 'Default' (the platform default organisation
+  // used by the agent cache — 33 of 49 rows in dev) so the release gate
+  // never runs with an empty org id. A synth-time warning fires when the
+  // default is used so operators know to set RELEASE_DEFAULT_ORG_ID
+  // explicitly for non-default orgs.
   releaseDefaultOrgId:
     process.env.RELEASE_DEFAULT_ORG_ID ??
-    (app.node.tryGetContext("releaseDefaultOrgId") as string | undefined),
+    (app.node.tryGetContext("releaseDefaultOrgId") as string | undefined) ??
+    "Default",
   // Actionless-alarm wiring: the six operational Lambda/DLQ alarms page to
   // BackendStack's shared alarm topic (the escalation topic keeps only the
   // governance OffFrontierEscalation alarm).
@@ -285,6 +288,20 @@ const arbiterStack = new ArbiterStack(app, `citadel-arbiter-${environment}`, {
   // (resolved once above; see BackendStack for the same prop).
   alarmDelivery,
 });
+
+// Synth-time warning when the release org id falls back to 'Default'. The
+// gate still works (the platform default org matches 33 of 49 agent cache
+// rows), but operators deploying a non-default org should set the env var.
+if (
+  !process.env.RELEASE_DEFAULT_ORG_ID &&
+  !app.node.tryGetContext("releaseDefaultOrgId")
+) {
+  cdk.Annotations.of(app).addWarning(
+    "RELEASE_DEFAULT_ORG_ID is not set — defaulting to 'Default'. " +
+      "Set the RELEASE_DEFAULT_ORG_ID environment variable or CDK context " +
+      "key 'releaseDefaultOrgId' to target a specific organisation.",
+  );
+}
 
 // Telemetry stack — invocation cost ledger + cost query API/budgets
 // (dedicated bounded context per decision ab73ae1b; see

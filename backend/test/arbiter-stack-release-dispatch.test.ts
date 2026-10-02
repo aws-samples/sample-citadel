@@ -165,13 +165,19 @@ describe("ArbiterStack — G3 release-aware dispatch env wiring", () => {
     });
   });
 
-  test("without the release substrate, neither dispatch env var is set (forward-compatible no-op)", () => {
+  test("without the release substrate, RELEASE_DISPATCH_ENVIRONMENT is unset but RELEASE_DEFAULT_ORG_ID defaults to 'Default'", () => {
     const template = synth(false);
     const functions = template.findResources("AWS::Lambda::Function");
-    for (const fn of Object.values(functions)) {
-      const vars = fn.Properties?.Environment?.Variables ?? {};
+    // Only the three governance-bearing arbiter functions carry the var;
+    // the scaffold's FanoutFunction (outside ArbiterStack) does not.
+    const arbiterIds = Object.keys(functions).filter((id) =>
+      /Supervisor|StepRunner|WorkerAgentWrapper/.test(id),
+    );
+    expect(arbiterIds.length).toBe(3);
+    for (const id of arbiterIds) {
+      const vars = functions[id].Properties?.Environment?.Variables ?? {};
       expect(vars.RELEASE_DISPATCH_ENVIRONMENT).toBeUndefined();
-      expect(vars.RELEASE_DEFAULT_ORG_ID).toBeUndefined();
+      expect(vars.RELEASE_DEFAULT_ORG_ID).toBe("Default");
     }
   });
 });
