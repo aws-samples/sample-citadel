@@ -99,10 +99,14 @@ def test_no_environment_var_skips_ssm_and_defaults_shadow(
     monkeypatch.delenv("ENVIRONMENT", raising=False)
     _stub_ddb_empty(monkeypatch)
 
-    def _should_not_call(service_name: str, *a: Any, **kw: Any) -> Any:
-        raise AssertionError("boto3.client('ssm') must not be called when ENVIRONMENT is unset")
+    cw_mock = MagicMock()
 
-    monkeypatch.setattr(hierarchy.boto3, "client", _should_not_call)
+    def _only_allow_cloudwatch(service_name: str, *a: Any, **kw: Any) -> Any:
+        if service_name == "cloudwatch":
+            return cw_mock
+        raise AssertionError(f"boto3.client({service_name!r}) must not be called when ENVIRONMENT is unset")
+
+    monkeypatch.setattr(hierarchy.boto3, "client", _only_allow_cloudwatch)
 
     state = load_governance_state()
 
@@ -285,3 +289,107 @@ def test_force_reload_refreshes_mode_after_ttl(monkeypatch: pytest.MonkeyPatch) 
     fake_now[0] = 1000.0 + hierarchy._MODE_CACHE_TTL_SECONDS + 1
     load_governance_state(force_reload=True)
     assert len(_enforce_calls(fake_client)) == 2
+
+
+# ---------------------------------------------------------------------------
+# ENVIRONMENT unset -> warning logged + CloudWatch metric emitted (once)
+# ---------------------------------------------------------------------------
+
+
+def test_unset_environment_logs_warning_and_returns_shadow(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """When ENVIRONMENT is not set the resolver must return 'shadow' AND log
+    a WARNING containing the exact message prescribed by the ticket."""
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    _stub_ddb_empty(monkeypatch)
+
+    cw_mock = MagicMock()
+    monkeypatch.setattr(
+        hierarchy.boto3, "client",
+        lambda svc, *a, **kw: cw_mock if svc == "cloudwatch" else (_ for _ in ()).throw(
+            AssertionError(f"unexpected boto3.client({svc!r})")
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=hierarchy.logger.name):
+        state = load_governance_state()
+
+    assert state.enforcement_mode == "shadow"
+    assert any(
+        "governance enforcement mode defaulted to shadow: ENVIRONMENT not set"
+        in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_unset_environment_emits_cloudwatch_metric(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The resolver must emit GovernanceModeDefaulted=1 to Citadel/Workflows
+    when ENVIRONMENT is unset."""
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    _stub_ddb_empty(monkeypatch)
+
+    cw_mock = MagicMock()
+    monkeypatch.setattr(
+        hierarchy.boto3, "client",
+        lambda svc, *a, **kw: cw_mock,
+    )
+
+    load_governance_state()
+
+    cw_mock.put_metric_data.assert_called_once()
+    call_kwargs = cw_mock.put_metric_data.call_args.kwargs
+    assert call_kwargs["Namespace"] == "Citadel/Workflows"
+    assert call_kwargs["MetricData"][0]["MetricName"] == "GovernanceModeDefaulted"
+    assert call_kwargs["MetricData"][0]["Value"] == 1
+
+
+def test_unset_environment_warning_fires_only_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The once-per-cold-start guard must suppress duplicate warnings."""
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    _stub_ddb_empty(monkeypatch)
+
+    cw_mock = MagicMock()
+    monkeypatch.setattr(
+        hierarchy.boto3, "client",
+        lambda svc, *a, **kw: cw_mock,
+    )
+
+    with caplog.at_level(logging.WARNING, logger=hierarchy.logger.name):
+        load_governance_state()
+        load_governance_state()  # second call within same process
+
+    warning_hits = [
+        r for r in caplog.records
+        if "ENVIRONMENT not set" in r.getMessage()
+    ]
+    assert len(warning_hits) == 1
+    assert cw_mock.put_metric_data.call_count == 1
+
+
+def test_unset_environment_metric_failure_does_not_block_fallback(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """If CloudWatch put_metric_data raises, the resolver must still return
+    shadow without propagating the exception."""
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    _stub_ddb_empty(monkeypatch)
+
+    cw_mock = MagicMock()
+    cw_mock.put_metric_data.side_effect = Exception("CW unavailable")
+    monkeypatch.setattr(
+        hierarchy.boto3, "client",
+        lambda svc, *a, **kw: cw_mock,
+    )
+
+    with caplog.at_level(logging.WARNING, logger=hierarchy.logger.name):
+        state = load_governance_state()
+
+    assert state.enforcement_mode == "shadow"
+    assert any(
+        "ENVIRONMENT not set" in r.getMessage() for r in caplog.records
+    )

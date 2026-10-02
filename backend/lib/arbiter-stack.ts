@@ -388,6 +388,11 @@ export class ArbiterStack extends cdk.Stack {
         EVENT_BUS_NAME: props.agentEventBus.eventBusName,
         WORKER_STATE_TABLE: workerStateTable.tableName,
         AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
+        // Governance enforcement-mode resolution: hierarchy.py reads
+        // ENVIRONMENT to build the SSM parameter path
+        // /citadel/governance/enforce/{ENVIRONMENT}. Without it the mode
+        // silently defaults to 'shadow' and all governance gates are inert.
+        ENVIRONMENT: props.environment,
         // Configurable model selection: the supervisor resolves its model
         // from these two tables via the shared pure resolver, falling back to
         // its previous default on any miss.
@@ -828,6 +833,11 @@ export class ArbiterStack extends cdk.Stack {
           AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
           AGENT_BUCKET_NAME: props.codeBucket.bucketName,
           CREDENTIAL_VENDER_FUNCTION: credentialVenderLambda.functionName,
+          // Governance enforcement-mode resolution: hierarchy.py reads
+          // ENVIRONMENT to build the SSM parameter path
+          // /citadel/governance/enforce/{ENVIRONMENT}. Without it the mode
+          // silently defaults to 'shadow' and all governance gates are inert.
+          ENVIRONMENT: props.environment,
           // QT3-6: dispatch-time spec status validation.
           EXECUTION_SPECS_TABLE: props.executionSpecificationsTable.tableName,
           // Write-then-signal (decision O2): the worker persists a completed
@@ -1153,6 +1163,21 @@ export class ArbiterStack extends cdk.Stack {
       );
     }
 
+    // Governance enforcement-mode: hierarchy.py reads the SSM parameters
+    // /citadel/governance/enforce/{env} and /citadel/governance/effective_at/{env}
+    // to resolve the enforcement mode. Without this the worker's
+    // load_governance_state call silently defaults to 'shadow'.
+    workerAgentWrapperLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["ssm:GetParameter"],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/enforce/${props.environment}`,
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/effective_at/${props.environment}`,
+        ],
+      }),
+    );
+
     workerAgentWrapperLambda.addEventSource(
       new SqsEventSource(workerAgentQueue, {
         batchSize: 1, // Process one message at a time
@@ -1384,6 +1409,21 @@ export class ArbiterStack extends cdk.Stack {
       }),
     );
 
+    // Governance enforcement-mode: hierarchy.py reads the SSM parameters
+    // /citadel/governance/enforce/{env} and /citadel/governance/effective_at/{env}
+    // to resolve the enforcement mode. Without this the supervisor's
+    // load_governance_state call silently defaults to 'shadow'.
+    supervisorLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["ssm:GetParameter"],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/enforce/${props.environment}`,
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/effective_at/${props.environment}`,
+        ],
+      }),
+    );
+
     // Seed initial agent configuration
     const seedAgentConfigLambda = new lambda.Function(
       this,
@@ -1604,6 +1644,11 @@ export class ArbiterStack extends cdk.Stack {
             TOOLS_CONFIG_TABLE: toolsConfigTable.tableName,
             EVENT_BUS_NAME: props.agentEventBus.eventBusName,
             APPSYNC_ENDPOINT: props.appSyncEndpoint,
+            // Governance enforcement-mode resolution: hierarchy.py reads
+            // ENVIRONMENT to build the SSM parameter path
+            // /citadel/governance/enforce/{ENVIRONMENT}. Without it the mode
+            // silently defaults to 'shadow' and all governance gates are inert.
+            ENVIRONMENT: props.environment,
             // URL of the worker agent queue. The Step Runner dispatches a
             // workflow node to the worker by sending a discriminated message to
             // this SQS queue; the worker runs the agent and emits the node
@@ -1675,6 +1720,21 @@ export class ArbiterStack extends cdk.Stack {
           },
         ],
         true,
+      );
+
+      // Governance enforcement-mode: hierarchy.py reads the SSM parameters
+      // /citadel/governance/enforce/{env} and /citadel/governance/effective_at/{env}
+      // to resolve the enforcement mode. Without this the step runner's
+      // load_governance_state call silently defaults to 'shadow'.
+      stepRunnerFunction.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["ssm:GetParameter"],
+          resources: [
+            `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/enforce/${props.environment}`,
+            `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/effective_at/${props.environment}`,
+          ],
+        }),
       );
 
       // EventBridge rules targeting StepRunner
