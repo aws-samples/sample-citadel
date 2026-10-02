@@ -956,6 +956,50 @@ deletion_gate() {
   return 1
 }
 
+# Extract HARD replacement lines from `cdk diff` output. A hard replacement is
+# a column-1 "[~] ..." resource line ending in the word "replace", or any line
+# carrying cdk's "(requires replacement)" property annotation. The softer
+# "may be replaced" annotation (conditional replacement) is deliberately NOT
+# matched — it fires on ordinary property edits and would make the gate noisy.
+extract_cdk_replacements() {
+  local diff_text="$1"
+  printf '%s\n' "$diff_text" \
+    | sed -E 's/\x1b\[[0-9;]*[mK]//g' \
+    | grep -E '^\[~\].* replace$|\(requires replacement\)'
+}
+
+# --- Replacement gate — sibling of deletion_gate ---
+# Args: <diff_text> <allow_replacements:true|false>
+# REFUSES (return 1) when the diff shows a HARD resource replacement and
+# --allow-replacements was not passed. A replacement deletes the old physical
+# resource (the custom-named KbCollection replacement rolled back
+# citadel-services-dev on 2026-10-02), so it is gated like a deletion. Empty /
+# failed diffs are already refused by deletion_gate, which runs first.
+replacement_gate() {
+  local diff_text="$1"
+  local allow_replacements="${2:-false}"
+
+  local replacements
+  replacements=$(extract_cdk_replacements "$diff_text")
+  if [ -z "$replacements" ]; then
+    ok "Replacement gate: cdk diff shows no hard resource replacements."
+    return 0
+  fi
+
+  err "✗ Hard replacement detected"
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] && err "  REPLACE → ${line}"
+  done <<< "$replacements"
+
+  if [ "$allow_replacements" = "true" ]; then
+    warn "--allow-replacements supplied — proceeding despite the replacements listed above."
+    return 0
+  fi
+  err "Refusing. If these replacements are intended, re-run with --allow-replacements."
+  return 1
+}
+
 # --- Resolve the concrete stack names this run will deploy ---
 # Mirrors the DEPLOY_MODE switch in main so the provenance manifest records
 # WHICH stacks were targeted, not just the mode string.
@@ -1030,6 +1074,7 @@ print_usage() {
   echo "  --no-verify          Skip post-deploy health checks"
   echo "  --expect-ref <ref>   Abort unless HEAD resolves to <ref> (branch name, full or short sha)"
   echo "  --allow-deletions    Proceed even if cdk diff shows resource DELETIONS (default: refuse)"
+  echo "  --allow-replacements Proceed even if cdk diff shows hard resource REPLACEMENTS (default: refuse)"
   echo "  --allow-dirty        Proceed even if the working tree is dirty (default: refuse)"
   echo "  --admin-email <addr> Admin email for initial user (overrides ADMIN_EMAIL env var)"
   echo "  --help               Show this help message"
@@ -1064,6 +1109,7 @@ NO_VERIFY=false
 ADMIN_EMAIL_ARG=""
 EXPECT_REF=""
 ALLOW_DELETIONS=false
+ALLOW_REPLACEMENTS=false
 ALLOW_DIRTY=false
 DEPLOY_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -1080,6 +1126,7 @@ while [[ $# -gt 0 ]]; do
     --no-verify)      NO_VERIFY=true; shift ;;
     --expect-ref)     EXPECT_REF="$2"; shift 2 ;;
     --allow-deletions) ALLOW_DELETIONS=true; shift ;;
+    --allow-replacements) ALLOW_REPLACEMENTS=true; shift ;;
     --allow-dirty)    ALLOW_DIRTY=true; shift ;;
     --admin-email)    ADMIN_EMAIL_ARG="$2"; shift 2 ;;
     -*)
@@ -1232,6 +1279,13 @@ fi
 diff_ok="true"
 [ "${CDK_DIFF_RC:-1}" -eq 0 ] || diff_ok="false"
 if ! deletion_gate "${CDK_DIFF_OUTPUT:-}" "$ALLOW_DELETIONS" "$diff_ok"; then
+  exit 1
+fi
+
+# --- Replacement gate — sibling of the deletion gate ---
+# Parse the same cdk diff for HARD resource REPLACEMENTS ("[~] ... replace" or
+# "(requires replacement)") and REFUSE unless --allow-replacements was passed.
+if ! replacement_gate "${CDK_DIFF_OUTPUT:-}" "$ALLOW_REPLACEMENTS"; then
   exit 1
 fi
 

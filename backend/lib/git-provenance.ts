@@ -40,6 +40,14 @@ export const GIT_PROVENANCE_ENV = {
 
 export const UNKNOWN_GIT_VALUE = "unknown";
 
+// Resource types the provenance Tags aspect must skip. For these types
+// `Tags` is Update-requires-Replacement, so a sha change would replace the
+// resource (custom-named KbCollection rolled back citadel-services-dev on
+// 2026-10-02). Extend ONLY with types verified against the CloudFormation spec.
+export const PROVENANCE_TAG_EXCLUDED_RESOURCE_TYPES = [
+  "AWS::OpenSearchServerless::Collection",
+] as const;
+
 export interface GitProvenance {
   /** Full commit sha the deploy was made from, or `unknown`. */
   readonly gitSha: string;
@@ -90,6 +98,9 @@ export function applyGitProvenanceTags(
   scope: IConstruct,
   provenance: GitProvenance,
 ): void {
-  cdk.Tags.of(scope).add(GIT_PROVENANCE_TAGS.SHA, provenance.gitSha);
-  cdk.Tags.of(scope).add(GIT_PROVENANCE_TAGS.REF, provenance.gitRef);
+  const tagOptions: cdk.TagProps = {
+    excludeResourceTypes: [...PROVENANCE_TAG_EXCLUDED_RESOURCE_TYPES],
+  };
+  cdk.Tags.of(scope).add(GIT_PROVENANCE_TAGS.SHA, provenance.gitSha, tagOptions);
+  cdk.Tags.of(scope).add(GIT_PROVENANCE_TAGS.REF, provenance.gitRef, tagOptions);
 }
