@@ -586,6 +586,47 @@ else
   fail "expected ANSI deletion to be caught; rc=$ansi_rc output=$ansi_out"
 fi
 
+# --- replacement gate: "(requires replacement)" REFUSES and echoes the line ---
+section "replacement_gate: hard replacement refuses and echoes the line"
+REPLACEMENT_DIFF="Stack citadel-services-dev
+Resources
+[~] AWS::OpenSearchServerless::Collection KbCollection KbCollection1234 replace
+ └─ [~] Tags (requires replacement)
+[~] AWS::Lambda::Function WorkerFn WorkerFn12AB modified"
+set +e
+rep_out=$(replacement_gate "$REPLACEMENT_DIFF" "false" 2>&1); rep_rc=$?
+set -e 2>/dev/null || true
+rep_plain=$(echo "$rep_out" | sed 's/\x1b\[[0-9;]*m//g')
+if [ $rep_rc -ne 0 ] && echo "$rep_plain" | grep -q "Hard replacement detected" && echo "$rep_plain" | grep -q "(requires replacement)"; then
+  pass "hard replacement diff refuses (rc=$rep_rc) and echoes the '(requires replacement)' line"
+else
+  fail "expected replacement refusal echoing the line; rc=$rep_rc output=$rep_plain"
+fi
+
+# --allow-replacements proceeds on the same diff
+set +e
+repallow_out=$(replacement_gate "$REPLACEMENT_DIFF" "true" 2>&1); repallow_rc=$?
+set -e 2>/dev/null || true
+if [ $repallow_rc -eq 0 ] && echo "$repallow_out" | sed 's/\x1b\[[0-9;]*m//g' | grep -qi "allow-replacements"; then
+  pass "--allow-replacements proceeds on a replacement diff with a loud warning (rc=$repallow_rc)"
+else
+  fail "expected --allow-replacements to proceed; rc=$repallow_rc output=$repallow_out"
+fi
+
+# "may be replaced" (conditional) is NOT a hard replacement -> proceeds
+MAYBE_DIFF="Stack citadel-backend-dev
+Resources
+[~] AWS::Lambda::Function WorkerFn WorkerFn12AB modified
+ └─ [~] FunctionName (may be replaced)"
+set +e
+maybe_out=$(replacement_gate "$MAYBE_DIFF" "false" 2>&1); maybe_rc=$?
+set -e 2>/dev/null || true
+if [ $maybe_rc -eq 0 ] && echo "$maybe_out" | sed 's/\x1b\[[0-9;]*m//g' | grep -qi "no hard resource replacements"; then
+  pass "'may be replaced' diff is NOT gated and proceeds (rc=$maybe_rc)"
+else
+  fail "expected 'may be replaced' diff to proceed; rc=$maybe_rc output=$maybe_out"
+fi
+
 ########################################
 # REGRESSION: finding — extract_cdk_deletions() previously matched INDENTED
 # [-] lines inside [~] modified-resource property diffs (leading

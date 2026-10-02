@@ -22,10 +22,12 @@
 import * as cdk from "aws-cdk-lib";
 import { Template, Match } from "aws-cdk-lib/assertions";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
+import * as opensearchserverless from "aws-cdk-lib/aws-opensearchserverless";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import {
   GIT_PROVENANCE_ENV,
   GIT_PROVENANCE_TAGS,
+  PROVENANCE_TAG_EXCLUDED_RESOURCE_TYPES,
   UNKNOWN_GIT_VALUE,
   applyGitProvenanceTags,
   resolveGitProvenance,
@@ -214,5 +216,42 @@ describe("bin/app.ts wiring", () => {
     expect(src).toMatch(/applyGitProvenanceTags\(\s*app\s*,/);
     // No shell-out to git from the CDK app (comments may mention the command).
     expect(src).not.toMatch(/child_process|execSync|spawnSync|execFileSync/);
+  });
+});
+
+describe("provenance tags skip Update-requires-Replacement resource types", () => {
+  test("OpenSearch Serverless Collection gets no GitSha/GitRef tag while an S3 bucket in the same stack does", () => {
+    const app = new cdk.App();
+    applyGitProvenanceTags(app, { gitSha: "abc123", gitRef: "main" });
+    const stack = new cdk.Stack(app, "T");
+    new opensearchserverless.CfnCollection(stack, "Kb", {
+      name: "kb-test",
+      type: "VECTORSEARCH",
+    });
+    new s3.Bucket(stack, "B");
+
+    const template = Template.fromStack(stack);
+    const collections = template.findResources(
+      "AWS::OpenSearchServerless::Collection",
+    );
+    const collectionIds = Object.keys(collections);
+    expect(collectionIds).toHaveLength(1);
+    const tags = (collections[collectionIds[0]].Properties?.Tags ?? []) as Array<{
+      Key: string;
+      Value: string;
+    }>;
+    const keys = tags.map((t) => t.Key);
+    expect(keys).not.toContain(GIT_PROVENANCE_TAGS.SHA);
+    expect(keys).not.toContain(GIT_PROVENANCE_TAGS.REF);
+
+    template.hasResourceProperties("AWS::S3::Bucket", {
+      Tags: Match.arrayWith([{ Key: "GitSha", Value: "abc123" }]),
+    });
+  });
+
+  test("PROVENANCE_TAG_EXCLUDED_RESOURCE_TYPES lists AWS::OpenSearchServerless::Collection", () => {
+    expect(PROVENANCE_TAG_EXCLUDED_RESOURCE_TYPES).toContain(
+      "AWS::OpenSearchServerless::Collection",
+    );
   });
 });

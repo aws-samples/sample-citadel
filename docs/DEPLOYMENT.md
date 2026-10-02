@@ -273,6 +273,17 @@ A `GitSha` of `unknown` means the stack was last deployed outside `deploy.sh`
 check the stack that owns the resource the fix touched — stacks deployed in
 separate `deploy.sh <stack>` runs can legitimately carry different shas.
 
+The tags are skipped on resource types where `Tags` is
+Update-requires-Replacement (`PROVENANCE_TAG_EXCLUDED_RESOURCE_TYPES` in
+`backend/lib/git-provenance.ts`, currently `AWS::OpenSearchServerless::Collection`),
+because a sha change would otherwise replace the resource — the custom-named
+`KbCollection` replacement rolled back `citadel-services-dev` this way. As a
+backstop, `deploy.sh` runs a replacement gate right after the deletion gate: if
+the `cdk diff` shows a hard replacement (a `[~] ... replace` resource line or a
+`(requires replacement)` property), it prints the lines under
+`✗ Hard replacement detected` and refuses; re-run with `--allow-replacements`
+to proceed. Conditional `may be replaced` annotations do not trigger the gate.
+
 ### RETAIN on data-bearing resources — the tradeoff, and recovery
 
 To make the divergent-branch deletion path **loud instead of silent**, the
