@@ -84,12 +84,14 @@ def test_strict_not_approved_refuses_dispatch():
 
     with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4], \
          patch.object(executor, 'load_governance_state', return_value=fake_state), \
-         patch.object(executor, '_emit_approval_dispatch_metric') as mock_metric:
+         patch.object(executor, '_emit_approval_dispatch_metric') as mock_metric, \
+         patch.object(executor, 'handle_node_failure') as mock_fail:
         executor.invoke_node('exec-1', 'wf-1', NODE, {'k': 'v'}, {'cfg': 1})
 
     fake_sqs.send_message.assert_not_called()
     assert mock_metric.call_args.kwargs['outcome'] == 'refused'
     assert mock_metric.call_args.kwargs['mode'] == 'strict'
+    mock_fail.assert_called_once_with('exec-1', 'n0', 'approval_absent:DRAFT')
 
 
 # ---------------------------------------------------------------------------
@@ -132,9 +134,14 @@ def test_getitem_raises_refuses_with_lookup_failed_in_strict():
         assert refused is True
         assert reason == 'approval_lookup_failed'
 
+    with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4], \
+         patch.object(executor, 'load_governance_state', return_value=fake_state), \
+         patch.object(executor, '_emit_approval_dispatch_metric'), \
+         patch.object(executor, 'handle_node_failure') as mock_fail:
         executor.invoke_node('exec-1', 'wf-1', NODE, {'k': 'v'}, {'cfg': 1})
 
     fake_sqs.send_message.assert_not_called()
+    mock_fail.assert_called_once_with('exec-1', 'n0', 'approval_lookup_failed')
 
 
 # ---------------------------------------------------------------------------
@@ -196,3 +203,86 @@ def test_shadow_draft_logs_warning_with_reason_token(caplog):
     assert 'registry_status=DRAFT' in rec.message
     # Must NOT contain the string 'None' as the reason.
     assert 'would_block: None;' not in rec.message
+
+
+# ---------------------------------------------------------------------------
+# strict + DRAFT → node marked failed via handle_node_failure path.
+# ---------------------------------------------------------------------------
+
+
+def test_strict_not_approved_marks_node_failed():
+    """A strict approval refusal (DRAFT) must write a terminal node
+    failure via handle_node_failure (status=failed, error=reason token)
+    — the same path worker-reported node failures take."""
+    executor, ctx, fake_sqs, fake_agent_table = _patched_executor()
+    fake_agent_table.get_item.return_value = {
+        'Item': {'agentId': 'agent-A', 'registryStatus': 'DRAFT'},
+    }
+    fake_state = _make_state('strict')
+
+    fake_exec_table = MagicMock()
+    fake_exec_table.get_item.return_value = {
+        'Item': {
+            'executionId': 'exec-1',
+            'workflowId': 'wf-1',
+            'status': 'running',
+            'nodeResults': {'n0': {'status': 'pending', 'agentId': 'agent-A'}},
+        },
+    }
+    fake_wf_table = MagicMock()
+    fake_wf_table.get_item.return_value = {
+        'Item': {
+            'workflowId': 'wf-1',
+            'definition': '{"nodes": [{"id": "n0", "agentId": "agent-A", "data": {}}], "edges": []}',
+            'configuration': '{}',
+        },
+    }
+
+    with ctx[1], ctx[2], ctx[3], ctx[4], \
+         patch.object(executor, '_executions_table', fake_exec_table), \
+         patch.object(executor, '_workflows_table', fake_wf_table), \
+         patch.object(executor, 'load_governance_state', return_value=fake_state), \
+         patch.object(executor, '_emit_approval_dispatch_metric'):
+        executor.invoke_node('exec-1', 'wf-1', NODE, {'k': 'v'}, {'cfg': 1})
+
+    # SQS dispatch must NOT happen.
+    fake_sqs.send_message.assert_not_called()
+    # handle_node_failure writes terminal failure — check the update_item call
+    # sets node status to 'failed' with the approval reason token as error.
+    update_calls = fake_exec_table.update_item.call_args_list
+    # Find the terminal failure write (the one that sets both node and
+    # execution status to 'failed').
+    failure_writes = [
+        c for c in update_calls
+        if c.kwargs.get('ExpressionAttributeValues', {}).get(':nstatus') == 'failed'
+        and c.kwargs.get('ExpressionAttributeValues', {}).get(':estatus') == 'failed'
+    ]
+    assert len(failure_writes) == 1, (
+        f"Expected exactly 1 terminal failure write, got {len(failure_writes)}: {update_calls}"
+    )
+    error_value = failure_writes[0].kwargs['ExpressionAttributeValues'][':error']
+    assert error_value == 'approval_absent:DRAFT'
+
+
+# ---------------------------------------------------------------------------
+# shadow + DRAFT → node proceeds (no failure write).
+# ---------------------------------------------------------------------------
+
+
+def test_shadow_not_approved_does_not_mark_node_failed():
+    """A shadow approval would-block must NOT call handle_node_failure —
+    dispatch proceeds normally."""
+    executor, ctx, fake_sqs, fake_agent_table = _patched_executor()
+    fake_agent_table.get_item.return_value = {
+        'Item': {'agentId': 'agent-A', 'registryStatus': 'DRAFT'},
+    }
+    fake_state = _make_state('shadow')
+
+    with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4], \
+         patch.object(executor, 'load_governance_state', return_value=fake_state), \
+         patch.object(executor, '_emit_approval_dispatch_metric'), \
+         patch.object(executor, 'handle_node_failure') as mock_fail:
+        executor.invoke_node('exec-1', 'wf-1', NODE, {'k': 'v'}, {'cfg': 1})
+
+    fake_sqs.send_message.assert_called_once()
+    mock_fail.assert_not_called()

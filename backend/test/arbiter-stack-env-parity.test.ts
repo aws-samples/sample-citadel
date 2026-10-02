@@ -167,7 +167,6 @@ const TARGETS: Target[] = [
       "TOOLS_CONFIG_TABLE", // dynamic-tools config; None-guarded, feature-gated
       "DENIED_TOOLS", // optional deny list; '' default
       "EVENT_BUS_NAME", // legacy alias; the worker emits on COMPLETION_BUS_NAME (which IS set)
-      "RELEASE_DEFAULT_ORG_ID", // release-attribution seam; only set in release-enabled envs
       "WORKER_MAX_PROMPT_ADDITION_CHARS", // size cap tunable; has a default
       // tool-execution-ledger tunables — all have defaults (_int_env/_float_env):
       "TOOL_LEDGER_TTL_SECONDS",
@@ -201,7 +200,6 @@ const TARGETS: Target[] = [
       "REGISTRY_ENABLED", // registry feature gate; default off
       "REGISTRY_ID", // only read when REGISTRY_ENABLED
       "WORKFLOW_TIMEOUT_SECONDS", // watchdog tunable; has a default
-      "RELEASE_DEFAULT_ORG_ID", // release-attribution seam; feature-gated env
       "RELEASE_DISPATCH_ENVIRONMENT", // release-dispatch feature switch; feature-gated env
     ]),
   },
@@ -322,6 +320,32 @@ describe("ArbiterStack — handler env-var parity (deployment contract)", () => 
     expect(vars).toHaveProperty("AGENT_LOG_LEVEL");
     expect(vars.AGENT_LOG_LEVEL).toBe("INFO");
   });
+
+  // -----------------------------------------------------------------
+  // RELEASE_DEFAULT_ORG_ID must be set unconditionally on every function
+  // that runs the release gate. When neither env nor context provides a
+  // value, it defaults to 'Default' (the platform default organisation
+  // used by the agent cache). This prevents the gate from running with
+  // an empty org id.
+  // -----------------------------------------------------------------
+  test.each(["SupervisorAgent", "StepRunnerFunction", "WorkerAgentWrapper"])(
+    "%s has RELEASE_DEFAULT_ORG_ID set to 'Default' when unset",
+    (prefix) => {
+      const fns = template.findResources("AWS::Lambda::Function");
+      const match = Object.entries(fns).find(([id]) => id.startsWith(prefix));
+      expect(match).toBeDefined();
+      const vars =
+        (
+          match![1] as {
+            Properties?: {
+              Environment?: { Variables?: Record<string, unknown> };
+            };
+          }
+        ).Properties?.Environment?.Variables ?? {};
+      expect(vars).toHaveProperty("RELEASE_DEFAULT_ORG_ID");
+      expect(vars.RELEASE_DEFAULT_ORG_ID).toBe("Default");
+    },
+  );
 
   // -----------------------------------------------------------------
   // Governance enforcement-mode regression guards: ENVIRONMENT must be

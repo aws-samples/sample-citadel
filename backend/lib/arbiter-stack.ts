@@ -195,10 +195,11 @@ interface ArbiterStackProps extends cdk.StackProps {
   // G3 — the named org seam for release-aware dispatch. resolve_release
   // resolves pointers for this single org per deployment
   // (RELEASE_DEFAULT_ORG_ID); the switch itself is RELEASE_DISPATCH_
-  // ENVIRONMENT, derived from `environment` at synth time. Optional and
-  // operator-provisioned (env/CDK context in bin/app.ts): when absent,
-  // RELEASE_DEFAULT_ORG_ID is omitted and every resolve_release lookup
-  // falls to NO_POINTER (see release_resolution.py) — never a crash.
+  // ENVIRONMENT, derived from `environment` at synth time. Operator-
+  // provisioned (env/CDK context in bin/app.ts); when absent, defaults to
+  // 'Default' (the platform default organisation used by the agent cache)
+  // so the release gate never runs with an empty org id. Set
+  // unconditionally on supervisor, stepRunner, and worker.
   releaseDefaultOrgId?: string;
   /**
    * Shared platform alarm topic (`citadel-alarms-<env>`, owned by
@@ -421,9 +422,10 @@ export class ArbiterStack extends cdk.Stack {
             props.environmentReleasePointersTable.tableName,
           RELEASE_DISPATCH_ENVIRONMENT: props.environment.toUpperCase(),
         }),
-        ...(props.releaseDefaultOrgId && {
-          RELEASE_DEFAULT_ORG_ID: props.releaseDefaultOrgId,
-        }),
+        // G3 — the named org for release-aware dispatch. Set
+        // unconditionally (bin/app.ts defaults to 'Default') so the
+        // release gate never runs with an empty org id.
+        RELEASE_DEFAULT_ORG_ID: props.releaseDefaultOrgId ?? "Default",
       },
       initialPolicy: [
         new PolicyStatement({
@@ -877,6 +879,10 @@ export class ArbiterStack extends cdk.Stack {
           REGISTRY_GENERATION,
 
           REGISTRY_ENABLED: "true",
+          // G3 — the named org for release-aware dispatch. Set
+          // unconditionally (bin/app.ts defaults to 'Default') so the
+          // release gate never runs with an empty org id.
+          RELEASE_DEFAULT_ORG_ID: props.releaseDefaultOrgId ?? "Default",
           // Idempotency-seam smoke fixture (non-prod only): the worker's
           // smoke tool refuses to run (raises, never silently no-ops) if
           // SMOKE_IDEMPOTENCY_TABLE is unset — so a prod deploy, which never
@@ -1668,9 +1674,10 @@ export class ArbiterStack extends cdk.Stack {
                 props.environmentReleasePointersTable.tableName,
               RELEASE_DISPATCH_ENVIRONMENT: props.environment.toUpperCase(),
             }),
-            ...(props.releaseDefaultOrgId && {
-              RELEASE_DEFAULT_ORG_ID: props.releaseDefaultOrgId,
-            }),
+            // G3 — the named org for release-aware dispatch. Set
+            // unconditionally (bin/app.ts defaults to 'Default') so the
+            // release gate never runs with an empty org id.
+            RELEASE_DEFAULT_ORG_ID: props.releaseDefaultOrgId ?? "Default",
           },
           deadLetterQueueEnabled: true,
           deadLetterQueue: arbiterAsyncDlq,

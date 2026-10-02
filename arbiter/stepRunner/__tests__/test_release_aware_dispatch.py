@@ -89,6 +89,7 @@ def test_no_release_resolvable_still_dispatches_in_permissive_and_shadow(mode):
          patch.object(executor, 'resolve_release', return_value=fake_resolution), \
          patch.object(executor, '_emit_release_dispatch_metric') as mock_metric:
         os.environ['RELEASE_DISPATCH_ENVIRONMENT'] = 'PROD'
+        os.environ['RELEASE_DEFAULT_ORG_ID'] = 'Default'
         executor.invoke_node('exec-1', 'wf-1', NODE, {'k': 'v'}, {'cfg': 1})
 
     fake_sqs.send_message.assert_called_once()
@@ -109,11 +110,14 @@ def test_strict_no_release_and_not_grandfathered_refuses_dispatch():
     with ctx[0], ctx[1], ctx[2], \
          patch.object(executor, 'load_governance_state', return_value=fake_state), \
          patch.object(executor, 'resolve_release', return_value=fake_resolution), \
-         patch.object(executor, '_resolve_agent_created_at', return_value='2026-06-01T00:00:00Z'):
+         patch.object(executor, '_resolve_agent_created_at', return_value='2026-06-01T00:00:00Z'), \
+         patch.object(executor, 'handle_node_failure') as mock_fail:
         os.environ['RELEASE_DISPATCH_ENVIRONMENT'] = 'PROD'
+        os.environ['RELEASE_DEFAULT_ORG_ID'] = 'Default'
         executor.invoke_node('exec-1', 'wf-1', NODE, {'k': 'v'}, {'cfg': 1})
 
     fake_sqs.send_message.assert_not_called()
+    mock_fail.assert_called_once_with('exec-1', 'n0', 'no_release_resolvable')
 
 
 def test_strict_no_release_but_grandfathered_dispatches():
@@ -134,6 +138,7 @@ def test_strict_no_release_but_grandfathered_dispatches():
          patch.object(executor, 'resolve_release', return_value=fake_resolution), \
          patch.object(executor, '_dynamodb', fake_dynamodb):
         os.environ['RELEASE_DISPATCH_ENVIRONMENT'] = 'PROD'
+        os.environ['RELEASE_DEFAULT_ORG_ID'] = 'Default'
         executor.invoke_node('exec-1', 'wf-1', NODE, {'k': 'v'}, {'cfg': 1})
 
     fake_sqs.send_message.assert_called_once()
@@ -159,6 +164,7 @@ def test_strict_resolved_release_dispatches():
          patch.object(executor, 'resolve_release', return_value=fake_resolution), \
          patch.object(executor, '_dynamodb', fake_dynamodb):
         os.environ['RELEASE_DISPATCH_ENVIRONMENT'] = 'PROD'
+        os.environ['RELEASE_DEFAULT_ORG_ID'] = 'Default'
         executor.invoke_node('exec-1', 'wf-1', NODE, {'k': 'v'}, {'cfg': 1})
 
     fake_sqs.send_message.assert_called_once()
@@ -176,11 +182,14 @@ def test_strict_lookup_failed_always_refuses_even_pre_flip():
 
     with ctx[0], ctx[1], ctx[2], \
          patch.object(executor, 'load_governance_state', return_value=fake_state), \
-         patch.object(executor, 'resolve_release', return_value=fake_resolution):
+         patch.object(executor, 'resolve_release', return_value=fake_resolution), \
+         patch.object(executor, 'handle_node_failure') as mock_fail:
         os.environ['RELEASE_DISPATCH_ENVIRONMENT'] = 'PROD'
+        os.environ['RELEASE_DEFAULT_ORG_ID'] = 'Default'
         executor.invoke_node('exec-1', 'wf-1', NODE, {'k': 'v'}, {'cfg': 1})
 
     fake_sqs.send_message.assert_not_called()
+    mock_fail.assert_called_once_with('exec-1', 'n0', 'release_lookup_failed')
 
 
 def test_strict_lookup_failed_in_shadow_mode_still_dispatches_with_would_block():
@@ -196,6 +205,7 @@ def test_strict_lookup_failed_in_shadow_mode_still_dispatches_with_would_block()
          patch.object(executor, 'resolve_release', return_value=fake_resolution), \
          patch.object(executor, '_emit_release_dispatch_metric') as mock_metric:
         os.environ['RELEASE_DISPATCH_ENVIRONMENT'] = 'PROD'
+        os.environ['RELEASE_DEFAULT_ORG_ID'] = 'Default'
         executor.invoke_node('exec-1', 'wf-1', NODE, {'k': 'v'}, {'cfg': 1})
 
     fake_sqs.send_message.assert_called_once()
@@ -220,6 +230,7 @@ def test_no_agent_id_on_node_resolves_release_with_empty_target_id():
          patch.object(executor, 'load_governance_state', return_value=fake_state), \
          patch.object(executor, 'resolve_release', return_value=fake_resolution) as mock_resolve:
         os.environ['RELEASE_DISPATCH_ENVIRONMENT'] = 'PROD'
+        os.environ['RELEASE_DEFAULT_ORG_ID'] = 'Default'
         try:
             executor.invoke_node('exec-1', 'wf-1', node_without_agent, {'k': 'v'}, {'cfg': 1})
         except ValueError:
@@ -227,3 +238,86 @@ def test_no_agent_id_on_node_resolves_release_with_empty_target_id():
 
     mock_resolve.assert_called_once()
     assert mock_resolve.call_args.kwargs['agent_target_id'] == ''
+
+
+# ---------------------------------------------------------------------------
+# Empty org id — strict refuses without DynamoDB call, node marked failed.
+# ---------------------------------------------------------------------------
+
+
+def test_strict_empty_org_refuses_and_marks_node_failed():
+    """When RELEASE_DEFAULT_ORG_ID is unset/empty and mode is strict,
+    _check_release_gate returns refused='release_org_unconfigured' without
+    calling resolve_release, and invoke_node writes a terminal node failure
+    via handle_node_failure (same path as worker-reported failures)."""
+    executor, ctx, fake_sqs = _patched_executor()
+    fake_state = MagicMock(enforcement_mode='strict', effective_at=None)
+    fake_exec_table = MagicMock()
+    # handle_node_failure loads execution + workflow — provide minimal stubs.
+    fake_exec_table.get_item.return_value = {
+        'Item': {
+            'executionId': 'exec-1',
+            'workflowId': 'wf-1',
+            'status': 'running',
+            'nodeResults': {'n0': {'status': 'pending', 'agentId': 'agent-A'}},
+        },
+    }
+    fake_wf_table = MagicMock()
+    fake_wf_table.get_item.return_value = {
+        'Item': {
+            'workflowId': 'wf-1',
+            'definition': '{"nodes": [{"id": "n0", "agentId": "agent-A", "data": {}}], "edges": []}',
+            'configuration': '{}',
+        },
+    }
+
+    with ctx[0], ctx[1], ctx[2], \
+         patch.object(executor, '_executions_table', fake_exec_table), \
+         patch.object(executor, '_workflows_table', fake_wf_table), \
+         patch.object(executor, 'load_governance_state', return_value=fake_state), \
+         patch.object(executor, 'resolve_release') as mock_resolve, \
+         patch.object(executor, '_emit_release_dispatch_metric') as mock_metric:
+        os.environ['RELEASE_DISPATCH_ENVIRONMENT'] = 'PROD'
+        # Ensure RELEASE_DEFAULT_ORG_ID is NOT set
+        os.environ.pop('RELEASE_DEFAULT_ORG_ID', None)
+        executor.invoke_node('exec-1', 'wf-1', NODE, {'k': 'v'}, {'cfg': 1})
+
+    # resolve_release must NOT be called — no DynamoDB lookup.
+    mock_resolve.assert_not_called()
+    # SQS dispatch must NOT happen.
+    fake_sqs.send_message.assert_not_called()
+    # The Refused metric must be emitted.
+    assert mock_metric.call_args.kwargs['outcome'] == 'refused'
+    # handle_node_failure writes terminal failure to the executions table.
+    update_calls = [
+        c for c in fake_exec_table.update_item.call_args_list
+        if ':nstatus' in str(c) or ':failed' in str(c) or 'failed' in str(c.kwargs.get('ExpressionAttributeValues', {}))
+    ]
+    assert len(update_calls) > 0, "Expected handle_node_failure to write terminal node status"
+
+
+def test_shadow_empty_org_proceeds_unchanged():
+    """When RELEASE_DEFAULT_ORG_ID is unset/empty and mode is shadow,
+    the gate emits would_block but does NOT refuse — dispatch proceeds."""
+    executor, ctx, fake_sqs = _patched_executor()
+    fake_state = MagicMock(enforcement_mode='shadow', effective_at=None)
+    fake_agent_table = MagicMock()
+    fake_agent_table.get_item.return_value = {
+        'Item': {'agentId': 'agent-A', 'registryStatus': 'APPROVED'},
+    }
+    fake_dynamodb = MagicMock()
+    fake_dynamodb.Table.return_value = fake_agent_table
+
+    with ctx[0], ctx[1], ctx[2], \
+         patch.object(executor, 'load_governance_state', return_value=fake_state), \
+         patch.object(executor, 'resolve_release') as mock_resolve, \
+         patch.object(executor, '_dynamodb', fake_dynamodb), \
+         patch.object(executor, '_emit_release_dispatch_metric') as mock_metric:
+        os.environ['RELEASE_DISPATCH_ENVIRONMENT'] = 'PROD'
+        os.environ.pop('RELEASE_DEFAULT_ORG_ID', None)
+        executor.invoke_node('exec-1', 'wf-1', NODE, {'k': 'v'}, {'cfg': 1})
+
+    mock_resolve.assert_not_called()
+    fake_sqs.send_message.assert_called_once()
+    assert mock_metric.call_args.kwargs['outcome'] == 'proceed'
+    assert mock_metric.call_args.kwargs['would_block'] is True
