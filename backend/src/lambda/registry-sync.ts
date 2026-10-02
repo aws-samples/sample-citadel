@@ -745,6 +745,21 @@ export async function handleGaUpsert(
     setClauses.push(`#${key} = :${key}`);
   }
 
+  // Ensure newly-created items (where the key was absent) get a complete
+  // cache row: config and createdAt default via if_not_exists so existing
+  // items keep their values untouched.
+  names["#config"] = "config";
+  values[":emptyConfig"] = resourceType === "tool" ? "" : {};
+  setClauses.push("#config = if_not_exists(#config, :emptyConfig)");
+
+  names["#createdAt"] = "createdAt";
+  const recordCreatedAt =
+    record.createdAt instanceof Date
+      ? record.createdAt.toISOString()
+      : new Date().toISOString();
+  values[":recordCreatedAt"] = recordCreatedAt;
+  setClauses.push("#createdAt = if_not_exists(#createdAt, :recordCreatedAt)");
+
   const params: UpdateCommandInput = {
     TableName: tableName,
     Key: getKeyForResource(resourceType, resourceId),
