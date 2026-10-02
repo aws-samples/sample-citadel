@@ -35,6 +35,28 @@ process.env.EVAL_RUNS_TABLE = "citadel-eval-runs-test";
 process.env.EVAL_SUITES_TABLE = "citadel-eval-suites-test";
 process.env.PROJECTS_TABLE = "citadel-projects-test";
 process.env.USER_POOL_ID = "us-west-2_testpool";
+process.env.USER_ORG_MEMBERSHIP_TABLE = "citadel-user-org-membership-test";
+
+/** UUID-shaped `Project.owner` values (owner IS the creator's Cognito sub —
+ * the UserOrgMembership partition key). */
+const OWNER_IN_ORG_1 = "11111111-1111-4111-8111-111111111111";
+const OWNER_IN_ORG_OTHER = "22222222-2222-4222-8222-222222222222";
+const OWNER_UNKNOWN = "33333333-3333-4333-8333-333333333333";
+
+/** UserOrgMembership rows keyed by owner sub (decision 00d40a31: the
+ * authoritative user↔org link; the Cognito attribute is never read). */
+const MEMBERSHIP_ROWS: Record<string, { sub: string; orgName: string }> = {
+  [OWNER_IN_ORG_1]: { sub: OWNER_IN_ORG_1, orgName: "org-1" },
+  [OWNER_IN_ORG_OTHER]: { sub: OWNER_IN_ORG_OTHER, orgName: "org-OTHER" },
+};
+
+function membershipGet(input: { Key?: Record<string, unknown> }): {
+  Item?: unknown;
+} {
+  const sub = input.Key?.sub as string | undefined;
+  const row = sub ? MEMBERSHIP_ROWS[sub] : undefined;
+  return row ? { Item: row } : {};
+}
 process.env.REGISTRY_ENABLED = "true";
 process.env.REGISTRY_ID = "test-registry";
 
@@ -165,8 +187,8 @@ function baseCutInput() {
 /** Wires the three GetCommand-backed lookups (execSpec, evalRun, evalSuite)
  * plus registry getResource to the "everything is valid" fixtures, and the
  * two write paths (release PutCommand, suite UpdateCommand) to success.
- * Also wires the exec spec's Project (PROJECTS_TABLE) and its Cognito
- * owner-org lookup to resolve to the caller's own org ("org-1"), so
+ * Also wires the exec spec's Project (PROJECTS_TABLE) and its owner's
+ * UserOrgMembership row to resolve to the caller's own org ("org-1"), so
  * existing happy-path tests exercise the exec-spec org check without
  * having to know about it. */
 function mockHappyPath(): void {
@@ -182,7 +204,10 @@ function mockHappyPath(): void {
       return { Item: frozenSuite() };
     }
     if (input.TableName === process.env.PROJECTS_TABLE) {
-      return { Item: { id: "project-1", owner: "owner-in-org-1" } };
+      return { Item: { id: "project-1", owner: OWNER_IN_ORG_1 } };
+    }
+    if (input.TableName === process.env.USER_ORG_MEMBERSHIP_TABLE) {
+      return membershipGet(input);
     }
     return {};
   });
@@ -190,15 +215,11 @@ function mockHappyPath(): void {
   ddbMock
     .on(UpdateCommand)
     .resolves({ Attributes: frozenSuite({ references: ["run-1"] }) });
+  // The Cognito attribute is populated with a CONFLICTING org on purpose:
+  // the owner-org derivation must never read it (decision 00d40a31).
   cognitoMock.on(AdminGetUserCommand).resolves({
-    UserAttributes: [{ Name: "custom:organization", Value: "org-1" }],
+    UserAttributes: [{ Name: "custom:organization", Value: "org-evil-mirror" }],
   });
-}
-
-function mockAdminGetUserResolves(
-  attributes: { Name: string; Value: string }[],
-): void {
-  cognitoMock.on(AdminGetUserCommand).resolves({ UserAttributes: attributes });
 }
 
 beforeEach(() => {
@@ -304,8 +325,10 @@ describe("cutAgentRelease — exec spec validation", () => {
       if (input.TableName === process.env.EVAL_SUITES_TABLE)
         return { Item: frozenSuite() };
       if (input.TableName === process.env.PROJECTS_TABLE) {
-        return { Item: { id: "project-1", owner: "owner-in-org-1" } };
+        return { Item: { id: "project-1", owner: OWNER_IN_ORG_1 } };
       }
+      if (input.TableName === process.env.USER_ORG_MEMBERSHIP_TABLE)
+        return membershipGet(input);
       return {};
     });
     await expect(
@@ -324,8 +347,10 @@ describe("cutAgentRelease — exec spec validation", () => {
       if (input.TableName === process.env.EVAL_SUITES_TABLE)
         return { Item: frozenSuite() };
       if (input.TableName === process.env.PROJECTS_TABLE) {
-        return { Item: { id: "project-1", owner: "owner-in-org-1" } };
+        return { Item: { id: "project-1", owner: OWNER_IN_ORG_1 } };
       }
+      if (input.TableName === process.env.USER_ORG_MEMBERSHIP_TABLE)
+        return membershipGet(input);
       return {};
     });
     await expect(
@@ -333,7 +358,7 @@ describe("cutAgentRelease — exec spec validation", () => {
     ).rejects.toThrow(/ValidationError.*APPROVED/);
   });
 
-  test("rejects (security) when the exec spec's project is owned by a different org (via Project.owner -> lookupUserOrganization)", async () => {
+  test("rejects (security) when the exec spec's project is owned by a different org (via Project.owner -> UserOrgMembership row)", async () => {
     mockHappyPath();
     ddbMock.on(GetCommand).callsFake((input) => {
       if (input.TableName === process.env.EXECUTION_SPECS_TABLE)
@@ -343,13 +368,12 @@ describe("cutAgentRelease — exec spec validation", () => {
       if (input.TableName === process.env.EVAL_SUITES_TABLE)
         return { Item: frozenSuite() };
       if (input.TableName === process.env.PROJECTS_TABLE) {
-        return { Item: { id: "project-1", owner: "owner-in-org-OTHER" } };
+        return { Item: { id: "project-1", owner: OWNER_IN_ORG_OTHER } };
       }
+      if (input.TableName === process.env.USER_ORG_MEMBERSHIP_TABLE)
+        return membershipGet(input);
       return {};
     });
-    mockAdminGetUserResolves([
-      { Name: "custom:organization", Value: "org-OTHER" },
-    ]);
     await expect(
       cutAgentRelease(baseCutInput(), authContextFor("architect"), "org-1"),
     ).rejects.toThrow(/SecurityError.*exec spec/i);
@@ -366,11 +390,12 @@ describe("cutAgentRelease — exec spec validation", () => {
       if (input.TableName === process.env.EVAL_SUITES_TABLE)
         return { Item: frozenSuite() };
       if (input.TableName === process.env.PROJECTS_TABLE) {
-        return { Item: { id: "project-1", owner: "owner-in-org-1" } };
+        return { Item: { id: "project-1", owner: OWNER_IN_ORG_1 } };
       }
+      if (input.TableName === process.env.USER_ORG_MEMBERSHIP_TABLE)
+        return membershipGet(input);
       return {};
     });
-    mockAdminGetUserResolves([{ Name: "custom:organization", Value: "org-1" }]);
     const release = await cutAgentRelease(
       baseCutInput(),
       authContextFor("architect"),
@@ -397,7 +422,7 @@ describe("cutAgentRelease — exec spec validation", () => {
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
   });
 
-  test("rejects (fail-closed) when the exec spec's project owner's org cannot be resolved (Cognito lookup returns nothing)", async () => {
+  test("rejects (fail-closed) when the exec spec's project owner's org cannot be resolved (no UserOrgMembership row — the Cognito attribute is NOT a fallback)", async () => {
     mockHappyPath();
     ddbMock.on(GetCommand).callsFake((input) => {
       if (input.TableName === process.env.EXECUTION_SPECS_TABLE)
@@ -407,15 +432,24 @@ describe("cutAgentRelease — exec spec validation", () => {
       if (input.TableName === process.env.EVAL_SUITES_TABLE)
         return { Item: frozenSuite() };
       if (input.TableName === process.env.PROJECTS_TABLE) {
-        return { Item: { id: "project-1", owner: "owner-unknown" } };
+        return { Item: { id: "project-1", owner: OWNER_UNKNOWN } };
       }
+      if (input.TableName === process.env.USER_ORG_MEMBERSHIP_TABLE)
+        return membershipGet(input);
       return {};
     });
-    mockAdminGetUserResolves([]);
+    // Even a Cognito attribute matching the caller's org must NOT rescue it.
+    cognitoMock.on(AdminGetUserCommand).resolves({
+      UserAttributes: [
+        { Name: "sub", Value: OWNER_UNKNOWN },
+        { Name: "custom:organization", Value: "org-1" },
+      ],
+    });
     await expect(
       cutAgentRelease(baseCutInput(), authContextFor("architect"), "org-1"),
     ).rejects.toThrow(/SecurityError.*exec spec/i);
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(cognitoMock.commandCalls(AdminGetUserCommand)).toHaveLength(0);
   });
 });
 
@@ -429,8 +463,10 @@ describe("cutAgentRelease — eval run validation", () => {
       if (input.TableName === process.env.EVAL_SUITES_TABLE)
         return { Item: frozenSuite() };
       if (input.TableName === process.env.PROJECTS_TABLE) {
-        return { Item: { id: "project-1", owner: "owner-in-org-1" } };
+        return { Item: { id: "project-1", owner: OWNER_IN_ORG_1 } };
       }
+      if (input.TableName === process.env.USER_ORG_MEMBERSHIP_TABLE)
+        return membershipGet(input);
       return {};
     });
     await expect(
@@ -449,8 +485,10 @@ describe("cutAgentRelease — eval run validation", () => {
       if (input.TableName === process.env.EVAL_SUITES_TABLE)
         return { Item: frozenSuite() };
       if (input.TableName === process.env.PROJECTS_TABLE) {
-        return { Item: { id: "project-1", owner: "owner-in-org-1" } };
+        return { Item: { id: "project-1", owner: OWNER_IN_ORG_1 } };
       }
+      if (input.TableName === process.env.USER_ORG_MEMBERSHIP_TABLE)
+        return membershipGet(input);
       return {};
     });
     await expect(
@@ -469,8 +507,10 @@ describe("cutAgentRelease — eval run validation", () => {
       if (input.TableName === process.env.EVAL_SUITES_TABLE)
         return { Item: frozenSuite() };
       if (input.TableName === process.env.PROJECTS_TABLE) {
-        return { Item: { id: "project-1", owner: "owner-in-org-1" } };
+        return { Item: { id: "project-1", owner: OWNER_IN_ORG_1 } };
       }
+      if (input.TableName === process.env.USER_ORG_MEMBERSHIP_TABLE)
+        return membershipGet(input);
       return {};
     });
     await expect(
@@ -490,8 +530,10 @@ describe("cutAgentRelease — eval run validation", () => {
         return { Item: frozenSuite({ version: 2 }) };
       }
       if (input.TableName === process.env.PROJECTS_TABLE) {
-        return { Item: { id: "project-1", owner: "owner-in-org-1" } };
+        return { Item: { id: "project-1", owner: OWNER_IN_ORG_1 } };
       }
+      if (input.TableName === process.env.USER_ORG_MEMBERSHIP_TABLE)
+        return membershipGet(input);
       return {};
     });
     await expect(
@@ -510,8 +552,10 @@ describe("cutAgentRelease — eval run validation", () => {
         return { Item: frozenSuite({ orgId: "org-OTHER" }) };
       }
       if (input.TableName === process.env.PROJECTS_TABLE) {
-        return { Item: { id: "project-1", owner: "owner-in-org-1" } };
+        return { Item: { id: "project-1", owner: OWNER_IN_ORG_1 } };
       }
+      if (input.TableName === process.env.USER_ORG_MEMBERSHIP_TABLE)
+        return membershipGet(input);
       return {};
     });
     await expect(
@@ -623,8 +667,10 @@ describe("cutAgentRelease — successful cut", () => {
       if (input.TableName === process.env.EVAL_SUITES_TABLE)
         return { Item: frozenSuite() };
       if (input.TableName === process.env.PROJECTS_TABLE) {
-        return { Item: { id: "project-1", owner: "owner-in-org-1" } };
+        return { Item: { id: "project-1", owner: OWNER_IN_ORG_1 } };
       }
+      if (input.TableName === process.env.USER_ORG_MEMBERSHIP_TABLE)
+        return membershipGet(input);
       return {};
     });
 
@@ -673,8 +719,10 @@ describe("cutAgentRelease — successful cut", () => {
       if (input.TableName === process.env.EVAL_SUITES_TABLE)
         return { Item: frozenSuite() };
       if (input.TableName === process.env.PROJECTS_TABLE) {
-        return { Item: { id: "project-1", owner: "owner-in-org-1" } };
+        return { Item: { id: "project-1", owner: OWNER_IN_ORG_1 } };
       }
+      if (input.TableName === process.env.USER_ORG_MEMBERSHIP_TABLE)
+        return membershipGet(input);
       return {};
     });
 
@@ -764,8 +812,10 @@ describe("cutAgentRelease — ordering / partial failure (store succeeds, freeze
       if (input.TableName === process.env.EVAL_SUITES_TABLE)
         return { Item: frozenSuite() };
       if (input.TableName === process.env.PROJECTS_TABLE) {
-        return { Item: { id: "project-1", owner: "owner-in-org-1" } };
+        return { Item: { id: "project-1", owner: OWNER_IN_ORG_1 } };
       }
+      if (input.TableName === process.env.USER_ORG_MEMBERSHIP_TABLE)
+        return membershipGet(input);
       return {};
     });
     ddbMock
@@ -789,8 +839,10 @@ describe("cutAgentRelease — ordering / partial failure (store succeeds, freeze
       if (input.TableName === process.env.EVAL_SUITES_TABLE)
         return { Item: frozenSuite() };
       if (input.TableName === process.env.PROJECTS_TABLE) {
-        return { Item: { id: "project-1", owner: "owner-in-org-1" } };
+        return { Item: { id: "project-1", owner: OWNER_IN_ORG_1 } };
       }
+      if (input.TableName === process.env.USER_ORG_MEMBERSHIP_TABLE)
+        return membershipGet(input);
       return {};
     });
 

@@ -69,10 +69,15 @@
  *       `userAttributes["custom:organization"]` expression (the trigger
  *       never consults the stored attribute — not even as a fallback when
  *       the membership lookup fails; that path fails closed).
- *   T6. The body of `function extractOrgFromEvent` in auth-event.ts contains
- *       no call to `lookupUserOrganization` (the former AdminGetUser
- *       fallback for a missing claim). Scoped to the function body by AST,
- *       so the remaining informational callers elsewhere are unaffected.
+ *   T6. (a) The body of `function extractOrgFromEvent` in auth-event.ts
+ *       contains no call to `lookupUserOrganization` (the former AdminGetUser
+ *       fallback for a missing claim), scoped to the function body by AST;
+ *       and (b) — board task 5190de51 — the `lookupUserOrganization`
+ *       IDENTIFIER appears nowhere in backend/src production sources at all
+ *       (AST identifier scan; comments are invisible). The helper was
+ *       deleted: project-owner org resolution now reads the UserOrgMembership
+ *       table via utils/org-membership.ts `lookupOwnerOrganization`, and
+ *       Cognito AdminGetUser there is a username→sub identity mapping only.
  *   T7. Negative self-test for T5/T6 against fixtures that WOULD violate.
  *   T8. pre-token-generation.ts WRITES `claimsToSuppress` (AST: object
  *       property or assignment target). Omitting the org claim from
@@ -282,6 +287,35 @@ export function callsInsideFunction(
   };
   visit(target.body);
   return { found: true, callees };
+}
+
+/**
+ * Line numbers of every Identifier node whose text equals `name`. Comments
+ * and string literals are invisible to the AST, so prose mentions of a
+ * deleted helper never count — only a real declaration, import, or
+ * reference does. Used by T6(b).
+ */
+export function identifierOccurrences(
+  sourceText: string,
+  fileName: string,
+  name: string,
+): number[] {
+  const sf = ts.createSourceFile(
+    fileName,
+    sourceText,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const lines: number[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node) && node.text === name) {
+      lines.push(sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return lines;
 }
 
 /**
@@ -549,6 +583,29 @@ describe("cognito claim-trust tripwire (finding 7aa877f8, escalation 2026-09-30)
           `A caller with no claim must resolve to null (fail closed), never to the display-only attribute.`,
       );
     });
+
+    test("T6(b): the `lookupUserOrganization` identifier appears nowhere in backend/src (helper deleted; owner org comes from the UserOrgMembership table)", () => {
+      const files = listProductionSources(SRC_ROOT);
+      expect(files.length).toBeGreaterThan(0);
+      const offenders: string[] = [];
+      for (const file of files) {
+        const lines = identifierOccurrences(
+          fs.readFileSync(file, "utf8"),
+          file,
+          "lookupUserOrganization",
+        );
+        if (lines.length > 0) {
+          offenders.push(`${rel(file)}:${lines.join(",")}`);
+        }
+      }
+      orgTripwire(
+        offenders.length === 0,
+        `\`lookupUserOrganization\` (the deleted AdminGetUser custom:organization attribute reader) is referenced in: ` +
+          `${offenders.join("; ")}. Project-owner org resolution MUST use utils/org-membership.ts ` +
+          `lookupOwnerOrganization (GetItem on the UserOrgMembership table by sub); AdminGetUser is permitted there ` +
+          `ONLY as a username→sub identity mapping, never to read custom:organization.`,
+      );
+    });
   });
 
   // ————————————————————————————————————————————————————————————————————
@@ -617,6 +674,27 @@ describe("cognito claim-trust tripwire (finding 7aa877f8, escalation 2026-09-30)
       expect(good.found).toBe(true);
       expect(good.callees).not.toContain("lookupUserOrganization");
       expect(good.callees).toContain("readClaim");
+    });
+
+    test("T6(b) matcher detects the identifier as a declaration, import, or call — and ignores comments and string literals", () => {
+      expect(
+        identifierOccurrences(BAD_AUTH_EVENT, "fixture.ts", "lookupUserOrganization"),
+      ).toHaveLength(3); // declaration + call inside + call outside
+      expect(
+        identifierOccurrences(
+          `import { lookupUserOrganization } from "./auth-event";`,
+          "fixture.ts",
+          "lookupUserOrganization",
+        ),
+      ).toHaveLength(1);
+      const CLEAN = `
+        // lookupUserOrganization was deleted (comment only — must not count)
+        const label = "lookupUserOrganization"; // string literal — must not count
+        export async function other(u: string) { return lookupOwnerOrganization(u); }
+      `;
+      expect(
+        identifierOccurrences(CLEAN, "fixture.ts", "lookupUserOrganization"),
+      ).toHaveLength(0);
     });
 
     test("T6 matcher reports found=false when the function is absent (so the pin fails loudly instead of passing vacuously)", () => {

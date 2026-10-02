@@ -108,6 +108,11 @@ export interface GovernanceStackProps extends cdk.StackProps {
   // SEPARATE admin resolver Lambda only.
   promotionPolicyConfigTable: dynamodb.ITable;
   promotionPolicyConfigWriterRole: iam.IRole;
+  // CIT-216: the release resolver resolves an org-less project's
+  // organization from the project OWNER's membership row (GetItem by the
+  // owner's `sub`) in BackendStack's UserOrgMembershipTable, replacing the
+  // retired cognito-idp:AdminGetUser `custom:organization` lookup.
+  userOrgMembershipTable: dynamodb.ITable;
   /** Shared SLO alarm topic (from BackendStack). REQUIRED (finding
    * e396a7ee): the auto-rollback evaluator's finding-write-failure alarm
    * (decision D6) AND the governance-notifier's durable CRITICAL-event
@@ -1314,6 +1319,9 @@ exports.handler = async (event) => {
           EVAL_RUNS_TABLE: props.evalRunsTable.tableName,
           EVAL_SUITES_TABLE: props.evalSuitesTable.tableName,
           PROJECTS_TABLE: props.projectsTable.tableName,
+          // CIT-216: owner-org fallback for org-less project rows reads the
+          // owner's membership row (GetItem by `sub`); AdminGetUser retired.
+          USER_ORG_MEMBERSHIP_TABLE: props.userOrgMembershipTable.tableName,
           REGISTRY_ID: registryId,
           REGISTRY_GENERATION,
         },
@@ -1359,6 +1367,8 @@ exports.handler = async (event) => {
       }),
     );
     props.projectsTable.grantReadData(agentReleaseResolverFunction);
+    // CIT-216: owner-org membership lookup (GetItem by owner `sub`).
+    props.userOrgMembershipTable.grantReadData(agentReleaseResolverFunction);
 
     const agentReleaseDataSourceRole = new iam.Role(
       this,

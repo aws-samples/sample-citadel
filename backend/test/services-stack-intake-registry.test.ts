@@ -1,4 +1,5 @@
 import * as cdk from "aws-cdk-lib";
+import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import {
@@ -40,6 +41,11 @@ describe("AgentIntakeSingle runtime — AgentCore Registry read access (SSM-reso
       environment: "test",
       agentEventBus: bus,
       documentBucket: bucket,
+      userOrgMembershipTable: dynamodb.Table.fromTableName(
+        prereq,
+        "UserOrgMembership",
+        "citadel-user-org-membership-test",
+      ),
       env: { account: "123456789012", region: "us-west-2" },
     });
     template = cdk.assertions.Template.fromStack(stack);

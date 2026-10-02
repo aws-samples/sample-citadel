@@ -276,6 +276,11 @@ describe("citadel-tools table name parity (finding 9b702e07 regression guard)", 
         env: { account: ACCOUNT, region: REGION },
         agentEventBus: servicesEventBus,
         documentBucket,
+        userOrgMembershipTable: dynamodb.Table.fromTableName(
+          servicesBackendStack,
+          "UserOrgMembership",
+          "citadel-user-org-membership-test",
+        ),
       },
     );
     servicesTemplate = Template.fromStack(servicesStack);

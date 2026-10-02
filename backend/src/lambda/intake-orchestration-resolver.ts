@@ -26,8 +26,10 @@
  *    cross-org app/blueprint access is rejected before delegation. When the
  *    linked project row is org-less (project-resolver writes `organization:
  *    userOrganization || undefined`), the org falls back to the project
- *    owner's Cognito `custom:organization`, then to the same literal an
- *    org-less caller produces on the Cognito-auth path (see resolveOrgId).
+ *    owner's UserOrgMembership row (the authoritative user↔org link,
+ *    decision 00d40a31 — never the Cognito attribute), then to the same
+ *    literal an org-less caller produces on the Cognito-auth path (see
+ *    resolveOrgId).
  *  - Logging is restricted to identifiers (field, correlationId, ids) — no
  *    argument payloads are ever logged, so credentials cannot leak by
  *    construction.
@@ -40,7 +42,7 @@ import {
   ScanCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { getUserId } from "../utils/appsync";
-import { lookupUserOrganization } from "../utils/auth-event";
+import { lookupOwnerOrganization } from "../utils/org-membership";
 import { ValidationError, sanitizeString } from "../utils/validation";
 import {
   activateProjectAgents,
@@ -249,11 +251,14 @@ async function deriveSessionContext(
 /**
  * Org derivation fallback chain (self-healing — no data patch needed):
  *  1. `project.organization` when the project row carries it.
- *  2. The project owner's Cognito `custom:organization` via AdminGetUser —
- *     project-resolver writes `organization: userOrganization || undefined`,
- *     so users whose token lacked the claim at project creation produced
- *     org-less rows; the owner attribute is the durable pointer back to the
- *     org they belong to today.
+ *  2. The project owner's UserOrgMembership row (utils/org-membership.ts,
+ *     GetItem by `sub` — `Project.owner` IS the creator's Cognito sub, see
+ *     that module's owner-field finding) — project-resolver writes
+ *     `organization: userOrganization || undefined`, so users whose token
+ *     lacked the claim at project creation produced org-less rows; the
+ *     owner is the durable pointer back to the org they belong to today.
+ *     Decision 00d40a31: the membership table is authoritative; the Cognito
+ *     `custom:organization` attribute is never consulted.
  *  3. `'default'` — exactly what an org-less caller produces on the
  *     Cognito-auth createApp/createWorkflow paths (see ORGLESS_CALLER_ORG).
  */
@@ -262,10 +267,10 @@ async function resolveOrgId(ctx: SessionContext): Promise<string> {
     return ctx.orgId;
   }
   if (ctx.owner) {
-    const ownerOrg = await lookupUserOrganization(ctx.owner);
+    const ownerOrg = await lookupOwnerOrganization(ctx.owner);
     if (ownerOrg) {
       log("resolveOrgId", ctx.sessionId, {
-        orgSource: "ownerCognitoAttribute",
+        orgSource: "ownerMembership",
       });
       return ownerOrg;
     }

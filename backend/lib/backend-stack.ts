@@ -190,6 +190,11 @@ export class BackendStack extends cdk.Stack {
   // unmoved agentMessageHandlerFunction, so it stays in BackendStack and is
   // passed to ProjectsStack as a prop rather than moving.
   public readonly agentStatusTable: dynamodb.Table;
+  // Exposed for ServicesStack (intake-orchestration resolver) and
+  // GovernanceStack (release resolver), CIT-216: owner-org lookups for
+  // org-less project rows now read this membership table by the owner's
+  // `sub` instead of calling cognito-idp:AdminGetUser. Was a local `const`.
+  public readonly userOrgMembershipTable: dynamodb.Table;
   // Exposed for TelemetryStack (dashboards + alarms story, decision
   // ab73ae1b): the platform-health alarms reuse this existing topic rather
   // than provisioning a second one — on-call is already subscribed here
@@ -324,17 +329,14 @@ export class BackendStack extends cdk.Stack {
     // attribute; `deleteOrganization` sweeps rows for the deleted org via
     // the `orgName-index` GSI. Encryption/removal/PITR settings deliberately
     // match the sibling OrganisationTable above.
-    const userOrgMembershipTable = new dynamodb.Table(
-      this,
-      "UserOrgMembershipTable",
-      {
+    const userOrgMembershipTable = (this.userOrgMembershipTable =
+      new dynamodb.Table(this, "UserOrgMembershipTable", {
         tableName: `citadel-user-org-membership-${props.environment}`,
         partitionKey: { name: "sub", type: dynamodb.AttributeType.STRING },
         billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
         removalPolicy: cdk.RemovalPolicy.DESTROY,
         pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-      },
-    );
+      }));
     userOrgMembershipTable.addGlobalSecondaryIndex({
       indexName: "orgName-index",
       partitionKey: { name: "orgName", type: dynamodb.AttributeType.STRING },

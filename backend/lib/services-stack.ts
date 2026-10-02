@@ -99,6 +99,13 @@ export interface ServicesStackProps extends cdk.StackProps {
   // USER_POOL_ID is absent).
   userPoolId?: string;
   userPoolArn?: string;
+  // CIT-216: the intake-orchestration resolver resolves an org-less
+  // project's organization from the project OWNER's membership row
+  // (GetItem by the owner's `sub`) in BackendStack's UserOrgMembershipTable,
+  // replacing the retired cognito-idp:AdminGetUser `custom:organization`
+  // lookup. ServicesStack already consumes BackendStack constructs
+  // (agentEventBus, documentBucket), so this adds no new cycle.
+  userOrgMembershipTable: dynamodb.ITable;
 }
 
 export class ServicesStack extends cdk.Stack {
@@ -1401,10 +1408,11 @@ def handler(event, context):
             REGISTRY_GENERATION,
             REGISTRY_ENABLED: "true",
             AUTHORITY_UNITS_TABLE: `citadel-authority-units-${props.environment}`,
-            // Owner-org Cognito fallback for org-less project rows
-            // (resolveOrgId → lookupUserOrganization). Optional: without
-            // it the resolver skips straight to the org-less caller
-            // default.
+            // Owner-org fallback for org-less project rows (CIT-216,
+            // orgSource 'ownerMembership'): GetItem on the membership table
+            // by the owner's `sub`. USER_POOL_ID is retained for the
+            // username→sub AdminGetUser mapping only.
+            USER_ORG_MEMBERSHIP_TABLE: props.userOrgMembershipTable.tableName,
             ...(props.userPoolId && { USER_POOL_ID: props.userPoolId }),
             // Governance activation gate (defaults to 'shadow')
             ENVIRONMENT: props.environment,
@@ -1485,7 +1493,11 @@ def handler(event, context):
           ],
         }),
       );
-      // Owner-org fallback for org-less project rows: AdminGetUser scoped
+      // CIT-216: owner-org fallback for org-less project rows reads the
+      // project owner's membership row (GetItem by `sub`). Construct grant
+      // (not a deterministic-name ARN) — the table is passed as a prop.
+      props.userOrgMembershipTable.grantReadData(intakeOrchestrationResolverFn);
+      // AdminGetUser is retained ONLY for the username→sub mapping, scoped
       // to exactly the BackendStack user pool (mirrors the ArbiterStack
       // governance-ui-resolver grant). Conditional with the env var above.
       if (props.userPoolArn) {
