@@ -152,6 +152,9 @@ const TARGETS: Target[] = [
       // Governed-tool legibility seam (write-once ledger) — GOVERNANCE_LEDGER_TABLE
       // lives here, NOT in workerWrapper/. This is the Bug C seam.
       "governance/ledger.py",
+      // Governance enforcement-mode resolution: hierarchy.py reads ENVIRONMENT
+      // to build the SSM path for enforce/effective_at parameters.
+      "governance/hierarchy.py",
       // Tool-idempotency ledger the worker reserves/finalizes against.
       "governance/tool_execution_ledger.py",
       // Per-target circuit breaker store the worker consults at the tool seam
@@ -182,13 +185,18 @@ const TARGETS: Target[] = [
       "TOOL_BREAKER_TTL_SECONDS",
       "TOOL_BREAKER_OPEN_ON_THROTTLE",
       // governance ledger correlation id — best-effort, absent-tolerant:
-      "ENVIRONMENT",
     ]),
   },
   {
     name: "StepRunnerFunction",
     logicalIdPrefix: "StepRunnerFunction",
-    sources: ["stepRunner"],
+    sources: [
+      "stepRunner",
+      // Governance enforcement-mode resolution: hierarchy.py reads ENVIRONMENT
+      // to build the SSM path for enforce/effective_at parameters. Loaded
+      // dynamically by executor.py's _load_release_governance_modules().
+      "governance/hierarchy.py",
+    ],
     optional: new Set<string>([
       "REGISTRY_ENABLED", // registry feature gate; default off
       "REGISTRY_ID", // only read when REGISTRY_ENABLED
@@ -314,4 +322,88 @@ describe("ArbiterStack — handler env-var parity (deployment contract)", () => 
     expect(vars).toHaveProperty("AGENT_LOG_LEVEL");
     expect(vars.AGENT_LOG_LEVEL).toBe("INFO");
   });
+
+  // -----------------------------------------------------------------
+  // Governance enforcement-mode regression guards: ENVIRONMENT must be
+  // set on every function whose runtime loads hierarchy.py (which reads
+  // os.environ['ENVIRONMENT'] to build the SSM path). Without it the
+  // enforcement mode silently defaults to 'shadow'.
+  // -----------------------------------------------------------------
+  test.each(["StepRunnerFunction", "WorkerAgentWrapper", "SupervisorAgent"])(
+    "%s has ENVIRONMENT set to the stack environment",
+    (prefix) => {
+      const provided = functionEnvKeys(template, prefix);
+      expect(provided.has("ENVIRONMENT")).toBe(true);
+    },
+  );
+
+  test.each(["StepRunnerFunction", "WorkerAgentWrapper", "SupervisorAgent"])(
+    "%s has ssm:GetParameter on the governance enforce/effective_at parameters",
+    (prefix) => {
+      const fns = template.findResources("AWS::Lambda::Function");
+      const match = Object.entries(fns).find(([id]) => id.startsWith(prefix));
+      expect(match).toBeDefined();
+
+      // CDK wires the Role as either { "Fn::GetAtt": ["RoleXXX", "Arn"] }
+      // or { "Ref": "RoleXXX" }. Extract the role logical id from either.
+      const roleProp = (
+        match![1] as {
+          Properties?: {
+            Role?: { Ref?: string } | { "Fn::GetAtt"?: [string, string] };
+          };
+        }
+      ).Properties?.Role;
+
+      let roleLogicalId: string | undefined;
+      if (roleProp && "Ref" in roleProp) {
+        roleLogicalId = roleProp.Ref;
+      } else if (roleProp && "Fn::GetAtt" in roleProp) {
+        roleLogicalId = roleProp["Fn::GetAtt"]?.[0];
+      }
+      expect(roleLogicalId).toBeDefined();
+
+      const policies = template.findResources("AWS::IAM::Policy");
+      const hasGovernanceSsmGrant = Object.values(policies).some((pol) => {
+        const props = (
+          pol as {
+            Properties?: {
+              Roles?: Array<{ Ref?: string }>;
+              PolicyDocument?: {
+                Statement?: Array<{
+                  Action?: string | string[];
+                  Resource?: string | string[];
+                }>;
+              };
+            };
+          }
+        ).Properties;
+        const attachedToRole = props?.Roles?.some(
+          (r) => r.Ref === roleLogicalId,
+        );
+        if (!attachedToRole) return false;
+        return (props?.PolicyDocument?.Statement ?? []).some((stmt) => {
+          const actions = Array.isArray(stmt.Action)
+            ? stmt.Action
+            : [stmt.Action];
+          const resources = Array.isArray(stmt.Resource)
+            ? stmt.Resource
+            : [stmt.Resource];
+          return (
+            actions.includes("ssm:GetParameter") &&
+            resources.some(
+              (r) =>
+                typeof r === "string" &&
+                r.includes("/citadel/governance/enforce/"),
+            ) &&
+            resources.some(
+              (r) =>
+                typeof r === "string" &&
+                r.includes("/citadel/governance/effective_at/"),
+            )
+          );
+        });
+      });
+      expect(hasGovernanceSsmGrant).toBe(true);
+    },
+  );
 });
