@@ -156,6 +156,12 @@ function createTemplate(): Template {
     environmentReleasePointersTable,
     environmentReleasePointerWriterRole,
     promotionPolicyConfigTable,
+    // CIT-216: release-resolver owner-org membership lookup.
+    userOrgMembershipTable: mockTable(
+      backendStack,
+      "UserOrgMembership",
+      "citadel-user-org-membership-test",
+    ),
     promotionPolicyConfigWriterRole,
     alarmTopic,
   });

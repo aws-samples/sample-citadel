@@ -84,9 +84,10 @@ The model is now:
   the attribute is not touched and the user is not signed out, so the two
   can never disagree in the dangerous direction (attribute says X, claim says
   nothing). `listUsers` and the admin UI read the attribute; no authorization
-  path does. `lookupUserOrganization` (`auth-event.ts`) still exists for two
-  informational owner-derivation callers and is documented as not an
-  authorization path.
+  path does. The two owner-org derivation callers (intake-orchestration and
+  release resolvers) also read the membership table (`GetItem` by the owner's
+  `sub` via `utils/org-membership.ts`); `lookupUserOrganization` is retired
+  (CIT-216), so no derivation path reads the attribute via `AdminGetUser`.
 - **The trigger fails closed.** `pre-token-generation.ts` does a
   `GetItem` by `sub` (`ConsistentRead`, so a row written by `assignUserRole`
   milliseconds before a re-login is seen). Row present → claim minted from

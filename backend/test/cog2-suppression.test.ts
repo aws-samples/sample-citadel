@@ -21,6 +21,7 @@
 
 import * as cdk from "aws-cdk-lib";
 import { Annotations, Match, Template } from "aws-cdk-lib/assertions";
+import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import { AwsSolutionsChecks } from "cdk-nag";
@@ -126,6 +127,11 @@ describe("cdk-nag — AwsSolutions-COG2 documented suppressions", () => {
         environment: "test",
         agentEventBus,
         documentBucket,
+        userOrgMembershipTable: dynamodb.Table.fromTableName(
+          prereq,
+          "UserOrgMembership",
+          "citadel-user-org-membership-test",
+        ),
         env: { account: "123456789012", region: "us-east-1" },
       });
       cdk.Aspects.of(app).add(new AwsSolutionsChecks({ verbose: false }));

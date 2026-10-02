@@ -1,4 +1,5 @@
 import * as cdk from "aws-cdk-lib";
+import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import {
@@ -46,11 +47,18 @@ function buildStack(
   });
   const bus = new events.EventBus(prereq, "Bus", { eventBusName: "orch-bus" });
   const bucket = new s3.Bucket(prereq, "DocBucket");
+  // CIT-216: owner-org membership table (BackendStack-owned in prod).
+  const membershipTable = new dynamodb.Table(prereq, "UserOrgMembership", {
+    tableName: "citadel-user-org-membership-test",
+    partitionKey: { name: "sub", type: dynamodb.AttributeType.STRING },
+    billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+  });
 
   const stack = new ServicesStack(app, `citadel-services-orchtest${variant}`, {
     environment: "test",
     agentEventBus: bus,
     documentBucket: bucket,
+    userOrgMembershipTable: membershipTable,
     ...(withAppSync && {
       appSyncApiArn: APPSYNC_API_ARN,
       appSyncApiId: APPSYNC_API_ID,

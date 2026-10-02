@@ -1,14 +1,10 @@
-import {
-  CognitoIdentityProviderClient,
-  AdminGetUserCommand,
-} from "@aws-sdk/client-cognito-identity-provider";
-
 /**
  * CANONICAL TENANCY RULE (ratified decision 228b3cc8): the organisation
  * NAME — never the generated `orgId` — is canonical for the
  * `custom:organization` Cognito claim, for the UserOrgMembership table's
  * `orgName` attribute, and for EVERY tenancy comparison in this codebase
- * (this file's `extractOrgFromEvent`/`lookupUserOrganization`,
+ * (this file's `extractOrgFromEvent`, `utils/org-membership.ts`'s
+ * `lookupOwnerOrganization`,
  * `assignUserRole`'s membership-table + Cognito attribute writes,
  * `user-management-resolver.ts`'s org-scoping filters, the governance
  * ledger, and the projects family). `assignUserRole` writes the
@@ -23,8 +19,12 @@ import {
  * `listOrganizations` always got an empty list). If you are about to write
  * `something.orgId === <claim variable>`, you are almost certainly holding
  * a NAME on one side and a UUID on the other.
+ *
+ * This module intentionally has NO Cognito client: decision 00d40a31
+ * removed the AdminGetUser `custom:organization` attribute-lookup helper
+ * entirely. Project-owner org resolution now lives in
+ * utils/org-membership.ts and reads the UserOrgMembership table.
  */
-const cognitoClient = new CognitoIdentityProviderClient({});
 
 /**
  * Thrown by {@link assertRowOrg} when a loaded row's org does not match the
@@ -54,50 +54,6 @@ function readClaim(event: unknown, name: string): string | undefined {
 }
 
 /**
- * Looks up a user's stored `custom:organization` user-pool ATTRIBUTE via
- * Cognito AdminGetUser. `username` accepts the Cognito sub or username
- * (both are valid AdminGetUser lookups). Returns null when USER_POOL_ID is
- * not configured, the user cannot be found, or the attribute is absent —
- * callers decide what null means.
- *
- * THIS IS NOT AN AUTHORIZATION PATH (decision 00d40a31, option A). The
- * stored attribute is a display/back-compat mirror; the authoritative
- * user↔org link is the UserOrgMembership DynamoDB table, which the
- * pre-token-generation trigger reads to mint the `custom:organization`
- * claim. {@link extractOrgFromEvent} deliberately does NOT call this
- * function any more — a caller with no claim resolves to null (fail
- * closed), never to the attribute.
- *
- * Remaining callers are informational/ownership fallbacks only: the
- * intake-orchestration resolver (project-owner org for org-less project
- * rows created before the trigger existed) and release-resolver's
- * project-owner derivation. Do NOT add this as a fallback to any
- * caller-identity or row-access check.
- */
-export async function lookupUserOrganization(
-  username: string,
-): Promise<string | null> {
-  const userPoolId = process.env.USER_POOL_ID;
-  if (!userPoolId) return null;
-
-  try {
-    const response = await cognitoClient.send(
-      new AdminGetUserCommand({ UserPoolId: userPoolId, Username: username }),
-    );
-    const attr = response.UserAttributes?.find(
-      (a) => a.Name === "custom:organization",
-    );
-    return attr?.Value || null;
-  } catch (err) {
-    console.warn("lookupUserOrganization: Cognito lookup failed", {
-      userId: username,
-      err: String(err),
-    });
-    return null;
-  }
-}
-
-/**
  * Extracts the caller's organization from the `custom:organization` JWT
  * CLAIM — and ONLY the claim.
  *
@@ -108,7 +64,8 @@ export async function lookupUserOrganization(
  *
  * Decision 00d40a31 (option A) REMOVED the former Cognito AdminGetUser
  * fallback that read the stored `custom:organization` user attribute when
- * the claim was absent. That attribute is display/back-compat only; a
+ * the claim was absent (the helper itself has since been deleted from this
+ * module). That attribute is display/back-compat only; a
  * caller whose token carries no claim (no membership row, stale token,
  * access token instead of ID token, anonymous/api-key auth) now resolves
  * to null. Callers are responsible for deciding whether null means "deny"

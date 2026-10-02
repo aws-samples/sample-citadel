@@ -95,7 +95,17 @@ const invoke = handler as (event: HandlerEvent) => Promise<unknown>;
 const SESSION_ID = 'sess-1111';
 const PROJECT_ID = 'proj-2222';
 const ORG_ID = 'org-1';
-const OWNER_SUB = 'owner-sub-3333';
+// UUID-shaped: `Project.owner` is the creator's Cognito sub (getUserId →
+// identity.sub), which is the UserOrgMembership partition key.
+const OWNER_SUB = '3f2a1b7c-9d4e-4f61-8a2b-0c5d6e7f8a9b';
+const MEMBERSHIP_TABLE = 'citadel-user-org-membership-test';
+
+/** Wire the owner's UserOrgMembership row (the authoritative user↔org link). */
+function mockOwnerMembership(row: Record<string, unknown> | null): void {
+  ddbMock
+    .on(GetCommand, { TableName: MEMBERSHIP_TABLE, Key: { sub: OWNER_SUB } })
+    .resolves({ Item: row ?? undefined });
+}
 
 /** Wire the conversations scan → projectId and projects get → org/name. */
 function mockSessionLinkage(opts?: {
@@ -121,9 +131,11 @@ describe('intake-orchestration-resolver', () => {
     process.env.APPS_TABLE = 'citadel-apps-test';
     process.env.WORKFLOWS_TABLE = 'citadel-workflows-test';
     process.env.USER_POOL_ID = 'us-west-2_testpool';
+    process.env.USER_ORG_MEMBERSHIP_TABLE = MEMBERSHIP_TABLE;
   });
 
   afterAll(() => {
+    delete process.env.USER_ORG_MEMBERSHIP_TABLE;
     delete process.env.PROJECTS_TABLE;
     delete process.env.CONVERSATIONS_TABLE;
     delete process.env.APPS_TABLE;
@@ -323,33 +335,39 @@ describe('intake-orchestration-resolver', () => {
       expect(result).toEqual({ appId: 'rec123456789', name: 'My App' });
     });
 
-    test("falls back to the project owner's Cognito custom:organization when the project row is org-less", async () => {
+    test("falls back to the project owner's UserOrgMembership row when the project row is org-less (decision 00d40a31)", async () => {
       // Dev-observed root cause: project-resolver writes
       // `organization: userOrganization || undefined`, so users without the
       // custom:organization claim create org-less projects. Self-healing:
-      // resolve the org the owner WOULD have carried, via AdminGetUser
-      // (mirrors utils/auth-event.ts extractOrgFromEvent's fallback).
+      // resolve the org the owner belongs to from the AUTHORITATIVE
+      // membership table (GetItem by sub, ConsistentRead) — never from the
+      // Cognito attribute, even when it is populated with something else.
       mockSessionLinkage({ project: { id: PROJECT_ID, name: 'Alpha', owner: OWNER_SUB } });
+      mockOwnerMembership({ sub: OWNER_SUB, orgName: 'org-owner' });
       cognitoMock.on(AdminGetUserCommand).resolves({
-        UserAttributes: [{ Name: 'custom:organization', Value: 'org-owner' }],
+        UserAttributes: [{ Name: 'custom:organization', Value: 'org-evil-mirror' }],
       });
       createAppMock.mockResolvedValueOnce({ appId: 'rec123456789' });
 
       await invoke(makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }));
 
-      const cognitoCalls = cognitoMock.commandCalls(AdminGetUserCommand);
-      expect(cognitoCalls).toHaveLength(1);
-      expect(cognitoCalls[0].args[0].input).toEqual({
-        UserPoolId: 'us-west-2_testpool',
-        Username: OWNER_SUB,
+      const membershipReads = ddbMock
+        .commandCalls(GetCommand)
+        .filter((c) => c.args[0].input.TableName === MEMBERSHIP_TABLE);
+      expect(membershipReads).toHaveLength(1);
+      expect(membershipReads[0].args[0].input).toEqual({
+        TableName: MEMBERSHIP_TABLE,
+        Key: { sub: OWNER_SUB },
+        ConsistentRead: true,
       });
+      expect(cognitoMock.commandCalls(AdminGetUserCommand)).toHaveLength(0);
       expect(createAppMock).toHaveBeenCalledWith(
         expect.objectContaining({ orgId: 'org-owner' }),
         expect.any(String),
       );
     });
 
-    test("falls back to 'default' when the owner carries no custom:organization claim", async () => {
+    test("falls back to 'default' when the owner has no membership row (the Cognito attribute is NOT consulted)", async () => {
       // Terminal behavior mirrors the Cognito-auth path for an org-less
       // caller: createApp (registry-agent-record-resolver.ts) never derives
       // or validates org, and the frontend sends the literal fallback
@@ -357,21 +375,10 @@ describe('intake-orchestration-resolver', () => {
       // throw here would make intake STRICTER than the UI path it delegates
       // to, which is exactly the dev failure being fixed.
       mockSessionLinkage({ project: { id: PROJECT_ID, name: 'Alpha', owner: OWNER_SUB } });
+      mockOwnerMembership(null);
       cognitoMock.on(AdminGetUserCommand).resolves({
-        UserAttributes: [{ Name: 'email', Value: 'dev@example.com' }],
+        UserAttributes: [{ Name: 'custom:organization', Value: 'org-evil-mirror' }],
       });
-      createAppMock.mockResolvedValueOnce({ appId: 'rec123456789' });
-
-      await invoke(makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }));
-
-      expect(createAppMock).toHaveBeenCalledWith(
-        expect.objectContaining({ orgId: 'default' }),
-        expect.any(String),
-      );
-    });
-
-    test("falls back to 'default' without a Cognito call when the project row has no owner", async () => {
-      mockSessionLinkage({ project: { id: PROJECT_ID, name: 'Alpha' } });
       createAppMock.mockResolvedValueOnce({ appId: 'rec123456789' });
 
       await invoke(makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }));
@@ -383,12 +390,31 @@ describe('intake-orchestration-resolver', () => {
       );
     });
 
-    test('makes no Cognito call when the project row already carries an organization', async () => {
+    test("falls back to 'default' without any owner lookup when the project row has no owner", async () => {
+      mockSessionLinkage({ project: { id: PROJECT_ID, name: 'Alpha' } });
+      createAppMock.mockResolvedValueOnce({ appId: 'rec123456789' });
+
+      await invoke(makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }));
+
+      expect(
+        ddbMock.commandCalls(GetCommand).filter((c) => c.args[0].input.TableName === MEMBERSHIP_TABLE),
+      ).toHaveLength(0);
+      expect(cognitoMock.commandCalls(AdminGetUserCommand)).toHaveLength(0);
+      expect(createAppMock).toHaveBeenCalledWith(
+        expect.objectContaining({ orgId: 'default' }),
+        expect.any(String),
+      );
+    });
+
+    test('makes no owner lookup when the project row already carries an organization', async () => {
       mockSessionLinkage();
       createAppMock.mockResolvedValueOnce({ appId: 'rec123456789' });
 
       await invoke(makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }));
 
+      expect(
+        ddbMock.commandCalls(GetCommand).filter((c) => c.args[0].input.TableName === MEMBERSHIP_TABLE),
+      ).toHaveLength(0);
       expect(cognitoMock.commandCalls(AdminGetUserCommand)).toHaveLength(0);
       expect(createAppMock).toHaveBeenCalledWith(
         expect.objectContaining({ orgId: ORG_ID }),
@@ -396,9 +422,11 @@ describe('intake-orchestration-resolver', () => {
       );
     });
 
-    test("falls back to 'default' when Cognito AdminGetUser itself fails", async () => {
+    test("falls back to 'default' when the membership-table read itself fails", async () => {
       mockSessionLinkage({ project: { id: PROJECT_ID, name: 'Alpha', owner: OWNER_SUB } });
-      cognitoMock.on(AdminGetUserCommand).rejects(new Error('UserNotFoundException'));
+      ddbMock
+        .on(GetCommand, { TableName: MEMBERSHIP_TABLE, Key: { sub: OWNER_SUB } })
+        .rejects(new Error('ProvisionedThroughputExceededException'));
       createAppMock.mockResolvedValueOnce({ appId: 'rec123456789' });
 
       await invoke(makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }));

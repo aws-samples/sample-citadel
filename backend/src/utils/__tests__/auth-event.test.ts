@@ -6,9 +6,11 @@
  * trigger from the membership table, and there is NO Cognito
  * AdminGetUser fallback to the client-writable attribute) and the
  * group-only role derivation (`readGroups`, `isAdminFromEvent`,
- * `hasRoleFromEvent`, `deriveRoles`). `lookupUserOrganization` remains
- * exported for the intake-orchestration project-owner fallback but is NOT
- * an authorization path and is never called from `extractOrgFromEvent`.
+ * `hasRoleFromEvent`, `deriveRoles`). The former AdminGetUser
+ * attribute-lookup helper has been DELETED from this module (board task
+ * 5190de51): project-owner org resolution now reads the UserOrgMembership
+ * table via utils/org-membership.ts. The Cognito mock is retained so the
+ * escalation tests can keep asserting ZERO AdminGetUser calls.
  *
  * finding 7aa877f8 made ADMIN group-only; CIT-213 extended that to every
  * role: the `custom:role` claim is never read as an authorization signal.
@@ -28,7 +30,6 @@ import {
   deriveRoles,
   resolveScopedOrgFromEvent,
   canCallerSeeRow,
-  lookupUserOrganization,
 } from "../auth-event";
 
 const cognitoMock = mockClient(CognitoIdentityProviderClient);
@@ -123,33 +124,6 @@ describe("auth-event", () => {
       const result = await extractOrgFromEvent(event);
       expect(result).toBeNull();
       expect(cognitoMock.commandCalls(AdminGetUserCommand).length).toBe(0);
-    });
-  });
-
-  describe("lookupUserOrganization (NOT an authz path — intake project-owner fallback only)", () => {
-    test("still resolves the stored attribute for its remaining non-authz caller", async () => {
-      cognitoMock.on(AdminGetUserCommand).resolves({
-        Username: "owner-1",
-        UserAttributes: [{ Name: "custom:organization", Value: "owner-org" }],
-      });
-      await expect(lookupUserOrganization("owner-1")).resolves.toBe(
-        "owner-org",
-      );
-    });
-
-    test("returns null on Cognito error and when USER_POOL_ID is unset", async () => {
-      cognitoMock.on(AdminGetUserCommand).rejects(new Error("boom"));
-      await expect(lookupUserOrganization("owner-1")).resolves.toBeNull();
-
-      const saved = process.env.USER_POOL_ID;
-      delete process.env.USER_POOL_ID;
-      try {
-        cognitoMock.reset();
-        await expect(lookupUserOrganization("owner-1")).resolves.toBeNull();
-        expect(cognitoMock.commandCalls(AdminGetUserCommand).length).toBe(0);
-      } finally {
-        process.env.USER_POOL_ID = saved;
-      }
     });
   });
 

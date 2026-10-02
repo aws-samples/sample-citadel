@@ -172,6 +172,12 @@ function synthGovernanceStack(): Template {
     environmentReleasePointersTable,
     environmentReleasePointerWriterRole,
     promotionPolicyConfigTable,
+    // CIT-216: release-resolver owner-org membership lookup.
+    userOrgMembershipTable: mockTable(
+      backendStack,
+      "UserOrgMembershipParity",
+      "citadel-user-org-membership-test-parity",
+    ),
     promotionPolicyConfigWriterRole,
     alarmTopic,
     governanceUiBaseUrl: "https://ui.example.com",

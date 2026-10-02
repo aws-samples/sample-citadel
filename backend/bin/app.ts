@@ -159,6 +159,9 @@ const servicesStack = new ServicesStack(
     // custom:organization attribute (AdminGetUser, scoped to this pool).
     userPoolId: backendStack.userPool.userPoolId,
     userPoolArn: backendStack.userPool.userPoolArn,
+    // CIT-216: owner-org lookup now reads the membership table by the
+    // owner's `sub` (AdminGetUser retained for username→sub mapping only).
+    userOrgMembershipTable: backendStack.userOrgMembershipTable,
   },
 );
 
@@ -214,6 +217,9 @@ const governanceStack = new GovernanceStack(
     promotionPolicyConfigTable: backendStack.promotionPolicyConfigTable,
     promotionPolicyConfigWriterRole:
       backendStack.promotionPolicyConfigWriterRole,
+    // CIT-216: the release resolver's owner-org lookup reads the membership
+    // table by the owner's `sub` (AdminGetUser retired).
+    userOrgMembershipTable: backendStack.userOrgMembershipTable,
     // D6 — the auto-rollback evaluator's finding-write-failure alarm posts
     // to the shared SLO alarm topic so a committed-but-unrecorded rollback
     // pages. Now also REQUIRED (finding e396a7ee) — the governance-notifier's

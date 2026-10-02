@@ -44,7 +44,9 @@
  * in this codebase (see ../types.ts — it only has projectId, and Project
  * itself has no orgId field either). That does NOT make the exec spec's
  * org boundary inexpressible: an indirect path exists via
- * Project.owner -> lookupUserOrganization (../utils/auth-event.ts), the
+ * Project.owner -> lookupOwnerOrganization (../utils/org-membership.ts,
+ * a GetItem on the authoritative UserOrgMembership table, decision
+ * 00d40a31 — never the Cognito attribute), the
  * exact derivation already used in production by
  * intake-orchestration-resolver.ts's resolveOrgId() (project-owner
  * fallback for org-less project rows). This module uses that same
@@ -88,11 +90,8 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import { createHash } from "crypto";
 import { hasPermission } from "../utils/auth";
-import {
-  extractOrgFromEvent,
-  lookupUserOrganization,
-  deriveRoles,
-} from "../utils/auth-event";
+import { extractOrgFromEvent, deriveRoles } from "../utils/auth-event";
+import { lookupOwnerOrganization } from "../utils/org-membership";
 import { putRelease } from "./release-store";
 import { RegistryService } from "../services/registry-service";
 import type {
@@ -234,7 +233,7 @@ async function getProjectForOrgCheck(
 /**
  * Resolves the org an ExecutionSpecification was created under via the
  * precedented indirect path: projectId -> Project.owner ->
- * lookupUserOrganization(owner) — the exact derivation used in production
+ * lookupOwnerOrganization(owner) — the exact derivation used in production
  * by intake-orchestration-resolver.ts's resolveOrgId() (project-owner
  * fallback for org-less project rows). ExecutionSpecification has no
  * orgId field of its own, and Project itself has no orgId field either
@@ -242,8 +241,8 @@ async function getProjectForOrgCheck(
  *
  * Returns null (never throws) when the org cannot be determined — e.g.
  * the project row doesn't exist, the project has no owner, or
- * lookupUserOrganization can't resolve the owner's org (no USER_POOL_ID,
- * Cognito lookup failure, or a missing custom:organization attribute).
+ * lookupOwnerOrganization can't resolve the owner's org (membership table
+ * unconfigured, DynamoDB failure, or no membership row for the owner).
  * Callers of this function are responsible for treating null as a
  * rejection (fail closed), per this codebase's established gate doctrine
  * — never warn-and-proceed.
@@ -255,7 +254,7 @@ async function resolveExecSpecOrgId(
   if (!project?.owner) {
     return null;
   }
-  return lookupUserOrganization(project.owner);
+  return lookupOwnerOrganization(project.owner);
 }
 
 /**
@@ -346,7 +345,7 @@ export async function cutAgentRelease(
   }
   // Cross-org check via the precedented indirect path: exec spec has no
   // orgId field directly, but its projectId -> Project.owner ->
-  // lookupUserOrganization resolves the org the spec was created under
+  // lookupOwnerOrganization resolves the org the spec was created under
   // (same derivation as intake-orchestration-resolver.ts's resolveOrgId()
   // project-owner fallback). Fail CLOSED at every step — project not
   // found, or the owner's org not resolvable, is a rejection, never a
