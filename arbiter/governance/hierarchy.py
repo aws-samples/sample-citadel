@@ -58,6 +58,9 @@ _DEFAULT_ENFORCEMENT_MODE = "shadow"
 # Maps env name to (mode, loaded_at).
 _mode_cache: dict[str, tuple[str, float]] = {}
 
+# Once-per-cold-start guard so the "ENVIRONMENT not set" warning fires only once.
+_env_unset_warned: bool = False
+
 # effective_at cache — same TTL/cache shape as the enforcement-mode cache
 # above (independent SSM parameter, same env-scoped cache key). Mirrors the
 # second parameter ``backend/src/utils/governance-flag.ts`` reads
@@ -508,6 +511,25 @@ def _resolve_enforcement_mode(force_reload: bool = False) -> str:
     """
     env_name = os.environ.get("ENVIRONMENT")
     if not env_name:
+        global _env_unset_warned  # noqa: PLW0603
+        if not _env_unset_warned:
+            _env_unset_warned = True
+            logger.warning(
+                "governance enforcement mode defaulted to shadow: ENVIRONMENT not set",
+            )
+            try:
+                boto3.client("cloudwatch").put_metric_data(
+                    Namespace="Citadel/Workflows",
+                    MetricData=[
+                        {
+                            "MetricName": "GovernanceModeDefaulted",
+                            "Value": 1,
+                            "Unit": "Count",
+                        }
+                    ],
+                )
+            except Exception:
+                pass  # best-effort; do not let metric emission block fallback
         return _DEFAULT_ENFORCEMENT_MODE
 
     now = time.time()
@@ -566,7 +588,9 @@ def _resolve_enforcement_mode(force_reload: bool = False) -> str:
 
 def __reset_mode_cache_for_test() -> None:
     """Clear the process-local enforcement-mode cache. Test-only helper."""
+    global _env_unset_warned  # noqa: PLW0603
     _mode_cache.clear()
+    _env_unset_warned = False
 
 
 def _resolve_effective_at(force_reload: bool = False) -> str | None:
