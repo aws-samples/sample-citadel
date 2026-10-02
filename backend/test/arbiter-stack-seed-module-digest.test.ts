@@ -153,7 +153,7 @@ describe("ArbiterStack — seed-module content digest (finding 588c7fb8)", () =>
     test("Version lever retained alongside the digest (two-lever change detection)", () => {
       // Version is the manual force-reseed lever; ModuleDigest is the automatic
       // content lever. Both live in the custom resource properties.
-      expect(seedResourceProps(template).Version).toBe("v1.4.0");
+      expect(seedResourceProps(template).Version).toBe("v1.4.1");
     });
   });
 

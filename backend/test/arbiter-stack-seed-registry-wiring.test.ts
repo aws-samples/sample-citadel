@@ -16,8 +16,9 @@
  *      catalog.registry_client import used for the idempotency lookup).
  *   B. REGISTRY_ID (SSM Ref) / REGISTRY_ENABLED / REGISTRY_GENERATION env.
  *   C. Minimal bedrock-agentcore grants (CreateRegistryRecord +
- *      ListRegistryRecords ONLY) scoped to the SSM-resolved registry arn
- *      (+ /*). No mutation surface beyond create.
+ *      GetRegistryRecord + ListRegistryRecords +
+ *      SubmitRegistryRecordForApproval) scoped to the SSM-resolved registry
+ *      arn (+ /*). No mutation surface beyond create/get/submit.
  *   D. SeedAgentConfigResource Version bumped so the seed re-runs on the
  *      next deploy and creates the registry record in existing envs.
  */
@@ -183,7 +184,7 @@ describe("ArbiterStack — seed Lambda registry wiring (dual-store agent seam)",
     expect(env.REGISTRY_GENERATION).toBe(REGISTRY_GENERATION);
   });
 
-  test("C1. seed role grants CreateRegistryRecord + ListRegistryRecords scoped to the SSM-resolved registry arn", () => {
+  test("C1. seed role grants CreateRegistryRecord + GetRegistryRecord + ListRegistryRecords + SubmitRegistryRecordForApproval scoped to the SSM-resolved registry arn", () => {
     const statements = collectAgentcoreStatements(
       getPoliciesForLambda(resources, findSeedLambdaId(resources)),
     );
@@ -192,7 +193,9 @@ describe("ArbiterStack — seed Lambda registry wiring (dual-store agent seam)",
       Array.isArray(s.Action) ? s.Action : [s.Action],
     );
     expect(actions).toContain("agent-registry:CreateRegistryRecord");
+    expect(actions).toContain("agent-registry:GetRegistryRecord");
     expect(actions).toContain("agent-registry:ListRegistryRecords");
+    expect(actions).toContain("agent-registry:SubmitRegistryRecordForApproval");
     for (const stmt of statements) {
       const resourceList = Array.isArray(stmt.Resource)
         ? stmt.Resource
@@ -206,23 +209,22 @@ describe("ArbiterStack — seed Lambda registry wiring (dual-store agent seam)",
     }
   });
 
-  test("C2. seed role has NO registry mutation actions beyond create (least privilege)", () => {
+  test("C2. seed role has NO registry mutation actions beyond create/get/submit (least privilege)", () => {
     const actions = collectAgentcoreStatements(
       getPoliciesForLambda(resources, findSeedLambdaId(resources)),
     ).flatMap((s) => (Array.isArray(s.Action) ? s.Action : [s.Action]));
     for (const forbidden of [
       "agent-registry:UpdateRegistryRecord",
       "agent-registry:UpdateRegistryRecordStatus",
-      "agent-registry:SubmitRegistryRecordForApproval",
       "agent-registry:DeleteRegistryRecord",
     ]) {
       expect(actions).not.toContain(forbidden);
     }
   });
 
-  test("D. SeedAgentConfigResource Version bumped to v1.4.0", () => {
+  test("D. SeedAgentConfigResource Version bumped to v1.4.1", () => {
     expect(findSeedCustomResource(resources).Properties?.Version).toBe(
-      "v1.4.0",
+      "v1.4.1",
     );
   });
 
