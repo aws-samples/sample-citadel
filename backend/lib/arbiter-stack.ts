@@ -1525,7 +1525,8 @@ export class ArbiterStack extends cdk.Stack {
       {
         serviceToken: seedAgentConfigLambda.functionArn,
         properties: {
-          Version: "v1.4.0",
+          // bumped so the seed re-runs and submits pre-existing system agent records now that the role may approve them
+          Version: "v1.4.1",
           ModuleDigest: seedModuleDigest,
           RegistryGeneration: REGISTRY_GENERATION,
         },
