@@ -1426,20 +1426,23 @@ export class ArbiterStack extends cdk.Stack {
 
     props.agentConfigTable.grantWriteData(seedAgentConfigLambda);
 
-    // Minimal registry surface for the demo-agent record seed: the seed path
-    // calls ONLY ListRegistryRecords (idempotency lookup via
-    // catalog.registry_client.list_agent_records) and CreateRegistryRecord.
-    // No status/update/delete APIs — the record is left in its post-create
-    // DRAFT status, mirroring fabricator-created records. Scoped to the
-    // registry ARN like the fabricator's grant, and only wired when a
-    // registry is provisioned.
+    // Registry surface for the demo-agent record seed: the seed path calls
+    // ListRegistryRecords (idempotency lookup), CreateRegistryRecord,
+    // GetRegistryRecord (post-create verification), and
+    // SubmitRegistryRecordForApproval (transitions system agent records from
+    // DRAFT → PENDING_APPROVAL so the out-of-box demo flow passes the
+    // approval gate). No update/delete APIs. Scoped to the registry ARN
+    // like the fabricator's grant, and only wired when a registry is
+    // provisioned.
     if (registryArn) {
       seedAgentConfigLambda.addToRolePolicy(
         new PolicyStatement({
           effect: Effect.ALLOW,
           actions: [
             "agent-registry:CreateRegistryRecord",
+            "agent-registry:GetRegistryRecord",
             "agent-registry:ListRegistryRecords",
+            "agent-registry:SubmitRegistryRecordForApproval",
           ],
           resources: [registryArn, `${registryArn}/*`],
         }),
@@ -1454,7 +1457,7 @@ export class ArbiterStack extends cdk.Stack {
           {
             id: "AwsSolutions-IAM5",
             reason:
-              "AgentCore registry record create/list requires wildcard on " +
+              "AgentCore registry record operations require wildcard on " +
               "registry ARN sub-resources (records). Scoped to the specific " +
               "registry ARN; mirrors the registryArnSuppression applied to " +
               "the fabricator/supervisor roles in bin/app.ts.",
