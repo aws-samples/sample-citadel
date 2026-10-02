@@ -429,8 +429,35 @@ def _check_release_gate(
     state = load_governance_state()
     enforcement_mode = getattr(state, 'enforcement_mode', 'shadow')
 
+    org_id = os.environ.get('RELEASE_DEFAULT_ORG_ID') or ''
+    if not org_id:
+        # Org id is unconfigured — refuse in strict, would_block in shadow,
+        # without calling DynamoDB (no meaningful lookup can happen with an
+        # empty partition key).
+        outcome = 'refused' if enforcement_mode == 'strict' else 'proceed'
+        would_block = enforcement_mode != 'strict'
+        _emit_release_dispatch_metric(
+            mode=enforcement_mode, outcome=outcome, would_block=would_block,
+            workflow_id=workflow_id,
+        )
+        if enforcement_mode == 'strict':
+            _logger.error(
+                "release dispatch refused: RELEASE_DEFAULT_ORG_ID is not "
+                "configured; set the RELEASE_DEFAULT_ORG_ID environment "
+                "variable; workflow_id=%s target_agent=%s",
+                workflow_id, agent_id,
+            )
+            return True, 'release_org_unconfigured'
+        _logger.warning(
+            "release dispatch would_block: RELEASE_DEFAULT_ORG_ID is not "
+            "configured; set the RELEASE_DEFAULT_ORG_ID environment "
+            "variable; workflow_id=%s target_agent=%s",
+            workflow_id, agent_id,
+        )
+        return False, None
+
     release_result = resolve_release(
-        org_id=os.environ.get('RELEASE_DEFAULT_ORG_ID') or '',
+        org_id=org_id,
         agent_target_id=agent_id,
         environment=release_dispatch_environment,
         # D1: server-minted stickiness key = executionId (the stepRunner's
@@ -804,27 +831,28 @@ def invoke_node(
     # shape, so executor must read top-level too.
     agent_id = node.get('agentId', '')
 
-    # Release-aware dispatch (this story). Evaluated before any state
-    # mutation (node status update, node.started event, SQS send) so a
-    # strict-mode refusal leaves no partial/inconsistent trace of a
-    # dispatch that never actually happened — the node simply stays in
-    # whatever state DAG scheduling left it, and the refusal is observable
-    # via the ERROR-level log line and the ReleaseDispatchRefused metric
-    # emitted inside _check_release_gate.
+    # Release-aware dispatch gate. Evaluated before any state mutation
+    # (node status update, node.started event, SQS send). A strict-mode
+    # refusal now writes a terminal node failure (reusing the same
+    # handle_node_failure path the worker-reported node-failed event
+    # drives) so the execution fails/advances cleanly rather than leaving
+    # the node stranded in pending.
     _release_refused, _release_refusal_reason = _check_release_gate(
         agent_id, workflow_id, execution_id
     )
     if _release_refused:
+        handle_node_failure(execution_id, node_id, _release_refusal_reason)
         return
 
-    # Record-approval dispatch gate (this story). Sibling of the release
-    # gate immediately above, evaluated at the same point (before any
-    # state mutation) for the same reason: a strict-mode refusal must
-    # leave no partial dispatch trace — the node simply stays pending.
+    # Record-approval dispatch gate. Sibling of the release gate
+    # immediately above, evaluated at the same point (before any state
+    # mutation). Strict refusals write a terminal node failure the same
+    # way.
     _approval_refused, _approval_refusal_reason = _check_approval_gate(
         agent_id, workflow_id, execution_id
     )
     if _approval_refused:
+        handle_node_failure(execution_id, node_id, _approval_refusal_reason)
         return
 
     now = _now_iso()
