@@ -1662,6 +1662,10 @@ export const EXPECTED_NEW_FIELDS: AllowlistEntry[] = [
       "resolvers baseline. Same shape as the Subscription.onChatter " +
       "exemption above (satellite-only addition; rail 1 doesn't see it).",
   },
+  {
+    logicalId: "Query.listPendingApprovals",
+    justification: "Pending approvals queue for administrators.",
+  },
 ];
 
 /**
@@ -1943,6 +1947,10 @@ export const ADDITION_ALLOWLIST: AllowlistEntry[] = [
       "CIT-214: grantReadData on UserOrgMembershipTable for the " +
       "pre-token-generation Lambda — the first IAM grant that function has " +
       "needed, so CDK now emits a DefaultPolicy for its service role.",
+  },
+  {
+    logicalId: "AgenticAIApiListPendingApprovalsResolver024F6303",
+    justification: "Pending approvals queue for administrators.",
   },
 ];
 
