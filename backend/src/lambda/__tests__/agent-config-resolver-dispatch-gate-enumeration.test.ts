@@ -238,6 +238,14 @@ const SEARCH_OP = "searchAgentConfigs";
 const SEARCH_CALLEE = "searchAgentConfigsRegistry";
 
 /**
+ * listPendingApprovals has no registryEnabled ternary (it is Registry-only,
+ * admin-gated). Its case calls listPendingApprovalsHandler(event) directly.
+ * Verified by a dedicated test below.
+ */
+const PENDING_APPROVALS_OP = "listPendingApprovals";
+const PENDING_APPROVALS_CALLEE = "listPendingApprovalsHandler";
+
+/**
  * activateProjectAgents has no registryEnabled ternary either: its case is
  * a block that calls `assertProjectOrgAccess(projectId, event)` BEFORE
  * delegating to the (deliberately ungated, internally-reused by
@@ -264,7 +272,7 @@ describe("agent-config-resolver — dispatch enumeration completeness (finding 1
   const caseNames = Array.from(dispatch.cases.keys());
 
   test("the dispatch switch actually has cases to check (sanity check on the parser itself)", () => {
-    expect(caseNames.length).toBe(8);
+    expect(caseNames.length).toBe(9);
     expect(caseNames).toEqual(
       expect.arrayContaining([
         "listAgentConfigs",
@@ -274,6 +282,7 @@ describe("agent-config-resolver — dispatch enumeration completeness (finding 1
         "deleteAgentConfig",
         "publishAgentManifest",
         "searchAgentConfigs",
+        "listPendingApprovals",
         "activateProjectAgents",
       ]),
     );
@@ -284,6 +293,7 @@ describe("agent-config-resolver — dispatch enumeration completeness (finding 1
       ...GATED_AT_CALL_SITE,
       PRE_EXISTING_GATED_OP,
       SEARCH_OP,
+      PENDING_APPROVALS_OP,
       ACTIVATE_OP,
     ]);
     const unaccounted = caseNames.filter((c) => !known.has(c));
@@ -296,6 +306,7 @@ describe("agent-config-resolver — dispatch enumeration completeness (finding 1
       ...GATED_AT_CALL_SITE,
       PRE_EXISTING_GATED_OP,
       SEARCH_OP,
+      PENDING_APPROVALS_OP,
       ACTIVATE_OP,
     ];
     const stale = claimed.filter((c) => !known.has(c));
@@ -321,6 +332,14 @@ describe("agent-config-resolver — dispatch enumeration completeness (finding 1
     const clause = dispatch.cases.get(SEARCH_OP) as ts.CaseClause;
     expect(clause).toBeDefined();
     const calls = findCallsTo(clause, SEARCH_CALLEE);
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.some((c) => callReceivesBareEvent(c))).toBe(true);
+  });
+
+  test(`${PENDING_APPROVALS_OP}'s case calls ${PENDING_APPROVALS_CALLEE}(event) — bare event passed directly (no ternary; Registry-only admin op)`, () => {
+    const clause = dispatch.cases.get(PENDING_APPROVALS_OP) as ts.CaseClause;
+    expect(clause).toBeDefined();
+    const calls = findCallsTo(clause, PENDING_APPROVALS_CALLEE);
     expect(calls.length).toBeGreaterThan(0);
     expect(calls.some((c) => callReceivesBareEvent(c))).toBe(true);
   });
