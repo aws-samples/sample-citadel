@@ -160,6 +160,21 @@ describe("agent-config-resolver", () => {
       expect(result[1].state).toBe("inactive");
     });
 
+    test("item without config property returns '{}' instead of null", async () => {
+      dynamoMock.on(ScanCommand).resolves({
+        Items: [
+          { agentId: "good", config: '{"ok":true}', state: "active" },
+          { agentId: "bad", state: "active" },
+        ],
+      });
+
+      const result = await handler(makeEvent("listAgentConfigs", {}));
+
+      expect(result).toHaveLength(2);
+      expect(result[0].config).toBe('{"ok":true}');
+      expect(result[1].config).toBe("{}");
+    });
+
     test("returns empty array when no configs exist", async () => {
       dynamoMock.on(ScanCommand).resolves({ Items: [] });
       const result = await handler(makeEvent("listAgentConfigs", {}));

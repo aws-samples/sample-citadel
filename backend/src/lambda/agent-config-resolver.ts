@@ -1270,6 +1270,22 @@ export async function activateProjectAgents(
   return result;
 }
 
+/**
+ * Safely convert a DynamoDB item's `config` value to a JSON string suitable
+ * for the GraphQL AWSJSON scalar.  Handles:
+ *  - string values (already serialised) — returned as-is
+ *  - object/array values — JSON.stringify'd
+ *  - null / undefined / missing — returns "{}" and warns once per item
+ */
+function toAwsJsonConfig(value: unknown, agentId?: string): string {
+  if (typeof value === "string") return value;
+  if (value != null && typeof value === "object") return JSON.stringify(value);
+  console.warn(
+    `toAwsJsonConfig: missing or null config for agent "${agentId ?? "unknown"}", defaulting to "{}"`,
+  );
+  return "{}";
+}
+
 async function listAgentConfigs(): Promise<AgentConfig[]> {
   const result = await docClient.send(
     new ScanCommand({
@@ -1280,11 +1296,7 @@ async function listAgentConfigs(): Promise<AgentConfig[]> {
   return (result.Items || []).map((item) => ({
     agentId: item.agentId,
     orgId: item.orgId || "",
-    // AWSJSON type expects a JSON string, so ensure it's stringified
-    config:
-      typeof item.config === "string"
-        ? item.config
-        : JSON.stringify(item.config),
+    config: toAwsJsonConfig(item.config, item.agentId),
     state: item.state || "active",
     categories: item.categories || [],
     createdAt: item.createdAt,
@@ -1307,11 +1319,7 @@ async function getAgentConfig(agentId: string): Promise<AgentConfig | null> {
   return {
     agentId: result.Item.agentId,
     orgId: result.Item.orgId || "",
-    // AWSJSON type expects a JSON string, so ensure it's stringified
-    config:
-      typeof result.Item.config === "string"
-        ? result.Item.config
-        : JSON.stringify(result.Item.config),
+    config: toAwsJsonConfig(result.Item.config, result.Item.agentId),
     state: result.Item.state || "active",
     categories: result.Item.categories || [],
     createdAt: result.Item.createdAt,
@@ -1595,10 +1603,7 @@ async function publishAgentManifest(
   return {
     agentId: item.agentId,
     orgId: item.orgId || "",
-    config:
-      typeof item.config === "string"
-        ? item.config
-        : JSON.stringify(item.config),
+    config: toAwsJsonConfig(item.config, item.agentId),
     state: item.state || "active",
     categories: item.categories || [],
     createdAt: item.createdAt,

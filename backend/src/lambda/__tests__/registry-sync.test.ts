@@ -1213,7 +1213,9 @@ describe("handler — GA agent-registry events", () => {
 
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
     expect(input.UpdateExpression).not.toMatch(/REMOVE/i);
-    expect(input.UpdateExpression).not.toContain("config");
+    // config appears only inside if_not_exists (safe default for new items),
+    // never as a direct #config = :config overwrite.
+    expect(input.UpdateExpression).not.toContain("#config = :config");
     expect(input.UpdateExpression).not.toContain("createdBy");
     expect(input.UpdateExpression).not.toContain("sourceProjectId");
   });
@@ -1225,10 +1227,9 @@ describe("handler — GA agent-registry events", () => {
     await handler(makeGaApprovedEvent() as RegistryEvent);
 
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
-    // The merge UpdateCommand must SET only derived fields; config/createdBy/
-    // sourceProjectId must not appear as SET targets since the GA record
-    // carries no source for them — this is what makes the existing DDB
-    // values survive (SET is a no-op on absent attribute names).
+    // The merge UpdateCommand must SET only derived fields; config appears
+    // only inside if_not_exists (safe default for new items), not as a
+    // direct :config value. createdBy/sourceProjectId must not appear at all.
     expect(input.UpdateExpression).not.toContain(":config");
     expect(input.UpdateExpression).not.toContain(":createdBy");
     expect(input.UpdateExpression).not.toContain(":sourceProjectId");
@@ -1415,6 +1416,48 @@ describe("handler — GA agent-registry events", () => {
     expect(input.UpdateExpression).toContain("#description = :description");
     expect(input.UpdateExpression).toContain("#name = :name");
     expect(input.ExpressionAttributeValues![":categories"]).toEqual(["worker"]);
+  });
+
+  // -------------------------------------------------------------------------
+  // Bug fix: newly created items (key absent) must get config + createdAt
+  // via if_not_exists so the row is complete; existing items keep theirs.
+  // -------------------------------------------------------------------------
+
+  test("new item: SET clause contains if_not_exists for config (empty map) and createdAt from the record", async () => {
+    mockGetResource.mockResolvedValueOnce(zdRecord);
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await handler(makeGaDraftEvent() as RegistryEvent);
+
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.UpdateExpression).toContain(
+      "#config = if_not_exists(#config, :emptyConfig)",
+    );
+    expect(input.UpdateExpression).toContain(
+      "#createdAt = if_not_exists(#createdAt, :recordCreatedAt)",
+    );
+    // Agent config default is an empty map (not a string)
+    expect(input.ExpressionAttributeValues![":emptyConfig"]).toEqual({});
+    expect(input.ExpressionAttributeValues![":recordCreatedAt"]).toBe(
+      "2026-01-01T00:00:01.000Z",
+    );
+  });
+
+  test("existing item with config: expression still uses if_not_exists (DynamoDB preserves the existing value)", async () => {
+    mockGetResource.mockResolvedValueOnce(mjRecord);
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await handler(makeGaApprovedEvent() as RegistryEvent);
+
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    // The if_not_exists clause is always present — DynamoDB semantics mean
+    // existing items keep their config/createdAt unchanged.
+    expect(input.UpdateExpression).toContain(
+      "#config = if_not_exists(#config, :emptyConfig)",
+    );
+    expect(input.UpdateExpression).toContain(
+      "#createdAt = if_not_exists(#createdAt, :recordCreatedAt)",
+    );
   });
 });
 
