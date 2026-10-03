@@ -18,6 +18,7 @@ import type {
   AgentOrigin,
   RegistryRecord,
   ListResourcesOptions,
+  ListPendingApprovalsOptions,
 } from "../services/registry-service";
 import {
   extractOrgFromEvent,
@@ -282,6 +283,9 @@ export const handler = async (
           event.arguments.query as string,
           event,
         );
+
+      case "listPendingApprovals":
+        return await listPendingApprovalsHandler(event);
 
       case "activateProjectAgents": {
         const projectId = event.arguments.projectId as string;
@@ -1114,6 +1118,29 @@ export async function publishAgentManifestRegistry(
   });
 
   return registryService.mapToAgentConfig(record);
+}
+
+/**
+ * Admin-only pending-approvals queue. Global admin model — no org filtering
+ * (finding 59e5a79c: pending-approval visibility is intentionally
+ * cross-org for platform administrators).
+ */
+export async function listPendingApprovalsHandler(
+  event: AgentConfigResolverEvent,
+): Promise<{ items: unknown[]; nextToken?: string }> {
+  if (!isAdminFromEvent(event)) {
+    throw new Error("Unauthorized: admin role required");
+  }
+  const registryService = getRegistryService();
+  const opts: ListPendingApprovalsOptions = {};
+  if (event.arguments.limit != null) {
+    opts.limit = event.arguments.limit as number;
+  }
+  if (event.arguments.nextToken != null) {
+    opts.nextToken = event.arguments.nextToken as string;
+  }
+  const result = await registryService.listPendingApprovals(opts);
+  return { items: result.items, nextToken: result.nextToken };
 }
 
 /**

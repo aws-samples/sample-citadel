@@ -148,6 +148,26 @@ type Query {
   getTrustPath(resourceType: String!, resourceId: String!): TrustPathReport!
 
   getResourceIamDrift(resourceType: String!, resourceId: String!): IamDriftReport!
+  # Admin-only pending-approvals queue (global admin model — no org
+  # filtering; see finding 59e5a79c). Auth enforced in resolver, not by
+  # schema visibility, matching sibling admin queries.
+  listPendingApprovals(limit: Int, nextToken: String): PendingApprovalConnection!
+}
+
+type PendingApproval {
+  recordId: ID!
+  recordType: String!
+  name: String!
+  displayName: String
+  orgId: String
+  submittedAt: AWSDateTime
+  createdBy: String
+  status: String!
+}
+
+type PendingApprovalConnection {
+  items: [PendingApproval!]!
+  nextToken: String
 }
 
 type Mutation {

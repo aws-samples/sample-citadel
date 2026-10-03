@@ -2476,6 +2476,13 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
+    agentConfigLambdaDataSource.createResolver("ListPendingApprovalsResolver", {
+      typeName: "Query",
+      fieldName: "listPendingApprovals",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
     agentConfigLambdaDataSource.createResolver("GetAgentConfigResolver", {
       typeName: "Query",
       fieldName: "getAgentConfig",
