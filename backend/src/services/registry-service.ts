@@ -515,6 +515,35 @@ export interface ToolConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Pending-approval output type (CIT-040)
+// ---------------------------------------------------------------------------
+
+/**
+ * Lightweight view of a registry record awaiting admin approval, combining
+ * both agent and tool record types into a single queue item.
+ */
+export interface PendingApproval {
+  recordId: string;
+  recordType: "agent" | "tool";
+  name: string;
+  displayName: string;
+  orgId: string;
+  submittedAt: string | undefined;
+  createdBy: string | undefined;
+  status: string;
+}
+
+export interface ListPendingApprovalsOptions {
+  limit?: number;
+  nextToken?: string;
+}
+
+export interface ListPendingApprovalsResult {
+  items: PendingApproval[];
+  nextToken?: string;
+}
+
+// ---------------------------------------------------------------------------
 // Input types for CRUD
 // ---------------------------------------------------------------------------
 
@@ -1263,6 +1292,105 @@ export class RegistryService {
       nextToken = result.nextToken;
     } while (nextToken);
     return summaries;
+  }
+
+  /**
+   * Lists registry records with STATUS=PENDING_APPROVAL across both agent
+   * and tool record types (CIT-040). Issues a single
+   * `ListRegistryRecordsCommand` with STATUS + RECORD_TYPE=CUSTOM filters,
+   * then hydrates each summary via `GetRegistryRecordCommand` to read
+   * `customDescriptorContent` — needed to discriminate agent vs tool (the
+   * manifest-presence heuristic) and to extract `orgId` / `createdBy`.
+   *
+   * Pagination: the SDK's `maxResults` / `nextToken` are passed through
+   * directly; callers control page size via `limit`.
+   */
+  async listPendingApprovals(
+    options?: ListPendingApprovalsOptions,
+  ): Promise<ListPendingApprovalsResult> {
+    const result: ListRegistryRecordsCommandOutput = await this.withRetry(() =>
+      this.client.send(
+        new ListRegistryRecordsCommand({
+          registryId: this.registryId,
+          filters: [
+            {
+              name: RegistryRecordFilterName.RECORD_TYPE,
+              values: [RecordType.CUSTOM],
+            },
+            {
+              name: RegistryRecordFilterName.STATUS,
+              values: [RegistryRecordStatusValues.PENDING_APPROVAL],
+            },
+          ],
+          maxResults: options?.limit,
+          nextToken: options?.nextToken,
+        }),
+      ),
+    );
+
+    const summaries = result.registryRecords ?? [];
+    const items: PendingApproval[] = [];
+
+    // Hydrate each summary with a detail GET to read descriptor content.
+    // Bounded concurrency mirrors the listResources pattern.
+    const outcomes: Array<PendingApproval | null> = new Array(
+      summaries.length,
+    ).fill(null);
+    let cursor = 0;
+
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        const i = cursor;
+        cursor += 1;
+        if (i >= summaries.length) return;
+        const rec = summaries[i];
+        const recId = rec.recordId ?? "";
+        if (!recId) continue;
+        try {
+          const detail = await this.withRetry(() =>
+            this.client.send(
+              new GetRegistryRecordCommand({
+                registryId: this.registryId,
+                recordId: recId,
+              }),
+            ),
+          );
+          const descriptorContent = detail.descriptors?.custom?.data;
+          const meta = descriptorContent ? JSON.parse(descriptorContent) : {};
+          const hasManifest = meta.manifest !== undefined;
+          outcomes[i] = {
+            recordId: detail.recordId ?? recId,
+            recordType: hasManifest ? "agent" : "tool",
+            name: detail.name ?? rec.name ?? "",
+            displayName: detail.displayName ?? detail.name ?? rec.name ?? "",
+            orgId: meta.orgId ?? "",
+            submittedAt: detail.updatedAt?.toISOString(),
+            createdBy: meta.createdBy,
+            status: detail.status ?? rec.status ?? "",
+          };
+        } catch (err) {
+          console.warn("listPendingApprovals: detail GET failed, skipping", {
+            recordId: recId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    };
+
+    const workerCount = Math.min(
+      RegistryService.LIST_DETAIL_CONCURRENCY,
+      Math.max(summaries.length, 1),
+    );
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+    for (const item of outcomes) {
+      if (item) items.push(item);
+    }
+
+    return {
+      items,
+      nextToken: result.nextToken,
+    };
   }
 
   /**
