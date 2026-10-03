@@ -1,5 +1,6 @@
 import React from 'react';
 import { render } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { AppSidebar } from '../AppSidebar';
 import { SidebarProvider } from '../ui/sidebar';
 
@@ -30,9 +31,11 @@ jest.mock('../../contexts/OrganizationContext', () => ({
 
 function renderSidebar(props: Partial<React.ComponentProps<typeof AppSidebar>> = {}) {
   return render(
-    <SidebarProvider defaultOpen={true}>
-      <AppSidebar {...props} />
-    </SidebarProvider>
+    <MemoryRouter>
+      <SidebarProvider defaultOpen={true}>
+        <AppSidebar {...props} />
+      </SidebarProvider>
+    </MemoryRouter>
   );
 }
 
@@ -46,9 +49,11 @@ describe('Property 14: Sidebar collapse/expand round-trip', () => {
 
   it('renders in collapsed state when defaultOpen=false', () => {
     const { container } = render(
-      <SidebarProvider defaultOpen={false}>
-        <AppSidebar />
-      </SidebarProvider>
+      <MemoryRouter>
+        <SidebarProvider defaultOpen={false}>
+          <AppSidebar />
+        </SidebarProvider>
+      </MemoryRouter>
     );
     const sidebar = container.querySelector('[data-slot="sidebar"]');
     expect(sidebar).toBeTruthy();

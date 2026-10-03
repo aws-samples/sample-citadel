@@ -17,6 +17,7 @@ import { AgentConfigTab } from './AgentConfig';
 import { AgentCodeTab } from './AgentCode';
 import { RequireReapprovalDialog } from './RequireReapprovalDialog';
 import { registryStatusLabel } from './registry-status-label';
+import { ApprovalHistory } from './ApprovalHistory';
 import './AgentDetails.css';
 
 type TabType = 'details' | 'code';
@@ -535,7 +536,9 @@ def handler(event, context):
 
         {/* Tab Content */}
         {activeTab === 'details' && (
-          <AgentConfigTab
+          <>
+            {agent && !isCreating && <ApprovalHistory agent={agent} />}
+            <AgentConfigTab
             agent={agent}
             isCreating={isCreating}
             isEditing={isEditingDetails}
@@ -546,6 +549,7 @@ def handler(event, context):
             onCancel={handleCancelDetailsEdit}
             isFabricator={agent?.agentId === 'fabricator'}
           />
+          </>
         )}
 
         {/* Hide code tab for fabricator agent */}

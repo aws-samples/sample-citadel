@@ -56,7 +56,7 @@ export const ApprovalDecisionDialog: React.FC<ApprovalDecisionDialogProps> = ({
         </AlertDialogHeader>
 
         {isReject && (
-          <div className="space-y-2">
+          <div className="flex flex-col gap-2">
             <Label htmlFor="rejection-reason">Reason</Label>
             <Textarea
               id="rejection-reason"

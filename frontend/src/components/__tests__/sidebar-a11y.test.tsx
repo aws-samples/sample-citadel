@@ -1,5 +1,6 @@
 import React from 'react';
 import { render, screen } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { AppSidebar, navigationItems } from '../AppSidebar';
 import { SidebarProvider } from '../ui/sidebar';
 
@@ -30,9 +31,11 @@ jest.mock('../../contexts/OrganizationContext', () => ({
 
 function renderSidebar(props: Partial<React.ComponentProps<typeof AppSidebar>> = {}) {
   return render(
-    <SidebarProvider defaultOpen={true}>
-      <AppSidebar {...props} />
-    </SidebarProvider>
+    <MemoryRouter>
+      <SidebarProvider defaultOpen={true}>
+        <AppSidebar {...props} />
+      </SidebarProvider>
+    </MemoryRouter>
   );
 }
 
@@ -53,7 +56,7 @@ describe('Property 9: Active nav item has aria-current', () => {
 describe('Accessibility unit tests', () => {
   it('renders all navigation items as buttons', () => {
     renderSidebar();
-    for (const item of navigationItems) {
+    for (const item of navigationItems.filter((i) => !i.adminOnly)) {
       expect(screen.getByRole('button', { name: item.label })).toBeTruthy();
     }
   });
