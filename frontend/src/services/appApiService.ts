@@ -463,7 +463,7 @@ class AppApiService {
     return response.createApp;
   }
 
-  async updateApp(input: { appId: string; version: number; name?: string; description?: string; status?: string; routingConfig?: string }) {
+  async updateApp(input: { appId: string; version: number; name?: string; description?: string; status?: string; routingConfig?: string; statusReason?: string }) {
     const response = await serverService.mutate<{ updateApp: any }>(
       UPDATE_APP,
       { input }

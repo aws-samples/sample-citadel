@@ -19,6 +19,12 @@ export interface AgentConfig {
    * do not infer it from `name` or any other field (finding 414f8013).
    */
   registryStatus?: string | null;
+  /** Cognito userId of the admin who approved/rejected (set server-side). */
+  decidedBy?: string | null;
+  /** ISO timestamp of the approval/rejection decision (set server-side). */
+  decidedAt?: string | null;
+  /** Reason text — required for REJECTED, optional for APPROVED. */
+  statusReason?: string | null;
 }
 
 /** Outcome of a bulk project-agent activation, grouped by per-agent result. */
@@ -37,6 +43,9 @@ const listAgentConfigsQuery = `
       state
       categories
       registryStatus
+      decidedBy
+      decidedAt
+      statusReason
       createdAt
       updatedAt
     }
@@ -52,6 +61,9 @@ const getAgentConfigQuery = `
       state
       categories
       registryStatus
+      decidedBy
+      decidedAt
+      statusReason
       createdAt
       updatedAt
     }

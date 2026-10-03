@@ -21,6 +21,12 @@ jest.mock('../AgentCode', () => ({
   AgentCodeTab: ({ onSave }: { onSave: () => void }) =>
     React.createElement('button', { onClick: onSave }, 'Save Code'),
 }));
+jest.mock('../ApprovalHistory', () => ({
+  ApprovalHistory: ({ agent }: any) =>
+    agent.registryStatus
+      ? React.createElement('div', { 'data-testid': 'approval-history' }, `Status: ${agent.registryStatus}`)
+      : null,
+}));
 
 jest.mock('../../services/agentConfigService', () => ({
   agentConfigService: {
@@ -265,5 +271,30 @@ describe('AgentDetails — confirm before saving code edits to an approved regis
 
     await waitFor(() => expect(agentConfigService.updateAgentCode).toHaveBeenCalledTimes(1));
     expect(screen.queryByText('Saving will require re-approval')).not.toBeInTheDocument();
+  });
+});
+
+describe('AgentDetails — ApprovalHistory wiring', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (agentConfigService.getAgentCode as jest.Mock).mockRejectedValue(new Error('no code'));
+  });
+
+  it('renders ApprovalHistory for a registry-backed agent in the Details tab', async () => {
+    (agentConfigService.getAgentConfig as jest.Mock).mockResolvedValue(makeRegistryAgent('active', 'APPROVED'));
+
+    render(<AgentDetails agentId="agent-1" onBack={jest.fn()} />);
+
+    await waitFor(() => expect(screen.getByTestId('approval-history')).toBeInTheDocument());
+    expect(screen.getByTestId('approval-history')).toHaveTextContent('Status: APPROVED');
+  });
+
+  it('does not render ApprovalHistory for a legacy agent', async () => {
+    (agentConfigService.getAgentConfig as jest.Mock).mockResolvedValue(makeLegacyAgent('active'));
+
+    render(<AgentDetails agentId="legacy-agent-1" onBack={jest.fn()} />);
+
+    await waitFor(() => expect(screen.getByText('Legacy Agent')).toBeInTheDocument());
+    expect(screen.queryByTestId('approval-history')).not.toBeInTheDocument();
   });
 });

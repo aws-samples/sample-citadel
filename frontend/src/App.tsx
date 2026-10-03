@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, lazy, Suspense } from 'react';
 import { Routes, Route, Navigate, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { AuthScreen } from './components/AuthScreen';
 import { AppLayout } from './components/AppLayout';
@@ -33,6 +33,11 @@ import { GovernanceEvalComparison } from './pages/governance/EvalComparison';
 import { Observability } from './pages/Observability';
 import { NotFound } from './components/NotFound';
 import { ProtectedRoute } from './components/ProtectedRoute';
+import { RequireAdmin } from './components/RequireAdmin';
+
+const LazyApprovalsPage = lazy(() =>
+  import('./pages/ApprovalsPage').then((m) => ({ default: m.ApprovalsPage }))
+);
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { serverService } from './services';
 import { OrganizationProvider } from './contexts/OrganizationContext';
@@ -241,6 +246,16 @@ function App() {
               <Route path="/governance/iam" element={<GovernanceIamTrustPath />} />
               <Route path="/governance/eval-comparison" element={<GovernanceEvalComparison />} />
               <Route path="/team" element={<Team />} />
+              <Route
+                path="/approvals"
+                element={
+                  <RequireAdmin>
+                    <Suspense fallback={<div className="p-6">Loading…</div>}>
+                      <LazyApprovalsPage />
+                    </Suspense>
+                  </RequireAdmin>
+                }
+              />
               <Route path="/observability" element={<Observability />} />
               <Route path="/observability/trace/:kind/:id" element={<Observability />} />
               <Route path="/implementation/:projectId" element={<ImplementationRoute />} />
