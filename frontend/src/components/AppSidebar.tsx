@@ -1,3 +1,5 @@
+import { useState, useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
 import {
   LayoutDashboard,
   Inbox,
@@ -14,8 +16,11 @@ import {
   SlidersHorizontal,
   Waypoints,
   KeyRound,
+  ClipboardCheck,
 } from 'lucide-react';
 import { useOrganization } from '../contexts/OrganizationContext';
+import { Badge } from './ui/badge';
+import { approvalsService } from '../services/approvalsService';
 import {
   Sidebar,
   SidebarContent,
@@ -43,7 +48,14 @@ export interface AppSidebarProps {
   onNavigate?: (item: string) => void;
 }
 
-export const navigationItems = [
+export interface NavigationItem {
+  id: string;
+  label: string;
+  icon: React.ComponentType<any>;
+  adminOnly?: boolean;
+}
+
+export const navigationItems: NavigationItem[] = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'intake-requests', label: 'Intake Requests', icon: Inbox },
   { id: 'agentic-studio', label: 'Agentic Studio', icon: Wand2 },
@@ -56,10 +68,24 @@ export const navigationItems = [
   { id: 'integrations', label: 'Integrations', icon: Plug },
   { id: 'data-stores', label: 'Data Stores', icon: Database },
   { id: 'team', label: 'Team', icon: Users },
+  { id: 'approvals', label: 'Approvals', icon: ClipboardCheck, adminOnly: true },
 ];
 
 export function AppSidebar({ activeItem = 'dashboard', onNavigate }: AppSidebarProps) {
   const { selectedOrganization, setSelectedOrganization, organizations, loading, isAdmin } = useOrganization();
+  const location = useLocation();
+  const [pendingCount, setPendingCount] = useState(0);
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    let cancelled = false;
+    approvalsService.listPendingApprovals({ limit: 50 }).then((data) => {
+      if (!cancelled) setPendingCount(data.items.length);
+    }).catch(() => {
+      /* best-effort badge */
+    });
+    return () => { cancelled = true; };
+  }, [isAdmin, location.pathname]);
 
   return (
     <Sidebar collapsible="icon">
@@ -106,7 +132,9 @@ export function AppSidebar({ activeItem = 'dashboard', onNavigate }: AppSidebarP
         <SidebarGroup>
           <SidebarGroupContent>
             <SidebarMenu>
-              {navigationItems.map((item) => {
+              {navigationItems
+                .filter((item) => !item.adminOnly || isAdmin)
+                .map((item) => {
                 const Icon = item.icon;
                 return (
                   <SidebarMenuItem key={item.id}>
@@ -117,6 +145,11 @@ export function AppSidebar({ activeItem = 'dashboard', onNavigate }: AppSidebarP
                     >
                       <Icon />
                       <span>{item.label}</span>
+                      {item.id === 'approvals' && pendingCount > 0 && (
+                        <Badge variant="destructive" className="ml-auto text-[10px] px-1.5 py-0">
+                          {pendingCount}
+                        </Badge>
+                      )}
                     </SidebarMenuButton>
                     {item.id === 'observability' && isAdmin && (
                       <SidebarMenuSub>

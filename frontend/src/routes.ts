@@ -16,6 +16,7 @@ export const ROUTE_PATHS = {
   'data-stores': '/data-stores',
   'model-config': '/model-config',
   team: '/team',
+  approvals: '/approvals',
   observability: '/observability',
 } as const;
 
