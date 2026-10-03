@@ -12,6 +12,9 @@ record (Decision #6), one design-assessment gate per record (US-ARB-017).
 
 - [Overview](#overview)
 - [Status Lifecycle](#status-lifecycle)
+  - [Approvals](#approvals)
+  - [Enabling manual review in a development deployment](#enabling-manual-review-in-a-development-deployment)
+  - [Tools re-approval confirmation (wiring contract)](#tools-re-approval-confirmation-wiring-contract)
 - [Governance Integration](#governance-integration)
 - [Imported Agent Records (Agent Import)](#imported-agent-records-agent-import)
 - [Migration Guide — AgentApp to RegistryRecord](#migration-guide--agentapp-to-registryrecord)
@@ -279,6 +282,82 @@ Not shown: the transient `CREATING`/`UPDATING` statuses (polled past by
 These four are not targets of `updateResourceStatus` and are therefore
 outside `REGISTRY_TRANSITIONS`. All nine statuses (five governed states +
 four transient/error) are documented in the [States](#states) section.
+
+### Approvals
+
+Administrators approve or reject records that are in `PENDING_APPROVAL`.
+
+**Where to find pending records.** The `/approvals` page lists every agent
+and tool record awaiting a decision. A badge on the sidebar nav entry shows
+the pending count. After a decision is recorded, the approval history
+(decided by, decided at, reason) appears on the agent or tool detail view.
+
+**What approve and reject do.** Both call `UpdateRegistryRecordStatus`:
+
+- **Approve** sets the record to `APPROVED`. The registry stamps `decidedBy`
+  and `decidedAt` from the caller's auth context.
+- **Reject** sets the record to `REJECTED`. A non-empty `statusReason` is
+  required. The registry stamps `decidedBy`, `decidedAt`, and the reason
+  into the manifest.
+
+**Rejected records cannot be resubmitted.** The only status-transition
+target from `REJECTED` via `UpdateRegistryRecordStatus` is `DEPRECATED`
+(abandon). To revise, create a new record. See [Rejection and
+revision](#transition-matrix) for the content-edit path that demotes a
+rejected record to `DRAFT`.
+
+**Tool approval decisions.** The approval workflow applies to both agent and
+tool records. The `/approvals` page lists both record types. A dedicated
+tools approval surface in the UI is a follow-up (tracked as a follow-up).
+
+**Dispatch-time consequence.** In strict enforcement mode, the workload-
+identity gate (Decision #6, engine position 3) refuses dispatch to any
+record that is not `APPROVED`. In shadow mode the gate logs the refusal
+without blocking. Unapproved records never serve production traffic in
+strict mode.
+
+### Enabling manual review in a development deployment
+
+By default the registry auto-approves every submission. To test the approval
+workflow, deploy with the CDK context flag set to `false`:
+
+```bash
+npx cdk deploy -c registryAutoApproval=false
+```
+
+The provisioner calls `UpdateRegistryCommand` with the new approval
+configuration. The change applies in place — it does not replace the
+registry. Records already in `APPROVED` are unaffected; only future
+submissions enter `PENDING_APPROVAL`.
+
+To restore auto-approval, redeploy without the flag (the default is
+`true`):
+
+```bash
+npx cdk deploy
+```
+
+Records that entered `PENDING_APPROVAL` during the manual-review window
+stay pending until an administrator approves or rejects them.
+
+**Producing a `PENDING_APPROVAL` record.** After deploying with manual
+review, create an agent (or tool), then use the Activate action. Activate
+submits the record for approval; with auto-approval disabled, the record
+stays in `PENDING_APPROVAL` and appears on the `/approvals` page.
+
+### Tools re-approval confirmation (wiring contract)
+
+`RequireReapprovalDialog` already supports `recordKind: 'tool'`. Wire it
+when a tools Configure surface exists. The contract:
+
+1. Before saving a content edit on an `APPROVED` or `REJECTED` tool record,
+   show `RequireReapprovalDialog` with `recordKind='tool'`.
+2. On confirmation, save the edit. The backend settles the record from the
+   transient `UPDATING` status to `DRAFT` — approval is invalidated.
+3. Inform the user to re-submit via Activate.
+
+Until the tools Configure dialog ships, no wiring is needed. This section
+documents the contract so the implementation matches when it lands.
 
 ## Governance Integration
 
