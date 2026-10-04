@@ -291,6 +291,7 @@ const AGENT_METADATA_DEFAULTS = {
   config: undefined as Record<string, unknown> | undefined,
   createdBy: undefined as string | undefined,
   sourceProjectId: undefined as string | undefined,
+  tags: undefined as Record<string, string> | undefined,
 };
 
 const TOOL_METADATA_DEFAULTS = {
@@ -300,6 +301,7 @@ const TOOL_METADATA_DEFAULTS = {
   integrationBindings: undefined as unknown[] | undefined,
   dataStoreBindings: undefined as unknown[] | undefined,
   appId: undefined as string | undefined,
+  tags: undefined as Record<string, string> | undefined,
 };
 
 /**
@@ -467,6 +469,8 @@ export type AgentCacheRecord = {
   registryStatus: string | undefined;
   registryRecordId: string | undefined;
   statusUpdatedAt: string | undefined;
+  /** User-supplied resource tags (CIT-042). Absent on legacy/pre-tag records. */
+  tags: Record<string, string> | undefined;
 };
 
 /**
@@ -483,6 +487,8 @@ export type ToolCacheRecord = {
   appId: string | undefined;
   createdAt: string;
   updatedAt: string;
+  /** User-supplied resource tags (CIT-042). Absent on legacy/pre-tag records. */
+  tags: Record<string, string> | undefined;
 };
 
 /**
@@ -525,6 +531,7 @@ export function buildAgentCacheRecord(
     registryRecordId: undefined,
     statusUpdatedAt:
       rawStatus !== undefined ? new Date().toISOString() : undefined,
+    tags: meta.tags,
   };
 }
 
@@ -556,6 +563,7 @@ export function buildToolCacheRecord(
     updatedAt: resource.updatedAt
       ? new Date(resource.updatedAt).toISOString()
       : new Date().toISOString(),
+    tags: meta.tags,
   };
 }
 
@@ -644,6 +652,7 @@ function buildGaMergeFields(
       fields.integrationBindings = meta.integrationBindings;
     if (meta.dataStoreBindings !== undefined)
       fields.dataStoreBindings = meta.dataStoreBindings;
+    if (meta.tags !== undefined && meta.tags !== null) fields.tags = meta.tags;
     const mappedState = toInternalStateFromGaStatus(record.status);
     if (mappedState !== undefined) fields.state = mappedState;
 
@@ -681,6 +690,8 @@ function buildGaMergeFields(
   else skipped.push("appId");
 
   if (meta.manifest !== undefined) fields.manifest = meta.manifest;
+
+  if (meta.tags !== undefined && meta.tags !== null) fields.tags = meta.tags;
 
   // The bug: migrated GA records carry orgId as an explicit '', not
   // undefined — `!== undefined` alone let it through and overwrote the
