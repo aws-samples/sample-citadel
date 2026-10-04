@@ -1038,6 +1038,12 @@ type ToolConfig {
   # AppSync caller identity who created this record (CIT-043 ownership).
   # Absent on legacy, non-registry rows that predate the field.
   createdBy: String
+  # Identity of the admin who approved/rejected this tool record.
+  decidedBy: String
+  # Timestamp of the approval/rejection decision.
+  decidedAt: AWSDateTime
+  # Reason supplied when a tool record is rejected.
+  statusReason: String
 }
 
 type DeleteToolConfigResult {
@@ -1305,6 +1311,10 @@ input UpdateToolConfigInput {
   categories: [String]
   integrationBindings: [IntegrationBindingInput]
   dataStoreBindings: [DataStoreBindingInput]
+  status: AppStatus
+  # Required when transitioning PENDING_APPROVAL -> REJECTED. Ignored for
+  # every other transition.
+  statusReason: String
 }
 
 input CreateAgentRequestInput {

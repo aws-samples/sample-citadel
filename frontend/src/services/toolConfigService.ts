@@ -237,6 +237,8 @@ export const toolConfigService = {
     categories?: string[];
     integrationBindings?: IntegrationBinding[];
     dataStoreBindings?: DataStoreBinding[];
+    status?: string;
+    statusReason?: string;
   }): Promise<ToolConfig> {
     try {
       const response = await serverService.mutate<{ updateToolConfig: ToolConfig }>(

@@ -5,6 +5,7 @@
 
 import serverService from './server';
 import { appApiService } from './appApiService';
+import { toolConfigService } from './toolConfigService';
 
 // --- Types ---
 
@@ -32,12 +33,6 @@ export class NotSupportedError extends Error {
     this.name = 'NotSupportedError';
   }
 }
-
-/**
- * Whether tool approval/rejection is supported via the UI.
- * Currently no tool status mutation exists in the schema.
- */
-export const supportsToolDecisions = false;
 
 // --- GraphQL Documents ---
 
@@ -81,7 +76,7 @@ export const approvalsService = {
    * Approve or reject a pending record.
    *
    * For agent records: delegates to appApiService.updateApp.
-   * For tool records: throws NotSupportedError (no mutation exists yet).
+   * For tool records: delegates to toolConfigService.updateToolConfig.
    */
   async decideApproval(input: {
     recordId: string;
@@ -91,7 +86,12 @@ export const approvalsService = {
     statusReason?: string;
   }): Promise<void> {
     if (input.recordType === 'tool') {
-      throw new NotSupportedError('tool approval via UI pending');
+      await toolConfigService.updateToolConfig({
+        toolId: input.recordId,
+        status: input.decision,
+        statusReason: input.statusReason,
+      });
+      return;
     }
 
     await appApiService.updateApp({
