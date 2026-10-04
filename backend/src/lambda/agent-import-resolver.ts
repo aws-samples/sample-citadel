@@ -94,6 +94,7 @@ import type {
   ProposedManifestMetadata,
   RegistryRecord,
 } from "../services/registry-service";
+import { normaliseTags } from "../utils/tag-policy";
 
 // Re-export the shared RegistryService singleton reset so the whole import
 // surface (and tests) can be imported from this module.
@@ -487,6 +488,10 @@ export function buildImportDescriptor(input: unknown): Record<string, unknown> {
     origin,
     categories: asStringArray(flat.categories) ?? [],
   };
+  // CIT-042: carry tags from the flat import descriptor when present.
+  if (flat.tags !== undefined && flat.tags !== null) {
+    descriptor.tags = flat.tags;
+  }
   const onConflict = mapConflictPolicy(flat.onConflict);
   if (onConflict) descriptor.onConflict = onConflict;
   // RAW caller-submitted secret (transient): carried as a top-level field so
@@ -1159,6 +1164,11 @@ export async function importAgent(
   // record as an agent (vs a tool). Fall back to {} when absent.
   const manifest = isRecord(root.manifest) ? root.manifest : {};
   const categories = asStringArray(root.categories) ?? [];
+  // CIT-042: format-validate tags unconditionally (decision ad393b11).
+  const tags =
+    root.tags !== undefined && root.tags !== null
+      ? normaliseTags(root.tags)
+      : undefined;
   const createdBy =
     asNonEmptyString(event.identity?.sub) ??
     asNonEmptyString(event.identity?.username) ??
@@ -1255,6 +1265,7 @@ export async function importAgent(
         orgId,
         createdBy,
         governanceAttestation,
+        tags,
       }),
     );
   };
@@ -2761,6 +2772,7 @@ function buildImportedMetadata(args: {
   orgId: string;
   createdBy: string;
   governanceAttestation?: AgentCustomMetadata["governanceAttestation"];
+  tags?: Record<string, string>;
 }): ImportedAgentMetadata {
   const meta: ImportedAgentMetadata = {
     categories: args.categories,
@@ -2775,6 +2787,10 @@ function buildImportedMetadata(args: {
   // Additive: only present on the record-creating import paths.
   if (args.governanceAttestation) {
     meta.governanceAttestation = args.governanceAttestation;
+  }
+  // CIT-042: carry user-supplied tags when present.
+  if (args.tags) {
+    meta.tags = args.tags;
   }
   return meta;
 }

@@ -838,7 +838,8 @@ describe("organization-resolver", () => {
       const deleted = dynamoMock
         .commandCalls(BatchWriteCommand)
         .flatMap(
-          (b) => b.args[0].input.RequestItems?.["test-user-org-membership"] ?? [],
+          (b) =>
+            b.args[0].input.RequestItems?.["test-user-org-membership"] ?? [],
         );
       expect(deleted).toHaveLength(2);
     });
@@ -924,5 +925,209 @@ describe("organization-resolver", () => {
     await expect(handler(makeEvent("unknownField", {}))).rejects.toThrow(
       "Unknown field: unknownField",
     );
+  });
+
+  // ── CIT-042: Tag policy tests ────────────────────────────────────────
+
+  const memberIdentity = {
+    sub: "member-1",
+    "custom:organization": "Operations",
+    "cognito:groups": ["project_manager"],
+  };
+  const otherOrgIdentity = {
+    sub: "outsider-1",
+    "custom:organization": "DifferentOrg",
+    "cognito:groups": ["project_manager"],
+  };
+
+  describe("updateTagPolicy — admin update + read back", () => {
+    test("admin creates a tag policy and the stored item is returned", async () => {
+      const result = await handler(
+        makeEvent(
+          "updateTagPolicy",
+          {
+            input: {
+              orgId: "org-uuid-123",
+              requiredKeys: [
+                { key: "team", allowedValues: ["platform", "ml"] },
+                { key: "cost-center" },
+              ],
+            },
+          },
+          adminIdentity,
+        ),
+      );
+
+      expect(result).toMatchObject({
+        requiredKeys: [
+          { key: "team", allowedValues: ["platform", "ml"] },
+          { key: "cost-center" },
+        ],
+        version: 1,
+        updatedBy: "admin-1",
+      });
+      expect(result.updatedAt).toBeDefined();
+
+      // Verify a PutCommand was sent to the TAG_POLICY# key
+      const putCalls = dynamoMock.commandCalls(PutCommand);
+      const policyPut = putCalls.find(
+        (c) =>
+          (c.args[0].input.Item as Record<string, unknown>).orgId ===
+          "TAG_POLICY#org-uuid-123",
+      );
+      expect(policyPut).toBeDefined();
+      expect(
+        (policyPut!.args[0].input.Item as Record<string, unknown>).itemType,
+      ).toBe("tag_policy");
+    });
+  });
+
+  describe("updateTagPolicy — authorization", () => {
+    test("non-admin update is refused and no DDB write occurs", async () => {
+      await expect(
+        handler(
+          makeEvent(
+            "updateTagPolicy",
+            {
+              input: {
+                orgId: "org-uuid-123",
+                requiredKeys: [{ key: "team" }],
+              },
+            },
+            nonAdminIdentity,
+          ),
+        ),
+      ).rejects.toThrow(/UnauthorizedError/);
+
+      // No PutCommand for the TAG_POLICY key should have been sent
+      const putCalls = dynamoMock.commandCalls(PutCommand);
+      const policyPut = putCalls.find(
+        (c) =>
+          (c.args[0].input.Item as Record<string, unknown>).orgId ===
+          "TAG_POLICY#org-uuid-123",
+      );
+      expect(policyPut).toBeUndefined();
+    });
+  });
+
+  describe("updateTagPolicy — validation errors", () => {
+    test("rejects a policy with 11 required keys", async () => {
+      const keys = Array.from({ length: 11 }, (_, i) => ({
+        key: `key-${i}`,
+      }));
+      await expect(
+        handler(
+          makeEvent(
+            "updateTagPolicy",
+            { input: { orgId: "org-1", requiredKeys: keys } },
+            adminIdentity,
+          ),
+        ),
+      ).rejects.toThrow(/at most 10/);
+    });
+
+    test("rejects a policy with a key longer than 64 characters", async () => {
+      await expect(
+        handler(
+          makeEvent(
+            "updateTagPolicy",
+            {
+              input: {
+                orgId: "org-1",
+                requiredKeys: [{ key: "a".repeat(65) }],
+              },
+            },
+            adminIdentity,
+          ),
+        ),
+      ).rejects.toThrow(/1–64 characters/);
+    });
+  });
+
+  describe("getTagPolicy — member read", () => {
+    test("authenticated org member can read the tag policy", async () => {
+      // Stub: org row exists so membership check can find the org name
+      dynamoMock
+        .on(GetCommand, {
+          TableName: "test-orgs",
+          Key: { orgId: "org-uuid-123" },
+        })
+        .resolves({
+          Item: { orgId: "org-uuid-123", name: "Operations" },
+        });
+      // Stub: the TAG_POLICY item exists
+      dynamoMock
+        .on(GetCommand, {
+          TableName: "test-orgs",
+          Key: { orgId: "TAG_POLICY#org-uuid-123" },
+        })
+        .resolves({
+          Item: {
+            orgId: "TAG_POLICY#org-uuid-123",
+            itemType: "tag_policy",
+            policy: {
+              requiredKeys: [{ key: "team", allowedValues: ["platform"] }],
+              version: 1,
+              updatedBy: "admin-1",
+              updatedAt: "2026-10-04T06:00:00Z",
+            },
+          },
+        });
+
+      const result = await handler(
+        makeEvent("getTagPolicy", { orgId: "org-uuid-123" }, memberIdentity),
+      );
+
+      expect(result).toMatchObject({
+        requiredKeys: [{ key: "team", allowedValues: ["platform"] }],
+        version: 1,
+      });
+    });
+
+    test("returns null when no policy is configured (allow all)", async () => {
+      dynamoMock
+        .on(GetCommand, {
+          TableName: "test-orgs",
+          Key: { orgId: "org-uuid-123" },
+        })
+        .resolves({
+          Item: { orgId: "org-uuid-123", name: "Operations" },
+        });
+      dynamoMock
+        .on(GetCommand, {
+          TableName: "test-orgs",
+          Key: { orgId: "TAG_POLICY#org-uuid-123" },
+        })
+        .resolves({ Item: undefined });
+
+      const result = await handler(
+        makeEvent("getTagPolicy", { orgId: "org-uuid-123" }, memberIdentity),
+      );
+
+      expect(result).toBeNull();
+    });
+  });
+
+  describe("getTagPolicy — non-member refused", () => {
+    test("non-member of the target org is refused", async () => {
+      dynamoMock
+        .on(GetCommand, {
+          TableName: "test-orgs",
+          Key: { orgId: "org-uuid-123" },
+        })
+        .resolves({
+          Item: { orgId: "org-uuid-123", name: "Operations" },
+        });
+
+      await expect(
+        handler(
+          makeEvent(
+            "getTagPolicy",
+            { orgId: "org-uuid-123" },
+            otherOrgIdentity,
+          ),
+        ),
+      ).rejects.toThrow(/UnauthorizedError/);
+    });
   });
 });

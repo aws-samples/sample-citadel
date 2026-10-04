@@ -24,6 +24,7 @@ import {
 import { getUserId } from "../utils/appsync";
 import { LifecycleManager, REGISTRY_TRANSITIONS } from "../adapters/lifecycle";
 import { isRecordVisible, viewerFromEvent } from "../utils/record-visibility";
+import { normaliseTags } from "../utils/tag-policy";
 
 const client = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(client);
@@ -160,6 +161,7 @@ interface ToolConfigMutationInput {
   dataStoreBindings?: RawDataStoreBinding[];
   status?: string;
   statusReason?: string;
+  tags?: unknown;
 }
 
 /** Minimal slice of the AppSync event needed for org/admin extraction. */
@@ -191,6 +193,8 @@ interface ToolConfig {
   decidedAt?: string;
   /** Reason supplied when this record was rejected. */
   statusReason?: string;
+  /** User-supplied resource tags (CIT-042). */
+  tags?: Record<string, string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -553,6 +557,7 @@ export async function createToolConfigRegistry(
     config,
     createdBy: userId,
     orgId,
+    ...(input.tags !== undefined ? { tags: normaliseTags(input.tags) } : {}),
   } as ToolCustomMetadata);
 
   const record = await registryService.createResource("tool", input.toolId, {
@@ -649,6 +654,7 @@ export async function updateToolConfigRegistry(
     decidedBy?: string;
     decidedAt?: string;
     statusReason?: string;
+    tags?: Record<string, string>;
   }>(existing.customDescriptorContent ?? null, {
     categories: [],
     icon: "",
@@ -662,6 +668,7 @@ export async function updateToolConfigRegistry(
     decidedBy: undefined,
     decidedAt: undefined,
     statusReason: undefined,
+    tags: undefined,
   });
 
   // Org scoping (finding 13065e38): reconcile the record's orgId against
@@ -813,6 +820,8 @@ export async function updateToolConfigRegistry(
     config: newConfig,
     createdBy: existingMeta.createdBy ?? userId,
     orgId: preservedOrgId,
+    tags:
+      input.tags !== undefined ? normaliseTags(input.tags) : existingMeta.tags,
   } as ToolCustomMetadata);
 
   // If state is being changed, update the Registry status BEFORE writing

@@ -199,13 +199,27 @@ describe("org-name-canonical guard (decision 228b3cc8, piece 4)", () => {
       expect(renameShaped).toEqual([]);
     });
 
+    /**
+     * Dispatch cases that match /update|rename/i but do NOT touch the
+     * organisation name.  Each entry carries a reason so the exemption is
+     * auditable — adding a new case here is a deliberate, documented act.
+     */
+    const DISPATCH_RENAME_GUARD_EXEMPT: Record<string, string> = {
+      updateTagPolicy:
+        "writes the organisation tag policy item, never the organisation name",
+    };
+
     test("organization-resolver.ts's dispatch switch has no updateOrganization/renameOrganization case", () => {
       const sf = parseSourceFile(RESOLVER_PATH);
       const labels = extractDispatchCaseLabels(sf);
       expect(labels.length).toBeGreaterThan(0); // sanity
       expect(labels).toContain("createOrganization");
       expect(labels).toContain("deleteOrganization");
-      const renameShaped = labels.filter((l) => /update|rename/i.test(l));
+      const renameShaped = labels.filter(
+        (l) =>
+          /update|rename/i.test(l) &&
+          !Object.hasOwn(DISPATCH_RENAME_GUARD_EXEMPT, l),
+      );
       expect(renameShaped).toEqual([]);
     });
 

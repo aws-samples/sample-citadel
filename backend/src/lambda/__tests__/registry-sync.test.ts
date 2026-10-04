@@ -1644,3 +1644,133 @@ describe("handler — DLQ routing and metrics", () => {
     await expect(handler(event)).rejects.toThrow("DynamoDB is down");
   });
 });
+
+// ---------------------------------------------------------------------------
+// CIT-042 — tags denormalization into cache items
+// ---------------------------------------------------------------------------
+
+describe("tags denormalization — legacy buildAgentCacheRecord", () => {
+  test("tags written to cache record when present in metadata", () => {
+    const resource = makeAgentResource({
+      customDescriptorContent: JSON.stringify({
+        categories: ["cat1"],
+        icon: "icon.png",
+        state: "APPROVED",
+        tags: { env: "prod", team: "platform" },
+      }),
+    });
+    const record = buildAgentCacheRecord("agent-t1", resource);
+    expect(record.tags).toEqual({ env: "prod", team: "platform" });
+  });
+
+  test("tags undefined when metadata omits tags entirely", () => {
+    const resource = makeAgentResource({
+      customDescriptorContent: JSON.stringify({
+        categories: [],
+        icon: "",
+        state: "APPROVED",
+      }),
+    });
+    const record = buildAgentCacheRecord("agent-t2", resource);
+    expect(record.tags).toBeUndefined();
+  });
+
+  test("tags undefined when customDescriptorContent is absent", () => {
+    const record = buildAgentCacheRecord("agent-t3", { description: "desc" });
+    expect(record.tags).toBeUndefined();
+  });
+});
+
+describe("tags denormalization — legacy buildToolCacheRecord", () => {
+  test("tags written to cache record when present in metadata", () => {
+    const resource = makeToolResource({
+      customDescriptorContent: JSON.stringify({
+        categories: ["toolcat"],
+        icon: "tool-icon.png",
+        state: "active",
+        tags: { purpose: "data-ingestion" },
+      }),
+    });
+    const record = buildToolCacheRecord("tool-t1", resource);
+    expect(record.tags).toEqual({ purpose: "data-ingestion" });
+  });
+
+  test("tags undefined when metadata omits tags entirely", () => {
+    const resource = makeToolResource({
+      customDescriptorContent: JSON.stringify({
+        categories: [],
+        icon: "",
+        state: "active",
+      }),
+    });
+    const record = buildToolCacheRecord("tool-t2", resource);
+    expect(record.tags).toBeUndefined();
+  });
+});
+
+describe("tags denormalization — GA merge path", () => {
+  test("agent: tags SET when present in record metadata", async () => {
+    const taggedRecord: RegistryRecord = {
+      ...gaAgentRecord,
+      customDescriptorContent: JSON.stringify({
+        categories: ["cat1"],
+        icon: "icon.png",
+        state: "DRAFT",
+        tags: { env: "staging", owner: "alice" },
+      }),
+    };
+    mockGetResource.mockResolvedValueOnce(taggedRecord);
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await handler(makeGaDraftEvent() as RegistryEvent);
+
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.UpdateExpression).toContain("#tags = :tags");
+    expect(input.ExpressionAttributeValues![":tags"]).toEqual({
+      env: "staging",
+      owner: "alice",
+    });
+  });
+
+  test("agent: tags NOT set when metadata omits tags — preserves existing cache value", async () => {
+    mockGetResource.mockResolvedValueOnce(gaAgentRecord);
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await handler(makeGaDraftEvent() as RegistryEvent);
+
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.UpdateExpression).not.toContain("#tags");
+    expect(input.ExpressionAttributeValues![":tags"]).toBeUndefined();
+  });
+
+  test("tool: tags SET when present in record metadata", async () => {
+    const taggedToolRecord: RegistryRecord = {
+      recordId: "RecDraft00001",
+      name: "TestTool",
+      description: JSON.stringify({ name: "TestTool" }),
+      status: "DRAFT",
+      customDescriptorContent: JSON.stringify({
+        categories: ["toolcat"],
+        icon: "tool-icon.png",
+        state: "active",
+        tags: { dept: "engineering" },
+      }),
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+    };
+    // First call: agent fetch fails with TypeMismatchError; second: tool resolves
+    mockGetResource.mockImplementation(async (type: string) => {
+      if (type === "agent") throw new TypeMismatchError("not an agent");
+      return taggedToolRecord;
+    });
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await handler(makeGaDraftEvent() as RegistryEvent);
+
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.UpdateExpression).toContain("#tags = :tags");
+    expect(input.ExpressionAttributeValues![":tags"]).toEqual({
+      dept: "engineering",
+    });
+  });
+});

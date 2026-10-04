@@ -5,19 +5,21 @@
  * .test.ts via the shared AST helpers
  * (fixtures/dispatch-gate-ast-helpers.ts).
  *
- * Classification — every op is GATED (admin): createOrganization /
- * deleteOrganization are platform-administration writes. The gate runs
- * IN THE CASE CLAUSE (requireAdmin on an authContext resolved inside the
- * try/case, per finding c79cd4f6, so a derivation exception surfaces as
- * a refusal, never as an unhandled crash mistaken for "allow") and the
- * delegate is only called after it. requireAdmin itself refuses unless
- * the derived roles include "admin" (real if/throw, pinned below);
- * deriveRoles-based derivation means a failed identity parse yields no
- * roles → refusal (fail closed).
+ * Classification — ops are either ADMIN_GATED (requireAdmin) or
+ * MEMBER_GATED (org-membership check). createOrganization /
+ * deleteOrganization / updateTagPolicy are platform-administration writes.
+ * getTagPolicy is a member-gated read (any authenticated org member or
+ * admin). The admin gates run IN THE CASE CLAUSE (requireAdmin on an
+ * authContext resolved inside the try/case, per finding c79cd4f6, so a
+ * derivation exception surfaces as a refusal, never as an unhandled crash
+ * mistaken for "allow") and the delegate is only called after it.
+ * requireAdmin itself refuses unless the derived roles include "admin"
+ * (real if/throw, pinned below); deriveRoles-based derivation means a
+ * failed identity parse yields no roles → refusal (fail closed).
  *
- * There is no org reconciliation here BY DESIGN: organizations are the
- * tenancy roots themselves — only platform admins may create or delete
- * them, and admin access is cross-org everywhere else in this codebase.
+ * getTagPolicy delegates membership checking to the callee (getTagPolicy
+ * function), which uses isAdminFromEvent + extractOrgFromEvent to verify
+ * the caller is either admin or a member of the target org.
  */
 import * as fs from "fs";
 import * as path from "path";
@@ -36,9 +38,25 @@ import {
 
 const HANDLER_PATH = path.join(__dirname, "..", "organization-resolver.ts");
 
-const GATED_OPS: Record<string, { fn: string }> = {
+/** Admin-gated ops: requireAdmin is called in the dispatch case clause. */
+const ADMIN_GATED_OPS: Record<string, { fn: string }> = {
   createOrganization: { fn: "createOrganization" },
   deleteOrganization: { fn: "deleteOrganization" },
+  updateTagPolicy: { fn: "updateTagPolicy" },
+};
+
+/**
+ * Member-gated ops: access control delegated to the callee (the callee
+ * checks isAdminFromEvent + extractOrgFromEvent internally).
+ */
+const MEMBER_GATED_OPS: Record<string, { fn: string }> = {
+  getTagPolicy: { fn: "getTagPolicy" },
+};
+
+/** All classified ops — union of admin-gated and member-gated. */
+const ALL_OPS: Record<string, { fn: string }> = {
+  ...ADMIN_GATED_OPS,
+  ...MEMBER_GATED_OPS,
 };
 
 describe("organization-resolver — dispatch enumeration completeness", () => {
@@ -55,19 +73,19 @@ describe("organization-resolver — dispatch enumeration completeness", () => {
     );
   });
 
-  test("every dispatch case is accounted for in GATED_OPS", () => {
-    const unaccounted = caseNames.filter((c) => !(c in GATED_OPS));
+  test("every dispatch case is accounted for in the classification tables", () => {
+    const unaccounted = caseNames.filter((c) => !(c in ALL_OPS));
     expect(unaccounted).toEqual([]);
   });
 
   test("no classification entry references a case that no longer exists in the switch", () => {
     const known = new Set(caseNames);
-    const stale = Object.keys(GATED_OPS).filter((k) => !known.has(k));
+    const stale = Object.keys(ALL_OPS).filter((k) => !known.has(k));
     expect(stale).toEqual([]);
   });
 
-  test("the classification table covers exactly the dispatch surface", () => {
-    expect(Object.keys(GATED_OPS).length).toBe(caseNames.length);
+  test("the classification tables cover exactly the dispatch surface", () => {
+    expect(Object.keys(ALL_OPS).length).toBe(caseNames.length);
   });
 
   test("the dispatch default clause throws on unknown fields (fails closed)", () => {
@@ -96,8 +114,8 @@ describe("organization-resolver — dispatch enumeration completeness", () => {
     expect(failClosed).toBe(true);
   });
 
-  describe.each(Object.entries(GATED_OPS))(
-    "GATED_OPS['%s'] (admin-gated in the case clause)",
+  describe.each(Object.entries(ADMIN_GATED_OPS))(
+    "ADMIN_GATED_OPS['%s'] (admin-gated in the case clause)",
     (fieldName, meta) => {
       test(`case '${fieldName}' derives authContext from the event and calls requireAdmin(authContext, ...)`, () => {
         const clause = dispatch.cases.get(fieldName);
@@ -123,6 +141,19 @@ describe("organization-resolver — dispatch enumeration completeness", () => {
         expect(Math.min(...gates.map((c) => c.start))).toBeLessThan(
           Math.min(...targets.map((c) => c.start)),
         );
+      });
+    },
+  );
+
+  describe.each(Object.entries(MEMBER_GATED_OPS))(
+    "MEMBER_GATED_OPS['%s'] (member-gated, access control in callee)",
+    (fieldName, meta) => {
+      test(`case '${fieldName}' delegates to ${meta.fn}`, () => {
+        const clause = dispatch.cases.get(fieldName);
+        expect(clause).toBeDefined();
+        const calls = collectCalls(clause as ts.Node, sf);
+        const targets = calls.filter((c) => c.callee === meta.fn);
+        expect(targets.length).toBeGreaterThanOrEqual(1);
       });
     },
   );

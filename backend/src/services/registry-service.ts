@@ -394,6 +394,8 @@ export interface AgentCustomMetadata {
    * `governanceAttestation`. Absent until the agent has been published once.
    */
   gatewayPublication?: GatewayPublicationMetadata;
+  /** User-supplied resource tags (CIT-042). Format-validated by normaliseTags. */
+  tags?: Record<string, string>;
 }
 
 /**
@@ -421,6 +423,8 @@ export interface ToolCustomMetadata {
   decidedBy?: string; // admin who approved/rejected
   decidedAt?: string; // ISO timestamp of decision
   statusReason?: string; // reason for rejection
+  /** User-supplied resource tags (CIT-042). Format-validated by normaliseTags. */
+  tags?: Record<string, string>;
 }
 
 export type ResourceType = "agent" | "tool";
@@ -502,6 +506,8 @@ export interface AgentConfig {
   gatewayPublication?: GatewayPublicationMetadata;
   /** AppSync caller identity who created this record. Absent on legacy records. */
   createdBy?: string;
+  /** User-supplied resource tags (CIT-042). Absent on legacy/pre-tag records. */
+  tags?: Record<string, string>;
 }
 
 export interface ToolConfig {
@@ -529,6 +535,8 @@ export interface ToolConfig {
   decidedAt?: string;
   /** Reason supplied when this record was rejected. */
   statusReason?: string;
+  /** User-supplied resource tags (CIT-042). Absent on legacy/pre-tag records. */
+  tags?: Record<string, string>;
 }
 
 // ---------------------------------------------------------------------------
@@ -2119,6 +2127,8 @@ export class RegistryService {
         : {}),
       // Surface createdBy when present (CIT-043 ownership visibility).
       ...(meta.createdBy ? { createdBy: meta.createdBy } : {}),
+      // Surface user-supplied tags when present (CIT-042).
+      ...(meta.tags ? { tags: meta.tags } : {}),
     };
   }
 
@@ -2168,6 +2178,8 @@ export class RegistryService {
       ...(meta.decidedBy ? { decidedBy: meta.decidedBy } : {}),
       ...(meta.decidedAt ? { decidedAt: meta.decidedAt } : {}),
       ...(meta.statusReason ? { statusReason: meta.statusReason } : {}),
+      // Surface user-supplied tags when present (CIT-042).
+      ...(meta.tags ? { tags: meta.tags } : {}),
     };
   }
 }

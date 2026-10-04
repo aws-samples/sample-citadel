@@ -31,6 +31,7 @@ import { extractUserIdFromEvent } from "../utils/auth";
 import { isRecordVisible, viewerFromEvent } from "../utils/record-visibility";
 import { getGovernanceEnforce } from "../utils/governance-flag";
 import { publishEvent } from "../utils/events";
+import { normaliseTags } from "../utils/tag-policy";
 import {
   computeTrustPath,
   isCrossAccountRoleArn,
@@ -164,6 +165,8 @@ interface AgentConfig {
   registryStatus?: string;
   /** AppSync caller identity who created this record (CIT-043 ownership). */
   createdBy?: string;
+  /** User-supplied resource tags (CIT-042). */
+  tags?: Record<string, string>;
 }
 
 /** Merged create/update mutation input (config required only on create). */
@@ -174,6 +177,7 @@ interface AgentConfigMutationInput {
   categories?: string[] | string;
   icon?: string;
   appId?: string;
+  tags?: unknown;
 }
 
 /** Minimal slice of the AppSync event needed for org/admin extraction. */
@@ -483,6 +487,7 @@ export async function createAgentConfigRegistry(
     appId: input.appId || undefined,
     orgId,
     createdBy: extractUserIdFromEvent(event),
+    ...(input.tags !== undefined ? { tags: normaliseTags(input.tags) } : {}),
   } as AgentCustomMetadata);
 
   const record = await registryService.createResource("agent", input.agentId, {
@@ -649,6 +654,7 @@ export async function updateAgentConfigRegistry(
     appId?: string;
     manifest?: Record<string, unknown>;
     orgId?: string;
+    tags?: Record<string, string>;
   }>(existing.customDescriptorContent ?? null, {
     categories: [],
     icon: "",
@@ -656,6 +662,7 @@ export async function updateAgentConfigRegistry(
     appId: undefined,
     manifest: undefined,
     orgId: undefined,
+    tags: undefined,
   });
 
   // Tenancy reconciliation BEFORE any mutation (finding 1fcfd11e): compare the
@@ -880,6 +887,8 @@ export async function updateAgentConfigRegistry(
     appId: input.appId !== undefined ? input.appId : existingMeta.appId,
     manifest: existingMeta.manifest,
     orgId: preservedOrgId,
+    tags:
+      input.tags !== undefined ? normaliseTags(input.tags) : existingMeta.tags,
   };
   const updatedMeta = registryService.serializeCustomMetadata(
     (importAttestationToPersist
@@ -1121,6 +1130,7 @@ export async function publishAgentManifestRegistry(
     appId?: string;
     manifest?: Record<string, unknown>;
     orgId?: string;
+    tags?: Record<string, string>;
   }>(existing.customDescriptorContent ?? null, {
     categories: [],
     icon: "",
@@ -1128,6 +1138,7 @@ export async function publishAgentManifestRegistry(
     appId: undefined,
     manifest: undefined,
     orgId: undefined,
+    tags: undefined,
   });
 
   const updatedMeta = registryService.serializeCustomMetadata({
