@@ -102,3 +102,88 @@ export function normaliseTagPolicy(
     return { key: trimmedKey, allowedValues: deduped };
   });
 }
+
+// ─── Tag format validation (per-record, unconditional) ──────────────────
+
+/**
+ * Distinct error codes for tag format violations.
+ * Consumers can switch on `code` for programmatic handling.
+ */
+export type TagFormatErrorCode =
+  "TOO_MANY_KEYS" | "KEY_TOO_LONG" | "VALUE_TOO_LONG" | "INVALID_TYPE";
+
+export class TagFormatError extends Error {
+  readonly code: TagFormatErrorCode;
+  constructor(code: TagFormatErrorCode, message: string) {
+    super(message);
+    this.name = "TagFormatError";
+    this.code = code;
+  }
+}
+
+/** Maximum number of tags on a single record. */
+const MAX_TAG_KEYS = 10;
+/** Maximum length of a tag key. */
+const MAX_TAG_KEY_LENGTH = 64;
+/** Maximum length of a tag value. */
+const MAX_TAG_VALUE_LENGTH = 256;
+
+/**
+ * Validates and normalises a raw `tags` input (typically parsed from AWSJSON)
+ * into a typed `Record<string, string>`.
+ *
+ * FORMAT limits enforced unconditionally (decision ad393b11):
+ *  - ≤10 keys
+ *  - each key ≤64 chars
+ *  - each value ≤256 chars
+ *  - all values must be strings
+ *
+ * Throws {@link TagFormatError} with a distinct code on any violation.
+ */
+export function normaliseTags(input: unknown): Record<string, string> {
+  if (input === null || input === undefined) {
+    return {};
+  }
+  if (typeof input !== "object" || Array.isArray(input)) {
+    throw new TagFormatError(
+      "INVALID_TYPE",
+      "Tags must be a JSON object (Record<string, string>)",
+    );
+  }
+
+  const raw = input as Record<string, unknown>;
+  const keys = Object.keys(raw);
+
+  if (keys.length > MAX_TAG_KEYS) {
+    throw new TagFormatError(
+      "TOO_MANY_KEYS",
+      `Tags must have at most ${MAX_TAG_KEYS} keys, got ${keys.length}`,
+    );
+  }
+
+  const result: Record<string, string> = {};
+  for (const key of keys) {
+    if (key.length > MAX_TAG_KEY_LENGTH) {
+      throw new TagFormatError(
+        "KEY_TOO_LONG",
+        `Tag key must be at most ${MAX_TAG_KEY_LENGTH} characters, got length ${key.length}`,
+      );
+    }
+    const value = raw[key];
+    if (typeof value !== "string") {
+      throw new TagFormatError(
+        "INVALID_TYPE",
+        `Tag value for key "${key}" must be a string, got ${typeof value}`,
+      );
+    }
+    if (value.length > MAX_TAG_VALUE_LENGTH) {
+      throw new TagFormatError(
+        "VALUE_TOO_LONG",
+        `Tag value for key "${key}" must be at most ${MAX_TAG_VALUE_LENGTH} characters, got length ${value.length}`,
+      );
+    }
+    result[key] = value;
+  }
+
+  return result;
+}

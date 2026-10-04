@@ -741,6 +741,9 @@ type AgentConfig {
   # surfaced READ-only. Absent until publishImportToGateway has run; never an
   # active/trusted field and never changes the record's DRAFT/activation state.
   gatewayPublication: GatewayPublication
+  # User-supplied resource tags (CIT-042). AWSJSON since GraphQL has no
+  # native map type — the value is a JSON object of string→string pairs.
+  tags: AWSJSON
 }
 
 # UNTRUSTED, LLM-proposed agent manifest (Tier-3 agent import), surfaced
@@ -831,6 +834,7 @@ input ImportAgentInput {
   substrate: String!
   categories: [String!]
   onConflict: ImportConflictPolicy
+  tags: AWSJSON
 }
 
 # On success: { agent, conflict: false }. On an unresolved collision:
@@ -1048,6 +1052,9 @@ type ToolConfig {
   decidedAt: AWSDateTime
   # Reason supplied when a tool record is rejected.
   statusReason: String
+  # User-supplied resource tags (CIT-042). AWSJSON since GraphQL has no
+  # native map type — the value is a JSON object of string→string pairs.
+  tags: AWSJSON
 }
 
 type DeleteToolConfigResult {
@@ -1271,6 +1278,7 @@ input CreateAgentConfigInput {
   config: AWSJSON!
   state: AgentState
   categories: [String]
+  tags: AWSJSON
 }
 
 input UpdateAgentConfigInput {
@@ -1278,6 +1286,7 @@ input UpdateAgentConfigInput {
   config: AWSJSON
   state: AgentState
   categories: [String]
+  tags: AWSJSON
 }
 
 input UpdateAgentCodeInput {
@@ -1306,6 +1315,7 @@ input CreateToolConfigInput {
   categories: [String]
   integrationBindings: [IntegrationBindingInput]
   dataStoreBindings: [DataStoreBindingInput]
+  tags: AWSJSON
 }
 
 input UpdateToolConfigInput {
@@ -1319,6 +1329,7 @@ input UpdateToolConfigInput {
   # Required when transitioning PENDING_APPROVAL -> REJECTED. Ignored for
   # every other transition.
   statusReason: String
+  tags: AWSJSON
 }
 
 input CreateAgentRequestInput {
@@ -1328,6 +1339,7 @@ input CreateAgentRequestInput {
   integrations: [String]
   dataStores: [String]
   appId: String
+  tags: AWSJSON
 }
 
 input CreateToolRequestInput {
