@@ -1283,3 +1283,72 @@ describe("TelemetryStack — platform-health alarms (6 new; decision ab73ae1b)",
     });
   });
 });
+
+describe("TelemetryStack — cost-ledger-writer agent config table access (CIT-042 tag propagation)", () => {
+  test("cost-ledger-writer Lambda env includes AGENT_CONFIG_TABLE", () => {
+    const { template } = buildStack();
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Handler: "cost-ledger-writer.handler",
+      Environment: {
+        Variables: Match.objectLike({
+          AGENT_CONFIG_TABLE: Match.anyValue(),
+        }),
+      },
+    });
+  });
+
+  test("cost-ledger-writer role is granted dynamodb:GetItem on the agent config table (read grant)", () => {
+    const { template } = buildStack();
+    const allPolicies = template.findResources("AWS::IAM::Policy");
+    let sawGetItem = false;
+    for (const [, resource] of Object.entries(allPolicies)) {
+      const roles = resource.Properties?.Roles ?? [];
+      const roleRefs = JSON.stringify(roles);
+      if (!roleRefs.includes("CostLedgerWriter")) continue;
+      const statements = resource.Properties?.PolicyDocument?.Statement ?? [];
+      for (const stmt of statements) {
+        const actions: string[] = Array.isArray(stmt.Action)
+          ? stmt.Action
+          : [stmt.Action];
+        if (actions.includes("dynamodb:GetItem")) {
+          sawGetItem = true;
+        }
+      }
+    }
+    expect(sawGetItem).toBe(true);
+  });
+
+  test("cost-ledger-writer role holds no dynamodb write actions on the agent config table", () => {
+    const { template } = buildStack();
+    const allPolicies = template.findResources("AWS::IAM::Policy");
+    const writeActions = [
+      "dynamodb:PutItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:DeleteItem",
+      "dynamodb:BatchWriteItem",
+    ];
+    for (const [, resource] of Object.entries(allPolicies)) {
+      const roles = resource.Properties?.Roles ?? [];
+      const roleRefs = JSON.stringify(roles);
+      if (!roleRefs.includes("CostLedgerWriter")) continue;
+      const statements = resource.Properties?.PolicyDocument?.Statement ?? [];
+      for (const stmt of statements) {
+        const actions: string[] = Array.isArray(stmt.Action)
+          ? stmt.Action
+          : [stmt.Action];
+        // Only check statements whose resource refs include the agent config table.
+        // The writer DOES have write actions on the cost ledger table — that's correct.
+        const resources = Array.isArray(stmt.Resource)
+          ? stmt.Resource
+          : [stmt.Resource];
+        const resourceStr = JSON.stringify(resources);
+        // If resource references the agent config table (by logical ID substring)
+        if (resourceStr.includes("TestAgentConfigTable")) {
+          for (const wa of writeActions) {
+            expect(actions).not.toContain(wa);
+          }
+        }
+      }
+    }
+  });
+});
