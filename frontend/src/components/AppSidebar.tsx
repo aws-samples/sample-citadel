@@ -77,7 +77,7 @@ export function AppSidebar({ activeItem = 'dashboard', onNavigate }: AppSidebarP
   const [pendingCount, setPendingCount] = useState(0);
 
   useEffect(() => {
-    if (!isAdmin) return;
+    if (loading || !isAdmin) return;
     let cancelled = false;
     approvalsService.listPendingApprovals({ limit: 50 }).then((data) => {
       if (!cancelled) setPendingCount(data.items.length);
@@ -85,7 +85,7 @@ export function AppSidebar({ activeItem = 'dashboard', onNavigate }: AppSidebarP
       /* best-effort badge */
     });
     return () => { cancelled = true; };
-  }, [isAdmin, location.pathname]);
+  }, [isAdmin, loading, location.pathname]);
 
   return (
     <Sidebar collapsible="icon">
@@ -133,7 +133,7 @@ export function AppSidebar({ activeItem = 'dashboard', onNavigate }: AppSidebarP
           <SidebarGroupContent>
             <SidebarMenu>
               {navigationItems
-                .filter((item) => !item.adminOnly || isAdmin)
+                .filter((item) => !item.adminOnly || loading || isAdmin)
                 .map((item) => {
                 const Icon = item.icon;
                 return (

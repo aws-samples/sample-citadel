@@ -3,23 +3,27 @@ import '@testing-library/jest-dom';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { RequireAdmin } from '../RequireAdmin';
 
-// Shared mock reference so each test file can override
+// Shared mock state so individual tests can override
 let mockIsAdmin = true;
+let mockLoading = false;
 
 jest.mock('../../contexts/OrganizationContext', () => ({
   useOrganization: () => ({
     selectedOrganization: 'TestOrg',
     setSelectedOrganization: jest.fn(),
     organizations: ['TestOrg'],
-    currentUser: { userId: 'u1', role: mockIsAdmin ? 'admin' : 'developer', organization: 'TestOrg' },
+    currentUser: mockLoading
+      ? null
+      : { userId: 'u1', role: mockIsAdmin ? 'admin' : 'developer', organization: 'TestOrg' },
     isAdmin: mockIsAdmin,
-    loading: false,
+    loading: mockLoading,
   }),
   OrganizationProvider: ({ children }: any) => <>{children}</>,
 }));
 
-function renderWithRouter(isAdmin: boolean) {
+function renderWithRouter(isAdmin: boolean, loading = false) {
   mockIsAdmin = isAdmin;
+  mockLoading = loading;
   return render(
     <MemoryRouter initialEntries={['/admin-page']}>
       <Routes>
@@ -47,5 +51,12 @@ describe('RequireAdmin', () => {
     renderWithRouter(false);
     expect(screen.queryByTestId('admin-content')).not.toBeInTheDocument();
     expect(screen.getByTestId('home')).toBeInTheDocument();
+  });
+
+  it('shows loading indicator while profile is loading and does not redirect', () => {
+    renderWithRouter(false, true);
+    expect(screen.getByTestId('admin-loading')).toBeInTheDocument();
+    expect(screen.queryByTestId('admin-content')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('home')).not.toBeInTheDocument();
   });
 });

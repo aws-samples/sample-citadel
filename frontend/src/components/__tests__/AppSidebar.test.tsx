@@ -27,14 +27,17 @@ jest.mock('../../services/approvalsService', () => ({
 
 // ---------- org context ----------
 let mockIsAdmin = true;
+let mockLoading = false;
 jest.mock('../../contexts/OrganizationContext', () => ({
   useOrganization: () => ({
     selectedOrganization: 'TestOrg',
     setSelectedOrganization: jest.fn(),
     organizations: ['TestOrg'],
-    currentUser: { userId: 'u1', role: mockIsAdmin ? 'admin' : 'dev', organization: 'TestOrg' },
+    currentUser: mockLoading
+      ? null
+      : { userId: 'u1', role: mockIsAdmin ? 'admin' : 'dev', organization: 'TestOrg' },
     isAdmin: mockIsAdmin,
-    loading: false,
+    loading: mockLoading,
   }),
 }));
 
@@ -51,6 +54,7 @@ function renderSidebar() {
 describe('AppSidebar — Approvals entry', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockLoading = false;
     mockListPendingApprovals.mockResolvedValue({ items: [], nextToken: null });
   });
 
@@ -91,6 +95,18 @@ describe('AppSidebar — Approvals entry', () => {
     renderSidebar();
 
     expect(screen.queryByText('Approvals')).not.toBeInTheDocument();
+    expect(mockListPendingApprovals).not.toHaveBeenCalled();
+  });
+
+  it('keeps Approvals visible while loading and does not fetch pending count', () => {
+    mockIsAdmin = false;
+    mockLoading = true;
+
+    renderSidebar();
+
+    // Approvals entry is shown during loading (not hidden prematurely)
+    expect(screen.getByText('Approvals')).toBeInTheDocument();
+    // Pending-count fetch should not fire while still loading
     expect(mockListPendingApprovals).not.toHaveBeenCalled();
   });
 });
