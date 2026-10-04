@@ -33,6 +33,8 @@ export interface ToolConfig {
    * do not infer it from any other field (finding 414f8013).
    */
   registryStatus?: string | null;
+  /** Resource tags (key=value pairs, AWSJSON on the wire). */
+  tags?: Record<string, string> | null;
 }
 
 const listToolConfigsQuery = `
@@ -42,6 +44,7 @@ const listToolConfigsQuery = `
       config
       state
       categories
+      tags
       integrationBindings { integrationId integrationType operations direction }
       dataStoreBindings { dataStoreId dataStoreType operations direction }
       registryStatus
@@ -58,6 +61,7 @@ const getToolConfigQuery = `
       config
       state
       categories
+      tags
       integrationBindings { integrationId integrationType operations direction }
       dataStoreBindings { dataStoreId dataStoreType operations direction }
       registryStatus
@@ -74,6 +78,7 @@ const searchToolConfigsQuery = `
       config
       state
       categories
+      tags
       integrationBindings { integrationId integrationType operations direction }
       dataStoreBindings { dataStoreId dataStoreType operations direction }
       registryStatus
@@ -90,6 +95,7 @@ const createToolConfigMutation = `
       config
       state
       categories
+      tags
       integrationBindings { integrationId integrationType operations direction }
       dataStoreBindings { dataStoreId dataStoreType operations direction }
       createdAt
@@ -105,6 +111,7 @@ const updateToolConfigMutation = `
       config
       state
       categories
+      tags
       integrationBindings { integrationId integrationType operations direction }
       dataStoreBindings { dataStoreId dataStoreType operations direction }
       createdAt
@@ -141,6 +148,7 @@ export const toolConfigService = {
       return (response.listToolConfigs || []).map((tool: any) => ({
         ...tool,
         config: safeParseConfig(tool.config),
+        tags: typeof tool.tags === 'string' ? JSON.parse(tool.tags) : tool.tags,
       }));
     } catch (error) {
       console.error('Error listing tool configs:', error);
@@ -161,6 +169,7 @@ export const toolConfigService = {
       return {
         ...tool,
         config: safeParseConfig(tool.config),
+        tags: typeof tool.tags === 'string' ? JSON.parse(tool.tags) : tool.tags,
       };
     } catch (error) {
       console.error('Error getting tool config:', error);
@@ -178,6 +187,7 @@ export const toolConfigService = {
       return (response.searchToolConfigs || []).map((tool: any) => ({
         ...tool,
         config: safeParseConfig(tool.config),
+        tags: typeof tool.tags === 'string' ? JSON.parse(tool.tags) : tool.tags,
       }));
     } catch (error) {
       console.warn('Semantic search failed, falling back to client-side filtering:', error);
@@ -205,6 +215,7 @@ export const toolConfigService = {
     config: any;
     state?: 'active' | 'inactive' | 'maintenance';
     categories?: string[];
+    tags?: Record<string, string>;
     integrationBindings?: IntegrationBinding[];
     dataStoreBindings?: DataStoreBinding[];
   }): Promise<ToolConfig> {
@@ -215,6 +226,7 @@ export const toolConfigService = {
           input: {
             ...input,
             config: JSON.stringify(input.config),
+            tags: input.tags ? JSON.stringify(input.tags) : undefined,
           },
         }
       );
@@ -223,6 +235,7 @@ export const toolConfigService = {
       return {
         ...tool,
         config: safeParseConfig(tool.config),
+        tags: typeof tool.tags === 'string' ? JSON.parse(tool.tags) : tool.tags,
       };
     } catch (error) {
       console.error('Error creating tool config:', error);
@@ -235,6 +248,7 @@ export const toolConfigService = {
     config?: any;
     state?: 'active' | 'inactive' | 'maintenance';
     categories?: string[];
+    tags?: Record<string, string>;
     integrationBindings?: IntegrationBinding[];
     dataStoreBindings?: DataStoreBinding[];
     status?: string;
@@ -247,6 +261,7 @@ export const toolConfigService = {
           input: {
             ...input,
             config: input.config ? JSON.stringify(input.config) : undefined,
+            tags: input.tags ? JSON.stringify(input.tags) : undefined,
           },
         }
       );
@@ -255,6 +270,7 @@ export const toolConfigService = {
       return {
         ...tool,
         config: safeParseConfig(tool.config),
+        tags: typeof tool.tags === 'string' ? JSON.parse(tool.tags) : tool.tags,
       };
     } catch (error) {
       console.error('Error updating tool config:', error);

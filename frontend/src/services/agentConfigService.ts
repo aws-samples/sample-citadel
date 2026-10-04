@@ -25,6 +25,8 @@ export interface AgentConfig {
   decidedAt?: string | null;
   /** Reason text — required for REJECTED, optional for APPROVED. */
   statusReason?: string | null;
+  /** Resource tags (key=value pairs, AWSJSON on the wire). */
+  tags?: Record<string, string> | null;
 }
 
 /** Outcome of a bulk project-agent activation, grouped by per-agent result. */
@@ -42,6 +44,7 @@ const listAgentConfigsQuery = `
       config
       state
       categories
+      tags
       registryStatus
       decidedBy
       decidedAt
@@ -60,6 +63,7 @@ const getAgentConfigQuery = `
       config
       state
       categories
+      tags
       registryStatus
       decidedBy
       decidedAt
@@ -78,6 +82,7 @@ const searchAgentConfigsQuery = `
       config
       state
       categories
+      tags
       registryStatus
       createdAt
       updatedAt
@@ -92,6 +97,7 @@ const createAgentConfigMutation = `
       config
       state
       categories
+      tags
       createdAt
       updatedAt
     }
@@ -105,6 +111,7 @@ const updateAgentConfigMutation = `
       config
       state
       categories
+      tags
       createdAt
       updatedAt
     }
@@ -180,6 +187,7 @@ export const agentConfigService = {
       return (response.listAgentConfigs || []).map((agent: any) => ({
         ...agent,
         config: parseAgentConfig(agent.config),
+        tags: typeof agent.tags === 'string' ? JSON.parse(agent.tags) : agent.tags,
       }));
     } catch (error) {
       console.error('Error listing agent configs:', error);
@@ -200,6 +208,7 @@ export const agentConfigService = {
       return {
         ...agent,
         config: parseAgentConfig(agent.config),
+        tags: typeof agent.tags === 'string' ? JSON.parse(agent.tags) : agent.tags,
       };
     } catch (error) {
       console.error('Error getting agent config:', error);
@@ -217,6 +226,7 @@ export const agentConfigService = {
       return (response.searchAgentConfigs || []).map((agent: any) => ({
         ...agent,
         config: parseAgentConfig(agent.config),
+        tags: typeof agent.tags === 'string' ? JSON.parse(agent.tags) : agent.tags,
       }));
     } catch (error) {
       console.warn('Semantic search failed, falling back to client-side filtering:', error);
@@ -244,6 +254,7 @@ export const agentConfigService = {
     config: any;
     state?: 'active' | 'inactive' | 'maintenance';
     categories?: string[];
+    tags?: Record<string, string>;
   }): Promise<AgentConfig> {
     try {
       const response = await serverService.mutate<{ createAgentConfig: AgentConfig }>(
@@ -252,6 +263,7 @@ export const agentConfigService = {
           input: {
             ...input,
             config: JSON.stringify(input.config),
+            tags: input.tags ? JSON.stringify(input.tags) : undefined,
           },
         }
       );
@@ -260,6 +272,7 @@ export const agentConfigService = {
       return {
         ...agent,
         config: parseAgentConfig(agent.config),
+        tags: typeof agent.tags === 'string' ? JSON.parse(agent.tags) : agent.tags,
       };
     } catch (error) {
       console.error('Error creating agent config:', error);
@@ -272,6 +285,7 @@ export const agentConfigService = {
     config?: any;
     state?: 'active' | 'inactive' | 'maintenance';
     categories?: string[];
+    tags?: Record<string, string>;
   }): Promise<AgentConfig> {
     try {
       const response = await serverService.mutate<{ updateAgentConfig: AgentConfig }>(
@@ -280,6 +294,7 @@ export const agentConfigService = {
           input: {
             ...input,
             config: input.config ? JSON.stringify(input.config) : undefined,
+            tags: input.tags ? JSON.stringify(input.tags) : undefined,
           },
         }
       );
@@ -288,6 +303,7 @@ export const agentConfigService = {
       return {
         ...agent,
         config: parseAgentConfig(agent.config),
+        tags: typeof agent.tags === 'string' ? JSON.parse(agent.tags) : agent.tags,
       };
     } catch (error) {
       console.error('Error updating agent config:', error);
