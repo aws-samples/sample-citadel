@@ -50,6 +50,7 @@ import {
 import { getGovernanceEnforce } from "../utils/governance-flag";
 import { assertRecordApprovedForAction } from "./record-approval-check";
 import { REGISTRY_STATUS_FIELD } from "./approval-cache-fields";
+import { enforceTagPolicy } from "./tag-policy-check";
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -611,12 +612,37 @@ export async function publishApp(
         "publish",
         enforcementMode,
       );
+      // Legacy agents have no tag metadata — skip tag policy enforcement.
     } else {
       assertRecordApprovedForAction(
         boundAgentRecord!,
         "publish",
         enforcementMode,
       );
+
+      // 3c. Tag-policy enforcement (CIT-042 PR2): validate each bound
+      // agent's tags against the org's tag policy. Tags live inside the
+      // agent's customDescriptorContent JSON. Legacy agents (handled
+      // above) have no tag metadata and are skipped.
+      if (metadata.orgId) {
+        let agentTags: Record<string, string> | undefined;
+        try {
+          const agentMeta = boundAgentRecord!.customDescriptorContent
+            ? JSON.parse(boundAgentRecord!.customDescriptorContent)
+            : {};
+          agentTags = agentMeta.tags;
+        } catch {
+          // Malformed customDescriptorContent — treat as no tags.
+        }
+        if (agentTags && Object.keys(agentTags).length > 0) {
+          await enforceTagPolicy({
+            orgId: metadata.orgId,
+            tags: agentTags,
+            action: "publish",
+            subjectId: boundAgentId,
+          });
+        }
+      }
     }
   }
 

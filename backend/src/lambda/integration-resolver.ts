@@ -496,6 +496,21 @@ async function createIntegration(
   const integrationId = uuidv4();
   const timestamp = new Date().toISOString();
 
+  // CIT-042 PR2: tag-policy enforcement at provisioning time. Integrations
+  // are org-scoped with no bound owning agent, and CreateIntegrationInput
+  // carries no tags field — skip enforcement with a debug log. When
+  // owning-agent binding is added in a future iteration, this block should
+  // look up the agent's tags and call enforceTagPolicy.
+  console.debug(
+    JSON.stringify({
+      level: "debug",
+      message: "tag-policy-check: skipped_no_owning_agent",
+      action: "createIntegration",
+      orgId: input.orgId,
+      integrationId,
+    }),
+  );
+
   const spec = getConnectorSpec(input.integrationType);
   if (!spec) {
     throw new Error(`Unknown connector type: ${input.integrationType}`);
