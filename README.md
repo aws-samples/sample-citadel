@@ -123,6 +123,7 @@ Prerequisites: AWS CLI, Node.js 24+, Python 3.14+, CDK 2.100+, and Finch (or Doc
 - **[docs/RESOLVER_GUIDE.md](docs/RESOLVER_GUIDE.md)** - Lambda resolver development guide
 - **[docs/ADAPTER_GUIDE.md](docs/ADAPTER_GUIDE.md)** - Adapter development guide (adding datastores/integrations)
 - **[docs/AGENT_APPS.md](docs/AGENT_APPS.md)** - Agent Apps platform architecture
+- **[docs/AGENT_RECORDS.md](docs/AGENT_RECORDS.md)** - Registry record lifecycle, approvals workflow, and governance integration
 - **[docs/BLUEPRINTS_WORKFLOWS.md](docs/BLUEPRINTS_WORKFLOWS.md)** - Workflow engine and DAG execution
 - **[docs/WORKFLOW_USER_GUIDE.md](docs/WORKFLOW_USER_GUIDE.md)** - End-to-end workflow guide (blueprints, canvas, publish, run, inspect)
 - **[docs/DATASTORES_INTEGRATIONS.md](docs/DATASTORES_INTEGRATIONS.md)** - Datastore and integration subsystem
