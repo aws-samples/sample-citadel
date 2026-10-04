@@ -146,3 +146,34 @@ export function visibleStatusesFor(viewer: Viewer): string[] {
 
   return result;
 }
+
+// ---------------------------------------------------------------------------
+// Event → Viewer factory — bridges the AppSync identity to the Viewer type
+// ---------------------------------------------------------------------------
+
+// Import lazily to keep the core policy functions above dependency-free.
+// These imports are used ONLY by viewerFromEvent, which is the single call
+// site that bridges an AppSync event into the pure Viewer value.
+import {
+  extractOrgFromEvent,
+  isAdminFromEvent,
+  deriveRoles,
+} from "./auth-event";
+import { extractUserIdFromEvent } from "./auth";
+
+/**
+ * Constructs a {@link Viewer} from an AppSync resolver event.
+ *
+ * Combines the auth helpers scattered across auth-event.ts and auth.ts into
+ * a single factory so every list/search call site can build a Viewer in one
+ * call instead of four.
+ */
+export async function viewerFromEvent(event: unknown): Promise<Viewer> {
+  const [orgId] = await Promise.all([extractOrgFromEvent(event)]);
+  return {
+    isAdmin: isAdminFromEvent(event),
+    roles: deriveRoles(event),
+    orgId,
+    userId: extractUserIdFromEvent(event),
+  };
+}

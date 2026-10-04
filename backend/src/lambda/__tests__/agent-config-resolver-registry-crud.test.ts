@@ -172,6 +172,7 @@ describe("Registry-backed CRUD functions (task 6.4)", () => {
         state: "active",
         appId: undefined,
         orgId: "test-org-a",
+        createdBy: "anonymous",
       });
       expect(mockCreateResource).toHaveBeenCalledWith("agent", "agent-1", {
         name: "TestAgent",
