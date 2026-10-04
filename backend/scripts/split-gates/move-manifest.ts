@@ -1961,16 +1961,12 @@ export const ADDITION_ALLOWLIST: AllowlistEntry[] = [
     justification: "Pending approvals queue for administrators.",
   },
   {
-    logicalId: "AgenticAIApiGetTagPolicyResolver",
-    justification:
-      "CIT-042: Organisation tag policy read (member or admin). " +
-      "Logical ID placeholder — re-derive from `cdk synth` output.",
+    logicalId: "AgenticAIApiGetTagPolicyResolverC8C12F23",
+    justification: "CIT-042: Organisation tag policy read (member or admin).",
   },
   {
-    logicalId: "AgenticAIApiUpdateTagPolicyResolver",
-    justification:
-      "CIT-042: Administrator-only tag policy editor. " +
-      "Logical ID placeholder — re-derive from `cdk synth` output.",
+    logicalId: "AgenticAIApiUpdateTagPolicyResolverC38663E3",
+    justification: "CIT-042: Administrator-only tag policy editor.",
   },
 ];
 

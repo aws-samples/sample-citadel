@@ -2772,6 +2772,20 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
+    organizationLambdaDataSource.createResolver("GetTagPolicyResolver", {
+      typeName: "Query",
+      fieldName: "getTagPolicy",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    organizationLambdaDataSource.createResolver("UpdateTagPolicyResolver", {
+      typeName: "Mutation",
+      fieldName: "updateTagPolicy",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
     // NOTE: PublishChatterResolver moved to CitadelProjectsStack.
 
     // Integration Resolvers
