@@ -11,13 +11,7 @@ import {
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from '../components/ui/tooltip';
-import {
   approvalsService,
-  supportsToolDecisions,
 } from '../services/approvalsService';
 import type {
   PendingApprovalItem,
@@ -93,9 +87,6 @@ export function ApprovalsPage() {
     }
   };
 
-  const actionsDisabled = (record: PendingApprovalItem) =>
-    record.recordType === 'tool' && !supportsToolDecisions;
-
   return (
     <div className="p-6 flex flex-col gap-4">
       <h1 className="text-2xl font-semibold">Pending Approvals</h1>
@@ -137,35 +128,23 @@ export function ApprovalsPage() {
                 </TableCell>
                 <TableCell>{record.createdBy}</TableCell>
                 <TableCell>
-                  {actionsDisabled(record) ? (
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <span className="inline-flex gap-2" data-testid="tool-actions-disabled">
-                          <Button size="sm" disabled>Approve</Button>
-                          <Button size="sm" variant="destructive" disabled>Reject</Button>
-                        </span>
-                      </TooltipTrigger>
-                      <TooltipContent>Tool decisions are not yet supported</TooltipContent>
-                    </Tooltip>
-                  ) : (
-                    <span className="inline-flex gap-2">
-                      <Button
-                        size="sm"
-                        onClick={() => openDialog(record, 'APPROVED')}
-                        data-testid={`approve-${record.recordId}`}
-                      >
-                        Approve
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="destructive"
-                        onClick={() => openDialog(record, 'REJECTED')}
-                        data-testid={`reject-${record.recordId}`}
-                      >
-                        Reject
-                      </Button>
-                    </span>
-                  )}
+                  <span className="inline-flex gap-2">
+                    <Button
+                      size="sm"
+                      onClick={() => openDialog(record, 'APPROVED')}
+                      data-testid={`approve-${record.recordId}`}
+                    >
+                      Approve
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      onClick={() => openDialog(record, 'REJECTED')}
+                      data-testid={`reject-${record.recordId}`}
+                    >
+                      Reject
+                    </Button>
+                  </span>
                 </TableCell>
               </TableRow>
             ))}

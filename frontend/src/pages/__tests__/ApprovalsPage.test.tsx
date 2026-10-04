@@ -30,15 +30,6 @@ jest.mock('@/components/ui/button', () => ({
     React.createElement('button', { onClick, disabled, ...rest }, children),
 }));
 
-jest.mock('@/components/ui/tooltip', () => {
-  const React = require('react');
-  return {
-    Tooltip: ({ children }: any) => React.createElement(React.Fragment, null, children),
-    TooltipTrigger: ({ children, asChild }: any) => (asChild ? children : React.createElement('span', null, children)),
-    TooltipContent: ({ children }: any) => React.createElement('div', { 'data-testid': 'tooltip-content' }, children),
-  };
-});
-
 jest.mock('@/components/ApprovalDecisionDialog', () => ({
   ApprovalDecisionDialog: ({ record, decision, onConfirm, onCancel }: any) =>
     React.createElement('div', { 'data-testid': 'decision-dialog', 'data-decision': decision },
@@ -53,7 +44,6 @@ jest.mock('@/services/approvalsService', () => ({
     listPendingApprovals: jest.fn(),
     decideApproval: jest.fn(),
   },
-  supportsToolDecisions: false,
 }));
 
 import { toast } from 'sonner';
@@ -162,7 +152,7 @@ describe('ApprovalsPage', () => {
     );
   });
 
-  it('tool row actions are disabled', async () => {
+  it('tool row shows enabled approve/reject buttons', async () => {
     mockList.mockResolvedValue({
       items: [makeRecord({ recordId: 't1', recordType: 'tool' })],
       nextToken: null,
@@ -170,9 +160,32 @@ describe('ApprovalsPage', () => {
 
     await act(async () => { render(React.createElement(ApprovalsPage)); });
 
-    const disabledWrapper = screen.getByTestId('tool-actions-disabled');
-    const buttons = disabledWrapper.querySelectorAll('button');
-    buttons.forEach((btn) => expect(btn).toBeDisabled());
+    const approveBtn = screen.getByTestId('approve-t1');
+    const rejectBtn = screen.getByTestId('reject-t1');
+    expect(approveBtn).not.toBeDisabled();
+    expect(rejectBtn).not.toBeDisabled();
+  });
+
+  it('tool approve calls decideApproval with tool recordType', async () => {
+    const record = makeRecord({ recordId: 't1', recordType: 'tool' });
+    mockList.mockResolvedValue({ items: [record], nextToken: null });
+    mockDecide.mockResolvedValue(undefined);
+
+    await act(async () => { render(React.createElement(ApprovalsPage)); });
+
+    fireEvent.click(screen.getByTestId('approve-t1'));
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('dialog-confirm'));
+    });
+
+    expect(mockDecide).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recordId: 't1',
+        recordType: 'tool',
+        decision: 'APPROVED',
+      }),
+    );
   });
 
   it('shows Load more when nextToken exists', async () => {

@@ -1,6 +1,7 @@
-import { approvalsService, NotSupportedError, supportsToolDecisions } from '../approvalsService';
+import { approvalsService } from '../approvalsService';
 import serverService from '../server';
 import { appApiService } from '../appApiService';
+import { toolConfigService } from '../toolConfigService';
 
 jest.mock('../server', () => ({
   __esModule: true,
@@ -11,8 +12,13 @@ jest.mock('../appApiService', () => ({
   appApiService: { updateApp: jest.fn() },
 }));
 
+jest.mock('../toolConfigService', () => ({
+  toolConfigService: { updateToolConfig: jest.fn() },
+}));
+
 const mockQuery = serverService.query as jest.Mock;
 const mockUpdateApp = appApiService.updateApp as jest.Mock;
+const mockUpdateToolConfig = toolConfigService.updateToolConfig as jest.Mock;
 
 describe('approvalsService', () => {
   beforeEach(() => jest.clearAllMocks());
@@ -75,6 +81,7 @@ describe('approvalsService', () => {
         status: 'APPROVED',
         statusReason: undefined,
       });
+      expect(mockUpdateToolConfig).not.toHaveBeenCalled();
     });
 
     it('passes statusReason for REJECTED agent records', async () => {
@@ -96,23 +103,40 @@ describe('approvalsService', () => {
       });
     });
 
-    it('throws NotSupportedError for tool records', async () => {
-      await expect(
-        approvalsService.decideApproval({
-          recordId: 'tool1',
-          recordType: 'tool',
-          decision: 'APPROVED',
-          version: 1,
-        }),
-      ).rejects.toThrow(NotSupportedError);
+    it('calls updateToolConfig with APPROVED for tool records', async () => {
+      mockUpdateToolConfig.mockResolvedValue({});
 
+      await approvalsService.decideApproval({
+        recordId: 'tool1',
+        recordType: 'tool',
+        decision: 'APPROVED',
+        version: 1,
+      });
+
+      expect(mockUpdateToolConfig).toHaveBeenCalledWith({
+        toolId: 'tool1',
+        status: 'APPROVED',
+        statusReason: undefined,
+      });
       expect(mockUpdateApp).not.toHaveBeenCalled();
     });
-  });
 
-  describe('supportsToolDecisions', () => {
-    it('is false', () => {
-      expect(supportsToolDecisions).toBe(false);
+    it('passes statusReason for REJECTED tool records', async () => {
+      mockUpdateToolConfig.mockResolvedValue({});
+
+      await approvalsService.decideApproval({
+        recordId: 'tool2',
+        recordType: 'tool',
+        decision: 'REJECTED',
+        version: 1,
+        statusReason: 'Security concern',
+      });
+
+      expect(mockUpdateToolConfig).toHaveBeenCalledWith({
+        toolId: 'tool2',
+        status: 'REJECTED',
+        statusReason: 'Security concern',
+      });
     });
   });
 });
