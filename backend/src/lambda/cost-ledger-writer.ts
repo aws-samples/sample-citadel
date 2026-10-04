@@ -39,7 +39,11 @@
  */
 
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+} from "@aws-sdk/lib-dynamodb";
 import type { EventBridgeEvent } from "aws-lambda";
 import { resolvePricing } from "./utils/cost-pricing";
 import { computeTokenCost, type UnpricedReason } from "./utils/cost-compute";
@@ -53,6 +57,77 @@ const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
 
 const COST_LEDGER_TABLE = process.env.COST_LEDGER_TABLE!;
+
+/**
+ * Agent-tag lookup — per-invocation memo keyed by agentId.
+ * Policy (decision ad393b11): any lookup failure or missing env → log WARN
+ * once and write the row WITHOUT tags. NEVER drop or delay the row.
+ */
+let agentTagCache: Map<string, Promise<Record<string, string> | null>>;
+let agentTagEnvWarned: boolean;
+
+function resetAgentTagState(): void {
+  agentTagCache = new Map();
+  agentTagEnvWarned = false;
+}
+resetAgentTagState();
+
+/** Exported for test access only. */
+export const _testInternals = { resetAgentTagState };
+
+async function lookupAgentTags(
+  agentId: string,
+  orgId: string,
+): Promise<Record<string, string> | null> {
+  const tableName = process.env.AGENT_CONFIG_TABLE;
+  if (!tableName) {
+    if (!agentTagEnvWarned) {
+      console.warn(
+        "cost-ledger-writer: AGENT_CONFIG_TABLE env not set, writing rows without agent tags",
+      );
+      agentTagEnvWarned = true;
+    }
+    return null;
+  }
+
+  if (agentTagCache.has(agentId)) {
+    return agentTagCache.get(agentId)!;
+  }
+
+  const promise = (async (): Promise<Record<string, string> | null> => {
+    try {
+      const result = await docClient.send(
+        new GetCommand({
+          TableName: tableName,
+          Key: { agentId, orgId },
+          ProjectionExpression: "tags",
+        }),
+      );
+      const tags =
+        result.Item?.tags &&
+        typeof result.Item.tags === "object" &&
+        !Array.isArray(result.Item.tags)
+          ? (result.Item.tags as Record<string, string>)
+          : null;
+      // Enforce ≤10 keys
+      return tags && Object.keys(tags).length > 0
+        ? Object.fromEntries(Object.entries(tags).slice(0, 10))
+        : null;
+    } catch (err: unknown) {
+      console.warn(
+        "cost-ledger-writer: agent tag lookup failed, writing row without tags",
+        {
+          agentId,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      );
+      return null;
+    }
+  })();
+
+  agentTagCache.set(agentId, promise);
+  return promise;
+}
 
 /** Thrown internally to make the conditional-check-failed branch explicit and testable. */
 export class ConditionalCheckFailedError extends Error {
@@ -266,6 +341,8 @@ interface LedgerRow {
    * principle carry both if a future pass needs to, but today only
    * handleEvalUsageCaptured sets costContext. */
   costContext?: "eval";
+  /** CIT-042: agent policy tags, additive/omit-when-absent. ≤10 keys. */
+  tags?: Record<string, string>;
   // Pricing fields (pass 2): populated when the catalog row resolves to a
   // usable price; null + unpricedReason when it does not.
   currency: string | null;
@@ -421,6 +498,15 @@ async function buildLedgerRow(
     row.costContext = "eval";
     row.GSI6PK = `EVALCTX#${orgId}`;
     row.GSI6SK = `${capturedAt}#${ledgerId}`;
+  }
+
+  // CIT-042: agent policy tag propagation (decision ad393b11). Lookup is
+  // memoised per invocation; failures never drop the row.
+  if (dims.agentId && dims.orgId) {
+    const tags = await lookupAgentTags(dims.agentId, dims.orgId);
+    if (tags) {
+      row.tags = tags;
+    }
   }
 
   return row;
@@ -592,6 +678,7 @@ async function handleEvalUsageCaptured(
 export const handler = async (
   event: EventBridgeEvent<string, IncomingDetail>,
 ): Promise<void> => {
+  resetAgentTagState();
   const eventId = event.id || `no-id-${Date.now()}`;
   const detailType = event["detail-type"];
   const source = event.source;
