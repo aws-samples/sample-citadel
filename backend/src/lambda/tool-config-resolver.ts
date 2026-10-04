@@ -10,8 +10,10 @@ import { getOperations } from "../utils/operations-registry";
 import {
   RegistryService,
   RegistryRecordStatusValues,
+  RegistryLifecycleError,
   type ToolCustomMetadata,
   type ListResourcesOptions,
+  type RegistryRecordStatusValue,
 } from "../services/registry-service";
 import {
   extractOrgFromEvent,
@@ -19,12 +21,20 @@ import {
   assertRowOrg,
   canCallerSeeRow,
 } from "../utils/auth-event";
+import { getUserId } from "../utils/appsync";
+import { LifecycleManager, REGISTRY_TRANSITIONS } from "../adapters/lifecycle";
 import { isRecordVisible, viewerFromEvent } from "../utils/record-visibility";
 
 const client = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(client);
 
 const TOOLS_CONFIG_TABLE = process.env.TOOLS_CONFIG_TABLE!;
+
+/**
+ * Registry statuses that represent an admin decision (approve/reject).
+ * Mirrors DECISION_STATUSES in registry-agent-record-resolver.ts.
+ */
+const DECISION_STATUSES = new Set(["APPROVED", "REJECTED"]);
 
 // ---------------------------------------------------------------------------
 // Feature flag + Registry Service initialization (task 7.1)
@@ -148,6 +158,8 @@ interface ToolConfigMutationInput {
   appId?: string;
   integrationBindings?: RawIntegrationBinding[];
   dataStoreBindings?: RawDataStoreBinding[];
+  status?: string;
+  statusReason?: string;
 }
 
 /** Minimal slice of the AppSync event needed for org/admin extraction. */
@@ -173,6 +185,12 @@ interface ToolConfig {
   registryStatus?: string;
   /** AppSync caller identity who created this record (CIT-043 ownership). */
   createdBy?: string;
+  /** Admin who approved/rejected this record. */
+  decidedBy?: string;
+  /** ISO timestamp of the approval/rejection decision. */
+  decidedAt?: string;
+  /** Reason supplied when this record was rejected. */
+  statusReason?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -628,6 +646,9 @@ export async function updateToolConfigRegistry(
     config?: string;
     createdBy?: string;
     orgId?: string;
+    decidedBy?: string;
+    decidedAt?: string;
+    statusReason?: string;
   }>(existing.customDescriptorContent ?? null, {
     categories: [],
     icon: "",
@@ -638,6 +659,9 @@ export async function updateToolConfigRegistry(
     config: undefined,
     createdBy: undefined,
     orgId: undefined,
+    decidedBy: undefined,
+    decidedAt: undefined,
+    statusReason: undefined,
   });
 
   // Org scoping (finding 13065e38): reconcile the record's orgId against
@@ -654,6 +678,93 @@ export async function updateToolConfigRegistry(
     (event !== undefined
       ? ((await extractOrgFromEvent(event)) ?? undefined)
       : undefined);
+
+  // ─── Decision path: input.status = APPROVED | REJECTED ──────
+  // Mirrors updateApp in registry-agent-record-resolver.ts verbatim.
+  const currentStatus = existing.status ?? "DRAFT";
+  const isStatusChange =
+    input.status !== undefined && input.status !== currentStatus;
+
+  if (isStatusChange && DECISION_STATUSES.has(input.status!)) {
+    // Lifecycle gate via REGISTRY_TRANSITIONS
+    const lifecycleManager = new LifecycleManager(REGISTRY_TRANSITIONS);
+    if (!lifecycleManager.isValidTransition(currentStatus, input.status!)) {
+      const valid = REGISTRY_TRANSITIONS.transitions[currentStatus] || [];
+      throw new RegistryLifecycleError(
+        `Invalid status transition: ${currentStatus} → ${input.status}. ` +
+          `Valid transitions from ${currentStatus}: ${valid.join(", ") || "none"}`,
+        "INVALID_TRANSITION",
+      );
+    }
+
+    // Admin gate
+    if (!isAdminFromEvent(event!)) {
+      throw new Error(
+        `UnauthorizedError: admin role required to ${input.status === "APPROVED" ? "approve" : "reject"} tool ${input.toolId}`,
+      );
+    }
+
+    // Rejection requires a reason
+    if (input.status === "REJECTED" && !(input.statusReason ?? "").trim()) {
+      throw new Error(
+        "ValidationError: statusReason is required to reject a tool",
+      );
+    }
+
+    // Stamp decision fields
+    const decidedBy = getUserId(
+      event!.identity as Parameters<typeof getUserId>[0],
+    );
+    const decidedAt = new Date().toISOString();
+    const decidedStatusReason = (input.statusReason ?? "").trim();
+
+    // Write decision metadata via updateResource
+    const decisionMeta = registryService.serializeCustomMetadata({
+      categories: existingMeta.categories ?? [],
+      icon: existingMeta.icon ?? "",
+      state: existingMeta.state ?? "active",
+      integrationBindings: existingMeta.integrationBindings || undefined,
+      dataStoreBindings: existingMeta.dataStoreBindings || undefined,
+      appId: existingMeta.appId,
+      config: existingMeta.config ?? existing.description ?? "",
+      createdBy: existingMeta.createdBy ?? userId,
+      orgId: preservedOrgId,
+      decidedBy,
+      decidedAt,
+      statusReason: decidedStatusReason || null,
+    } as ToolCustomMetadata);
+
+    await registryService.updateResource("tool", input.toolId, {
+      name: existing.name,
+      description: existing.description ?? "",
+      customMetadata: decisionMeta,
+    });
+
+    // Transition status
+    const finalRecord = await registryService.updateResourceStatus(
+      "tool",
+      input.toolId,
+      input.status as RegistryRecordStatusValue,
+      decidedStatusReason || "Status update via registry service",
+      currentStatus,
+    );
+
+    // Re-fetch for consistent return
+    const refreshed = await registryService.getResource("tool", input.toolId);
+    return registryService.mapToToolConfig(refreshed ?? finalRecord);
+  }
+
+  // Submit path: DRAFT -> PENDING_APPROVAL when input.status is
+  // PENDING_APPROVAL (mirrors updateApp's submit special-case).
+  if (
+    isStatusChange &&
+    currentStatus === "DRAFT" &&
+    input.status === "PENDING_APPROVAL"
+  ) {
+    const record = await registryService.submitForApproval(input.toolId);
+    const refreshed = await registryService.getResource("tool", input.toolId);
+    return registryService.mapToToolConfig(refreshed ?? record);
+  }
 
   // Merge config. Source of truth for the "existing" config is
   // customMetadata.config (new contract), with a fallback to

@@ -418,6 +418,9 @@ export interface ToolCustomMetadata {
   config?: string; // full tool config JSON (was previously dumped in `description`)
   createdBy?: string; // AppSync caller identity or 'unknown'
   orgId?: string;
+  decidedBy?: string; // admin who approved/rejected
+  decidedAt?: string; // ISO timestamp of decision
+  statusReason?: string; // reason for rejection
 }
 
 export type ResourceType = "agent" | "tool";
@@ -520,6 +523,12 @@ export interface ToolConfig {
   updatedAt?: string;
   /** AppSync caller identity who created this record. Absent on legacy records. */
   createdBy?: string;
+  /** Admin who approved/rejected this record. */
+  decidedBy?: string;
+  /** ISO timestamp of the approval/rejection decision. */
+  decidedAt?: string;
+  /** Reason supplied when this record was rejected. */
+  statusReason?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -2155,6 +2164,10 @@ export class RegistryService {
       registryStatus: record.status ?? null,
       // Surface createdBy when present (CIT-043 ownership visibility).
       ...(meta.createdBy ? { createdBy: meta.createdBy } : {}),
+      // Surface decision audit fields when present (CIT-215).
+      ...(meta.decidedBy ? { decidedBy: meta.decidedBy } : {}),
+      ...(meta.decidedAt ? { decidedAt: meta.decidedAt } : {}),
+      ...(meta.statusReason ? { statusReason: meta.statusReason } : {}),
     };
   }
 }
