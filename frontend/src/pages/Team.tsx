@@ -34,6 +34,7 @@ import {
 import { userManagementService, User, Organization } from '../services/userManagementService';
 import { useOrganization } from '../contexts/OrganizationContext';
 import { PageContainer } from '../components/PageContainer';
+import { TagPolicyEditor } from '../components/TagPolicyEditor';
 
 export function Team() {
   const { selectedOrganization: currentOrg, currentUser, isAdmin } = useOrganization();
@@ -1269,32 +1270,35 @@ export function Team() {
                   organizations.map((org) => (
                     <Card
                       key={org.orgId}
-                      className="flex-row items-center justify-between gap-0 p-4"
+                      className="flex flex-col gap-0 p-4"
                     >
-                      <div className="flex items-center gap-4 flex-1">
-                        <div className="size-10 rounded-full bg-chart-5/20 flex items-center justify-center">
-                          <Building2 className="size-5 text-chart-5" />
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-4 flex-1">
+                          <div className="size-10 rounded-full bg-chart-5/20 flex items-center justify-center">
+                            <Building2 className="size-5 text-chart-5" />
+                          </div>
+                          <div className="flex-1">
+                            <p className="text-foreground font-medium">{org.name}</p>
+                            {org.description && (
+                              <p className="text-muted-foreground text-sm">{org.description}</p>
+                            )}
+                            {org.createdAt && (
+                              <p className="text-muted-foreground text-xs mt-1">
+                                Created {formatDate(org.createdAt)}
+                              </p>
+                            )}
+                          </div>
                         </div>
-                        <div className="flex-1">
-                          <p className="text-foreground font-medium">{org.name}</p>
-                          {org.description && (
-                            <p className="text-muted-foreground text-sm">{org.description}</p>
-                          )}
-                          {org.createdAt && (
-                            <p className="text-muted-foreground text-xs mt-1">
-                              Created {formatDate(org.createdAt)}
-                            </p>
-                          )}
-                        </div>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="border-destructive/50 text-destructive hover:bg-destructive/10"
+                          onClick={() => handleDeleteOrganization(org.orgId, org.name)}
+                        >
+                          <Trash2 className="size-4" />
+                        </Button>
                       </div>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="border-destructive/50 text-destructive hover:bg-destructive/10"
-                        onClick={() => handleDeleteOrganization(org.orgId, org.name)}
-                      >
-                        <Trash2 className="size-4" />
-                      </Button>
+                      <TagPolicyEditor orgId={org.orgId} isAdmin={isAdmin} />
                     </Card>
                   ))
                 ) : (
