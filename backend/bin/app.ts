@@ -134,6 +134,7 @@ const registryStack = new RegistryStack(
     idempotencyTable: backendStack.idempotencyTable,
     userPool: backendStack.userPool,
     adrsTable: backendStack.adrsTable,
+    organisationTable: backendStack.organisationTable,
   },
 );
 registryStack.addStackDependency(backendStack);
@@ -459,6 +460,7 @@ const gatewayStack = new GatewayStack(app, `citadel-gateway-${environment}`, {
   eventBus: backendStack.agentEventBus,
   idempotencyTable: backendStack.idempotencyTable,
   agentConfigTable: backendStack.agentConfigTable,
+  organisationTable: backendStack.organisationTable,
 });
 
 // Telemetry stack has already been instantiated above (before FrontendStack)

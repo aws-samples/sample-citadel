@@ -53,6 +53,17 @@ function createTestStack(): { stack: GatewayStack; template: Template } {
     removalPolicy: cdk.RemovalPolicy.DESTROY,
   });
 
+  const organisationTable = new dynamodb.Table(
+    helperStack,
+    "OrganisationTable",
+    {
+      tableName: "citadel-organisations-test",
+      partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    },
+  );
+
   const stack = new GatewayStack(app, "TestGatewayStack", {
     env: { account: "123456789012", region: "us-east-1" },
     environment: "test",
@@ -60,6 +71,7 @@ function createTestStack(): { stack: GatewayStack; template: Template } {
     eventBus,
     idempotencyTable,
     agentConfigTable,
+    organisationTable,
   });
 
   const template = Template.fromStack(stack);

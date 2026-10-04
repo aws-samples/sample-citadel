@@ -2113,6 +2113,37 @@ export const ALLOWED_SATELLITE_ADDED_STATEMENTS: Record<
       ],
       conditionKeys: [],
     },
+    // Tag-policy enforcement (CIT-042): read the caller's organisation
+    // policy row (grantReadData on OrganisationTable, cross-stack
+    // Fn::ImportValue resolved by CDK).
+    {
+      effect: "Allow",
+      actions: [
+        "dynamodb:BatchGetItem",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:DescribeTable",
+        "dynamodb:GetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:Scan",
+      ],
+      resources: ["GETATT:OrganisationTableF468D173:Arn"],
+      conditionKeys: [],
+    },
+    // Tag-policy enforcement (CIT-042): governance enforcement mode. CDK
+    // merges ssm:GetParameter grants into one statement — the pre-existing
+    // gateway-id param is included alongside the two new governance params.
+    {
+      effect: "Allow",
+      actions: ["ssm:GetParameter"],
+      resources: [
+        "arn:aws:ssm:us-west-2:000000000000:parameter/citadel/gateway-id-dev",
+        "arn:aws:ssm:us-west-2:000000000000:parameter/citadel/governance/effective_at/dev",
+        "arn:aws:ssm:us-west-2:000000000000:parameter/citadel/governance/enforce/dev",
+      ],
+      conditionKeys: [],
+    },
   ],
   // AgentImportManifestResultHandlerAC7A0B8E is merged into its existing
   // key above (sqs:SendMessage DLQ grant + the renamed agent-registry
@@ -2192,6 +2223,54 @@ export const ALLOWED_SATELLITE_ADDED_STATEMENTS: Record<
       ],
       resources: [
         "arn:aws:dynamodb:us-west-2:000000000000:table/citadel-tools-dev",
+      ],
+      conditionKeys: [],
+    },
+  ],
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // Tag-policy enforcement (CIT-042): agent-import and fabricator-request
+  // resolvers now read the caller's organisation policy row
+  // (dynamodb:GetItem on OrganisationTable) and the governance enforcement
+  // mode (ssm:GetParameter on the two governance rollout parameters).
+  // The frozen baseline predates this branch, so these statements are
+  // allowlisted here. CDK merges same-effect/same-action addToRolePolicy
+  // calls, so agent-import's ssm:GetParameter includes the pre-existing
+  // gateway-id parameter alongside the two new governance ones.
+  // Confirmed via a live `npm run split:gates` run, not hand-typed.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  // NOTE: AgentImportResolverFunctionE5B20F94 already has entries above
+  // (from the agent-registry GA migration). These new entries are MERGED
+  // into the existing key. Since JS object literals shadow duplicate keys,
+  // we must append to the existing array instead. The entries are spliced
+  // into the existing AgentImportResolverFunctionE5B20F94 array above.
+
+  // Tag-policy enforcement (CIT-042): fabricator-request-resolver reads the
+  // caller's organisation policy row and the governance enforcement mode.
+  // Confirmed via a live `npm run split:gates` run, not hand-typed.
+  FabricatorRequestResolverFunctionBCCF3ABD: [
+    {
+      effect: "Allow",
+      actions: [
+        "dynamodb:BatchGetItem",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:DescribeTable",
+        "dynamodb:GetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:Scan",
+      ],
+      resources: ["GETATT:OrganisationTableF468D173:Arn"],
+      conditionKeys: [],
+    },
+    {
+      effect: "Allow",
+      actions: ["ssm:GetParameter"],
+      resources: [
+        "arn:aws:ssm:us-west-2:000000000000:parameter/citadel/governance/effective_at/dev",
+        "arn:aws:ssm:us-west-2:000000000000:parameter/citadel/governance/enforce/dev",
       ],
       conditionKeys: [],
     },

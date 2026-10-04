@@ -201,6 +201,10 @@ export class BackendStack extends cdk.Stack {
   // for the Lambda error/throttle alarms below. Was a local `const`;
   // promoted to a public readonly field, zero new resources.
   public readonly alarmTopic: sns.Topic;
+  // Exposed for RegistryStack / GatewayStack: tag-policy enforcement points
+  // (agent-import, fabricator-request, app-publish) read the caller's
+  // organisation policy row via dynamodb:GetItem.
+  public readonly organisationTable: dynamodb.Table;
 
   constructor(scope: Construct, id: string, props: BackendStackProps) {
     super(scope, id, props);
@@ -312,13 +316,17 @@ export class BackendStack extends cdk.Stack {
     });
 
     // DynamoDB Tables
-    const organisationTable = new dynamodb.Table(this, "OrganisationTable", {
-      tableName: `citadel-organisations-${props.environment}`,
-      partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-    });
+    const organisationTable = (this.organisationTable = new dynamodb.Table(
+      this,
+      "OrganisationTable",
+      {
+        tableName: `citadel-organisations-${props.environment}`,
+        partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      },
+    ));
 
     // User ↔ organisation membership (decision 00d40a31, option A). This
     // table — NOT the client-facing `custom:organization` Cognito user
@@ -1033,6 +1041,8 @@ export class BackendStack extends cdk.Stack {
           // agent's invocation.roleArn lives in a DIFFERENT account and route to
           // the operator analysis-role assume path (sts:AssumeRole grant below).
           ACCOUNT_ID: this.account,
+          // Tag-policy enforcement: reads the caller's organisation policy row.
+          ORGANIZATIONS_TABLE: organisationTable.tableName,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, "AgentConfigResolverFunctionLogs", {
@@ -1093,6 +1103,10 @@ export class BackendStack extends cdk.Stack {
           REGISTRY_ENABLED: "true",
           REGISTRY_ID: registryId,
           REGISTRY_GENERATION,
+          // Tag-policy enforcement: reads the caller's organisation policy row
+          // and the governance enforcement mode.
+          ORGANIZATIONS_TABLE: organisationTable.tableName,
+          ENVIRONMENT: props.environment,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, "ToolConfigResolverFunctionLogs", {
@@ -1165,6 +1179,8 @@ export class BackendStack extends cdk.Stack {
 
     // Grant permissions for agent config
     this.agentConfigTable.grantReadWriteData(agentConfigResolverFunction);
+    // Tag-policy enforcement: read-only access to the organisations table.
+    organisationTable.grantReadData(agentConfigResolverFunction);
 
     // Grant agent-config-resolver permission to call Registry APIs
     agentConfigResolverFunction.addToRolePolicy(
@@ -1290,6 +1306,21 @@ export class BackendStack extends cdk.Stack {
           "agent-registry:ListRegistryRecords",
         ],
         resources: [registryArn, `${registryArn}/*`],
+      }),
+    );
+
+    // Tag-policy enforcement: read-only access to the organisations table.
+    organisationTable.grantReadData(toolConfigResolverFunction);
+    // Tag-policy enforcement: governance enforcement mode (same SSM grant
+    // shape as agent-config-resolver / app-publish-handler).
+    toolConfigResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["ssm:GetParameter"],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/enforce/${props.environment}`,
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/effective_at/${props.environment}`,
+        ],
       }),
     );
 
