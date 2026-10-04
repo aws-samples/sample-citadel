@@ -25,6 +25,7 @@ import { getUserId } from "../utils/appsync";
 import { LifecycleManager, REGISTRY_TRANSITIONS } from "../adapters/lifecycle";
 import { isRecordVisible, viewerFromEvent } from "../utils/record-visibility";
 import { normaliseTags } from "../utils/tag-policy";
+import { enforceTagPolicy } from "./tag-policy-check";
 
 const client = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(client);
@@ -540,6 +541,18 @@ export async function createToolConfigRegistry(
     throw new Error("Cannot determine caller organization");
   }
 
+  // CIT-042 tag-policy enforcement: validate tags BEFORE the registry write.
+  const normalisedTags =
+    input.tags !== undefined ? normaliseTags(input.tags) : undefined;
+  if (normalisedTags !== undefined) {
+    await enforceTagPolicy({
+      orgId,
+      tags: normalisedTags,
+      action: "createTool",
+      subjectId: input.toolId,
+    });
+  }
+
   const config =
     typeof input.config === "string"
       ? input.config
@@ -557,7 +570,7 @@ export async function createToolConfigRegistry(
     config,
     createdBy: userId,
     orgId,
-    ...(input.tags !== undefined ? { tags: normaliseTags(input.tags) } : {}),
+    ...(normalisedTags !== undefined ? { tags: normalisedTags } : {}),
   } as ToolCustomMetadata);
 
   const record = await registryService.createResource("tool", input.toolId, {
@@ -685,6 +698,17 @@ export async function updateToolConfigRegistry(
     (event !== undefined
       ? ((await extractOrgFromEvent(event)) ?? undefined)
       : undefined);
+
+  // CIT-042 tag-policy enforcement: validate tags ONLY when input.tags is
+  // present (decision ad393b11). Update without tags → skip enforcement.
+  if (input.tags !== undefined && preservedOrgId) {
+    await enforceTagPolicy({
+      orgId: preservedOrgId,
+      tags: normaliseTags(input.tags),
+      action: "updateTool",
+      subjectId: input.toolId,
+    });
+  }
 
   // ─── Decision path: input.status = APPROVED | REJECTED ──────
   // Mirrors updateApp in registry-agent-record-resolver.ts verbatim.

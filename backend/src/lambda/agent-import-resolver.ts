@@ -95,6 +95,7 @@ import type {
   RegistryRecord,
 } from "../services/registry-service";
 import { normaliseTags } from "../utils/tag-policy";
+import { enforceTagPolicy } from "./tag-policy-check";
 
 // Re-export the shared RegistryService singleton reset so the whole import
 // surface (and tests) can be imported from this module.
@@ -1181,6 +1182,16 @@ export async function importAgent(
   // ref is ever written to the record. Read here; consumed by
   // ensureInvocationSecretStored below.
   const rawInvocationSecret = asNonEmptyString(root.invocationSecret);
+
+  // CIT-042 tag-policy enforcement: validate tags BEFORE any registry write.
+  if (tags !== undefined) {
+    await enforceTagPolicy({
+      orgId,
+      tags,
+      action: "importAgent",
+      subjectId: name ?? undefined,
+    });
+  }
 
   const registryService = getRegistryService();
 
