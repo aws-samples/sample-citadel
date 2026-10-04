@@ -1,6 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { ArrowLeft, AlertTriangle } from 'lucide-react';
 import { agentConfigService, AgentConfig } from '../services/agentConfigService';
+import { tagPolicyService, TagPolicy } from '../services/tagPolicyService';
+import { parseTagPolicyViolation, TagViolation } from '../lib/tag-policy-errors';
+import { useOrganization } from '../contexts/OrganizationContext';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import {
@@ -18,6 +21,7 @@ import { AgentCodeTab } from './AgentCode';
 import { RequireReapprovalDialog } from './RequireReapprovalDialog';
 import { registryStatusLabel } from './registry-status-label';
 import { ApprovalHistory } from './ApprovalHistory';
+import { toast } from 'sonner';
 import './AgentDetails.css';
 
 type TabType = 'details' | 'code';
@@ -66,7 +70,20 @@ export const AgentDetails: React.FC<AgentDetailsProps> = ({
     config: {} as any,
   });
 
+  // --- Tag state ---
+  const { currentUser } = useOrganization();
+  const callerOrg = currentUser?.organization ?? 'default';
+  const [tagPolicy, setTagPolicy] = useState<TagPolicy | null>(null);
+  const [tags, setTags] = useState<Record<string, string>>({});
+  const [tagErrors, setTagErrors] = useState<TagViolation[]>([]);
+  /** Snapshot of `tags` when a loaded/created agent is first rendered —
+   *  on update we send tags only when the user actually changed them. */
+  const initialTagsRef = useRef<Record<string, string>>({});
+
   useEffect(() => {
+    // Load tag policy for the caller's org (once).
+    tagPolicyService.getTagPolicy(callerOrg).then(setTagPolicy).catch(() => {});
+
     if (agentId && !isCreating) {
       loadAgent();
     } else if (isCreating) {
@@ -149,6 +166,12 @@ def handler(event, context):
           agentId: agentWithParsedConfig.agentId,
           config: agentWithParsedConfig.config,
         });
+
+        // Capture current tags so we can diff on save.
+        const loadedTags = agentWithParsedConfig.tags ?? {};
+        setTags(loadedTags);
+        initialTagsRef.current = loadedTags;
+        setTagErrors([]);
 
         // Load code using the agent's name (which matches the S3 key)
         // rather than the recordId which doesn't have a corresponding file.
@@ -235,12 +258,14 @@ def handler(event, context):
   const handleSaveDetails = async () => {
     try {
       setError(null);
+      setTagErrors([]);
 
       if (isCreating) {
         await agentConfigService.createAgentConfig({
           agentId: formData.agentId,
           config: formData.config,
           state: 'active',
+          tags,
         });
       } else if (agent) {
         // Increment version by 0.1 for config changes
@@ -252,9 +277,13 @@ def handler(event, context):
           version: newVersion,
         };
 
+        // Only send tags when the user actually changed them.
+        const tagsChanged = JSON.stringify(tags) !== JSON.stringify(initialTagsRef.current);
+
         await agentConfigService.updateAgentConfig({
           agentId: agent.agentId,
           config: updatedConfig,
+          ...(tagsChanged ? { tags } : {}),
         });
 
         console.log(`Config updated: version ${currentVersion} -> ${newVersion}`);
@@ -268,6 +297,12 @@ def handler(event, context):
         await loadAgent();
       }
     } catch (err: any) {
+      const violation = parseTagPolicyViolation(err);
+      if (violation) {
+        setTagErrors(violation.violations);
+        toast.error('Tags do not meet the organisation policy');
+        return;
+      }
       setError(err.message || 'Failed to save agent config');
     }
   };
@@ -548,6 +583,10 @@ def handler(event, context):
             onSave={handleSaveDetailsClick}
             onCancel={handleCancelDetailsEdit}
             isFabricator={agent?.agentId === 'fabricator'}
+            tags={tags}
+            onTagsChange={setTags}
+            tagPolicy={tagPolicy}
+            tagErrors={tagErrors}
           />
           </>
         )}

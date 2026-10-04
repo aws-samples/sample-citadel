@@ -71,6 +71,7 @@ const importAgentMutation = `
         config
         state
         categories
+        tags
         createdAt
         updatedAt
       }
@@ -90,6 +91,7 @@ const attestAgentImportMutation = `
       config
       state
       categories
+      tags
       createdAt
       updatedAt
     }
@@ -162,6 +164,7 @@ const acceptProposedManifestTier3Mutation = `
       config
       state
       categories
+      tags
       createdAt
       updatedAt
       ${proposedManifestSelection}
@@ -180,6 +183,7 @@ const getImportRecordQuery = `
       config
       state
       categories
+      tags
       createdAt
       updatedAt
       ${proposedManifestSelection}
@@ -382,9 +386,13 @@ export const agentImportService = {
    */
   async importAgent(input: ImportAgentInput): Promise<ImportAgentResult> {
     try {
+      const serialized = {
+        ...input,
+        tags: input.tags ? JSON.stringify(input.tags) : undefined,
+      };
       const response = await serverService.mutate<{ importAgent: ImportAgentResult }>(
         importAgentMutation,
-        { input }
+        { input: serialized }
       );
 
       const result = response.importAgent;

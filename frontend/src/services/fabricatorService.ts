@@ -7,6 +7,7 @@ export interface CreateAgentRequest {
   tools?: string[];
   integrations?: string[];
   dataStores?: string[];
+  tags?: Record<string, string>;
 }
 
 export interface CreateToolRequest {
@@ -14,6 +15,7 @@ export interface CreateToolRequest {
   toolDescription: string;
   integrationBindings?: IntegrationBinding[];
   dataStoreBindings?: DataStoreBinding[];
+  tags?: Record<string, string>;
 }
 
 export interface AgentCreationResponse {
@@ -55,7 +57,12 @@ export const fabricatorService = {
       
       const response = await serverService.mutate<{ requestAgentCreation: AgentCreationResponse }>(
         requestAgentCreationMutation,
-        { input }
+        {
+          input: {
+            ...input,
+            tags: input.tags ? JSON.stringify(input.tags) : undefined,
+          },
+        }
       );
       
       console.log('Fabricator response:', response.requestAgentCreation);
@@ -72,7 +79,12 @@ export const fabricatorService = {
       
       const response = await serverService.mutate<{ requestToolCreation: ToolCreationResponse }>(
         requestToolCreationMutation,
-        { input }
+        {
+          input: {
+            ...input,
+            tags: input.tags ? JSON.stringify(input.tags) : undefined,
+          },
+        }
       );
       
       console.log('Fabricator response:', response.requestToolCreation);

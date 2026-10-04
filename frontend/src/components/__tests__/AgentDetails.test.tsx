@@ -38,6 +38,20 @@ jest.mock('../../services/agentConfigService', () => ({
   },
 }));
 
+jest.mock('../../services/tagPolicyService', () => ({
+  tagPolicyService: { getTagPolicy: jest.fn().mockResolvedValue(null) },
+}));
+
+jest.mock('../../contexts/OrganizationContext', () => ({
+  useOrganization: () => ({
+    currentUser: { organization: 'default', role: 'admin' },
+  }),
+}));
+
+jest.mock('sonner', () => ({
+  toast: { error: jest.fn(), info: jest.fn(), success: jest.fn() },
+}));
+
 import { AgentDetails } from '../AgentDetails';
 import { agentConfigService } from '../../services/agentConfigService';
 

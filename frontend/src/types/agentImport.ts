@@ -201,6 +201,7 @@ export interface ImportAgentInput {
   sourceArn?: string;
   substrate: string;
   categories?: string[];
+  tags?: Record<string, string>;
   onConflict?: ImportConflictPolicy;
 }
 
