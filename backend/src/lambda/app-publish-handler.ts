@@ -36,6 +36,7 @@ import {
   PutEventsCommand,
 } from "@aws-sdk/client-eventbridge";
 import { PolicyManager } from "../utils/policy-manager";
+import type { RoleTagInput } from "../utils/policy-manager";
 import { updateAppMetaFields } from "../utils/apps-table-meta";
 import { hashApiKey, getApiKeyPepper, HASH_ALG } from "../utils/api-key-hash";
 import {
@@ -655,11 +656,19 @@ export async function publishApp(
   const { accountId } = await deps.policyManager.getAccountContext();
 
   if (permissionItems.length > 0) {
+    const roleTagInput: RoleTagInput = {
+      orgId: metadata.orgId,
+      agentId: appId,
+    };
     await deps.policyManager.ensureRole(
       appId,
       permissionItems,
       accountId,
       "agent",
+      undefined,
+      undefined,
+      undefined,
+      roleTagInput,
     );
   }
 
