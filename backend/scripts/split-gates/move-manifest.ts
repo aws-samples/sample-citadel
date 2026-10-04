@@ -1666,6 +1666,14 @@ export const EXPECTED_NEW_FIELDS: AllowlistEntry[] = [
     logicalId: "Query.listPendingApprovals",
     justification: "Pending approvals queue for administrators.",
   },
+  {
+    logicalId: "Query.getTagPolicy",
+    justification: "CIT-042: Organisation tag policy read (member or admin).",
+  },
+  {
+    logicalId: "Mutation.updateTagPolicy",
+    justification: "CIT-042: Administrator-only tag policy editor.",
+  },
 ];
 
 /**
@@ -1951,6 +1959,18 @@ export const ADDITION_ALLOWLIST: AllowlistEntry[] = [
   {
     logicalId: "AgenticAIApiListPendingApprovalsResolver024F6303",
     justification: "Pending approvals queue for administrators.",
+  },
+  {
+    logicalId: "AgenticAIApiGetTagPolicyResolver",
+    justification:
+      "CIT-042: Organisation tag policy read (member or admin). " +
+      "Logical ID placeholder — re-derive from `cdk synth` output.",
+  },
+  {
+    logicalId: "AgenticAIApiUpdateTagPolicyResolver",
+    justification:
+      "CIT-042: Administrator-only tag policy editor. " +
+      "Logical ID placeholder — re-derive from `cdk synth` output.",
   },
 ];
 

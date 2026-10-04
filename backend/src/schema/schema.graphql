@@ -152,6 +152,8 @@ type Query {
   # filtering; see finding 59e5a79c). Auth enforced in resolver, not by
   # schema visibility, matching sibling admin queries.
   listPendingApprovals(limit: Int, nextToken: String): PendingApprovalConnection!
+  # CIT-042: Organisation tag policy. Authenticated org member or admin.
+  getTagPolicy(orgId: ID!): TagPolicy
 }
 
 type PendingApproval {
@@ -305,6 +307,8 @@ type Mutation {
   adminResendInvitation(userId: String!): UserManagementResponse
   createOrganization(input: CreateOrganizationInput!): Organization
   deleteOrganization(orgId: String!): UserManagementResponse
+  # CIT-042: Admin-only tag policy editor.
+  updateTagPolicy(input: UpdateTagPolicyInput!): TagPolicy!
   publishAssessmentCompletion(input: AssessmentCompletionInput!): AssessmentCompletionEvent @aws_iam
   publishDesignProgress(input: DesignProgressInput!): DesignProgressEvent @aws_iam
   publishChatter(input: AgentChatterInput!): AgentChatterMessage @aws_iam
@@ -3657,4 +3661,29 @@ type IamDriftReport {
   totalMissing: Int!
   groups: [IamDriftActionGroup!]!
   notes: [String!]!
+}
+
+# ── CIT-042: Organisation tag policies ──────────────────────────────────
+
+type TagPolicyRule {
+  key: String!
+  allowedValues: [String!]
+}
+
+type TagPolicy {
+  requiredKeys: [TagPolicyRule!]!
+  version: Int!
+  updatedBy: String!
+  updatedAt: AWSDateTime!
+}
+
+input TagPolicyRuleInput {
+  key: String!
+  allowedValues: [String!]
+}
+
+input UpdateTagPolicyInput {
+  orgId: ID!
+  requiredKeys: [TagPolicyRuleInput!]!
+  expectedVersion: Int
 }

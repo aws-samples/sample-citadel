@@ -1,4 +1,8 @@
-import { deriveRoles } from "../utils/auth-event";
+import {
+  deriveRoles,
+  isAdminFromEvent,
+  extractOrgFromEvent,
+} from "../utils/auth-event";
 import {
   orgNameReservationKey as nameReservationKey,
   type NameReservationItem,
@@ -20,6 +24,13 @@ import {
 } from "@aws-sdk/client-cognito-identity-provider";
 import { v4 as uuidv4 } from "uuid";
 import type { AuthContext } from "../types";
+import {
+  normaliseTagPolicy,
+  validateTagPolicyShape,
+  type TagPolicy,
+  type TagPolicyRule,
+} from "../utils/tag-policy";
+import { extractUserIdFromEvent } from "../utils/auth";
 
 const client = new DynamoDBClient({});
 // removeUndefinedValues: defensive guard so no undefined attribute can break
@@ -96,7 +107,11 @@ interface UserManagementResponse {
 /** AppSync event slice this resolver reads. */
 interface OrganizationResolverEvent {
   info: { fieldName: string };
-  arguments: { input: CreateOrganizationInput; orgId: string };
+  arguments: {
+    input: CreateOrganizationInput;
+    orgId: string;
+    [key: string]: unknown;
+  };
   identity?: {
     sub?: string;
     username?: string;
@@ -160,6 +175,17 @@ export const handler = async (
         const authContext = authContextFromEvent(event);
         requireAdmin(authContext, "delete an organization");
         return await deleteOrganization(args.orgId);
+      }
+      case "getTagPolicy": {
+        return await getTagPolicy(args.orgId, event);
+      }
+      case "updateTagPolicy": {
+        const authContext = authContextFromEvent(event);
+        requireAdmin(authContext, "update tag policy");
+        return await updateTagPolicy(
+          args.input as unknown as UpdateTagPolicyInput,
+          event,
+        );
       }
       default:
         throw new Error(`Unknown field: ${fieldName}`);
@@ -326,8 +352,7 @@ async function sweepMembershipRows(
         if (typeof sub === "string" && sub.length > 0) subs.push(sub);
       }
       exclusiveStartKey = page?.LastEvaluatedKey as
-        | Record<string, unknown>
-        | undefined;
+        Record<string, unknown> | undefined;
     } while (exclusiveStartKey);
   } catch (error: unknown) {
     console.error(
@@ -529,4 +554,139 @@ async function deleteOrganization(
     success: true,
     message: `Organization deleted successfully`,
   };
+}
+
+// ── CIT-042: Organisation tag policies ──────────────────────────────────
+
+interface UpdateTagPolicyInput {
+  orgId: string;
+  requiredKeys: TagPolicyRule[];
+  expectedVersion?: number | null;
+}
+
+/**
+ * Read the org's tag policy. Accessible to any authenticated member of the
+ * org (server-derived org matches) or any admin. Non-members receive the
+ * same "UnauthorizedError" shape as sibling operations (fail closed).
+ * Returns null when no policy has been configured (meaning "allow all").
+ */
+async function getTagPolicy(
+  orgId: string,
+  event: OrganizationResolverEvent,
+): Promise<TagPolicy | null> {
+  // Admin can read any org's policy; non-admin must belong to the org.
+  if (!isAdminFromEvent(event)) {
+    const callerOrg = await extractOrgFromEvent(event);
+    // The caller's claim carries the org NAME, and the orgs table stores
+    // org rows with orgId = UUID. Resolve the org name to compare.
+    const orgRow = await docClient.send(
+      new GetCommand({
+        TableName: ORGANIZATIONS_TABLE,
+        Key: { orgId },
+      }),
+    );
+    const orgName = (orgRow.Item as { name?: string } | undefined)?.name;
+    if (!callerOrg || !orgName || callerOrg !== orgName) {
+      throw new Error(
+        "UnauthorizedError: you do not have access to this organization",
+      );
+    }
+  }
+
+  const result = await docClient.send(
+    new GetCommand({
+      TableName: ORGANIZATIONS_TABLE,
+      Key: { orgId: `TAG_POLICY#${orgId}` },
+    }),
+  );
+
+  if (!result.Item) return null;
+
+  const policy = result.Item.policy as TagPolicy | undefined;
+  return policy ?? null;
+}
+
+/**
+ * Create or update the org's tag policy. Admin-only. Validates the input
+ * shape via the pure module, then writes with optimistic concurrency via
+ * ConditionExpression on the version field.
+ */
+async function updateTagPolicy(
+  input: UpdateTagPolicyInput,
+  event: OrganizationResolverEvent,
+): Promise<TagPolicy> {
+  // Validate shape (unconditional, per security review C1)
+  const shapeError = validateTagPolicyShape(input.requiredKeys);
+  if (shapeError) {
+    throw new Error(`ValidationError: ${shapeError.message}`);
+  }
+
+  const normalisedKeys = normaliseTagPolicy(input.requiredKeys);
+  const userId = extractUserIdFromEvent(event);
+  const now = new Date().toISOString();
+
+  // Determine the next version: read existing, then increment.
+  const existing = await docClient.send(
+    new GetCommand({
+      TableName: ORGANIZATIONS_TABLE,
+      Key: { orgId: `TAG_POLICY#${input.orgId}` },
+    }),
+  );
+  const existingPolicy = existing.Item?.policy as TagPolicy | undefined;
+  const currentVersion = existingPolicy?.version ?? 0;
+
+  // Optimistic concurrency: if caller supplies expectedVersion, enforce it.
+  if (
+    input.expectedVersion != null &&
+    input.expectedVersion !== currentVersion
+  ) {
+    throw new Error(
+      `ConflictError: expected version ${input.expectedVersion} but current version is ${currentVersion}`,
+    );
+  }
+
+  const newVersion = currentVersion + 1;
+  const policy: TagPolicy = {
+    requiredKeys: normalisedKeys,
+    version: newVersion,
+    updatedBy: userId,
+    updatedAt: now,
+  };
+
+  // Conditional write for create-or-update safety.
+  const conditionExpression =
+    currentVersion === 0
+      ? "attribute_not_exists(orgId)"
+      : "policy.version = :expectedVersion";
+  const conditionValues: Record<string, unknown> =
+    currentVersion === 0 ? {} : { ":expectedVersion": currentVersion };
+
+  try {
+    await docClient.send(
+      new PutCommand({
+        TableName: ORGANIZATIONS_TABLE,
+        Item: {
+          orgId: `TAG_POLICY#${input.orgId}`,
+          itemType: "tag_policy",
+          policy,
+        },
+        ConditionExpression: conditionExpression,
+        ...(Object.keys(conditionValues).length > 0
+          ? { ExpressionAttributeValues: conditionValues }
+          : {}),
+      }),
+    );
+  } catch (error: unknown) {
+    if (
+      error instanceof Error &&
+      error.name === "ConditionalCheckFailedException"
+    ) {
+      throw new Error(
+        "ConflictError: tag policy was modified concurrently; re-read and retry",
+      );
+    }
+    throw error;
+  }
+
+  return policy;
 }
