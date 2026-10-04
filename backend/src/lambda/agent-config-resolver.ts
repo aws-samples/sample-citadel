@@ -32,6 +32,7 @@ import { isRecordVisible, viewerFromEvent } from "../utils/record-visibility";
 import { getGovernanceEnforce } from "../utils/governance-flag";
 import { publishEvent } from "../utils/events";
 import { normaliseTags } from "../utils/tag-policy";
+import { enforceTagPolicy } from "./tag-policy-check";
 import {
   computeTrustPath,
   isCrossAccountRoleArn,
@@ -474,6 +475,18 @@ export async function createAgentConfigRegistry(
     throw new Error("Cannot determine caller organization");
   }
 
+  // CIT-042 tag-policy enforcement: validate tags BEFORE the registry write.
+  const normalisedTags =
+    input.tags !== undefined ? normaliseTags(input.tags) : undefined;
+  if (normalisedTags !== undefined) {
+    await enforceTagPolicy({
+      orgId,
+      tags: normalisedTags,
+      action: "createAgent",
+      subjectId: input.agentId,
+    });
+  }
+
   const parsedConfig = parseConfigOrThrow(input.config) ?? {};
   const config: string =
     typeof input.config === "string"
@@ -487,7 +500,7 @@ export async function createAgentConfigRegistry(
     appId: input.appId || undefined,
     orgId,
     createdBy: extractUserIdFromEvent(event),
-    ...(input.tags !== undefined ? { tags: normaliseTags(input.tags) } : {}),
+    ...(normalisedTags !== undefined ? { tags: normalisedTags } : {}),
   } as AgentCustomMetadata);
 
   const record = await registryService.createResource("agent", input.agentId, {
@@ -684,6 +697,25 @@ export async function updateAgentConfigRegistry(
       throw new Error(
         `Access denied: cannot determine caller organization for agent ${input.agentId}`,
       );
+    }
+  }
+
+  // CIT-042 tag-policy enforcement: validate tags ONLY when input.tags is
+  // present (decision ad393b11). Update without tags → skip enforcement.
+  if (input.tags !== undefined) {
+    // Derive orgId for enforcement: prefer the existing record's orgId; fall
+    // back to the caller's JWT org for legacy records.
+    const enforcementOrg =
+      typeof existingMeta.orgId === "string" && existingMeta.orgId.length > 0
+        ? existingMeta.orgId
+        : ((await extractOrgFromEvent(event)) ?? undefined);
+    if (enforcementOrg) {
+      await enforceTagPolicy({
+        orgId: enforcementOrg,
+        tags: normaliseTags(input.tags),
+        action: "updateAgent",
+        subjectId: input.agentId,
+      });
     }
   }
 

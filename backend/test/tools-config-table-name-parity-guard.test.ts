@@ -248,6 +248,7 @@ describe("citadel-tools table name parity (finding 9b702e07 regression guard)", 
         idempotencyTable: backendStack.idempotencyTable,
         userPool: backendStack.userPool,
         adrsTable: backendStack.adrsTable,
+        organisationTable: backendStack.organisationTable,
       },
     );
 

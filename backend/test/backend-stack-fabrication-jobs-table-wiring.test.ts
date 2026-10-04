@@ -99,6 +99,7 @@ describe("CitadelRegistryStack — fabricator resolver grants on the fabrication
       idempotencyTable: backendStack.idempotencyTable,
       userPool: backendStack.userPool,
       adrsTable: backendStack.adrsTable,
+      organisationTable: backendStack.organisationTable,
     });
     template = Template.fromStack(stack);
   });

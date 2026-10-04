@@ -13,6 +13,8 @@ import {
   hasRoleFromEvent,
   canCallerSeeRow,
 } from "../utils/auth-event";
+import { normaliseTags } from "../utils/tag-policy";
+import { enforceTagPolicy } from "./tag-policy-check";
 
 const sqsClient = new SQSClient({});
 const dynamoClient = new DynamoDBClient({});
@@ -151,6 +153,7 @@ interface CreateAgentRequest {
   integrations?: string[];
   dataStores?: string[];
   appId?: string;
+  tags?: Record<string, string>;
 }
 
 interface CreateToolRequest {
@@ -159,6 +162,7 @@ interface CreateToolRequest {
   integrations?: string[];
   dataStores?: string[];
   appId?: string;
+  tags?: Record<string, string>;
 }
 
 /**
@@ -414,6 +418,17 @@ async function requestAgentCreation(
 ) {
   requireArchitectOrAdmin(event, "request agent creation");
 
+  // CIT-042 tag-policy enforcement: validate tags BEFORE the SQS enqueue.
+  if (input.tags !== undefined) {
+    const normalisedTags = normaliseTags(input.tags);
+    await enforceTagPolicy({
+      orgId,
+      tags: normalisedTags,
+      action: "fabricateAgent",
+      subjectId: input.agentName,
+    });
+  }
+
   const requestId = randomUUID();
 
   // Build the task details with all the information
@@ -460,6 +475,17 @@ async function requestToolCreation(
   event: FabricatorRequestResolverEvent,
 ) {
   requireArchitectOrAdmin(event, "request tool creation");
+
+  // CIT-042 tag-policy enforcement: validate tags BEFORE the SQS enqueue.
+  if (input.tags !== undefined) {
+    const normalisedTags = normaliseTags(input.tags);
+    await enforceTagPolicy({
+      orgId,
+      tags: normalisedTags,
+      action: "fabricateTool",
+      subjectId: input.toolName,
+    });
+  }
 
   const requestId = randomUUID();
 

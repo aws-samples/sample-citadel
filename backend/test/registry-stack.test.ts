@@ -145,6 +145,17 @@ function createFixture(app: cdk.App) {
     removalPolicy: cdk.RemovalPolicy.DESTROY,
   });
 
+  const organisationTable = new dynamodb.Table(
+    backendStack,
+    "OrganisationTable",
+    {
+      tableName: "citadel-organisations-test",
+      partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    },
+  );
+
   const userPool = new cognito.UserPool(backendStack, "UserPool", {
     userPoolName: "citadel-test-pool",
   });
@@ -158,6 +169,7 @@ function createFixture(app: cdk.App) {
     modelCatalogTable,
     idempotencyTable,
     adrsTable,
+    organisationTable,
     userPool,
   };
 }

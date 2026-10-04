@@ -18,6 +18,8 @@ export interface GatewayStackProps extends cdk.StackProps {
   // is unset — same table backendStack exposes to agent-config-resolver /
   // workflow-resolver via AGENT_CONFIG_TABLE).
   agentConfigTable: dynamodb.ITable;
+  /** Tag-policy enforcement: read-only access to the organisations table. */
+  organisationTable: dynamodb.ITable;
 }
 
 export class GatewayStack extends cdk.Stack {
@@ -106,6 +108,8 @@ export class GatewayStack extends cdk.Stack {
         // every bound agent unresolved in the Registry silently fails the
         // publish approval-gate check instead of falling back correctly.
         AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
+        // Tag-policy enforcement: reads the caller's organisation policy row.
+        ORGANIZATIONS_TABLE: props.organisationTable.tableName,
       },
       timeout: cdk.Duration.seconds(120),
       logGroup: new logs.LogGroup(this, "AppPublishHandlerLogs", {
@@ -145,6 +149,8 @@ export class GatewayStack extends cdk.Stack {
     // lookups only (getLegacyAgentRow), matches workflowResolverFunction's
     // grantReadData in registry-stack.ts.
     props.agentConfigTable.grantReadData(this.publishHandler);
+    // Tag-policy enforcement: read-only access to the organisations table.
+    props.organisationTable.grantReadData(this.publishHandler);
 
     // --- Publish Handler: API Gateway management permissions ---
     this.publishHandler.addToRolePolicy(

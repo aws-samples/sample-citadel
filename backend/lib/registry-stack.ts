@@ -110,6 +110,8 @@ export interface RegistryStackProps extends cdk.StackProps {
   userPool: cognito.IUserPool;
   /** Write-only ADR creation for the import resolver's system-generated ADR. */
   adrsTable: dynamodb.ITable;
+  /** Tag-policy enforcement: read-only access to the organisations table. */
+  organisationTable: dynamodb.ITable;
 }
 
 export class RegistryStack extends cdk.Stack {
@@ -317,6 +319,10 @@ export class RegistryStack extends cdk.Stack {
           FABRICATOR_QUEUE_URL: `https://sqs.${this.region}.amazonaws.com/${this.account}/citadel-fabricator-queue-${props.environment}`,
           ADRS_TABLE: props.adrsTable.tableName,
           GATEWAY_ID_PARAM: `/citadel/gateway-id-${props.environment}`,
+          // Tag-policy enforcement: reads the caller's organisation policy row
+          // and the governance enforcement mode.
+          ORGANIZATIONS_TABLE: props.organisationTable.tableName,
+          ENVIRONMENT: props.environment,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, "AgentImportResolverFunctionLogs", {
@@ -503,6 +509,21 @@ export class RegistryStack extends cdk.Stack {
     // keyed to the synthetic GLOBAL import project (createADR -> PutItem,
     // never read). Verbatim from baseline.
     props.adrsTable.grantWriteData(agentImportResolverFunction);
+
+    // Tag-policy enforcement: read-only access to the organisations table.
+    props.organisationTable.grantReadData(agentImportResolverFunction);
+    // Tag-policy enforcement: governance enforcement mode (same SSM grant
+    // shape as app-publish-handler in gateway-stack.ts).
+    agentImportResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["ssm:GetParameter"],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/enforce/${props.environment}`,
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/effective_at/${props.environment}`,
+        ],
+      }),
+    );
 
     const agentImportManifestResultHandler = new lambda.Function(
       this,
@@ -738,6 +759,10 @@ export class RegistryStack extends cdk.Stack {
         environment: {
           FABRICATOR_QUEUE_URL: `https://sqs.${this.region}.amazonaws.com/${this.account}/citadel-fabricator-queue-${props.environment}`,
           FABRICATION_JOBS_TABLE: `citadel-fabrication-jobs-${props.environment}`,
+          // Tag-policy enforcement: reads the caller's organisation policy row
+          // and the governance enforcement mode.
+          ORGANIZATIONS_TABLE: props.organisationTable.tableName,
+          ENVIRONMENT: props.environment,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(
@@ -775,6 +800,21 @@ export class RegistryStack extends cdk.Stack {
         effect: iam.Effect.ALLOW,
         actions: ["dynamodb:PutItem"],
         resources: [fabricationJobsTableArn],
+      }),
+    );
+
+    // Tag-policy enforcement: read-only access to the organisations table.
+    props.organisationTable.grantReadData(fabricatorRequestResolverFunction);
+    // Tag-policy enforcement: governance enforcement mode (same SSM grant
+    // shape as app-publish-handler in gateway-stack.ts).
+    fabricatorRequestResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["ssm:GetParameter"],
+        resources: [
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/enforce/${props.environment}`,
+          `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/governance/effective_at/${props.environment}`,
+        ],
       }),
     );
 

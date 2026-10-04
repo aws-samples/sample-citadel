@@ -187,3 +187,73 @@ export function normaliseTags(input: unknown): Record<string, string> {
 
   return result;
 }
+
+// ─── Policy enforcement validation (pure, no I/O) ──────────────────────
+
+export type TagViolationType = "MISSING_KEY" | "INVALID_VALUE";
+
+export interface TagViolation {
+  type: TagViolationType;
+  key: string;
+  /** The value that was supplied (present only for INVALID_VALUE). */
+  suppliedValue?: string;
+  /** The allowed values for this key (present only for INVALID_VALUE). */
+  allowedValues?: string[];
+}
+
+export interface TagValidationResult {
+  ok: boolean;
+  violations: TagViolation[];
+}
+
+/**
+ * Validates a set of tags against an organisation's tag policy.
+ *
+ * Pure function — no I/O, no side effects.
+ *
+ * - `policy` is null when the organisation has no tag policy configured.
+ *   A null policy always returns `{ ok: true, violations: [] }`.
+ * - `tags` is undefined/null when the caller did not supply tags (e.g.
+ *   an update mutation that omits the field). Treated as an empty record.
+ *
+ * For each rule in `policy.requiredKeys`:
+ *   - MISSING_KEY: the key is absent in `tags`.
+ *   - INVALID_VALUE: the key is present but its value is not in the rule's
+ *     `allowedValues` (when defined; if `allowedValues` is absent or empty,
+ *     any value is accepted).
+ */
+export function validateTagsAgainstPolicy(
+  policy: TagPolicy | null,
+  tags: Record<string, string> | undefined | null,
+): TagValidationResult {
+  if (policy === null) {
+    return { ok: true, violations: [] };
+  }
+
+  const effectiveTags: Record<string, string> = tags ?? {};
+  const violations: TagViolation[] = [];
+
+  for (const rule of policy.requiredKeys) {
+    const key = rule.key;
+
+    if (!(key in effectiveTags)) {
+      violations.push({ type: "MISSING_KEY", key });
+      continue;
+    }
+
+    if (
+      rule.allowedValues &&
+      rule.allowedValues.length > 0 &&
+      !rule.allowedValues.includes(effectiveTags[key])
+    ) {
+      violations.push({
+        type: "INVALID_VALUE",
+        key,
+        suppliedValue: effectiveTags[key],
+        allowedValues: rule.allowedValues,
+      });
+    }
+  }
+
+  return { ok: violations.length === 0, violations };
+}
