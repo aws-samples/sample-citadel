@@ -28,6 +28,7 @@ import {
   QueryCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { PolicyManager } from "../utils/policy-manager";
+import type { RoleTagInput } from "../utils/policy-manager";
 import {
   computeAgentPolicies,
   AgentPermissions,
@@ -65,6 +66,25 @@ async function getAgentOrgId(agentId: string): Promise<string | null> {
   );
   const orgId = result.Item?.orgId;
   return typeof orgId === "string" && orgId ? orgId : null;
+}
+
+/** Returns orgId and tags from the agent config cache table. */
+async function getAgentRecord(
+  agentId: string,
+): Promise<{ orgId: string | null; tags?: Record<string, string> }> {
+  if (!AGENT_CONFIG_TABLE) return { orgId: null };
+  const result = await dynamodb.send(
+    new GetCommand({ TableName: AGENT_CONFIG_TABLE, Key: { agentId } }),
+  );
+  const orgId = result.Item?.orgId;
+  const tags =
+    result.Item?.tags && typeof result.Item.tags === "object"
+      ? (result.Item.tags as Record<string, string>)
+      : undefined;
+  return {
+    orgId: typeof orgId === "string" && orgId ? orgId : null,
+    tags,
+  };
 }
 
 async function getDataStoreOrgId(dataStoreId: string): Promise<string | null> {
@@ -173,7 +193,24 @@ export async function handler(
       region,
     );
 
-    await policyManager.ensureRole(agentId, policies, accountId, "agent");
+    // Fetch agent record to propagate tags to the IAM role
+    const agentRecord = await getAgentRecord(agentId);
+    const roleTagInput: RoleTagInput = {
+      orgId: org,
+      agentId,
+      tags: agentRecord.tags,
+    };
+
+    await policyManager.ensureRole(
+      agentId,
+      policies,
+      accountId,
+      "agent",
+      undefined,
+      undefined,
+      undefined,
+      roleTagInput,
+    );
     const credentials = await policyManager.assumeScopedRole(
       agentId,
       accountId,

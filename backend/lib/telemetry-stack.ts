@@ -328,6 +328,7 @@ export class TelemetryStack extends cdk.Stack {
         environment: {
           COST_LEDGER_TABLE: this.costLedgerTable.tableName,
           MODEL_CATALOG_TABLE: props.modelCatalogTable.tableName,
+          AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
           ENVIRONMENT: props.environment,
         },
         logGroup: new logs.LogGroup(this, "CostLedgerWriterLogs", {
@@ -340,9 +341,11 @@ export class TelemetryStack extends cdk.Stack {
     );
 
     // Least-privilege: writer may write the ledger table and read pricing
-    // from the model catalog. Nothing else.
+    // from the model catalog. Agent config table is read-only for tag
+    // propagation (GetItem by agentId).
     this.costLedgerTable.grantWriteData(this.costLedgerWriterFunction);
     props.modelCatalogTable.grantReadData(this.costLedgerWriterFunction);
+    props.agentConfigTable.grantReadData(this.costLedgerWriterFunction);
 
     // --- EventBridge rules (3, all targeting the same writer) -------------
     // Writer branches on `source`/`detail-type` internally; patterns can't

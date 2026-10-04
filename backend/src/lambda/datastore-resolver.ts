@@ -17,6 +17,7 @@ import {
 import { v4 as uuidv4 } from "uuid";
 import { getAdapter } from "./adapters/registry";
 import { PolicyManager, type ScopedCredentials } from "../utils/policy-manager";
+import type { RoleTagInput } from "../utils/policy-manager";
 import { getDataStoreOperations } from "../utils/operations-registry";
 import {
   extractOrgFromEvent,
@@ -613,6 +614,10 @@ async function createDataStore(
 
     let scopedCredentials: ScopedCredentials | undefined;
     if (policies.length > 0) {
+      const roleTagInput: RoleTagInput = {
+        orgId: callerOrgId,
+        agentId: dataStoreId,
+      };
       await policyManager.ensureRole(
         dataStoreId,
         policies,
@@ -620,6 +625,8 @@ async function createDataStore(
         "datastore",
         config.crossAccountRoleArn,
         await getAdditionalTrustedPrincipals(),
+        undefined,
+        roleTagInput,
       );
       // IAM is eventually consistent — wait for role/policy propagation
       await new Promise((resolve) => setTimeout(resolve, 10000));
@@ -913,6 +920,10 @@ async function connectDataStore(dataStoreId: string, event: unknown) {
     let scopedCredentials: ScopedCredentials | undefined;
 
     if (policies.length > 0) {
+      const roleTagInput: RoleTagInput = {
+        orgId: existing.orgId as string | undefined,
+        agentId: dataStoreId,
+      };
       await policyManager.ensureRole(
         dataStoreId,
         policies,
@@ -920,6 +931,8 @@ async function connectDataStore(dataStoreId: string, event: unknown) {
         "datastore",
         config.crossAccountRoleArn,
         await getAdditionalTrustedPrincipals(),
+        undefined,
+        roleTagInput,
       );
       // IAM is eventually consistent — wait for policy propagation
       await new Promise((resolve) => setTimeout(resolve, 5000));

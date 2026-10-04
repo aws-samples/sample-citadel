@@ -11,6 +11,7 @@ import {
   PutRolePolicyCommand,
   DeleteRolePolicyCommand,
   DeleteRoleCommand,
+  TagRoleCommand,
 } from "@aws-sdk/client-iam";
 import {
   STSClient,
@@ -43,6 +44,48 @@ const SCOPE_PREFIXES: Record<PolicyScope, string> = {
 };
 
 const INLINE_POLICY_NAME = "DataStoreAccess";
+
+/**
+ * AWS IAM limit: max 50 tags per role.
+ * @see https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_iam-quotas.html
+ */
+const IAM_TAG_LIMIT = 50;
+
+/** Role-name prefixes vended by PolicyManager — tagExistingRole is scoped to these. */
+const VENDED_PREFIXES = [
+  "citadel-agent-",
+  "citadel-ds-",
+  "citadel-int-",
+  "citadel-eval-",
+];
+
+/**
+ * IAM tag key rules: up to 128 unicode chars, alphanumeric + ` _ . : / = + - @`.
+ * IAM tag value rules: up to 256 unicode chars, same character set (empty allowed).
+ * Returns null when the entry cannot be sanitised (dropped).
+ */
+function sanitiseTagEntry(
+  key: string,
+  value: string,
+): { Key: string; Value: string } | null {
+  // eslint-disable-next-line no-control-regex
+  const ALLOWED = /^[\w\s_.:/=+\-@]+$/;
+  const sanitised = (s: string, max: number): string | null => {
+    const trimmed = s.slice(0, max);
+    return ALLOWED.test(trimmed) ? trimmed : null;
+  };
+  const k = sanitised(key, 128);
+  const v = sanitised(value, 256);
+  if (!k) return null; // key is mandatory
+  return { Key: k, Value: v ?? "" };
+}
+
+/** Optional tag-propagation input accepted by ensureRole and tagExistingRole. */
+export interface RoleTagInput {
+  tags?: Record<string, string>;
+  orgId?: string;
+  agentId?: string;
+}
 
 export class PolicyManager {
   private iamClient: IAMClient;
@@ -82,6 +125,7 @@ export class PolicyManager {
     crossAccountRoleArn?: string,
     additionalTrustedPrincipals?: string[],
     externalId?: string,
+    resourceTags?: RoleTagInput,
   ): Promise<void> {
     // Backward compat: if 4th arg looks like an ARN, treat it as crossAccountRoleArn
     let scope: PolicyScope = "datastore";
@@ -156,15 +200,61 @@ export class PolicyManager {
     };
 
     try {
+      // --- Build merged tag set ---
+      const iamTags: { Key: string; Value: string }[] = [
+        { Key: "ManagedBy", Value: "citadel" },
+        { Key: "ResourceId", Value: resourceId },
+        { Key: "Scope", Value: scope },
+      ];
+
+      if (resourceTags) {
+        // System tags: citadel:org (always when available)
+        if (resourceTags.orgId) {
+          iamTags.push({ Key: "citadel:org", Value: resourceTags.orgId });
+        }
+
+        // System tags: scope-specific identifier
+        if (resourceTags.agentId) {
+          const scopeTagKey =
+            scope === "datastore"
+              ? "citadel:datastore"
+              : scope === "integration"
+                ? "citadel:integration"
+                : "citadel:agent";
+          iamTags.push({ Key: scopeTagKey, Value: resourceTags.agentId });
+        }
+
+        // User-defined policy tags
+        if (resourceTags.tags) {
+          for (const [key, value] of Object.entries(resourceTags.tags)) {
+            const entry = sanitiseTagEntry(key, value);
+            if (entry) {
+              // Avoid duplicating system keys
+              if (!iamTags.some((t) => t.Key === entry.Key)) {
+                iamTags.push(entry);
+              }
+            } else {
+              console.warn(
+                `ensureRole: dropped tag with invalid characters: key=${key}`,
+              );
+            }
+          }
+        }
+      }
+
+      // AWS IAM limit: 50 tags per role
+      if (iamTags.length > IAM_TAG_LIMIT) {
+        console.warn(
+          `ensureRole: tag count (${iamTags.length}) exceeds IAM limit (${IAM_TAG_LIMIT}), truncating`,
+        );
+      }
+      const finalTags = iamTags.slice(0, IAM_TAG_LIMIT);
+
       await this.iamClient.send(
         new CreateRoleCommand({
           RoleName: roleName,
           AssumeRolePolicyDocument: JSON.stringify(trustPolicy),
-          Tags: [
-            { Key: "ManagedBy", Value: "citadel" },
-            { Key: "ResourceId", Value: resourceId },
-            { Key: "Scope", Value: scope },
-          ],
+          Tags: finalTags,
         }),
       );
     } catch (error: unknown) {
@@ -190,6 +280,66 @@ export class PolicyManager {
       const err = error as Error;
       throw new PermissionError(
         `Failed to attach policy to role ${roleName}: ${err.message}`,
+        err,
+      );
+    }
+  }
+
+  /**
+   * Tags an existing vended IAM role. Guarded to role names starting with
+   * a known vended prefix (citadel-agent-/citadel-ds-/citadel-int-/citadel-eval-).
+   * Swallows NoSuchEntityException (role may have been deleted externally).
+   */
+  async tagExistingRole(
+    roleName: string,
+    tags: Record<string, string>,
+  ): Promise<void> {
+    if (!VENDED_PREFIXES.some((p) => roleName.startsWith(p))) {
+      throw new PermissionError(
+        `tagExistingRole: refusing to tag role "${roleName}" — name does not ` +
+          `start with a vended prefix (${VENDED_PREFIXES.join(", ")})`,
+      );
+    }
+
+    const iamTags: { Key: string; Value: string }[] = [];
+    for (const [key, value] of Object.entries(tags)) {
+      const entry = sanitiseTagEntry(key, value);
+      if (entry) {
+        iamTags.push(entry);
+      } else {
+        console.warn(
+          `tagExistingRole: dropped tag with invalid characters: key=${key}`,
+        );
+      }
+    }
+
+    if (iamTags.length === 0) return;
+
+    // Cap at IAM limit
+    if (iamTags.length > IAM_TAG_LIMIT) {
+      console.warn(
+        `tagExistingRole: tag count (${iamTags.length}) exceeds IAM limit (${IAM_TAG_LIMIT}), truncating`,
+      );
+    }
+    const finalTags = iamTags.slice(0, IAM_TAG_LIMIT);
+
+    try {
+      await this.iamClient.send(
+        new TagRoleCommand({
+          RoleName: roleName,
+          Tags: finalTags,
+        }),
+      );
+    } catch (error: unknown) {
+      const err = error as Error;
+      if (err.name === "NoSuchEntityException") {
+        console.warn(
+          `tagExistingRole: role ${roleName} does not exist, skipping`,
+        );
+        return;
+      }
+      throw new PermissionError(
+        `Failed to tag IAM role ${roleName}: ${err.message}`,
         err,
       );
     }
