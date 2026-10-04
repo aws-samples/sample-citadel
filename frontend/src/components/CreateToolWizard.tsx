@@ -7,10 +7,14 @@ import { Textarea } from './ui/textarea';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Badge } from './ui/badge';
 import { fabricatorService } from '../services/fabricatorService';
+import { tagPolicyService, TagPolicy } from '../services/tagPolicyService';
+import { parseTagPolicyViolation, TagViolation } from '../lib/tag-policy-errors';
+import { TagEditor } from './TagEditor';
 import { integrationServiceBackend, Integration as BackendIntegration } from '../services/integrationServiceBackend';
 import { datastoreService, DataStore, DataStoreStatus } from '../services/datastoreService';
 import { getConnectorDefinition } from '../config/connectorRegistry';
 import { useOrganization } from '../contexts/OrganizationContext';
+import { toast } from 'sonner';
 import {
   MessageSquare,
   Mail,
@@ -105,8 +109,15 @@ export function CreateToolWizard({ onBack, onComplete, onRequestSubmitted }: Cre
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Tag state
+  const [tagPolicy, setTagPolicy] = useState<TagPolicy | null>(null);
+  const [tags, setTags] = useState<Record<string, string>>({});
+  const [tagErrors, setTagErrors] = useState<TagViolation[]>([]);
+
   // Load integrations and data stores on mount
   useEffect(() => {
+    tagPolicyService.getTagPolicy(orgId).then(setTagPolicy).catch(() => {});
+
     const loadData = async () => {
       try {
         setLoadingData(true);
@@ -181,6 +192,7 @@ export function CreateToolWizard({ onBack, onComplete, onRequestSubmitted }: Cre
       const response = await fabricatorService.requestToolCreation({
         toolName: toolName.trim(),
         toolDescription: enhancedDescription,
+        tags: Object.keys(tags).length > 0 ? tags : undefined,
       });
 
       console.log('Tool creation request submitted:', response);
@@ -192,6 +204,12 @@ export function CreateToolWizard({ onBack, onComplete, onRequestSubmitted }: Cre
       onComplete();
     } catch (err: any) {
       console.error('Failed to submit tool creation request:', err);
+      const violation = parseTagPolicyViolation(err);
+      if (violation) {
+        setTagErrors(violation.violations);
+        toast.error('Tags do not meet the organisation policy');
+        return;
+      }
       setError(err.message || 'Failed to submit tool creation request');
     } finally {
       setIsSubmitting(false);
@@ -266,6 +284,14 @@ export function CreateToolWizard({ onBack, onComplete, onRequestSubmitted }: Cre
                 Include details about parameters, return values, and any special requirements
               </p>
             </div>
+
+            {/* Tags */}
+            <TagEditor
+              value={tags}
+              onChange={setTags}
+              policy={tagPolicy}
+              errors={tagErrors}
+            />
 
             {/* Integrations */}
             <div className="flex flex-col gap-3">

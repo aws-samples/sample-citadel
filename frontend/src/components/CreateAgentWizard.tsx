@@ -8,6 +8,9 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { Card, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { toolConfigService, ToolConfig } from '../services/toolConfigService';
 import { fabricatorService } from '../services/fabricatorService';
+import { tagPolicyService, TagPolicy } from '../services/tagPolicyService';
+import { parseTagPolicyViolation, TagViolation } from '../lib/tag-policy-errors';
+import { TagEditor } from './TagEditor';
 import { datastoreService, DataStore, DataStoreStatus, DataStoreCategory, DataStoreUsage } from '../services/datastoreService';
 import { toast } from 'sonner';
 import { integrationServiceBackend } from '../services/integrationServiceBackend';
@@ -70,6 +73,11 @@ export function CreateAgentWizard({ onBack, onComplete, onRequestSubmitted }: Cr
   const [selectedIntegrations, setSelectedIntegrations] = useState<string[]>([]);
   const [selectedDataStores, setSelectedDataStores] = useState<string[]>([]);
 
+  // Tag state
+  const [tagPolicy, setTagPolicy] = useState<TagPolicy | null>(null);
+  const [tags, setTags] = useState<Record<string, string>>({});
+  const [tagErrors, setTagErrors] = useState<TagViolation[]>([]);
+
   // Available options
   const [availableTools, setAvailableTools] = useState<ToolConfig[]>([]);
   const [availableIntegrations, setAvailableIntegrations] = useState<any[]>([]);
@@ -77,6 +85,7 @@ export function CreateAgentWizard({ onBack, onComplete, onRequestSubmitted }: Cr
 
   useEffect(() => {
     loadOptions(orgId);
+    tagPolicyService.getTagPolicy(orgId).then(setTagPolicy).catch(() => {});
   }, [orgId]);
 
   const loadOptions = async (currentOrgId: string) => {
@@ -158,6 +167,7 @@ export function CreateAgentWizard({ onBack, onComplete, onRequestSubmitted }: Cr
         tools: selectedTools,
         integrations: selectedIntegrations,
         dataStores: selectedDataStores,
+        tags: Object.keys(tags).length > 0 ? tags : undefined,
       });
 
       console.log('Fabricator response:', response);
@@ -178,6 +188,12 @@ export function CreateAgentWizard({ onBack, onComplete, onRequestSubmitted }: Cr
       }
     } catch (err: any) {
       console.error('Failed to create agent:', err);
+      const violation = parseTagPolicyViolation(err);
+      if (violation) {
+        setTagErrors(violation.violations);
+        toast.error('Tags do not meet the organisation policy');
+        return;
+      }
       setError(err.message || 'Failed to send request to Fabricator');
     } finally {
       setLoading(false);
@@ -325,6 +341,13 @@ export function CreateAgentWizard({ onBack, onComplete, onRequestSubmitted }: Cr
                 Be specific about the agent's purpose, expected inputs, outputs, and any special requirements.
               </p>
             </div>
+
+            <TagEditor
+              value={tags}
+              onChange={setTags}
+              policy={tagPolicy}
+              errors={tagErrors}
+            />
           </div>
         )}
 

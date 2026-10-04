@@ -2,6 +2,9 @@ import React from 'react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { AgentConfig as AgentConfigType } from '../services/agentConfigService';
+import { TagEditor } from './TagEditor';
+import type { TagPolicy } from '../services/tagPolicyService';
+import type { TagViolation } from '../lib/tag-policy-errors';
 
 interface AgentConfigProps {
   agent: AgentConfigType | null;
@@ -16,6 +19,10 @@ interface AgentConfigProps {
   onSave: () => void;
   onCancel: () => void;
   isFabricator?: boolean;
+  tags?: Record<string, string>;
+  onTagsChange?: (tags: Record<string, string>) => void;
+  tagPolicy?: TagPolicy | null;
+  tagErrors?: TagViolation[];
 }
 
 export const AgentConfigTab: React.FC<AgentConfigProps> = ({
@@ -28,6 +35,10 @@ export const AgentConfigTab: React.FC<AgentConfigProps> = ({
   onSave,
   onCancel,
   isFabricator = false,
+  tags,
+  onTagsChange,
+  tagPolicy,
+  tagErrors,
 }) => {
   const updateConfigField = (path: string[], value: any) => {
     const newConfig = JSON.parse(JSON.stringify(formData.config));
@@ -202,6 +213,30 @@ export const AgentConfigTab: React.FC<AgentConfigProps> = ({
           </div>
         )}
       </div>
+
+      {/* Tags */}
+      {onTagsChange && (isEditing || isCreating) && (
+        <TagEditor
+          value={tags ?? {}}
+          onChange={onTagsChange}
+          policy={tagPolicy}
+          errors={tagErrors}
+        />
+      )}
+
+      {/* Read-only tag badges when not editing */}
+      {!isEditing && !isCreating && tags && Object.keys(tags).length > 0 && (
+        <div data-testid="tags-readonly" className="config-field-group">
+          <label className="config-field-label">Tags</label>
+          <div className="flex flex-wrap gap-1">
+            {Object.entries(tags).map(([k, v]) => (
+              <span key={k} className="inline-flex items-center rounded-full bg-accent px-2.5 py-0.5 text-xs font-medium text-foreground">
+                {k}={v}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
 
       {agent && !isCreating && (
         <div className="agent-details-metadata">

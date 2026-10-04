@@ -107,7 +107,7 @@ export function TagEditor({ value, onChange, policy, errors }: TagEditorProps) {
   );
 
   return (
-    <div data-testid="tag-editor" className="space-y-2">
+    <div data-testid="tag-editor" className="flex flex-col gap-2">
       <Label>Tags</Label>
 
       {rows.map((row) => {

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   ArrowLeft,
   Cloud,
@@ -27,8 +27,12 @@ import {
   SelectValue,
 } from './ui/select';
 import { agentImportService } from '../services/agentImportService';
+import { tagPolicyService, TagPolicy } from '../services/tagPolicyService';
+import { parseTagPolicyViolation, TagViolation } from '../lib/tag-policy-errors';
+import { TagEditor } from './TagEditor';
 import { useOrganization } from '../contexts/OrganizationContext';
 import { Tier3ProposalPanel } from './Tier3ProposalPanel';
+import { toast } from 'sonner';
 import type {
   AgentCandidate,
   AgentCapabilityDescriptor,
@@ -212,6 +216,12 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
   const [categoriesText, setCategoriesText] = useState('');
   const [confirmedFields, setConfirmedFields] = useState<Record<string, boolean>>({});
 
+  // Tags
+  const callerOrg = currentUser?.organization ?? 'default';
+  const [tagPolicy, setTagPolicy] = useState<TagPolicy | null>(null);
+  const [tags, setTags] = useState<Record<string, string>>({});
+  const [tagErrors, setTagErrors] = useState<TagViolation[]>([]);
+
   // Step 4 — Configure invocation + auth + test
   const [protocol, setProtocol] = useState<AgentInvocationProtocol>('HTTP_ENDPOINT');
   const [target, setTarget] = useState('');
@@ -242,6 +252,12 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
   const [batchResults, setBatchResults] = useState<BatchImportResult[] | null>(null);
 
   const activeRef = selectedRefs[0] ?? null;
+
+  // Load tag policy once on mount.
+  useEffect(() => {
+    tagPolicyService.getTagPolicy(callerOrg).then(setTagPolicy).catch(() => {});
+  }, [callerOrg]);
+
   const fieldConfidence = descriptor?.fieldConfidence ?? {};
   const lowConfidenceFields = Object.keys(fieldConfidence).filter(
     (k) => fieldConfidence[k] === 'low',
@@ -414,6 +430,7 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
       sourceArn: origin?.sourceArn,
       substrate: origin?.substrate ?? '',
       categories,
+      tags: Object.keys(tags).length > 0 ? tags : undefined,
       onConflict,
     };
   };
@@ -431,6 +448,13 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
         setRegistered(true);
       }
     } catch (err) {
+      const violation = parseTagPolicyViolation(err);
+      if (violation) {
+        setTagErrors(violation.violations);
+        toast.error('Tags do not meet the organisation policy');
+        setRegistering(false);
+        return;
+      }
       setRegisterError(errorMessage(err, 'Failed to import agent'));
     } finally {
       setRegistering(false);
@@ -866,6 +890,13 @@ export function ImportAgentWizard({ onBack, onComplete }: ImportAgentWizardProps
             />
           </div>
         </div>
+
+        <TagEditor
+          value={tags}
+          onChange={setTags}
+          policy={tagPolicy}
+          errors={tagErrors}
+        />
 
         <div className="flex flex-col gap-1">
           <div className="flex items-center gap-2">
