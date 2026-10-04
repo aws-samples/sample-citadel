@@ -27,6 +27,8 @@ import {
   assertRowOrg,
 } from "../utils/auth-event";
 import { assertProjectOrgAccess } from "../utils/project-org-access";
+import { extractUserIdFromEvent } from "../utils/auth";
+import { isRecordVisible, viewerFromEvent } from "../utils/record-visibility";
 import { getGovernanceEnforce } from "../utils/governance-flag";
 import { publishEvent } from "../utils/events";
 import {
@@ -158,6 +160,10 @@ interface AgentConfig {
   categories?: string[] | string;
   createdAt?: string;
   updatedAt?: string;
+  /** Raw Registry status (CIT-043 visibility filtering). */
+  registryStatus?: string;
+  /** AppSync caller identity who created this record (CIT-043 ownership). */
+  createdBy?: string;
 }
 
 /** Merged create/update mutation input (config required only on create). */
@@ -373,6 +379,12 @@ export async function listAgentConfigsRegistry(
     return [];
   }
 
+  // Build a Viewer for CIT-043 record-level visibility filtering.
+  const viewer =
+    event !== undefined
+      ? await viewerFromEvent(event)
+      : { isAdmin: false, roles: [], orgId: null, userId: null };
+
   // 1. Fetch Registry records and map to AgentConfig
   const registryService = getRegistryService();
   const budgetOptions = budgetOptionsFrom(context);
@@ -382,17 +394,28 @@ export async function listAgentConfigsRegistry(
   const allRegistryConfigs = registryRecords.map((record) =>
     registryService.mapToAgentConfig(record),
   );
-  const registryConfigs = admin
-    ? allRegistryConfigs
-    : allRegistryConfigs.filter(
-        (a) => a.orgId === callerOrgId || a.orgId === "",
-      );
+  // Org filter (existing) + status/ownership visibility (CIT-043).
+  const registryConfigs = allRegistryConfigs.filter((a) => {
+    if (!admin && a.orgId !== callerOrgId && a.orgId !== "") return false;
+    return isRecordVisible(viewer, {
+      status: a.registryStatus ?? undefined,
+      orgId: a.orgId,
+      createdBy: a.createdBy,
+    });
+  });
 
-  // 2. Fetch DynamoDB legacy records
+  // 2. Fetch DynamoDB legacy records — apply isRecordVisible for items that
+  //    carry registryStatus (none do today, but items without it stay visible
+  //    per policy: legacy records predate governance).
   const allDynamoConfigs = await listAgentConfigs();
-  const dynamoConfigs = admin
-    ? allDynamoConfigs
-    : allDynamoConfigs.filter((a) => a.orgId === callerOrgId || a.orgId === "");
+  const dynamoConfigs = allDynamoConfigs.filter((a) => {
+    if (!admin && a.orgId !== callerOrgId && a.orgId !== "") return false;
+    return isRecordVisible(viewer, {
+      status: a.registryStatus,
+      orgId: a.orgId,
+      createdBy: a.createdBy,
+    });
+  });
 
   // 3. Build set of names from Registry (Registry wins on duplicates).
   //    Post-420d0ae, registryConfigs[].agentId is a 12-char recordId while
@@ -459,6 +482,7 @@ export async function createAgentConfigRegistry(
     state: input.state || "active",
     appId: input.appId || undefined,
     orgId,
+    createdBy: extractUserIdFromEvent(event),
   } as AgentCustomMetadata);
 
   const record = await registryService.createResource("agent", input.agentId, {
@@ -1167,14 +1191,24 @@ export async function searchAgentConfigsRegistry(
     return [];
   }
 
+  const viewer =
+    event !== undefined
+      ? await viewerFromEvent(event)
+      : { isAdmin: false, roles: [], orgId: null, userId: null };
+
   const registryService = getRegistryService();
   const records = await registryService.searchResources("agent", query);
   const configs = records.map((record) =>
     registryService.mapToAgentConfig(record),
   );
-  return admin
-    ? configs
-    : configs.filter((a) => a.orgId === callerOrgId || a.orgId === "");
+  return configs.filter((a) => {
+    if (!admin && a.orgId !== callerOrgId && a.orgId !== "") return false;
+    return isRecordVisible(viewer, {
+      status: a.registryStatus ?? undefined,
+      orgId: a.orgId,
+      createdBy: a.createdBy,
+    });
+  });
 }
 
 /** Result of a bulk activation, grouped by per-agent outcome. */

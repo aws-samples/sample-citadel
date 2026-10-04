@@ -25,6 +25,8 @@ import type {
 import { sanitizeRegistryName } from "../utils/registry-name";
 import { LifecycleManager, REGISTRY_TRANSITIONS } from "../adapters/lifecycle";
 import { ConnectorError } from "../adapters/errors";
+import type { Viewer } from "../utils/record-visibility";
+import { isRecordVisible } from "../utils/record-visibility";
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -332,6 +334,8 @@ export interface AgentCustomMetadata {
   appId?: string;
   manifest?: Record<string, unknown>;
   orgId?: string;
+  /** AppSync caller identity (Cognito sub/username) recorded at create time. */
+  createdBy?: string;
   /** Present only on imported agents (US-IMP-001). Absent ⇒ AGENTCORE_RUNTIME. */
   invocation?: AgentInvocationBlock;
   /** Present only on imported agents (US-IMP-001). */
@@ -493,6 +497,8 @@ export interface AgentConfig {
    * active/trusted field and never changes the record's DRAFT/activation state.
    */
   gatewayPublication?: GatewayPublicationMetadata;
+  /** AppSync caller identity who created this record. Absent on legacy records. */
+  createdBy?: string;
 }
 
 export interface ToolConfig {
@@ -512,6 +518,8 @@ export interface ToolConfig {
   dataStoreBindings?: DataStoreBinding[] | null;
   createdAt?: string;
   updatedAt?: string;
+  /** AppSync caller identity who created this record. Absent on legacy records. */
+  createdBy?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -551,6 +559,8 @@ export interface CreateResourceInput {
   name: string;
   description?: string;
   customMetadata: string; // serialised JSON
+  /** Optional caller identity to stamp into customDescriptorContent (agents). */
+  createdBy?: string;
 }
 
 export interface UpdateResourceInput {
@@ -580,6 +590,12 @@ export interface ListResourcesOptions {
    * Defaults to 5000.
    */
   minRemainingTimeMs?: number;
+  /**
+   * When supplied, records are filtered through `isRecordVisible(viewer, ...)`
+   * before being returned. Omitting the viewer preserves the existing
+   * behaviour for internal callers that need the full unfiltered list.
+   */
+  viewer?: Viewer;
 }
 
 export class RegistryService {
@@ -763,6 +779,18 @@ export class RegistryService {
     // caller — createApp (UI + intake), agent import, agent/tool config —
     // flows through here, so this is THE shared sanitization point.
     const safeName = sanitizeRegistryName(input.name);
+    // When the caller supplies a createdBy identity, stamp it into the
+    // custom metadata so it persists alongside orgId for ownership queries.
+    let metadataJson = input.customMetadata;
+    if (input.createdBy) {
+      try {
+        const parsed = JSON.parse(metadataJson);
+        parsed.createdBy = input.createdBy;
+        metadataJson = JSON.stringify(parsed);
+      } catch {
+        // If metadata is unparseable, leave it as-is.
+      }
+    }
     const createResult = await this.withRetry(() =>
       this.client.send(
         new CreateRegistryRecordCommand({
@@ -773,7 +801,7 @@ export class RegistryService {
           recordType: RecordType.CUSTOM,
           descriptors: {
             custom: {
-              data: input.customMetadata,
+              data: metadataJson,
             },
           },
         }),
@@ -1660,6 +1688,23 @@ export class RegistryService {
       );
     }
 
+    // When a viewer is supplied, filter hydrated records through the
+    // visibility policy before returning so callers never see records
+    // their persona is not authorised for.
+    if (options?.viewer) {
+      const viewer = options.viewer;
+      return records.filter((record) => {
+        const meta = record.customDescriptorContent
+          ? JSON.parse(record.customDescriptorContent)
+          : {};
+        return isRecordVisible(viewer, {
+          status: record.status,
+          orgId: meta.orgId,
+          createdBy: meta.createdBy,
+        });
+      });
+    }
+
     return records;
   }
 
@@ -1675,6 +1720,7 @@ export class RegistryService {
   async searchResources(
     type: ResourceType,
     query: string,
+    viewer?: Viewer,
   ): Promise<RegistryRecord[]> {
     const records: RegistryRecord[] = [];
     let nextToken: string | undefined;
@@ -1705,6 +1751,22 @@ export class RegistryService {
 
       nextToken = result.nextToken;
     } while (nextToken);
+
+    // When a viewer is supplied, filter through the visibility policy.
+    // Search results are summary-only (no customDescriptorContent), so
+    // orgId/createdBy are unavailable — status-level filtering still applies.
+    if (viewer) {
+      return records.filter((record) => {
+        const meta = record.customDescriptorContent
+          ? JSON.parse(record.customDescriptorContent)
+          : {};
+        return isRecordVisible(viewer, {
+          status: record.status,
+          orgId: meta.orgId,
+          createdBy: meta.createdBy,
+        });
+      });
+    }
 
     return records;
   }
@@ -1873,6 +1935,7 @@ export class RegistryService {
     appId: undefined,
     manifest: undefined,
     orgId: undefined,
+    createdBy: undefined,
     invocation: undefined,
     origin: undefined,
     governanceAttestation: undefined,
@@ -2045,6 +2108,8 @@ export class RegistryService {
       ...(meta.gatewayPublication
         ? { gatewayPublication: meta.gatewayPublication }
         : {}),
+      // Surface createdBy when present (CIT-043 ownership visibility).
+      ...(meta.createdBy ? { createdBy: meta.createdBy } : {}),
     };
   }
 
@@ -2088,6 +2153,8 @@ export class RegistryService {
       // Registry status, present only on registry-backed records. Legacy
       // rows built outside this mapper leave the field undefined/null.
       registryStatus: record.status ?? null,
+      // Surface createdBy when present (CIT-043 ownership visibility).
+      ...(meta.createdBy ? { createdBy: meta.createdBy } : {}),
     };
   }
 }

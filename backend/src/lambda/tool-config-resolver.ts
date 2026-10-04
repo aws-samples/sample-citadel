@@ -19,6 +19,7 @@ import {
   assertRowOrg,
   canCallerSeeRow,
 } from "../utils/auth-event";
+import { isRecordVisible, viewerFromEvent } from "../utils/record-visibility";
 
 const client = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(client);
@@ -168,6 +169,10 @@ interface ToolConfig {
   dataStoreBindings?: RawDataStoreBinding[] | null;
   createdAt?: string;
   updatedAt?: string;
+  /** Raw Registry status (CIT-043 visibility filtering). */
+  registryStatus?: string;
+  /** AppSync caller identity who created this record (CIT-043 ownership). */
+  createdBy?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -382,6 +387,11 @@ export async function listToolConfigsRegistry(
     return [];
   }
 
+  const viewer =
+    event !== undefined
+      ? await viewerFromEvent(event)
+      : { isAdmin: false, roles: [], orgId: null, userId: null };
+
   const registryService = getRegistryService();
   const budgetOptions = budgetOptionsFrom(context);
   const registryRecords = budgetOptions
@@ -390,14 +400,24 @@ export async function listToolConfigsRegistry(
   const allRegistryConfigs = registryRecords.map((record) =>
     registryService.mapToToolConfig(record),
   );
-  const registryConfigs = admin
-    ? allRegistryConfigs
-    : allRegistryConfigs.filter((t) => t.orgId === callerOrgId);
+  const registryConfigs = allRegistryConfigs.filter((t) => {
+    if (!admin && t.orgId !== callerOrgId) return false;
+    return isRecordVisible(viewer, {
+      status: t.registryStatus ?? undefined,
+      orgId: t.orgId,
+      createdBy: t.createdBy,
+    });
+  });
 
   const allDynamoConfigs = await listToolConfigs();
-  const dynamoConfigs = admin
-    ? allDynamoConfigs
-    : allDynamoConfigs.filter((t) => t.orgId === callerOrgId);
+  const dynamoConfigs = allDynamoConfigs.filter((t) => {
+    if (!admin && t.orgId !== callerOrgId) return false;
+    return isRecordVisible(viewer, {
+      status: t.registryStatus,
+      orgId: t.orgId,
+      createdBy: t.createdBy,
+    });
+  });
 
   // Registry wins on duplicates. Post-420d0ae, registryConfigs[].toolId is a
   // 12-char recordId while dynamoConfigs[].toolId is still the legacy name.
@@ -840,12 +860,29 @@ async function searchToolConfigs(
 
   if (event === undefined) return mapped;
 
-  if (isAdminFromEvent(event)) return mapped;
+  const viewer = await viewerFromEvent(event);
+
+  if (isAdminFromEvent(event)) {
+    return mapped.filter((t) =>
+      isRecordVisible(viewer, {
+        status: t.registryStatus ?? undefined,
+        orgId: t.orgId,
+        createdBy: t.createdBy,
+      }),
+    );
+  }
 
   const callerOrgId = await extractOrgFromEvent(event);
   if (!callerOrgId) return [];
 
-  return mapped.filter((t) => t.orgId && t.orgId === callerOrgId);
+  return mapped.filter((t) => {
+    if (!t.orgId || t.orgId !== callerOrgId) return false;
+    return isRecordVisible(viewer, {
+      status: t.registryStatus ?? undefined,
+      orgId: t.orgId,
+      createdBy: t.createdBy,
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------

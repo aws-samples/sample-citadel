@@ -721,6 +721,9 @@ type AgentConfig {
   # tell registry-backed records from legacy ones — do not infer it from
   # `name` or any other field.
   registryStatus: String
+  # AppSync caller identity who created this record (CIT-043 ownership).
+  # Absent on legacy, non-registry rows that predate the field.
+  createdBy: String
   manifest: AgentManifest
   # UNTRUSTED, LLM-proposed manifest parked for human review (Tier-3 agent
   # import). READ-only; never an active/trusted manifest. Absent unless a
@@ -1032,6 +1035,9 @@ type ToolConfig {
   # tell registry-backed records from legacy ones — do not infer it from
   # any other field.
   registryStatus: String
+  # AppSync caller identity who created this record (CIT-043 ownership).
+  # Absent on legacy, non-registry rows that predate the field.
+  createdBy: String
 }
 
 type DeleteToolConfigResult {

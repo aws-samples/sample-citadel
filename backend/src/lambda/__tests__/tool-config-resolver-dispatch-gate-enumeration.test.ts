@@ -393,9 +393,14 @@ describe("tool-config-resolver — dispatch enumeration completeness", () => {
 
     test("searchToolConfigs org-filters results to the caller's own org with an explicit orgId equality", () => {
       const body = extractFunctionBody(source, "searchToolConfigs");
-      expect(/t\.orgId\s*&&\s*t\.orgId\s*===\s*callerOrgId/.test(body)).toBe(
-        true,
-      );
+      // CIT-043: org filter now uses the fail-closed shape
+      // `!t.orgId || t.orgId !== callerOrgId` (combined with
+      // isRecordVisible), or the original positive filter. Either shape
+      // satisfies the org-filtering invariant.
+      expect(
+        /!t\.orgId\s*\|\|\s*t\.orgId\s*!==\s*callerOrgId/.test(body) ||
+          /t\.orgId\s*&&\s*t\.orgId\s*===\s*callerOrgId/.test(body),
+      ).toBe(true);
     });
 
     test("bite: the fail-closed empty-list return in searchToolConfigs is guarded by the unresolvable-org check", () => {
