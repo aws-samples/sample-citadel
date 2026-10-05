@@ -349,6 +349,42 @@ describe("ArbiterStack — handler env-var parity (deployment contract)", () => 
     expect(vars.APPROVAL_GATE_ENABLED).toBe("false");
   });
 
+  test("APPROVAL_GATE_ENABLED is wired on the worker with default 'false'", () => {
+    const fns = template.findResources("AWS::Lambda::Function");
+    const match = Object.entries(fns).find(([id]) =>
+      id.startsWith("WorkerAgentWrapper"),
+    );
+    expect(match).toBeDefined();
+    const vars =
+      (
+        match![1] as {
+          Properties?: {
+            Environment?: { Variables?: Record<string, unknown> };
+          };
+        }
+      ).Properties?.Environment?.Variables ?? {};
+    expect(vars).toHaveProperty("APPROVAL_GATE_ENABLED");
+    expect(vars.APPROVAL_GATE_ENABLED).toBe("false");
+  });
+
+  test("APPROVAL_GATE_ENABLED is wired on the supervisor with default 'false'", () => {
+    const fns = template.findResources("AWS::Lambda::Function");
+    const match = Object.entries(fns).find(([id]) =>
+      id.startsWith("SupervisorAgent"),
+    );
+    expect(match).toBeDefined();
+    const vars =
+      (
+        match![1] as {
+          Properties?: {
+            Environment?: { Variables?: Record<string, unknown> };
+          };
+        }
+      ).Properties?.Environment?.Variables ?? {};
+    expect(vars).toHaveProperty("APPROVAL_GATE_ENABLED");
+    expect(vars.APPROVAL_GATE_ENABLED).toBe("false");
+  });
+
   test("APPROVAL_TIMEOUT_SECONDS is wired on the timeout watchdog with default '86400'", () => {
     const fns = template.findResources("AWS::Lambda::Function");
     const match = Object.entries(fns).find(([id]) =>
