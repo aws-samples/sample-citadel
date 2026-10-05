@@ -243,6 +243,43 @@ describe("RegistryService record mapping", () => {
       };
       expect(service.mapToAgentConfig(record).orgId).toBe("");
     });
+
+    it("surfaces decidedBy, decidedAt, and statusReason when present in metadata", () => {
+      const record: RegistryRecord = {
+        recordId: "a-dec-1",
+        name: "DecisionAgent",
+        status: RegistryRecordStatusValues.APPROVED,
+        customDescriptorContent: JSON.stringify({
+          categories: [],
+          icon: "",
+          state: "active",
+          decidedBy: "admin-user-42",
+          decidedAt: "2024-08-10T14:30:00Z",
+          statusReason: "Meets security requirements",
+        }),
+      };
+      const result = service.mapToAgentConfig(record);
+      expect(result.decidedBy).toBe("admin-user-42");
+      expect(result.decidedAt).toBe("2024-08-10T14:30:00Z");
+      expect(result.statusReason).toBe("Meets security requirements");
+    });
+
+    it("omits decidedBy, decidedAt, and statusReason when absent from metadata", () => {
+      const record: RegistryRecord = {
+        recordId: "a-dec-2",
+        name: "PlainAgent",
+        status: RegistryRecordStatusValues.DRAFT,
+        customDescriptorContent: JSON.stringify({
+          categories: [],
+          icon: "",
+          state: "active",
+        }),
+      };
+      const result = service.mapToAgentConfig(record);
+      expect(result.decidedBy).toBeUndefined();
+      expect(result.decidedAt).toBeUndefined();
+      expect(result.statusReason).toBeUndefined();
+    });
   });
 
   // -- mapToToolConfig -----------------------------------------------------

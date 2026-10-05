@@ -728,6 +728,12 @@ type AgentConfig {
   # AppSync caller identity who created this record (CIT-043 ownership).
   # Absent on legacy, non-registry rows that predate the field.
   createdBy: String
+  # Identity of the admin who approved/rejected this agent record.
+  decidedBy: String
+  # Timestamp of the approval/rejection decision.
+  decidedAt: AWSDateTime
+  # Reason supplied when an agent record is rejected.
+  statusReason: String
   manifest: AgentManifest
   # UNTRUSTED, LLM-proposed manifest parked for human review (Tier-3 agent
   # import). READ-only; never an active/trusted manifest. Absent unless a

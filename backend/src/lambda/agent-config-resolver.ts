@@ -166,6 +166,12 @@ interface AgentConfig {
   registryStatus?: string;
   /** AppSync caller identity who created this record (CIT-043 ownership). */
   createdBy?: string;
+  /** Admin who approved/rejected this record. Absent on legacy records. */
+  decidedBy?: string;
+  /** ISO timestamp of the approval/rejection decision. Absent on legacy records. */
+  decidedAt?: string;
+  /** Reason supplied when this record was rejected. Absent on legacy records. */
+  statusReason?: string;
   /** User-supplied resource tags (CIT-042). */
   tags?: Record<string, string>;
 }
