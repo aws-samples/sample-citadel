@@ -1831,7 +1831,10 @@ export class ArbiterStack extends cdk.Stack {
         {
           eventBus: props.agentEventBus,
           eventPattern: {
-            detailType: ["execution.resume.requested"],
+            detailType: [
+              "execution.resume.requested",
+              "execution.pause.requested",
+            ],
           },
         },
       );

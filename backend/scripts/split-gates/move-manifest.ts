@@ -1674,6 +1674,30 @@ export const EXPECTED_NEW_FIELDS: AllowlistEntry[] = [
     logicalId: "Mutation.updateTagPolicy",
     justification: "CIT-042: Administrator-only tag policy editor.",
   },
+  {
+    logicalId: "Mutation.pauseExecution",
+    justification:
+      "Execution approval API: see ADDITION_ALLOWLIST entry " +
+      "AgenticAIApiPauseExecutionResolver4601AFED.",
+  },
+  {
+    logicalId: "Mutation.approveExecution",
+    justification:
+      "Execution approval API: see ADDITION_ALLOWLIST entry " +
+      "AgenticAIApiApproveExecutionResolverCDDF9ECC.",
+  },
+  {
+    logicalId: "Mutation.denyExecution",
+    justification:
+      "Execution approval API: see ADDITION_ALLOWLIST entry " +
+      "AgenticAIApiDenyExecutionResolver0902D82B.",
+  },
+  {
+    logicalId: "Query.listAwaitingApprovals",
+    justification:
+      "Execution approval API: see ADDITION_ALLOWLIST entry " +
+      "AgenticAIApiListAwaitingApprovalsResolver03BFE76A.",
+  },
 ];
 
 /**
@@ -1967,6 +1991,30 @@ export const ADDITION_ALLOWLIST: AllowlistEntry[] = [
   {
     logicalId: "AgenticAIApiUpdateTagPolicyResolverC38663E3",
     justification: "CIT-042: Administrator-only tag policy editor.",
+  },
+  {
+    logicalId: "AgenticAIApiPauseExecutionResolver4601AFED",
+    justification:
+      "Execution approval API: Mutation.pauseExecution on the existing " +
+      "ExecutionLambdaDataSource (backend-stack.ts).",
+  },
+  {
+    logicalId: "AgenticAIApiApproveExecutionResolverCDDF9ECC",
+    justification:
+      "Execution approval API: Mutation.approveExecution on the existing " +
+      "ExecutionLambdaDataSource (backend-stack.ts).",
+  },
+  {
+    logicalId: "AgenticAIApiDenyExecutionResolver0902D82B",
+    justification:
+      "Execution approval API: Mutation.denyExecution on the existing " +
+      "ExecutionLambdaDataSource (backend-stack.ts).",
+  },
+  {
+    logicalId: "AgenticAIApiListAwaitingApprovalsResolver03BFE76A",
+    justification:
+      "Execution approval API: Query.listAwaitingApprovals on the existing " +
+      "ExecutionLambdaDataSource (backend-stack.ts).",
   },
 ];
 

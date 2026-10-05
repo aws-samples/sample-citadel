@@ -135,3 +135,32 @@ class TestNodeCompletedQueueWaitExtraction:
         _, kwargs = mock_handle.call_args
         assert kwargs['dispatched_at'] is None
         assert kwargs['worker_started_at'] is None
+
+
+class TestPauseRequestedRouting:
+    def test_routes_to_handle_pause_requested_with_reason_and_requested_by(self):
+        detail = {
+            'executionId': 'exec-1',
+            'reason': 'User requested pause',
+            'requestedBy': 'user@example.com',
+        }
+        with patch.object(index, 'handle_pause_requested') as mock_handle:
+            result = index.handler(_event('execution.pause.requested', detail), {})
+
+        mock_handle.assert_called_once_with(
+            'exec-1',
+            reason='User requested pause',
+            requested_by='user@example.com',
+        )
+        assert result == {'statusCode': 200}
+
+    def test_routes_with_missing_optional_fields(self):
+        detail = {'executionId': 'exec-1'}
+        with patch.object(index, 'handle_pause_requested') as mock_handle:
+            index.handler(_event('execution.pause.requested', detail), {})
+
+        mock_handle.assert_called_once_with(
+            'exec-1',
+            reason='',
+            requested_by='',
+        )

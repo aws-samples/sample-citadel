@@ -230,10 +230,13 @@ describe("ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)",
       });
     });
 
-    test("StepRunnerResumeRule matches execution.resume.requested", () => {
+    test("StepRunnerResumeRule matches execution.resume.requested and execution.pause.requested", () => {
       template.hasResourceProperties("AWS::Events::Rule", {
         EventPattern: {
-          "detail-type": ["execution.resume.requested"],
+          "detail-type": Match.arrayWith([
+            "execution.resume.requested",
+            "execution.pause.requested",
+          ]),
         },
       });
     });

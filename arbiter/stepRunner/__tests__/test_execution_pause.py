@@ -11,6 +11,7 @@ Covers:
   * flag off: behaviour byte-identical (no park, no extra writes)
 """
 import json
+import logging
 import os
 import re
 import sys
@@ -507,3 +508,128 @@ class TestResumeTokenNeverLogged:
         for ev_call in mock_events.publish_event.call_args_list:
             detail_str = json.dumps(ev_call.args[1]) if len(ev_call.args) > 1 else ''
             assert resume_token not in detail_str
+
+
+# ---------------------------------------------------------------------------
+# 8. handle_pause_requested — route from index.py
+# ---------------------------------------------------------------------------
+
+class TestHandlePauseRequested:
+    """Tests for the execution.pause.requested handler that parks pending nodes."""
+
+    def test_parks_pending_nodes_when_gate_on(self):
+        _enable_gate()
+        executor, ctx, fake_sqs, fake_exec_table = _patched_executor()
+        executor.APPROVAL_GATE_ENABLED = True
+
+        execution = {
+            'executionId': 'exec-1',
+            'workflowId': 'wf-1',
+            'nodeResults': {
+                'nA': {'status': 'completed'},
+                'nB': {'status': 'pending'},
+            },
+        }
+        workflow = {
+            'workflowId': 'wf-1',
+            'definition': json.dumps({
+                'nodes': [
+                    {'id': 'nA', 'agentId': 'agent-A'},
+                    {'id': 'nB', 'agentId': 'agent-B'},
+                ],
+                'edges': [{'source': 'nA', 'target': 'nB'}],
+            }),
+        }
+
+        with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4], \
+             patch.object(executor, '_load_execution', return_value=execution), \
+             patch.object(executor, '_load_workflow', return_value=workflow):
+            mock_events = executor.events
+            executor.handle_pause_requested(
+                'exec-1', reason='deploy freeze', requested_by='admin@co.com',
+            )
+
+        # DDB write parks nB (the pending node)
+        write_calls = fake_exec_table.update_item.call_args_list
+        assert len(write_calls) == 1
+        expr_values = write_calls[0].kwargs.get(
+            'ExpressionAttributeValues',
+            write_calls[0][1].get('ExpressionAttributeValues', {}),
+        )
+        assert expr_values.get(':awaiting') == AWAITING_APPROVAL
+        assert expr_values.get(':pending') == 'pending'
+        # Approval record carries the manual_pause request type
+        record = expr_values.get(':record', {})
+        assert record.get('requestType') == 'manual_pause'
+        assert record.get('reason') == 'deploy freeze'
+        assert record.get('requestedBy') == 'admin@co.com'
+
+    def test_noop_log_when_no_pending_nodes(self, capsys):
+        _enable_gate()
+        executor, ctx, fake_sqs, fake_exec_table = _patched_executor()
+        executor.APPROVAL_GATE_ENABLED = True
+
+        execution = {
+            'executionId': 'exec-1',
+            'workflowId': 'wf-1',
+            'nodeResults': {
+                'nA': {'status': 'completed'},
+                'nB': {'status': 'running'},
+            },
+        }
+
+        with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4], \
+             patch.object(executor, '_load_execution', return_value=execution):
+            executor.handle_pause_requested('exec-1')
+
+        # No DDB writes — no pending nodes
+        fake_exec_table.update_item.assert_not_called()
+        # Structured log emitted
+        captured = capsys.readouterr()
+        assert 'pause_requested_no_pending_nodes' in captured.out
+
+    def test_flag_off_ignores(self, caplog):
+        _disable_gate()
+        import executor
+        executor.APPROVAL_GATE_ENABLED = False
+
+        with caplog.at_level(logging.INFO):
+            executor.handle_pause_requested('exec-1', reason='r', requested_by='u')
+
+        assert any('APPROVAL_GATE_ENABLED is off' in r.message for r in caplog.records)
+
+    def test_parks_multiple_pending_nodes(self):
+        _enable_gate()
+        executor, ctx, fake_sqs, fake_exec_table = _patched_executor()
+        executor.APPROVAL_GATE_ENABLED = True
+
+        execution = {
+            'executionId': 'exec-1',
+            'workflowId': 'wf-1',
+            'nodeResults': {
+                'nA': {'status': 'pending'},
+                'nB': {'status': 'pending'},
+                'nC': {'status': 'running'},
+            },
+        }
+        workflow = {
+            'workflowId': 'wf-1',
+            'definition': json.dumps({
+                'nodes': [
+                    {'id': 'nA', 'agentId': 'agent-A'},
+                    {'id': 'nB', 'agentId': 'agent-B'},
+                    {'id': 'nC', 'agentId': 'agent-C'},
+                ],
+                'edges': [],
+            }),
+        }
+
+        with ctx[0], ctx[1], ctx[2], ctx[3], ctx[4], \
+             patch.object(executor, '_load_execution', return_value=execution), \
+             patch.object(executor, '_load_workflow', return_value=workflow):
+            executor.handle_pause_requested(
+                'exec-1', reason='freeze', requested_by='ops',
+            )
+
+        # Two pending nodes → two park writes
+        assert fake_exec_table.update_item.call_count == 2

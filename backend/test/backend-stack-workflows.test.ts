@@ -194,11 +194,18 @@ describe("BackendStack — Workflow/App/Execution Lambda functions and AppSync w
   // See registry-stack.test.ts.
 
   describe("AppSync Resolvers — Execution", () => {
-    const executionQueryFields = ["getExecution", "listExecutions"];
+    const executionQueryFields = [
+      "getExecution",
+      "listExecutions",
+      "listAwaitingApprovals",
+    ];
     const executionMutationFields = [
       "startExecution",
       "cancelExecution",
       "resumeExecution",
+      "pauseExecution",
+      "approveExecution",
+      "denyExecution",
       "publishWorkflowProgress",
     ];
 

@@ -780,6 +780,9 @@ def start_execution(execution_id: str, workflow_id: str) -> None:
 def _park_node_awaiting_approval(
     execution_id: str, workflow_id: str, node_id: str, agent_id: str,
     *, run_id: str | None = None,
+    request_type: str = 'approval_required',
+    reason: str = 'Execution pause requested',
+    requested_by: str = 'system',
 ) -> None:
     """Conditionally write pending → awaiting_approval for one node, persist
     the approval-request record, and emit events.  No SQS dispatch.
@@ -789,9 +792,9 @@ def _park_node_awaiting_approval(
     """
     now = _now_iso()
     approval_record = build_approval_request(
-        request_type='approval_required',
-        reason='Execution pause requested',
-        requested_by='system',
+        request_type=request_type,
+        reason=reason,
+        requested_by=requested_by,
         expires_at=None,
         metadata={},
     )
@@ -2554,3 +2557,64 @@ def cancel_execution(execution_id: str) -> None:
         failed_at=now,
         eval_run_id=execution.get('evalRunId'),
     )
+
+
+def handle_pause_requested(
+    execution_id: str,
+    *,
+    reason: str = '',
+    requested_by: str = '',
+) -> None:
+    """Handle an ``execution.pause.requested`` event from the API.
+
+    When ``APPROVAL_GATE_ENABLED`` is on, parks every currently **pending**
+    (not yet dispatched) node of the given execution via
+    :func:`_park_node_awaiting_approval` with request type ``manual_pause``.
+
+    If no pending nodes exist the handler logs an INFO event and returns —
+    the pause marker written by the API layer still ensures
+    ``schedule_frontier`` parks the next frontier when it materialises.
+
+    When the feature flag is off the handler logs and returns (no-op).
+    """
+    if not APPROVAL_GATE_ENABLED:
+        _logger.info(
+            'handle_pause_requested: APPROVAL_GATE_ENABLED is off, ignoring '
+            'pause request for execution=%s', execution_id,
+        )
+        return
+
+    execution = _load_execution(execution_id)
+    if not execution:
+        return
+
+    workflow_id = execution.get('workflowId', '')
+    node_results = execution.get('nodeResults', {})
+
+    pending_nodes = [
+        nid for nid, nr in node_results.items()
+        if nr.get('status') == 'pending'
+    ]
+
+    if not pending_nodes:
+        _log_event(
+            'pause_requested_no_pending_nodes',
+            executionId=execution_id,
+            workflowId=workflow_id,
+        )
+        return
+
+    # Resolve node definitions once for agentId lookup.
+    workflow = _load_workflow(workflow_id)
+    definition = _parse_definition(workflow) if workflow else {}
+    nodes_by_id = {n['id']: n for n in definition.get('nodes', [])}
+
+    for nid in pending_nodes:
+        agent_id = nodes_by_id.get(nid, {}).get('agentId', '')
+        _park_node_awaiting_approval(
+            execution_id, workflow_id, nid, agent_id,
+            run_id=execution.get('runId'),
+            request_type='manual_pause',
+            reason=reason or 'Manual pause requested',
+            requested_by=requested_by or 'system',
+        )
