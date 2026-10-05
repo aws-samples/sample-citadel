@@ -225,6 +225,25 @@ def _deny_error_result(tool_use_id: str, tool_name: str) -> dict:
     }
 
 
+def _awaiting_approval_result(tool_use_id: str, tool_name: str) -> dict:
+    """ToolResult-shaped error dict returned when a tool call requires approval
+    and the APPROVAL_GATE_ENABLED feature flag is active. The tool is NOT
+    executed; the node is parked ``awaiting_approval`` by the step runner when
+    it receives the corresponding ``workflow.node.awaiting_approval`` event.
+    The message is informational — the model never sees it (the node exits
+    before the model turn completes)."""
+    return {
+        'toolUseId': tool_use_id,
+        'status': 'error',
+        'content': [
+            {'text': (
+                f"Tool '{tool_name}' requires approval before execution. "
+                "The node has been parked awaiting approval."
+            )}
+        ],
+    }
+
+
 def _audit_unavailable_result(tool_use_id: str, tool_name: str) -> dict:
     """ToolResult-shaped error dict returned when the governance legibility
     write FAILED (fail-closed, decision gov-write-fail-closed).
@@ -390,6 +409,43 @@ def record_approval_finding(
         agent_id=agent_id, workflow_id=workflow_id, eval_run_id=eval_run_id,
         org_id=org_id,
     ))
+
+
+# ---------------------------------------------------------------------------
+# REQUIRE_APPROVAL signal — worker-wide accumulator (CIT-030/CIT-031).
+#
+# When the governance engine returns REQUIRE_APPROVAL for a tool call and
+# APPROVAL_GATE_ENABLED is active, the evaluator records the pending call
+# here. The worker's post-run handler (index.py) drains this list and emits
+# a ``workflow.node.awaiting_approval`` event so the step runner parks the
+# node. Same structural pattern as ``tool_idempotency_hook._GOVERNANCE_REFUSALS``.
+# ---------------------------------------------------------------------------
+_AWAITING_APPROVAL: list[dict[str, Any]] = []
+
+
+def record_awaiting_approval(
+    tool_name: str,
+    reason: str,
+    idempotency_key: str,
+    *,
+    execution_id: str = '',
+    node_id: str = '',
+) -> None:
+    """Record a tool call that was held for approval (REQUIRE_APPROVAL decision)."""
+    _AWAITING_APPROVAL.append({
+        'toolName': tool_name,
+        'reason': reason,
+        'idempotencyKey': idempotency_key,
+        'executionId': execution_id,
+        'nodeId': node_id,
+    })
+
+
+def drain_awaiting_approval() -> list[dict[str, Any]]:
+    """Drain and return all pending awaiting-approval signals."""
+    drained = list(_AWAITING_APPROVAL)
+    _AWAITING_APPROVAL.clear()
+    return drained
 
 
 class GovernedToolHandler(AgentToolHandler):  # type: ignore[misc]

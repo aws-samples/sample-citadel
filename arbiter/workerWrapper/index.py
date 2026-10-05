@@ -1137,6 +1137,47 @@ def _emit_node_result(
     result = client.put_events(Entries=[entry])
     print(f"node-result event posted: {result}")
 
+
+def _emit_awaiting_approval_event(
+    msg, *, awaiting_signals: list[dict],
+):
+    """Emit a ``workflow.node.awaiting_approval`` event to the agent event bus
+    so the step runner parks the node (CIT-030/CIT-031).
+
+    Called when the governance evaluator returned REQUIRE_APPROVAL for a tool
+    call and APPROVAL_GATE_ENABLED is active. The node is NOT completed or
+    failed — the step runner parks it as ``awaiting_approval`` and waits for
+    a future approval-decision event to resume it.
+
+    ``awaiting_signals`` is the drained list from
+    ``governed_tool_handler.drain_awaiting_approval()`` — one entry per tool
+    call that was held. The first entry drives the event payload (a node has
+    at most one awaiting-approval signal per run).
+    """
+    if not awaiting_signals:
+        return
+
+    signal = awaiting_signals[0]
+    detail = {
+        'executionId': getattr(msg, 'execution_id', '') or signal.get('executionId', ''),
+        'nodeId': getattr(msg, 'node_id', '') or signal.get('nodeId', ''),
+        'workflowId': getattr(msg, 'workflow_id', ''),
+        'requestType': 'tool_approval',
+        'toolName': signal.get('toolName', ''),
+        'reason': signal.get('reason', ''),
+        'idempotencyKey': signal.get('idempotencyKey', ''),
+    }
+    client = boto3.client('events')
+    entry = {
+        'Source': workflow_contract.WORKFLOW_EVENT_SOURCE,
+        'DetailType': workflow_contract.NODE_AWAITING_APPROVAL_DETAIL_TYPE,
+        'EventBusName': os.environ.get('COMPLETION_BUS_NAME'),
+        'Detail': json.dumps(detail),
+    }
+    print(f"posting awaiting-approval event: {json.dumps(entry)}")
+    result = client.put_events(Entries=[entry])
+    print(f"awaiting-approval event posted: {result}")
+
 def extract_node_overrides(configuration) -> tuple[str | None, str | None]:
     """Extract ``(model_override, system_prompt_addition)`` from a
     node-dispatch ``configuration`` (decision 59376546).
@@ -1616,6 +1657,29 @@ def _process_workflow_node(event, message_attributes=None):
             'workflowId': msg.workflow_id,
             'agentId': msg.agent_id,
         }))
+        # CIT-030/CIT-031: check for awaiting-approval signals BEFORE persisting
+        # the node completion. If a tool call was held for approval, emit the
+        # awaiting event and return WITHOUT completing the node. The node stays
+        # running from the step runner's perspective; the step runner will park
+        # it when it receives the awaiting_approval event.
+        try:
+            from governed_tool_handler import drain_awaiting_approval
+            awaiting_signals = drain_awaiting_approval()
+        except ImportError:
+            awaiting_signals = []
+        if awaiting_signals:
+            print(json.dumps({
+                'level': 'INFO',
+                'component': 'WorkerWrapper',
+                'action': 'workflow_node_awaiting_approval',
+                'executionId': msg.execution_id,
+                'nodeId': msg.node_id,
+                'workflowId': msg.workflow_id,
+                'toolName': awaiting_signals[0].get('toolName', ''),
+            }))
+            _emit_awaiting_approval_event(msg, awaiting_signals=awaiting_signals)
+            return
+
         # Write-then-signal (decision O2): persist this node's completed result to
         # EXECUTIONS_TABLE.nodeResults[nodeId] BEFORE emitting the signal, so a lost
         # event leaves a durable, reconcilable checkpoint (never a
