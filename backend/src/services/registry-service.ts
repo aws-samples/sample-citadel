@@ -396,6 +396,12 @@ export interface AgentCustomMetadata {
   gatewayPublication?: GatewayPublicationMetadata;
   /** User-supplied resource tags (CIT-042). Format-validated by normaliseTags. */
   tags?: Record<string, string>;
+  /** Admin who approved/rejected this agent record. */
+  decidedBy?: string;
+  /** ISO timestamp of the approval/rejection decision. */
+  decidedAt?: string;
+  /** Reason supplied when this agent record was rejected. */
+  statusReason?: string;
 }
 
 /**
@@ -506,6 +512,12 @@ export interface AgentConfig {
   gatewayPublication?: GatewayPublicationMetadata;
   /** AppSync caller identity who created this record. Absent on legacy records. */
   createdBy?: string;
+  /** Admin who approved/rejected this agent record. */
+  decidedBy?: string;
+  /** ISO timestamp of the approval/rejection decision. */
+  decidedAt?: string;
+  /** Reason supplied when this agent record was rejected. */
+  statusReason?: string;
   /** User-supplied resource tags (CIT-042). Absent on legacy/pre-tag records. */
   tags?: Record<string, string>;
 }
@@ -2127,6 +2139,10 @@ export class RegistryService {
         : {}),
       // Surface createdBy when present (CIT-043 ownership visibility).
       ...(meta.createdBy ? { createdBy: meta.createdBy } : {}),
+      // Surface decision audit fields when present.
+      ...(meta.decidedBy ? { decidedBy: meta.decidedBy } : {}),
+      ...(meta.decidedAt ? { decidedAt: meta.decidedAt } : {}),
+      ...(meta.statusReason ? { statusReason: meta.statusReason } : {}),
       // Surface user-supplied tags when present (CIT-042).
       ...(meta.tags ? { tags: meta.tags } : {}),
     };
