@@ -8,6 +8,7 @@ from executor import (
     cancel_execution,
     resume_execution,
     handle_node_awaiting_approval,
+    handle_pause_requested,
 )
 from common import workflow_contract
 from common.tracing import annotate_from_carried, execution_trace_scope, extract_carried
@@ -88,5 +89,11 @@ def handler(event, context):
             # the server re-derives the frontier from persisted state, never from
             # the event payload (SECURITY: server-side frontier re-derivation).
             resume_execution(detail['executionId'], approval_decision=detail.get('approval_decision'))
+        elif detail_type == 'execution.pause.requested':
+            handle_pause_requested(
+                detail['executionId'],
+                reason=detail.get('reason', ''),
+                requested_by=detail.get('requestedBy', ''),
+            )
 
     return {'statusCode': 200}
