@@ -28,10 +28,19 @@ if _step_runner not in sys.path:
 _pkg_dir = os.path.join(os.path.dirname(__file__), '..')
 sys.path.insert(0, _pkg_dir)
 
+import importlib.util
+import pathlib
+
 import pytest
 from unittest.mock import patch, MagicMock, call
 
-import index as approval_watchdog
+# Load timeoutWatchdog/index.py via importlib to avoid the sys.modules['index']
+# collision with arbiter/supervisor/__tests__/ which also `import index`.
+_spec = importlib.util.spec_from_file_location(
+    'approval_watchdog',
+    pathlib.Path(__file__).resolve().parent.parent / 'index.py')
+approval_watchdog = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(approval_watchdog)
 
 
 # ---------------------------------------------------------------------------
