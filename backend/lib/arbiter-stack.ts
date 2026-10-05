@@ -1678,6 +1678,14 @@ export class ArbiterStack extends cdk.Stack {
             // unconditionally (bin/app.ts defaults to 'Default') so the
             // release gate never runs with an empty org id.
             RELEASE_DEFAULT_ORG_ID: props.releaseDefaultOrgId ?? "Default",
+            // Execution pause/resume engine: executor.py reads
+            // APPROVAL_GATE_ENABLED at module level to decide whether
+            // invoke_node parks a node pending human approval before
+            // dispatch. CDK context `approvalGateEnabled` overrides;
+            // default 'false' (gate disabled).
+            APPROVAL_GATE_ENABLED:
+              (this.node.tryGetContext("approvalGateEnabled") as string) ??
+              "false",
           },
           deadLetterQueueEnabled: true,
           deadLetterQueue: arbiterAsyncDlq,
@@ -1874,6 +1882,14 @@ export class ArbiterStack extends cdk.Stack {
             // NODE_STALL_FACTOR (decision O6; 900s worker ceiling * 2).
             NODE_STALL_TIMEOUT_SECONDS: "900",
             NODE_STALL_FACTOR: "2",
+            // Execution pause/resume engine: the approval-timeout watchdog
+            // (arbiter/timeoutWatchdog/index.py) reads APPROVAL_TIMEOUT_SECONDS
+            // as the fallback expiry when a paused node has no expiresAt.
+            // CDK context `approvalTimeoutSeconds` overrides; default '86400'
+            // (24 hours).
+            APPROVAL_TIMEOUT_SECONDS:
+              (this.node.tryGetContext("approvalTimeoutSeconds") as string) ??
+              "86400",
           },
           deadLetterQueueEnabled: true,
           deadLetterQueue: arbiterAsyncDlq,

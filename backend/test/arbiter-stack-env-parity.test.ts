@@ -201,6 +201,9 @@ const TARGETS: Target[] = [
       "REGISTRY_ID", // only read when REGISTRY_ENABLED
       "WORKFLOW_TIMEOUT_SECONDS", // watchdog tunable; has a default
       "RELEASE_DISPATCH_ENVIRONMENT", // release-dispatch feature switch; feature-gated env
+      // timeout_watchdog.py lives in the stepRunner asset dir but is only
+      // executed by the WorkflowTimeoutWatchdogFunction, not this handler.
+      "APPROVAL_TIMEOUT_SECONDS",
     ]),
   },
 ];
@@ -319,6 +322,49 @@ describe("ArbiterStack — handler env-var parity (deployment contract)", () => 
       ).Properties?.Environment?.Variables ?? {};
     expect(vars).toHaveProperty("AGENT_LOG_LEVEL");
     expect(vars.AGENT_LOG_LEVEL).toBe("INFO");
+  });
+
+  // -----------------------------------------------------------------
+  // Execution pause/resume engine: APPROVAL_GATE_ENABLED must be set on
+  // the StepRunnerFunction (executor.py reads it at module level) with
+  // default 'false', and APPROVAL_TIMEOUT_SECONDS must be set on the
+  // WorkflowTimeoutWatchdogFunction (timeoutWatchdog reads it) with
+  // default '86400'.
+  // -----------------------------------------------------------------
+  test("APPROVAL_GATE_ENABLED is wired on the step runner with default 'false'", () => {
+    const fns = template.findResources("AWS::Lambda::Function");
+    const match = Object.entries(fns).find(([id]) =>
+      id.startsWith("StepRunnerFunction"),
+    );
+    expect(match).toBeDefined();
+    const vars =
+      (
+        match![1] as {
+          Properties?: {
+            Environment?: { Variables?: Record<string, unknown> };
+          };
+        }
+      ).Properties?.Environment?.Variables ?? {};
+    expect(vars).toHaveProperty("APPROVAL_GATE_ENABLED");
+    expect(vars.APPROVAL_GATE_ENABLED).toBe("false");
+  });
+
+  test("APPROVAL_TIMEOUT_SECONDS is wired on the timeout watchdog with default '86400'", () => {
+    const fns = template.findResources("AWS::Lambda::Function");
+    const match = Object.entries(fns).find(([id]) =>
+      id.startsWith("WorkflowTimeoutWatchdogFunction"),
+    );
+    expect(match).toBeDefined();
+    const vars =
+      (
+        match![1] as {
+          Properties?: {
+            Environment?: { Variables?: Record<string, unknown> };
+          };
+        }
+      ).Properties?.Environment?.Variables ?? {};
+    expect(vars).toHaveProperty("APPROVAL_TIMEOUT_SECONDS");
+    expect(vars.APPROVAL_TIMEOUT_SECONDS).toBe("86400");
   });
 
   // -----------------------------------------------------------------
