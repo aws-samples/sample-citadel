@@ -2,7 +2,7 @@
  * ExecutionOverlay Component Tests
  * TDD Red Phase — tests written before implementation
  *
- * Requirements: 14.1, 14.2, 14.3, 14.4, 14.5, 14.6, 14.7, 14.8, 27.4
+ * Requirements: 14.1, 14.2, 14.3, 14.4, 14.5, 14.6, 14.7, 14.8, 27.4, CIT-030
  */
 
 import { render, screen, act } from '@testing-library/react';
@@ -407,6 +407,183 @@ describe('ExecutionOverlay', () => {
 
       await user.click(screen.getByRole('button', { name: /cancel/i }));
       expect(onCancel).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('Pause button (CIT-030)', () => {
+    it('shows Pause when running + canApproveExecutions + onPause provided', () => {
+      render(
+        <ExecutionOverlay
+          nodeResults={{}}
+          executionStatus="running"
+          workflowStatus="PUBLISHED"
+          onRun={jest.fn()}
+          onCancel={jest.fn()}
+          executionId="exec-1"
+          canApproveExecutions
+          onPause={jest.fn()}
+        />
+      );
+
+      expect(screen.getByTestId('pause-execution')).toBeInTheDocument();
+    });
+
+    it('hides Pause when canApproveExecutions is false', () => {
+      render(
+        <ExecutionOverlay
+          nodeResults={{}}
+          executionStatus="running"
+          workflowStatus="PUBLISHED"
+          onRun={jest.fn()}
+          onCancel={jest.fn()}
+          executionId="exec-1"
+          canApproveExecutions={false}
+          onPause={jest.fn()}
+        />
+      );
+
+      expect(screen.queryByTestId('pause-execution')).not.toBeInTheDocument();
+    });
+
+    it('hides Pause when not running', () => {
+      render(
+        <ExecutionOverlay
+          nodeResults={{}}
+          executionStatus="completed"
+          workflowStatus="PUBLISHED"
+          onRun={jest.fn()}
+          onCancel={jest.fn()}
+          executionId="exec-1"
+          canApproveExecutions
+          onPause={jest.fn()}
+        />
+      );
+
+      expect(screen.queryByTestId('pause-execution')).not.toBeInTheDocument();
+    });
+
+    it('calls onPause with executionId when clicked', async () => {
+      const user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime });
+      const onPause = jest.fn();
+
+      render(
+        <ExecutionOverlay
+          nodeResults={{}}
+          executionStatus="running"
+          workflowStatus="PUBLISHED"
+          onRun={jest.fn()}
+          onCancel={jest.fn()}
+          executionId="exec-42"
+          canApproveExecutions
+          onPause={onPause}
+        />
+      );
+
+      await user.click(screen.getByTestId('pause-execution'));
+      expect(onPause).toHaveBeenCalledWith('exec-42');
+    });
+  });
+
+  describe('Approve/Deny buttons (CIT-030)', () => {
+    it('shows Approve and Deny when awaiting_approval + canApproveExecutions', () => {
+      render(
+        <ExecutionOverlay
+          nodeResults={{}}
+          executionStatus="awaiting_approval"
+          workflowStatus="PUBLISHED"
+          onRun={jest.fn()}
+          onCancel={jest.fn()}
+          executionId="exec-1"
+          canApproveExecutions
+          onApprove={jest.fn()}
+          onDeny={jest.fn()}
+        />
+      );
+
+      expect(screen.getByTestId('approve-execution')).toBeInTheDocument();
+      expect(screen.getByTestId('deny-execution')).toBeInTheDocument();
+    });
+
+    it('hides Approve/Deny when canApproveExecutions is false', () => {
+      render(
+        <ExecutionOverlay
+          nodeResults={{}}
+          executionStatus="awaiting_approval"
+          workflowStatus="PUBLISHED"
+          onRun={jest.fn()}
+          onCancel={jest.fn()}
+          executionId="exec-1"
+          canApproveExecutions={false}
+          onApprove={jest.fn()}
+          onDeny={jest.fn()}
+        />
+      );
+
+      expect(screen.queryByTestId('approve-execution')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('deny-execution')).not.toBeInTheDocument();
+    });
+
+    it('hides Approve/Deny when status is not awaiting_approval', () => {
+      render(
+        <ExecutionOverlay
+          nodeResults={{}}
+          executionStatus="running"
+          workflowStatus="PUBLISHED"
+          onRun={jest.fn()}
+          onCancel={jest.fn()}
+          executionId="exec-1"
+          canApproveExecutions
+          onApprove={jest.fn()}
+          onDeny={jest.fn()}
+        />
+      );
+
+      expect(screen.queryByTestId('approve-execution')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('deny-execution')).not.toBeInTheDocument();
+    });
+
+    it('calls onApprove with executionId when clicked', async () => {
+      const user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime });
+      const onApprove = jest.fn();
+
+      render(
+        <ExecutionOverlay
+          nodeResults={{}}
+          executionStatus="awaiting_approval"
+          workflowStatus="PUBLISHED"
+          onRun={jest.fn()}
+          onCancel={jest.fn()}
+          executionId="exec-99"
+          canApproveExecutions
+          onApprove={onApprove}
+          onDeny={jest.fn()}
+        />
+      );
+
+      await user.click(screen.getByTestId('approve-execution'));
+      expect(onApprove).toHaveBeenCalledWith('exec-99');
+    });
+
+    it('calls onDeny with executionId when clicked', async () => {
+      const user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime });
+      const onDeny = jest.fn();
+
+      render(
+        <ExecutionOverlay
+          nodeResults={{}}
+          executionStatus="awaiting_approval"
+          workflowStatus="PUBLISHED"
+          onRun={jest.fn()}
+          onCancel={jest.fn()}
+          executionId="exec-99"
+          canApproveExecutions
+          onApprove={jest.fn()}
+          onDeny={onDeny}
+        />
+      );
+
+      await user.click(screen.getByTestId('deny-execution'));
+      expect(onDeny).toHaveBeenCalledWith('exec-99');
     });
   });
 

@@ -7,6 +7,19 @@ import serverService from './server';
 
 // --- GraphQL Queries ---
 
+const APPROVAL_REQUEST_FIELDS = `
+  approvalRequests {
+    requestType
+    reason
+    requestedBy
+    requestedAt
+    expiresAt
+    decidedBy
+    decidedAt
+    decision
+  }
+`;
+
 const GET_EXECUTION = `
   query GetExecution($executionId: ID!) {
     getExecution(executionId: $executionId) {
@@ -24,6 +37,7 @@ const GET_EXECUTION = `
       completedAt
       triggeredBy
       error
+      ${APPROVAL_REQUEST_FIELDS}
     }
   }
 `;
@@ -46,6 +60,32 @@ const LIST_EXECUTIONS = `
         completedAt
         triggeredBy
         error
+        ${APPROVAL_REQUEST_FIELDS}
+      }
+      nextToken
+    }
+  }
+`;
+
+const LIST_AWAITING_APPROVALS = `
+  query ListAwaitingApprovals($limit: Int, $nextToken: String) {
+    listAwaitingApprovals(limit: $limit, nextToken: $nextToken) {
+      items {
+        executionId
+        workflowId
+        appId
+        orgId
+        status
+        workflowVersion
+        currentNode
+        nodeResults
+        input
+        output
+        startedAt
+        completedAt
+        triggeredBy
+        error
+        ${APPROVAL_REQUEST_FIELDS}
       }
       nextToken
     }
@@ -71,6 +111,7 @@ export const START_EXECUTION = `
       completedAt
       triggeredBy
       error
+      ${APPROVAL_REQUEST_FIELDS}
     }
   }
 `;
@@ -92,6 +133,73 @@ export const CANCEL_EXECUTION = `
       completedAt
       triggeredBy
       error
+      ${APPROVAL_REQUEST_FIELDS}
+    }
+  }
+`;
+
+export const PAUSE_EXECUTION = `
+  mutation PauseExecution($executionId: ID!, $nodeId: ID, $reason: String!) {
+    pauseExecution(executionId: $executionId, nodeId: $nodeId, reason: $reason) {
+      executionId
+      workflowId
+      appId
+      orgId
+      status
+      workflowVersion
+      currentNode
+      nodeResults
+      input
+      output
+      startedAt
+      completedAt
+      triggeredBy
+      error
+      ${APPROVAL_REQUEST_FIELDS}
+    }
+  }
+`;
+
+export const APPROVE_EXECUTION = `
+  mutation ApproveExecution($executionId: ID!, $nodeId: ID!) {
+    approveExecution(executionId: $executionId, nodeId: $nodeId) {
+      executionId
+      workflowId
+      appId
+      orgId
+      status
+      workflowVersion
+      currentNode
+      nodeResults
+      input
+      output
+      startedAt
+      completedAt
+      triggeredBy
+      error
+      ${APPROVAL_REQUEST_FIELDS}
+    }
+  }
+`;
+
+export const DENY_EXECUTION = `
+  mutation DenyExecution($executionId: ID!, $nodeId: ID!, $reason: String!) {
+    denyExecution(executionId: $executionId, nodeId: $nodeId, reason: $reason) {
+      executionId
+      workflowId
+      appId
+      orgId
+      status
+      workflowVersion
+      currentNode
+      nodeResults
+      input
+      output
+      startedAt
+      completedAt
+      triggeredBy
+      error
+      ${APPROVAL_REQUEST_FIELDS}
     }
   }
 `;
@@ -135,6 +243,45 @@ class ExecutionApiService {
       { executionId }
     );
     return response.cancelExecution;
+  }
+
+  async pauseExecution(executionId: string, reason: string, nodeId?: string) {
+    const variables: { executionId: string; reason: string; nodeId?: string } = { executionId, reason };
+    if (nodeId !== undefined) {
+      variables.nodeId = nodeId;
+    }
+    const response = await serverService.mutate<{ pauseExecution: any }>(
+      PAUSE_EXECUTION,
+      variables
+    );
+    return response.pauseExecution;
+  }
+
+  async approveExecution(executionId: string, nodeId: string) {
+    const response = await serverService.mutate<{ approveExecution: any }>(
+      APPROVE_EXECUTION,
+      { executionId, nodeId }
+    );
+    return response.approveExecution;
+  }
+
+  async denyExecution(executionId: string, nodeId: string, reason: string) {
+    const response = await serverService.mutate<{ denyExecution: any }>(
+      DENY_EXECUTION,
+      { executionId, nodeId, reason }
+    );
+    return response.denyExecution;
+  }
+
+  async listAwaitingApprovals(limit?: number, nextToken?: string) {
+    const variables: { limit?: number; nextToken?: string } = {};
+    if (limit !== undefined) variables.limit = limit;
+    if (nextToken !== undefined) variables.nextToken = nextToken;
+    const response = await serverService.query<{ listAwaitingApprovals: { items: any[]; nextToken: string | null } }>(
+      LIST_AWAITING_APPROVALS,
+      variables
+    );
+    return response.listAwaitingApprovals;
   }
 }
 

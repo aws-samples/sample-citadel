@@ -7,6 +7,7 @@ interface OrganizationContextType {
   organizations: string[];
   currentUser: User | null;
   isAdmin: boolean;
+  canApproveExecutions: boolean;
   loading: boolean;
 }
 
@@ -86,6 +87,7 @@ export function OrganizationProvider({ children }: { children: ReactNode }) {
   };
 
   const isAdmin = currentUser?.role === 'admin';
+  const canApproveExecutions = isAdmin || currentUser?.role === 'architect';
 
   return (
     <OrganizationContext.Provider
@@ -95,6 +97,7 @@ export function OrganizationProvider({ children }: { children: ReactNode }) {
         organizations,
         currentUser,
         isAdmin,
+        canApproveExecutions: !!canApproveExecutions,
         loading,
       }}
     >

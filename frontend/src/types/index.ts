@@ -16,6 +16,8 @@ export type {
   ValidationResult,
 } from './workflow';
 
+export type { ApprovalRequest, Execution } from './execution';
+
 export {
   isWorkflowNode,
   isWorkflowEdge,

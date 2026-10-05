@@ -162,6 +162,65 @@ describe('ExecutionHistoryPanel', () => {
         expect(badge).toHaveClass('bg-primary');
       });
     });
+
+    it('shows amber badge for awaiting_approval status', async () => {
+      const awaitingExec = {
+        ...mockExecutions[2],
+        executionId: 'exec-a',
+        status: 'awaiting_approval',
+        approvalRequests: [
+          { requestType: 'human_review', reason: 'Cost threshold exceeded', requestedBy: 'system', requestedAt: '2024-03-01T12:00:00Z', expiresAt: null, decidedBy: null, decidedAt: null, decision: null },
+        ],
+      };
+      (executionApiService.listExecutions as jest.Mock).mockResolvedValue({
+        items: [awaitingExec],
+        nextToken: null,
+      });
+
+      render(<ExecutionHistoryPanel {...defaultProps} />);
+
+      await waitFor(() => {
+        const badge = screen.getByTestId('status-badge-exec-a');
+        expect(badge).toHaveClass('bg-chart-3');
+      });
+    });
+
+    it('shows approval request reason and type as subtitle for awaiting_approval executions', async () => {
+      const awaitingExec = {
+        ...mockExecutions[2],
+        executionId: 'exec-a2',
+        status: 'awaiting_approval',
+        approvalRequests: [
+          { requestType: 'human_review', reason: 'Cost threshold exceeded', requestedBy: 'system', requestedAt: '2024-03-01T12:00:00Z', expiresAt: null, decidedBy: null, decidedAt: null, decision: null },
+        ],
+      };
+      (executionApiService.listExecutions as jest.Mock).mockResolvedValue({
+        items: [awaitingExec],
+        nextToken: null,
+      });
+
+      render(<ExecutionHistoryPanel {...defaultProps} />);
+
+      await waitFor(() => {
+        const subtitle = screen.getByTestId('approval-reason-exec-a2');
+        expect(subtitle).toHaveTextContent('human_review — Cost threshold exceeded');
+      });
+    });
+
+    it('does not show approval reason for non-awaiting_approval executions', async () => {
+      (executionApiService.listExecutions as jest.Mock).mockResolvedValue({
+        items: [mockExecutions[0]],
+        nextToken: null,
+      });
+
+      render(<ExecutionHistoryPanel {...defaultProps} />);
+
+      await waitFor(() => {
+        expect(screen.getByText('exec-3')).toBeInTheDocument();
+      });
+
+      expect(screen.queryByTestId('approval-reason-exec-3')).not.toBeInTheDocument();
+    });
   });
 
   describe('expand per-node results', () => {
