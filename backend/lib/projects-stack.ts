@@ -51,6 +51,7 @@ import * as iam from "aws-cdk-lib/aws-iam";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as logs from "aws-cdk-lib/aws-logs";
 import { Bucket } from "aws-cdk-lib/aws-s3";
+import * as ssm from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
 
 export interface ProjectsStackProps extends cdk.StackProps {
@@ -366,13 +367,22 @@ export class ProjectsStack extends cdk.Stack {
     props.documentBucket.grantPut(documentUploadResolverFunction);
     props.documentBucket.grantRead(documentUploadResolverFunction);
     props.documentBucket.grantDelete(documentUploadResolverFunction);
+    // Resolve the KB id published by ServicesStack via SSM (same cross-stack
+    // pattern services-stack.ts uses for registryId/registryArn) to avoid
+    // a direct construct import that would create a dependency cycle.
+    const kbId = ssm.StringParameter.valueForStringParameter(
+      this,
+      `/citadel/knowledge-base-id-${props.environment}`,
+    );
+    const knowledgeBaseArn = `arn:aws:bedrock:${this.region}:${this.account}:knowledge-base/${kbId}`;
+
     documentUploadResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         actions: [
           "bedrock:GetKnowledgeBaseDocuments",
           "bedrock:DeleteKnowledgeBaseDocuments",
         ],
-        resources: ["*"],
+        resources: [knowledgeBaseArn],
       }),
     );
     documentUploadResolverFunction.addToRolePolicy(

@@ -28,7 +28,9 @@ const mockUpdateResource = jest.fn();
 const mockListResources = jest.fn();
 const mockGetResource = jest.fn();
 const mockUpdateResourceStatus = jest.fn();
-const mockSerializeCustomMetadata = jest.fn((meta: unknown) => JSON.stringify(meta));
+const mockSerializeCustomMetadata = jest.fn((meta: unknown) =>
+  JSON.stringify(meta),
+);
 const mockDeserializeCustomMetadata = jest.fn(
   (json: string | null | undefined, defaults: Record<string, unknown>) =>
     json ? { ...defaults, ...JSON.parse(json) } : defaults,
@@ -36,9 +38,9 @@ const mockDeserializeCustomMetadata = jest.fn(
 const mockMapToAgentConfig = jest.fn((record: { recordId: string }) => ({
   agentId: record.recordId,
 }));
-jest.mock('../../services/registry-service', () => ({
+jest.mock("../../services/registry-service", () => ({
   RegistryService: jest.fn().mockImplementation(() => ({
-    getRegistryId: () => 'test-registry',
+    getRegistryId: () => "test-registry",
     createResource: mockCreateResource,
     updateResource: mockUpdateResource,
     listResources: mockListResources,
@@ -54,59 +56,76 @@ jest.mock('../../services/registry-service', () => ({
 const mockExtractOrgFromEvent = jest.fn();
 const mockIsAdminFromEvent = jest.fn(() => false);
 const mockHasRoleFromEvent = jest.fn(() => false);
-jest.mock('../../utils/auth-event', () => ({
+jest.mock("../../utils/auth-event", () => ({
   extractOrgFromEvent: (...args: unknown[]) => mockExtractOrgFromEvent(...args),
   isAdminFromEvent: (...args: unknown[]) => mockIsAdminFromEvent(...args),
   hasRoleFromEvent: (...args: unknown[]) => mockHasRoleFromEvent(...args),
 }));
 
 // ── Mock agent-discovery (keep the real typed errors) ───────────────────
-jest.mock('../../services/agent-discovery', () => {
-  const actual = jest.requireActual('../../services/agent-discovery');
+jest.mock("../../services/agent-discovery", () => {
+  const actual = jest.requireActual("../../services/agent-discovery");
   return { __esModule: true, ...actual };
 });
 
 // ── Mock events publish helper (keep real EventTypes; never hit EventBridge)
 const mockPublishEvent = jest.fn();
-jest.mock('../../utils/events', () => {
-  const actual = jest.requireActual('../../utils/events');
-  return { __esModule: true, ...actual, publishEvent: (...a: unknown[]) => mockPublishEvent(...a) };
+jest.mock("../../utils/events", () => {
+  const actual = jest.requireActual("../../utils/events");
+  return {
+    __esModule: true,
+    ...actual,
+    publishEvent: (...a: unknown[]) => mockPublishEvent(...a),
+  };
 });
 
 // ── Mock fabricator-authority lifecycle, governance flag, ADR resolver ──
-jest.mock('../registry-agent-authority-lifecycle', () => ({
+jest.mock("../registry-agent-authority-lifecycle", () => ({
   __esModule: true,
   grantFabricatorAuthority: jest.fn(),
 }));
-jest.mock('../../utils/governance-flag', () => ({
+jest.mock("../../utils/governance-flag", () => ({
   __esModule: true,
-  getGovernanceEnforce: jest.fn().mockResolvedValue('permissive'),
+  getGovernanceEnforce: jest.fn().mockResolvedValue("permissive"),
 }));
-jest.mock('../adr-resolver', () => ({ __esModule: true, createADR: jest.fn() }));
+jest.mock("../adr-resolver", () => ({
+  __esModule: true,
+  createADR: jest.fn(),
+}));
 
 // ── Mock the adapter registry factory: capture the { resolveSecret,
 //    credentialProvider } deps and expose BOTH describe + invoke. ──────────
 const mockDescribe = jest.fn();
 const mockInvoke = jest.fn();
-const mockResolve = jest.fn(() => ({ describe: mockDescribe, invoke: mockInvoke }));
+const mockResolve = jest.fn(() => ({
+  describe: mockDescribe,
+  invoke: mockInvoke,
+}));
 const mockBuildRegistry = jest.fn(() => ({ resolve: mockResolve }));
-jest.mock('../../adapters/agent-source/registry-factory', () => ({
+jest.mock("../../adapters/agent-source/registry-factory", () => ({
   __esModule: true,
-  buildDefaultAgentSourceRegistry: (...args: unknown[]) => mockBuildRegistry(...args),
+  buildDefaultAgentSourceRegistry: (...args: unknown[]) =>
+    mockBuildRegistry(...args),
 }));
 
 // ── Mock credential-manager: getAgentInvocationSecret + storeAgentInvocationSecret
 const mockGetAgentInvocationSecret = jest.fn();
 const mockStoreAgentInvocationSecret = jest.fn();
-jest.mock('../../utils/credential-manager', () => ({
+jest.mock("../../utils/credential-manager", () => ({
   __esModule: true,
-  getAgentInvocationSecret: (...a: unknown[]) => mockGetAgentInvocationSecret(...a),
-  storeAgentInvocationSecret: (...a: unknown[]) => mockStoreAgentInvocationSecret(...a),
+  getAgentInvocationSecret: (...a: unknown[]) =>
+    mockGetAgentInvocationSecret(...a),
+  storeAgentInvocationSecret: (...a: unknown[]) =>
+    mockStoreAgentInvocationSecret(...a),
 }));
 
 // ── Mock the untrusted-output sanitizer (passthrough) ───────────────────
-const mockSanitize = jest.fn((text: string) => ({ sanitized: text, modified: false, matches: [] }));
-jest.mock('../../utils/sanitize-agent-output', () => ({
+const mockSanitize = jest.fn((text: string) => ({
+  sanitized: text,
+  modified: false,
+  matches: [],
+}));
+jest.mock("../../utils/sanitize-agent-output", () => ({
   __esModule: true,
   sanitizeUntrustedAgentOutput: (...a: unknown[]) => mockSanitize(...a),
 }));
@@ -114,40 +133,56 @@ jest.mock('../../utils/sanitize-agent-output', () => ({
 // ── invoke-support: stub ONLY vendImportCredentials (keep real helpers,
 //    including the real toInvokeCredentials mapper). ──────────────────────
 const mockVend = jest.fn();
-jest.mock('../../adapters/agent-source/invoke-support', () => {
-  const actual = jest.requireActual('../../adapters/agent-source/invoke-support');
-  return { __esModule: true, ...actual, vendImportCredentials: (...a: unknown[]) => mockVend(...a) };
+jest.mock("../../adapters/agent-source/invoke-support", () => {
+  const actual = jest.requireActual(
+    "../../adapters/agent-source/invoke-support",
+  );
+  return {
+    __esModule: true,
+    ...actual,
+    vendImportCredentials: (...a: unknown[]) => mockVend(...a),
+  };
 });
 
-import { testImportedAgent, probeAgentCandidate, _resetRegistryService } from '../agent-import-resolver';
+import {
+  testImportedAgent,
+  probeAgentCandidate,
+  _resetRegistryService,
+} from "../agent-import-resolver";
 
 // ── Fixtures ────────────────────────────────────────────────────────────
-const ORG = 'test-org-a';
-const DEPLOY_ACCOUNT = '111122223333';
-const FOREIGN_ACCOUNT = '999988887777';
+const ORG = "test-org-a";
+const DEPLOY_ACCOUNT = "111122223333";
+const FOREIGN_ACCOUNT = "999988887777";
 const CROSS_ROLE = `arn:aws:iam::${FOREIGN_ACCOUNT}:role/CitadelInvoke`;
 const SAME_ROLE = `arn:aws:iam::${DEPLOY_ACCOUNT}:role/SameAccount`;
 const CROSS_TARGET = `arn:aws:lambda:us-east-1:${FOREIGN_ACCOUNT}:function:imported`;
 const SAME_TARGET = `arn:aws:lambda:us-east-1:${DEPLOY_ACCOUNT}:function:imported`;
-const ASSUMED_KEY = 'ASIA-ASSUMED';
-const ASSUMED_SECRET = 'assumed-secret-NEVER-LOG-0123456789';
-const ASSUMED_TOKEN = 'assumed-token-NEVER-LOG';
+const ASSUMED_KEY = "ASIA-ASSUMED";
+const ASSUMED_SECRET = "assumed-secret-NEVER-LOG-0123456789";
+const ASSUMED_TOKEN = "assumed-token-NEVER-LOG";
 
-const adminEvent = { identity: { claims: { 'custom:role': 'admin' }, sub: 'admin-1' } };
-const developerEvent = { identity: { claims: { 'custom:organization': ORG }, sub: 'dev-1' } };
+const adminEvent = {
+  identity: { claims: { "custom:role": "admin" }, sub: "admin-1" },
+};
+const developerEvent = {
+  identity: { claims: { "custom:organization": ORG }, sub: "dev-1" },
+};
 
 /** A CROSS-ACCOUNT invoke input (roleArn in FOREIGN_ACCOUNT). */
-function crossInput(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function crossInput(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
   return {
-    invocationProtocol: 'LAMBDA_INVOKE',
+    invocationProtocol: "LAMBDA_INVOKE",
     invocationTarget: CROSS_TARGET,
-    invocationAuthMode: 'NONE',
-    invocationMode: 'sync',
-    region: 'us-east-1',
+    invocationAuthMode: "NONE",
+    invocationMode: "sync",
+    region: "us-east-1",
     account: FOREIGN_ACCOUNT,
     invocationRoleArn: CROSS_ROLE,
-    invocationExternalId: 'ext-1',
-    prompt: 'hello',
+    invocationExternalId: "ext-1",
+    prompt: "hello",
     ...overrides,
   };
 }
@@ -159,23 +194,34 @@ function vendedOk() {
     accessKeyId: ASSUMED_KEY,
     secretAccessKey: ASSUMED_SECRET,
     sessionToken: ASSUMED_TOKEN,
-    expiresAt: '2030-01-01T00:00:00.000Z',
+    expiresAt: "2030-01-01T00:00:00.000Z",
   };
 }
 
 /** A STATIC describe() result with GAPS (forces a probe dry-run). */
-function gappyDescriptor(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function gappyDescriptor(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
   return {
-    name: 'import-candidate',
-    description: 'a discovered agent',
-    version: '1.0.0',
+    name: "import-candidate",
+    description: "a discovered agent",
+    version: "1.0.0",
     skills: [],
     categories: [],
     inputSchema: {},
     outputSchema: {},
-    invocation: { protocol: 'LAMBDA_INVOKE', target: CROSS_TARGET, auth: { mode: 'NONE' }, mode: 'sync' },
-    origin: { substrate: 'lambda', discoveredAt: '2026-06-28T00:00:00.000Z', ownership: 'external' },
-    fieldConfidence: { name: 'high', outputSchema: 'low', skills: 'low' },
+    invocation: {
+      protocol: "LAMBDA_INVOKE",
+      target: CROSS_TARGET,
+      auth: { mode: "NONE" },
+      mode: "sync",
+    },
+    origin: {
+      substrate: "lambda",
+      discoveredAt: "2026-06-28T00:00:00.000Z",
+      ownership: "external",
+    },
+    fieldConfidence: { name: "high", outputSchema: "low", skills: "low" },
     ...overrides,
   };
 }
@@ -188,17 +234,21 @@ type ParsedDescriptor = {
 };
 
 /** The deps of the FIRST buildDefaultAgentSourceRegistry call carrying a credentialProvider. */
-function crossAccountBuildDeps(): { credentialProvider?: Record<string, unknown> } | undefined {
+function crossAccountBuildDeps():
+  { credentialProvider?: Record<string, unknown> } | undefined {
   const call = mockBuildRegistry.mock.calls.find(
-    (c) => (c[0] as { credentialProvider?: unknown } | undefined)?.credentialProvider,
+    (c) =>
+      (c[0] as { credentialProvider?: unknown } | undefined)
+        ?.credentialProvider,
   );
-  return call?.[0] as { credentialProvider?: Record<string, unknown> } | undefined;
+  return call?.[0] as
+    { credentialProvider?: Record<string, unknown> } | undefined;
 }
 
 beforeEach(() => {
-  process.env.REGISTRY_ENABLED = 'true';
-  process.env.REGISTRY_ID = 'test-registry';
-  process.env.AWS_REGION = 'us-east-1';
+  process.env.REGISTRY_ENABLED = "true";
+  process.env.REGISTRY_ID = "test-registry";
+  process.env.AWS_REGION = "us-east-1";
   process.env.ACCOUNT_ID = DEPLOY_ACCOUNT;
   _resetRegistryService();
   jest.clearAllMocks();
@@ -208,9 +258,13 @@ beforeEach(() => {
   mockResolve.mockReturnValue({ describe: mockDescribe, invoke: mockInvoke });
   mockBuildRegistry.mockReturnValue({ resolve: mockResolve });
   mockDescribe.mockResolvedValue(gappyDescriptor());
-  mockInvoke.mockResolvedValue({ output: 'agent says hello' });
-  mockSanitize.mockImplementation((text: string) => ({ sanitized: text, modified: false, matches: [] }));
-  mockGetAgentInvocationSecret.mockResolvedValue('resolved-secret-value');
+  mockInvoke.mockResolvedValue({ output: "agent says hello" });
+  mockSanitize.mockImplementation((text: string) => ({
+    sanitized: text,
+    modified: false,
+    matches: [],
+  }));
+  mockGetAgentInvocationSecret.mockResolvedValue("resolved-secret-value");
   mockVend.mockReset();
 });
 
@@ -221,12 +275,12 @@ afterAll(() => {
 // ===========================================================================
 // testImportedAgent — cross-account invoke
 // ===========================================================================
-describe('testImportedAgent — cross-account invoke', () => {
+describe("testImportedAgent — cross-account invoke", () => {
   beforeEach(() => mockIsAdminFromEvent.mockReturnValue(true));
 
-  it('assumes the invoke role, builds the registry with the assumed credentialProvider, invokes, and returns ok:true', async () => {
+  it("assumes the invoke role, builds the registry with the assumed credentialProvider, invokes, and returns ok:true", async () => {
     mockVend.mockResolvedValue(vendedOk());
-    mockInvoke.mockResolvedValue({ output: 'cross-account pong' });
+    mockInvoke.mockResolvedValue({ output: "cross-account pong" });
 
     const res = await testImportedAgent(crossInput(), adminEvent);
 
@@ -234,7 +288,7 @@ describe('testImportedAgent — cross-account invoke', () => {
     expect(mockVend).toHaveBeenCalledTimes(1);
     expect(mockVend.mock.calls[0][0]).toMatchObject({
       roleArn: CROSS_ROLE,
-      externalId: 'ext-1',
+      externalId: "ext-1",
       account: FOREIGN_ACCOUNT,
     });
 
@@ -249,12 +303,14 @@ describe('testImportedAgent — cross-account invoke', () => {
     // The invoke happened on that registry's adapter and the result is ok.
     expect(mockInvoke).toHaveBeenCalledTimes(1);
     expect(res.ok).toBe(true);
-    expect(res.output).toBe('cross-account pong');
+    expect(res.output).toBe("cross-account pong");
     expect(res.error).toBeNull();
   });
 
-  it('a cross-account ASSUME FAILURE is a NORMAL result { ok:false, error } (NOT thrown)', async () => {
-    mockVend.mockRejectedValue(new Error('AccessDenied: not authorized to perform sts:AssumeRole'));
+  it("a cross-account ASSUME FAILURE is a NORMAL result { ok:false, error } (NOT thrown)", async () => {
+    mockVend.mockRejectedValue(
+      new Error("AccessDenied: not authorized to perform sts:AssumeRole"),
+    );
 
     const res = await testImportedAgent(crossInput(), adminEvent);
 
@@ -264,21 +320,31 @@ describe('testImportedAgent — cross-account invoke', () => {
     expect(res.output).toBeNull();
     // We did NOT silently fall back to the handler identity and invoke anyway.
     expect(mockInvoke).not.toHaveBeenCalled();
-    expect(typeof res.latencyMs).toBe('number');
+    expect(typeof res.latencyMs).toBe("number");
   });
 
-  it('NEVER logs the assumed credentials (success path)', async () => {
-    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
-    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+  it("NEVER logs the assumed credentials (success path)", async () => {
+    const logSpy = jest
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+    const warnSpy = jest
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    const errorSpy = jest
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
     mockVend.mockResolvedValue(vendedOk());
 
     await testImportedAgent(crossInput(), adminEvent);
 
-    const all = [...logSpy.mock.calls, ...warnSpy.mock.calls, ...errorSpy.mock.calls]
+    const all = [
+      ...logSpy.mock.calls,
+      ...warnSpy.mock.calls,
+      ...errorSpy.mock.calls,
+    ]
       .flat()
-      .map((a) => (typeof a === 'string' ? a : JSON.stringify(a)))
-      .join('\n');
+      .map((a) => (typeof a === "string" ? a : JSON.stringify(a)))
+      .join("\n");
     expect(all).not.toContain(ASSUMED_SECRET);
     expect(all).not.toContain(ASSUMED_TOKEN);
     expect(all).not.toContain(ASSUMED_KEY);
@@ -287,34 +353,49 @@ describe('testImportedAgent — cross-account invoke', () => {
     errorSpy.mockRestore();
   });
 
-  it('SAME-ACCOUNT roleArn: does NOT vend; registry built WITHOUT a credentialProvider (unchanged)', async () => {
+  it("SAME-ACCOUNT roleArn: does NOT vend; registry built WITHOUT a credentialProvider (unchanged)", async () => {
     const res = await testImportedAgent(
-      crossInput({ invocationRoleArn: SAME_ROLE, account: DEPLOY_ACCOUNT, invocationTarget: SAME_TARGET }),
+      crossInput({
+        invocationRoleArn: SAME_ROLE,
+        account: DEPLOY_ACCOUNT,
+        invocationTarget: SAME_TARGET,
+      }),
       adminEvent,
     );
 
     expect(mockVend).not.toHaveBeenCalled();
-    const deps = mockBuildRegistry.mock.calls[0][0] as { credentialProvider?: unknown };
+    const deps = mockBuildRegistry.mock.calls[0][0] as {
+      credentialProvider?: unknown;
+    };
     expect(deps.credentialProvider).toBeUndefined();
     expect(res.ok).toBe(true);
     expect(mockInvoke).toHaveBeenCalledTimes(1);
   });
 
-  it('NO roleArn: does NOT vend; registry built WITHOUT a credentialProvider (back-compat)', async () => {
+  it("NO roleArn: does NOT vend; registry built WITHOUT a credentialProvider (back-compat)", async () => {
     const res = await testImportedAgent(
-      crossInput({ invocationRoleArn: undefined, invocationExternalId: undefined, account: undefined, invocationTarget: SAME_TARGET }),
+      crossInput({
+        invocationRoleArn: undefined,
+        invocationExternalId: undefined,
+        account: undefined,
+        invocationTarget: SAME_TARGET,
+      }),
       adminEvent,
     );
 
     expect(mockVend).not.toHaveBeenCalled();
-    const deps = mockBuildRegistry.mock.calls[0][0] as { credentialProvider?: unknown };
+    const deps = mockBuildRegistry.mock.calls[0][0] as {
+      credentialProvider?: unknown;
+    };
     expect(deps.credentialProvider).toBeUndefined();
     expect(res.ok).toBe(true);
   });
 
-  it('developer/non-privileged caller is still rejected (gate unchanged) and never vends', async () => {
+  it("developer/non-privileged caller is still rejected (gate unchanged) and never vends", async () => {
     mockIsAdminFromEvent.mockReturnValue(false);
-    await expect(testImportedAgent(crossInput(), developerEvent)).rejects.toThrow(/unauthor/i);
+    await expect(
+      testImportedAgent(crossInput(), developerEvent),
+    ).rejects.toThrow(/unauthor/i);
     expect(mockVend).not.toHaveBeenCalled();
     expect(mockBuildRegistry).not.toHaveBeenCalled();
   });
@@ -323,10 +404,10 @@ describe('testImportedAgent — cross-account invoke', () => {
 // ===========================================================================
 // probeAgentCandidate — cross-account dry-run
 // ===========================================================================
-describe('probeAgentCandidate — cross-account dry-run', () => {
+describe("probeAgentCandidate — cross-account dry-run", () => {
   beforeEach(() => mockIsAdminFromEvent.mockReturnValue(true));
 
-  it('assumes the invoke role and uses the assumed credentialProvider for the dry-run', async () => {
+  it("assumes the invoke role and uses the assumed credentialProvider for the dry-run", async () => {
     mockVend.mockResolvedValue(vendedOk());
     mockInvoke.mockResolvedValue({ output: '{"answer":"42"}' });
 
@@ -336,7 +417,7 @@ describe('probeAgentCandidate — cross-account dry-run', () => {
     expect(mockVend).toHaveBeenCalledTimes(1);
     expect(mockVend.mock.calls[0][0]).toMatchObject({
       roleArn: CROSS_ROLE,
-      externalId: 'ext-1',
+      externalId: "ext-1",
       account: FOREIGN_ACCOUNT,
     });
     // The dry-run registry carried the assumed credentialProvider.
@@ -349,12 +430,14 @@ describe('probeAgentCandidate — cross-account dry-run', () => {
     // describe ran + the dry-run invoke ran + the descriptor was enriched.
     expect(mockDescribe).toHaveBeenCalledTimes(1);
     expect(mockInvoke).toHaveBeenCalledTimes(1);
-    expect(merged.fieldConfidence?.outputSchema).toBe('medium');
+    expect(merged.fieldConfidence?.outputSchema).toBe("medium");
     expect(merged.outputSample).toBe('{"answer":"42"}');
   });
 
-  it('a cross-account ASSUME FAILURE is best-effort: describe-only + probe note (NOT thrown)', async () => {
-    mockVend.mockRejectedValue(new Error('AccessDenied: not authorized to perform sts:AssumeRole'));
+  it("a cross-account ASSUME FAILURE is best-effort: describe-only + probe note (NOT thrown)", async () => {
+    mockVend.mockRejectedValue(
+      new Error("AccessDenied: not authorized to perform sts:AssumeRole"),
+    );
 
     const raw = await probeAgentCandidate(crossInput(), adminEvent);
     const merged = JSON.parse(raw) as ParsedDescriptor;
@@ -364,25 +447,35 @@ describe('probeAgentCandidate — cross-account dry-run', () => {
     expect(mockDescribe).toHaveBeenCalledTimes(1);
     expect(mockInvoke).not.toHaveBeenCalled();
     // No confidence bump, no fabricated sample — describe-only + a probe note.
-    expect(merged.fieldConfidence?.outputSchema).toBe('low');
+    expect(merged.fieldConfidence?.outputSchema).toBe("low");
     expect(merged.outputSample).toBeUndefined();
-    expect(typeof merged.probeNote).toBe('string');
+    expect(typeof merged.probeNote).toBe("string");
     expect(merged.probeNote).toMatch(/probe/i);
   });
 
-  it('NEVER logs the assumed credentials (success path)', async () => {
-    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
-    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+  it("NEVER logs the assumed credentials (success path)", async () => {
+    const logSpy = jest
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+    const warnSpy = jest
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    const errorSpy = jest
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
     mockVend.mockResolvedValue(vendedOk());
     mockInvoke.mockResolvedValue({ output: '{"answer":"42"}' });
 
     await probeAgentCandidate(crossInput(), adminEvent);
 
-    const all = [...logSpy.mock.calls, ...warnSpy.mock.calls, ...errorSpy.mock.calls]
+    const all = [
+      ...logSpy.mock.calls,
+      ...warnSpy.mock.calls,
+      ...errorSpy.mock.calls,
+    ]
       .flat()
-      .map((a) => (typeof a === 'string' ? a : JSON.stringify(a)))
-      .join('\n');
+      .map((a) => (typeof a === "string" ? a : JSON.stringify(a)))
+      .join("\n");
     expect(all).not.toContain(ASSUMED_SECRET);
     expect(all).not.toContain(ASSUMED_TOKEN);
     expect(all).not.toContain(ASSUMED_KEY);
@@ -391,7 +484,7 @@ describe('probeAgentCandidate — cross-account dry-run', () => {
     errorSpy.mockRestore();
   });
 
-  it('SAME-ACCOUNT roleArn: does NOT vend; the dry-run registry has no credentialProvider', async () => {
+  it("SAME-ACCOUNT roleArn: does NOT vend; the dry-run registry has no credentialProvider", async () => {
     mockInvoke.mockResolvedValue({ output: '{"answer":"42"}' });
 
     await probeAgentCandidate(
@@ -404,10 +497,65 @@ describe('probeAgentCandidate — cross-account dry-run', () => {
     expect(mockInvoke).toHaveBeenCalledTimes(1);
   });
 
-  it('developer/non-privileged caller is still rejected (gate unchanged) and never vends', async () => {
+  it("developer/non-privileged caller is still rejected (gate unchanged) and never vends", async () => {
     mockIsAdminFromEvent.mockReturnValue(false);
-    await expect(probeAgentCandidate(crossInput(), developerEvent)).rejects.toThrow(/unauthor/i);
+    await expect(
+      probeAgentCandidate(crossInput(), developerEvent),
+    ).rejects.toThrow(/unauthor/i);
     expect(mockVend).not.toHaveBeenCalled();
     expect(mockDescribe).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ExternalId REQUIRED for cross-account invoke (CIT-176 confused-deputy gate)
+// ---------------------------------------------------------------------------
+describe("cross-account externalId requirement", () => {
+  beforeEach(() => {
+    mockExtractOrgFromEvent.mockResolvedValue(ORG);
+    mockIsAdminFromEvent.mockReturnValue(true);
+    mockHasRoleFromEvent.mockReturnValue(false);
+  });
+
+  it("testImportedAgent: rejects cross-account roleArn when invocationExternalId is missing", async () => {
+    const input = crossInput({ invocationExternalId: undefined });
+    delete (input as Record<string, unknown>).invocationExternalId;
+    const result = (await testImportedAgent(input, adminEvent)) as {
+      ok: boolean;
+      error?: string;
+    };
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/cross-account.*require.*externalId/i);
+    expect(mockVend).not.toHaveBeenCalled();
+  });
+
+  it("testImportedAgent: accepts cross-account roleArn when invocationExternalId is present", async () => {
+    mockVend.mockResolvedValue(vendedOk());
+    mockInvoke.mockResolvedValue({ output: '{"ok":true}' });
+    // Should NOT throw — externalId is supplied.
+    await expect(
+      testImportedAgent(crossInput(), adminEvent),
+    ).resolves.toBeDefined();
+  });
+
+  it("probeAgentCandidate: rejects cross-account roleArn when invocationExternalId is missing", async () => {
+    const input = crossInput({ invocationExternalId: undefined });
+    delete (input as Record<string, unknown>).invocationExternalId;
+    await expect(probeAgentCandidate(input, adminEvent)).rejects.toThrow(
+      /cross-account.*require.*externalId/i,
+    );
+    expect(mockVend).not.toHaveBeenCalled();
+  });
+
+  it("same-account roleArn does not require externalId", async () => {
+    mockInvoke.mockResolvedValue({ output: '{"ok":true}' });
+    const input = crossInput({
+      invocationRoleArn: SAME_ROLE,
+      account: DEPLOY_ACCOUNT,
+      invocationExternalId: undefined,
+    });
+    delete (input as Record<string, unknown>).invocationExternalId;
+    // Same-account — no externalId required.
+    await expect(testImportedAgent(input, adminEvent)).resolves.toBeDefined();
   });
 });

@@ -363,6 +363,11 @@ export class RegistryStack extends cdk.Stack {
         ],
       }),
     );
+    // Invoke grants for imported-agent dry-runs. Targets are operator-
+    // supplied per import and unknowable at synth time, so the resource
+    // segment is wildcard WITHIN this account (function:*, runtime/*,
+    // agent-alias/*, execute-api:*). Accepted risk: tracked for tag-based
+    // conditions once imports tag targets (CIT-042 follow-up).
     agentImportResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
@@ -389,14 +394,19 @@ export class RegistryStack extends cdk.Stack {
         ],
       }),
     );
-    // Verbatim STS statement (cross-account trust-path assume). Action set
-    // (["sts:AssumeRole"]) and Resource (["arn:aws:iam::*:role/*"]) match the
-    // baseline exactly — no narrowing, no widening.
+    // Cross-account trust-path assume. Resource stays wildcard (imported
+    // agents live in arbitrary accounts) but the Null condition ensures
+    // callers MUST supply an STS ExternalId — an assume without one is
+    // denied at the IAM layer, defence-in-depth alongside the runtime
+    // validation in agent-import-resolver.ts.
     agentImportResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: ["sts:AssumeRole"],
         resources: ["arn:aws:iam::*:role/*"],
+        conditions: {
+          Null: { "sts:ExternalId": "false" },
+        },
       }),
     );
     agentImportResolverFunction.addToRolePolicy(

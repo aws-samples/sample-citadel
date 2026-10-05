@@ -348,7 +348,7 @@ describe("RegistryStack — backend-stack-split phase 2", () => {
       }
     });
 
-    test("has an sts:AssumeRole statement with EXACTLY that one action, scoped to arn:aws:iam::*:role/* (cross-account trust-path)", () => {
+    test("has an sts:AssumeRole statement with EXACTLY that one action, scoped to arn:aws:iam::*:role/* with Null sts:ExternalId condition (cross-account trust-path)", () => {
       const statements = agentImportPolicyStatements();
       const match = statements.find((s) => {
         const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
@@ -359,6 +359,8 @@ describe("RegistryStack — backend-stack-split phase 2", () => {
         ? match.Resource
         : [match.Resource];
       expect(resources).toEqual(["arn:aws:iam::*:role/*"]);
+      // Defence-in-depth: IAM denies an assume without an ExternalId.
+      expect(match.Condition).toEqual({ Null: { "sts:ExternalId": "false" } });
     });
 
     test("no statement broadens sts:AssumeRole to a bare wildcard Resource::* (must stay role/* scoped)", () => {
@@ -372,6 +374,37 @@ describe("RegistryStack — backend-stack-split phase 2", () => {
           ? stmt.Resource
           : [stmt.Resource];
         expect(resources).not.toContain("*");
+      }
+    });
+
+    // Invoke-wildcard account-scope pin: targets are operator-supplied per
+    // import, unknowable at synth time; tracked for tag-based conditions
+    // once imports tag targets. These must NEVER broaden to bare '*'.
+    test("invoke grants (lambda, bedrock, bedrock-agentcore, execute-api) are account-scoped, never bare '*'", () => {
+      const statements = agentImportPolicyStatements();
+      const invokeActions = [
+        "lambda:InvokeFunction",
+        "bedrock:InvokeAgent",
+        "bedrock-agentcore:InvokeAgentRuntime",
+        "execute-api:Invoke",
+      ];
+      const invokeStmts = statements.filter((s) => {
+        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+        return actions.some((a) => invokeActions.includes(a));
+      });
+      expect(invokeStmts.length).toBeGreaterThan(0);
+      for (const stmt of invokeStmts) {
+        const resources = Array.isArray(stmt.Resource)
+          ? stmt.Resource
+          : [stmt.Resource];
+        for (const r of resources) {
+          const rStr = typeof r === "string" ? r : JSON.stringify(r);
+          // Must never be a bare wildcard.
+          expect(rStr).not.toBe("*");
+          // Every resource must be scoped to the deployment account
+          // (CDK resolves ${this.account} to the stack's literal account).
+          expect(rStr).toContain("123456789012");
+        }
       }
     });
   });
