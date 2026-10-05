@@ -87,6 +87,6 @@ def handler(event, context):
             # Advance-only resume (decisions O1/O5). Only executionId is consumed;
             # the server re-derives the frontier from persisted state, never from
             # the event payload (SECURITY: server-side frontier re-derivation).
-            resume_execution(detail['executionId'])
+            resume_execution(detail['executionId'], approval_decision=detail.get('approval_decision'))
 
     return {'statusCode': 200}

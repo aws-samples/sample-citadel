@@ -139,8 +139,9 @@ function extractFunctionBody(source: string, fnName: string): string {
   return source.slice(bodyStart, i + 1);
 }
 
-const GATE_CALL_RE = /extractOrgFromEvent\s*\(|assertRowOrg\s*\(/;
-const DENY_RE = /Access denied|assertRowOrg\s*\(/;
+const GATE_CALL_RE =
+  /extractOrgFromEvent\s*\(|assertRowOrg\s*\(|assertAdminOrArchitect\s*\(/;
+const DENY_RE = /Access denied|assertRowOrg\s*\(|assertAdminOrArchitect\s*\(/;
 
 /**
  * Every op on this dispatch surface that touches tenant-scoped execution
@@ -157,6 +158,13 @@ const GATED_OPS: Record<string, { fn: string; gateOwner: string }> = {
   startExecution: { fn: "startExecution", gateOwner: "startExecution" },
   cancelExecution: { fn: "cancelExecution", gateOwner: "getExecution" },
   resumeExecution: { fn: "resumeExecution", gateOwner: "getExecution" },
+  pauseExecution: { fn: "pauseExecution", gateOwner: "getExecution" },
+  approveExecution: { fn: "approveExecution", gateOwner: "getExecution" },
+  denyExecution: { fn: "denyExecution", gateOwner: "getExecution" },
+  listAwaitingApprovals: {
+    fn: "listAwaitingApprovals",
+    gateOwner: "listAwaitingApprovals",
+  },
 };
 
 /**

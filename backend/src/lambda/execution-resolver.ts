@@ -6,6 +6,7 @@ import {
   PutCommand,
   UpdateCommand,
   QueryCommand,
+  ScanCommand,
 } from "@aws-sdk/lib-dynamodb";
 import {
   EventBridgeClient,
@@ -17,7 +18,12 @@ import {
 } from "@aws-sdk/client-cloudwatch";
 import { v4 as uuidv4 } from "uuid";
 import { getUserId } from "../utils/appsync";
-import { assertRowOrg } from "../utils/auth-event";
+import {
+  assertRowOrg,
+  isAdminFromEvent,
+  hasRoleFromEvent,
+  extractOrgFromEvent,
+} from "../utils/auth-event";
 import { mintRunId, buildDispatchContext } from "../utils/run-id";
 import {
   METRIC_NAMESPACE,
@@ -86,6 +92,10 @@ interface ExecutionResolverArguments {
   executionId: string;
   workflowId: string;
   input?: string;
+  nodeId?: string;
+  reason?: string;
+  limit?: number;
+  nextToken?: string;
 }
 
 type ExecutionResolverEvent = AppSyncResolverEvent<ExecutionResolverArguments>;
@@ -130,6 +140,23 @@ interface ExecutionRecord {
   usageTotals?: UsageTotals | null;
   /** Additive, nullable: server-minted correlation id (Pass 1, decision f1cbd5ef). Absent on pre-runId rows. */
   runId?: string;
+  /** CIT-030: per-node approval requests written by the step runner. */
+  approvalRequests?: Record<string, ApprovalRequestRecord>;
+}
+
+/** Shape of a per-node approval request stored in DDB (PR1). */
+interface ApprovalRequestRecord {
+  requestType: string;
+  reason?: string;
+  requestedBy?: string;
+  requestedAt?: string;
+  resumeToken?: string;
+  expiresAt?: string;
+  decidedBy?: string | null;
+  decidedAt?: string | null;
+  decision?: string | null;
+  orgId?: string;
+  metadata?: Record<string, unknown>;
 }
 
 function _coerceNonNegativeInt(value: unknown): number {
@@ -251,8 +278,10 @@ export const handler: AppSyncResolverHandler<
 
   try {
     switch (fieldName) {
-      case "getExecution":
-        return await getExecution(args.executionId, userId, event);
+      case "getExecution": {
+        const exec = await getExecution(args.executionId, userId, event);
+        return exec ? stripResumeTokens(exec) : null;
+      }
       case "listExecutions":
         return await listExecutions(args.workflowId, event);
       case "startExecution":
@@ -261,6 +290,31 @@ export const handler: AppSyncResolverHandler<
         return await cancelExecution(args.executionId, userId, event);
       case "resumeExecution":
         return await resumeExecution(args.executionId, userId, event);
+      case "pauseExecution":
+        return await pauseExecution(
+          args.executionId,
+          args.nodeId ?? null,
+          args.reason!,
+          userId,
+          event,
+        );
+      case "approveExecution":
+        return await approveExecution(
+          args.executionId,
+          args.nodeId!,
+          userId,
+          event,
+        );
+      case "denyExecution":
+        return await denyExecution(
+          args.executionId,
+          args.nodeId!,
+          args.reason!,
+          userId,
+          event,
+        );
+      case "listAwaitingApprovals":
+        return await listAwaitingApprovals(args.limit, args.nextToken, event);
       case "publishWorkflowProgress":
         // IAM-signed fan-out mutation: echo the input so AppSync delivers it
         // to onWorkflowProgress subscribers.
@@ -533,6 +587,359 @@ async function resumeExecution(
   });
 
   return existing;
+}
+
+/**
+ * CIT-030 role gate: require admin OR architect group membership.
+ * Throws "Access denied" for any other role (including developer).
+ */
+function assertAdminOrArchitect(event: ExecutionResolverEvent): void {
+  if (isAdminFromEvent(event) || hasRoleFromEvent(event, "architect")) {
+    return;
+  }
+  throw new Error("Access denied: admin or architect role required");
+}
+
+/**
+ * Strip resumeToken from approvalRequests before returning to client (RC-2).
+ * Returns a new object; never mutates the input.
+ */
+function stripResumeTokens(
+  execution: ExecutionRecord,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = { ...execution };
+  if (
+    execution.approvalRequests &&
+    typeof execution.approvalRequests === "object"
+  ) {
+    const stripped: Record<string, unknown>[] = [];
+    for (const [, req] of Object.entries(execution.approvalRequests)) {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { resumeToken, ...safeFields } = req;
+      stripped.push(safeFields);
+    }
+    result.approvalRequests = stripped;
+  }
+  return result;
+}
+
+/**
+ * Write a structured audit log record (RC-3) for an approval decision.
+ * Synchronous (before conditional write returns), best-effort (never throws).
+ */
+function auditApprovalDecision(params: {
+  executionId: string;
+  nodeId: string;
+  decision: string;
+  decidedBy: string;
+  orgId: string;
+}): void {
+  console.log(
+    JSON.stringify({
+      auditType: "approval_decision",
+      executionId: params.executionId,
+      nodeId: params.nodeId,
+      decision: params.decision,
+      decidedBy: params.decidedBy,
+      decidedAt: new Date().toISOString(),
+      orgId: params.orgId,
+    }),
+  );
+}
+
+async function pauseExecution(
+  executionId: string,
+  nodeId: string | null,
+  reason: string,
+  userId: string,
+  event: ExecutionResolverEvent,
+): Promise<Record<string, unknown>> {
+  assertAdminOrArchitect(event);
+
+  const existing = await getExecution(executionId, userId, event);
+  if (!existing) {
+    throw new Error("Execution not found");
+  }
+
+  const status = existing.status;
+  if (status === "completed" || status === "cancelled" || status === "failed") {
+    throw new Error(`Cannot pause execution in terminal state: ${status}`);
+  }
+
+  // Write pauseRequested marker — the engine parks at the next dispatch.
+  const now = new Date().toISOString();
+  const result = await docClient.send(
+    new UpdateCommand({
+      TableName: EXECUTIONS_TABLE,
+      Key: { executionId },
+      UpdateExpression: "SET #pauseRequested = :pr",
+      ExpressionAttributeNames: {
+        "#pauseRequested": "pauseRequested",
+      },
+      ExpressionAttributeValues: {
+        ":pr": {
+          reason,
+          requestedBy: userId,
+          requestedAt: now,
+          ...(nodeId ? { nodeId } : {}),
+        },
+      },
+      ReturnValues: "ALL_NEW",
+    }),
+  );
+
+  await emitEvent("execution.pause.requested", {
+    executionId,
+    workflowId: existing.workflowId,
+    orgId: existing.orgId,
+    reason,
+    requestedBy: userId,
+    ...(nodeId ? { nodeId } : {}),
+  });
+
+  const updated = result.Attributes as ExecutionRecord;
+  updated.usageTotals = computeExecutionUsageTotals(updated.nodeResults);
+  return stripResumeTokens(updated);
+}
+
+async function approveExecution(
+  executionId: string,
+  nodeId: string,
+  userId: string,
+  event: ExecutionResolverEvent,
+): Promise<Record<string, unknown>> {
+  assertAdminOrArchitect(event);
+
+  const existing = await getExecution(executionId, userId, event);
+  if (!existing) {
+    throw new Error("Execution not found");
+  }
+
+  if (existing.status !== "awaiting_approval") {
+    throw new Error(
+      `Cannot approve execution: status is '${existing.status}', expected 'awaiting_approval'`,
+    );
+  }
+
+  const approvalRequest = existing.approvalRequests?.[nodeId];
+  if (!approvalRequest) {
+    throw new Error(`No approval request found for node '${nodeId}'`);
+  }
+  if (approvalRequest.decision) {
+    throw new Error(`Approval request for node '${nodeId}' already decided`);
+  }
+
+  const resumeToken = approvalRequest.resumeToken;
+  if (!resumeToken) {
+    throw new Error(`No resume token found for node '${nodeId}'`);
+  }
+
+  const callerOrgId = await extractOrgFromEvent(event);
+
+  // RC-3: Structured audit log BEFORE conditional write
+  auditApprovalDecision({
+    executionId,
+    nodeId,
+    decision: "approved",
+    decidedBy: userId,
+    orgId: callerOrgId || existing.orgId,
+  });
+
+  const now = new Date().toISOString();
+  // Conditional write: idempotent (RC-2 fence on resumeToken + null decision).
+  const result = await docClient.send(
+    new UpdateCommand({
+      TableName: EXECUTIONS_TABLE,
+      Key: { executionId },
+      UpdateExpression:
+        "SET approvalRequests.#nid.#decision = :decision, " +
+        "approvalRequests.#nid.#decidedBy = :userId, " +
+        "approvalRequests.#nid.#decidedAt = :now",
+      ConditionExpression:
+        "approvalRequests.#nid.#resumeToken = :token " +
+        "AND (attribute_not_exists(approvalRequests.#nid.#decision) " +
+        "OR approvalRequests.#nid.#decision = :null)",
+      ExpressionAttributeNames: {
+        "#nid": nodeId,
+        "#decision": "decision",
+        "#decidedBy": "decidedBy",
+        "#decidedAt": "decidedAt",
+        "#resumeToken": "resumeToken",
+      },
+      ExpressionAttributeValues: {
+        ":decision": "approved",
+        ":userId": userId,
+        ":now": now,
+        ":token": resumeToken,
+        ":null": null,
+      },
+      ReturnValues: "ALL_NEW",
+    }),
+  );
+
+  // Emit execution.resume.requested with approval_decision payload (§3 contract)
+  await emitEvent("execution.resume.requested", {
+    executionId,
+    workflowId: existing.workflowId,
+    orgId: existing.orgId,
+    ...(existing.runId ? { runId: existing.runId } : {}),
+    approval_decision: {
+      decision: "approved",
+      node_id: nodeId,
+      resume_token: resumeToken,
+      decided_by: userId,
+      org_id: callerOrgId || existing.orgId,
+    },
+  });
+
+  const updated = result.Attributes as ExecutionRecord;
+  updated.usageTotals = computeExecutionUsageTotals(updated.nodeResults);
+  return stripResumeTokens(updated);
+}
+
+async function denyExecution(
+  executionId: string,
+  nodeId: string,
+  reason: string,
+  userId: string,
+  event: ExecutionResolverEvent,
+): Promise<Record<string, unknown>> {
+  assertAdminOrArchitect(event);
+
+  const existing = await getExecution(executionId, userId, event);
+  if (!existing) {
+    throw new Error("Execution not found");
+  }
+
+  if (existing.status !== "awaiting_approval") {
+    throw new Error(
+      `Cannot deny execution: status is '${existing.status}', expected 'awaiting_approval'`,
+    );
+  }
+
+  const approvalRequest = existing.approvalRequests?.[nodeId];
+  if (!approvalRequest) {
+    throw new Error(`No approval request found for node '${nodeId}'`);
+  }
+  if (approvalRequest.decision) {
+    throw new Error(`Approval request for node '${nodeId}' already decided`);
+  }
+
+  const resumeToken = approvalRequest.resumeToken;
+  if (!resumeToken) {
+    throw new Error(`No resume token found for node '${nodeId}'`);
+  }
+
+  const callerOrgId = await extractOrgFromEvent(event);
+
+  // RC-3: Structured audit log BEFORE conditional write
+  auditApprovalDecision({
+    executionId,
+    nodeId,
+    decision: "denied",
+    decidedBy: userId,
+    orgId: callerOrgId || existing.orgId,
+  });
+
+  const now = new Date().toISOString();
+  const result = await docClient.send(
+    new UpdateCommand({
+      TableName: EXECUTIONS_TABLE,
+      Key: { executionId },
+      UpdateExpression:
+        "SET approvalRequests.#nid.#decision = :decision, " +
+        "approvalRequests.#nid.#decidedBy = :userId, " +
+        "approvalRequests.#nid.#decidedAt = :now",
+      ConditionExpression:
+        "approvalRequests.#nid.#resumeToken = :token " +
+        "AND (attribute_not_exists(approvalRequests.#nid.#decision) " +
+        "OR approvalRequests.#nid.#decision = :null)",
+      ExpressionAttributeNames: {
+        "#nid": nodeId,
+        "#decision": "decision",
+        "#decidedBy": "decidedBy",
+        "#decidedAt": "decidedAt",
+        "#resumeToken": "resumeToken",
+      },
+      ExpressionAttributeValues: {
+        ":decision": "denied",
+        ":userId": userId,
+        ":now": now,
+        ":token": resumeToken,
+        ":null": null,
+      },
+      ReturnValues: "ALL_NEW",
+    }),
+  );
+
+  // Emit execution.resume.requested with denial payload
+  await emitEvent("execution.resume.requested", {
+    executionId,
+    workflowId: existing.workflowId,
+    orgId: existing.orgId,
+    ...(existing.runId ? { runId: existing.runId } : {}),
+    approval_decision: {
+      decision: "denied",
+      node_id: nodeId,
+      resume_token: resumeToken,
+      decided_by: userId,
+      org_id: callerOrgId || existing.orgId,
+      reason,
+    },
+  });
+
+  const updated = result.Attributes as ExecutionRecord;
+  updated.usageTotals = computeExecutionUsageTotals(updated.nodeResults);
+  return stripResumeTokens(updated);
+}
+
+async function listAwaitingApprovals(
+  limit: number | undefined,
+  nextToken: string | undefined,
+  event: ExecutionResolverEvent,
+): Promise<{ items: Record<string, unknown>[]; nextToken?: string }> {
+  assertAdminOrArchitect(event);
+
+  const isAdmin = isAdminFromEvent(event);
+  const callerOrgId = await extractOrgFromEvent(event);
+
+  const scanLimit = Math.min(limit || 20, 100);
+
+  const filterParts: string[] = ["#status = :awaitingApproval"];
+  const exprNames: Record<string, string> = { "#status": "status" };
+  const exprValues: Record<string, unknown> = {
+    ":awaitingApproval": "awaiting_approval",
+  };
+
+  if (!isAdmin && callerOrgId) {
+    filterParts.push("#orgId = :orgId");
+    exprNames["#orgId"] = "orgId";
+    exprValues[":orgId"] = callerOrgId;
+  }
+
+  const result = await docClient.send(
+    new ScanCommand({
+      TableName: EXECUTIONS_TABLE,
+      FilterExpression: filterParts.join(" AND "),
+      ExpressionAttributeNames: exprNames,
+      ExpressionAttributeValues: exprValues,
+      Limit: scanLimit * 5, // overscan to compensate for filter
+      ...(nextToken ? { ExclusiveStartKey: JSON.parse(nextToken) } : {}),
+    }),
+  );
+
+  const items = (result.Items || []).slice(0, scanLimit).map((item) => {
+    const exec = item as ExecutionRecord;
+    exec.usageTotals = computeExecutionUsageTotals(exec.nodeResults);
+    return stripResumeTokens(exec);
+  });
+
+  return {
+    items,
+    nextToken: result.LastEvaluatedKey
+      ? JSON.stringify(result.LastEvaluatedKey)
+      : undefined,
+  };
 }
 
 async function emitEvent(eventType: string, detail: unknown): Promise<void> {
