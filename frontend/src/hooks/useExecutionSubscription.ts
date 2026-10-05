@@ -55,6 +55,8 @@ export function useExecutionSubscription(executionId: string | null) {
           setExecutionStatus('failed');
         } else if (event.eventType === 'workflow.started') {
           setExecutionStatus('running');
+        } else if (event.eventType === 'workflow.awaiting_approval') {
+          setExecutionStatus('awaiting_approval');
         }
       }
     );
