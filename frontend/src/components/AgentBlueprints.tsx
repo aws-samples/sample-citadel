@@ -49,7 +49,7 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
   const [isPublishing, setIsPublishing] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
 
-  const { currentUser } = useOrganization();
+  const { currentUser, canApproveExecutions } = useOrganization();
   const orgId = currentUser?.organization || null;
   const orgMissingMessage = 'Your account has no organisation; ask an admin to assign one';
 
@@ -374,6 +374,49 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
     }
   }, [executionId]);
 
+  /**
+   * Pause the running execution so it enters an approval gate.
+   */
+  const handlePause = useCallback(async (execId: string) => {
+    try {
+      await executionApiService.pauseExecution(execId, 'Paused by user');
+    } catch (error: any) {
+      toast.error('Failed to pause execution', {
+        description: error?.message || 'Unknown error',
+      });
+    }
+  }, []);
+
+  /**
+   * Approve the execution that is awaiting approval, using the current node.
+   */
+  const handleApprove = useCallback(async (execId: string) => {
+    try {
+      const execution = await executionApiService.getExecution(execId);
+      const nodeId = execution?.currentNode || '';
+      await executionApiService.approveExecution(execId, nodeId);
+    } catch (error: any) {
+      toast.error('Failed to approve execution', {
+        description: error?.message || 'Unknown error',
+      });
+    }
+  }, []);
+
+  /**
+   * Deny the execution that is awaiting approval, using the current node.
+   */
+  const handleDeny = useCallback(async (execId: string) => {
+    try {
+      const execution = await executionApiService.getExecution(execId);
+      const nodeId = execution?.currentNode || '';
+      await executionApiService.denyExecution(execId, nodeId, 'Denied by user');
+    } catch (error: any) {
+      toast.error('Failed to deny execution', {
+        description: error?.message || 'Unknown error',
+      });
+    }
+  }, []);
+
   const saveStatusLabel = conflict
     ? 'Conflict — reloaded latest from server'
     : isSaving
@@ -460,6 +503,10 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
             onRun={handleRun}
             onCancel={handleCancel}
             executionId={executionId}
+            canApproveExecutions={canApproveExecutions}
+            onPause={handlePause}
+            onApprove={handleApprove}
+            onDeny={handleDeny}
           />
         </div>
 
