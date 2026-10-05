@@ -3265,6 +3265,37 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
+    executionLambdaDataSource.createResolver("PauseExecutionResolver", {
+      typeName: "Mutation",
+      fieldName: "pauseExecution",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    executionLambdaDataSource.createResolver("ApproveExecutionResolver", {
+      typeName: "Mutation",
+      fieldName: "approveExecution",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    executionLambdaDataSource.createResolver("DenyExecutionResolver", {
+      typeName: "Mutation",
+      fieldName: "denyExecution",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    executionLambdaDataSource.createResolver(
+      "ListAwaitingApprovalsResolver",
+      {
+        typeName: "Query",
+        fieldName: "listAwaitingApprovals",
+        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+      },
+    );
+
     // publishWorkflowProgress — IAM-only mutation called by fan-out Lambda
     executionLambdaDataSource.createResolver(
       "PublishWorkflowProgressResolver",
