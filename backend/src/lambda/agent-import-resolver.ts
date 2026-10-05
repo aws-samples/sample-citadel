@@ -1157,6 +1157,19 @@ export async function importAgent(
   if (invokeExternalId) {
     invocation.externalId = invokeExternalId;
   }
+  // Cross-account imports MUST carry an ExternalId (confused-deputy guard).
+  // The IAM policy condition (Null sts:ExternalId false) enforces this at
+  // the STS layer; this runtime check gives a clear validation error before
+  // the record is persisted.
+  if (
+    invokeRoleArn &&
+    isCrossAccountRoleArn(invokeRoleArn, process.env.ACCOUNT_ID) &&
+    !invokeExternalId
+  ) {
+    throw new Error(
+      "Cross-account imports require an externalId: supply invocationExternalId when invocationRoleArn is in a different account",
+    );
+  }
   const origin = {
     ...(root.origin as Record<string, unknown>),
     ownership: "external",
@@ -2102,6 +2115,16 @@ function buildTestInvocationDescriptor(
   const externalId = asNonEmptyString(flat.invocationExternalId);
   if (roleArn) invocation.roleArn = roleArn;
   if (externalId) invocation.externalId = externalId;
+  // Cross-account invoke requires an ExternalId (confused-deputy guard).
+  if (
+    roleArn &&
+    isCrossAccountRoleArn(roleArn, process.env.ACCOUNT_ID) &&
+    !externalId
+  ) {
+    throw new Error(
+      "Cross-account imports require an externalId: supply invocationExternalId when invocationRoleArn is in a different account",
+    );
+  }
 
   const origin: AgentOrigin = {
     substrate: "test-invoke",

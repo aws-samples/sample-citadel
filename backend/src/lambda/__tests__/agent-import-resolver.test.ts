@@ -1121,6 +1121,24 @@ describe("importAgent — invocation roleArn / externalId", () => {
     expect(stampedInvocation()?.roleArn).toBe(CROSS_ACCOUNT_INVOKE_ROLE_ARN);
     expect(stampedInvocation()?.externalId).toBe(INVOKE_EXTERNAL_ID);
   });
+
+  it("rejects cross-account invocationRoleArn when invocationExternalId is missing", async () => {
+    process.env.ACCOUNT_ID = "111122223333";
+    try {
+      await expect(
+        importAgent(
+          validInput({
+            invocationRoleArn: CROSS_ACCOUNT_INVOKE_ROLE_ARN,
+            // no invocationExternalId
+          }),
+          eventWithOrg,
+        ),
+      ).rejects.toThrow(/cross-account.*require.*externalId/i);
+      expect(mockCreateResource).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.ACCOUNT_ID;
+    }
+  });
 });
 
 // ── importAgent: governance attestation (US governance retrofit) ─────────
