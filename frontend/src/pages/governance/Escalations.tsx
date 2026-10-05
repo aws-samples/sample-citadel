@@ -24,6 +24,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Copy } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
 import {
   AreaChart,
   Area,
@@ -68,6 +69,10 @@ import {
   GovernanceFinding,
   MetricSeries,
 } from '../../services/governanceService';
+import { executionApiService } from '../../services/executionApiService';
+import { ExecutionDecisionDialog } from '../../components/ExecutionDecisionDialog';
+import type { ExecutionDecisionKind } from '../../components/ExecutionDecisionDialog';
+import type { Execution, ApprovalRequest } from '../../types/execution';
 
 type RangeFilter = '24h' | '7d' | '30d';
 type GroupByFilter = 'workflow' | 'agent' | 'none';
@@ -599,6 +604,62 @@ export function GovernanceEscalations() {
   const navigate = useNavigate();
   const org = useOrganization();
   const isAdmin = !!org.isAdmin;
+  const canApprove = !!org.canApproveExecutions;
+
+  const [awaitingApprovals, setAwaitingApprovals] = useState<Execution[]>([]);
+  const [awaitingLoading, setAwaitingLoading] = useState(false);
+  const [decisionDialog, setDecisionDialog] = useState<{
+    kind: ExecutionDecisionKind;
+    executionId: string;
+    nodeId: string;
+  } | null>(null);
+
+  const fetchAwaiting = useCallback(async () => {
+    setAwaitingLoading(true);
+    try {
+      const data = await executionApiService.listAwaitingApprovals(50);
+      setAwaitingApprovals(data.items ?? []);
+    } catch {
+      // Non-critical — governance escalations still load
+      setAwaitingApprovals([]);
+    } finally {
+      setAwaitingLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (canApprove) {
+      fetchAwaiting();
+    }
+  }, [canApprove, fetchAwaiting]);
+
+  const handleApproveExecution = async (exec: Execution) => {
+    const pending = exec.approvalRequests?.find((r) => !r.decision);
+    const nodeId = exec.currentNode ?? '';
+    try {
+      await executionApiService.approveExecution(exec.executionId, pending ? nodeId : nodeId);
+      toast.success('Execution approved');
+      fetchAwaiting();
+    } catch (err: any) {
+      toast.error(err.message ?? 'Approve failed');
+    }
+  };
+
+  const handleDenyExecution = async (reason: string) => {
+    if (!decisionDialog) return;
+    try {
+      await executionApiService.denyExecution(
+        decisionDialog.executionId,
+        decisionDialog.nodeId,
+        reason,
+      );
+      toast.success('Execution denied');
+      setDecisionDialog(null);
+      fetchAwaiting();
+    } catch (err: any) {
+      toast.error(err.message ?? 'Deny failed');
+    }
+  };
 
   const [range, setRange] = useState<RangeFilter>('7d');
   const [groupBy, setGroupBy] = useState<GroupByFilter>('workflow');
@@ -778,6 +839,105 @@ export function GovernanceEscalations() {
         onRefresh={() => setReloadKey((k) => k + 1)}
         loading={loading}
       />
+
+      {/* Awaiting approval section (CIT-030) */}
+      {canApprove && (
+        <div className="mb-6" data-testid="awaiting-approval-section">
+          <h3 className="text-foreground text-lg font-semibold mb-3">Awaiting approval</h3>
+          {awaitingLoading && (
+            <Skeleton className="h-16 w-full" data-testid="awaiting-approval-loading" />
+          )}
+          {!awaitingLoading && awaitingApprovals.length === 0 && (
+            <p className="text-muted-foreground text-sm" data-testid="awaiting-approval-empty">
+              No executions awaiting approval
+            </p>
+          )}
+          {!awaitingLoading && awaitingApprovals.length > 0 && (
+            <Card className="p-0 gap-0 overflow-hidden">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Execution</TableHead>
+                    <TableHead>Workflow</TableHead>
+                    <TableHead>Request type</TableHead>
+                    <TableHead>Reason</TableHead>
+                    <TableHead>Requested by</TableHead>
+                    <TableHead>Requested at</TableHead>
+                    <TableHead>Expires</TableHead>
+                    <TableHead>Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {awaitingApprovals.map((exec) => {
+                    const pending = exec.approvalRequests?.find((r: ApprovalRequest) => !r.decision);
+                    return (
+                      <TableRow key={exec.executionId} data-testid={`awaiting-row-${exec.executionId}`}>
+                        <TableCell>
+                          <span className="font-mono text-xs">{exec.executionId.slice(0, 8)}…</span>
+                        </TableCell>
+                        <TableCell>
+                          <span className="font-mono text-xs">{exec.workflowId}</span>
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="warning">{pending?.requestType ?? '—'}</Badge>
+                        </TableCell>
+                        <TableCell className="max-w-48 truncate" title={pending?.reason ?? undefined}>
+                          {pending?.reason ?? '—'}
+                        </TableCell>
+                        <TableCell>{pending?.requestedBy ?? '—'}</TableCell>
+                        <TableCell>
+                          {pending?.requestedAt
+                            ? new Date(pending.requestedAt).toLocaleString()
+                            : '—'}
+                        </TableCell>
+                        <TableCell>
+                          {pending?.expiresAt
+                            ? new Date(pending.expiresAt).toLocaleString()
+                            : '—'}
+                        </TableCell>
+                        <TableCell>
+                          <span className="inline-flex gap-2">
+                            <Button
+                              size="sm"
+                              onClick={() => handleApproveExecution(exec)}
+                              data-testid={`approve-exec-${exec.executionId}`}
+                            >
+                              Approve
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="destructive"
+                              onClick={() =>
+                                setDecisionDialog({
+                                  kind: 'deny',
+                                  executionId: exec.executionId,
+                                  nodeId: exec.currentNode ?? '',
+                                })
+                              }
+                              data-testid={`deny-exec-${exec.executionId}`}
+                            >
+                              Deny
+                            </Button>
+                          </span>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </Card>
+          )}
+        </div>
+      )}
+
+      {decisionDialog && (
+        <ExecutionDecisionDialog
+          kind={decisionDialog.kind}
+          executionId={decisionDialog.executionId}
+          onConfirm={handleDenyExecution}
+          onCancel={() => setDecisionDialog(null)}
+        />
+      )}
 
       {loading ? (
         <LoadingSkeleton showFilters={false} />

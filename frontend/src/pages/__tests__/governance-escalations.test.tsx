@@ -157,16 +157,53 @@ jest.mock('../../services/governanceService', () => ({
   },
 }));
 
+jest.mock('../../services/executionApiService', () => ({
+  executionApiService: {
+    listAwaitingApprovals: jest.fn(),
+    approveExecution: jest.fn(),
+    denyExecution: jest.fn(),
+  },
+}));
+
+jest.mock('../../components/ExecutionDecisionDialog', () => {
+  const React = require('react');
+  return {
+    ExecutionDecisionDialog: ({ kind, executionId: _eid, onConfirm, onCancel }: any) =>
+      React.createElement(
+        'div',
+        { 'data-testid': 'execution-decision-dialog', 'data-kind': kind },
+        React.createElement('button', {
+          'data-testid': 'dialog-confirm',
+          onClick: () => onConfirm('test reason'),
+        }, 'Confirm'),
+        React.createElement('button', {
+          'data-testid': 'dialog-cancel',
+          onClick: onCancel,
+        }, 'Cancel'),
+      ),
+  };
+});
+
+// Mock sonner toast
+jest.mock('sonner', () => ({
+  toast: {
+    success: jest.fn(),
+    error: jest.fn(),
+  },
+}));
+
 import { governanceService } from '../../services/governanceService';
+import { executionApiService } from '../../services/executionApiService';
 import { GovernanceEscalations } from '../../pages/governance/Escalations';
 
-function setOrg(isAdmin: boolean) {
+function setOrg(isAdmin: boolean, canApproveExecutions = isAdmin) {
   mockUseOrganization.mockReturnValue({
     selectedOrganization: 'TestOrg',
     setSelectedOrganization: jest.fn(),
     organizations: ['TestOrg'],
     currentUser: null,
     isAdmin,
+    canApproveExecutions,
     loading: false,
   });
 }
@@ -213,6 +250,11 @@ function makeMetricSeries(over: Partial<any> = {}) {
 describe('GovernanceEscalations', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    // Default: no awaiting approvals
+    (executionApiService.listAwaitingApprovals as jest.Mock).mockResolvedValue({
+      items: [],
+      nextToken: null,
+    });
   });
 
   it('non-admin: renders the admin-only empty state and does NOT fetch', async () => {
@@ -415,5 +457,128 @@ describe('GovernanceEscalations', () => {
       .mock.calls[1][0].sinceTs;
     // 24h since is much later than 7d since.
     expect(secondSinceTs).toBeGreaterThan(firstSinceTs);
+  });
+
+  describe('Awaiting approval section (CIT-030)', () => {
+    it('shows awaiting approval section with executions for admin', async () => {
+      setOrg(true);
+      (governanceService.listGovernanceFindings as jest.Mock).mockResolvedValue(
+        makeFindingsConn([]),
+      );
+      (governanceService.getEscalationMetricSeries as jest.Mock).mockResolvedValue(
+        makeMetricSeries({ datapoints: [], total: 0 }),
+      );
+      (executionApiService.listAwaitingApprovals as jest.Mock).mockResolvedValue({
+        items: [
+          {
+            executionId: 'exec-aaa',
+            workflowId: 'wf-1',
+            orgId: 'org-1',
+            status: 'awaiting_approval',
+            startedAt: '2026-10-01T00:00:00Z',
+            triggeredBy: 'user-1',
+            currentNode: 'node-1',
+            approvalRequests: [
+              {
+                requestType: 'cost_limit',
+                reason: 'Over budget',
+                requestedBy: 'agent-x',
+                requestedAt: '2026-10-01T01:00:00Z',
+                expiresAt: '2026-10-02T01:00:00Z',
+                decision: null,
+              },
+            ],
+          },
+        ],
+        nextToken: null,
+      });
+
+      await act(async () => {
+        render(React.createElement(GovernanceEscalations));
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('awaiting-approval-section')).toBeInTheDocument();
+      });
+
+      expect(screen.getByTestId('awaiting-row-exec-aaa')).toBeInTheDocument();
+      expect(screen.getByTestId('approve-exec-exec-aaa')).toBeInTheDocument();
+      expect(screen.getByTestId('deny-exec-exec-aaa')).toBeInTheDocument();
+    });
+
+    it('shows empty message when no executions awaiting approval', async () => {
+      setOrg(true);
+      (governanceService.listGovernanceFindings as jest.Mock).mockResolvedValue(
+        makeFindingsConn([]),
+      );
+      (governanceService.getEscalationMetricSeries as jest.Mock).mockResolvedValue(
+        makeMetricSeries({ datapoints: [], total: 0 }),
+      );
+
+      await act(async () => {
+        render(React.createElement(GovernanceEscalations));
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('awaiting-approval-empty')).toBeInTheDocument();
+      });
+    });
+
+    it('refreshes after approving an execution', async () => {
+      setOrg(true);
+      (governanceService.listGovernanceFindings as jest.Mock).mockResolvedValue(
+        makeFindingsConn([]),
+      );
+      (governanceService.getEscalationMetricSeries as jest.Mock).mockResolvedValue(
+        makeMetricSeries({ datapoints: [], total: 0 }),
+      );
+      (executionApiService.listAwaitingApprovals as jest.Mock).mockResolvedValue({
+        items: [
+          {
+            executionId: 'exec-bbb',
+            workflowId: 'wf-2',
+            orgId: 'org-1',
+            status: 'awaiting_approval',
+            startedAt: '2026-10-01T00:00:00Z',
+            triggeredBy: 'user-1',
+            currentNode: 'node-2',
+            approvalRequests: [
+              { requestType: 'manual', reason: 'Review needed', decision: null },
+            ],
+          },
+        ],
+        nextToken: null,
+      });
+      (executionApiService.approveExecution as jest.Mock).mockResolvedValue({});
+
+      await act(async () => {
+        render(React.createElement(GovernanceEscalations));
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('approve-exec-exec-bbb')).toBeInTheDocument();
+      });
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('approve-exec-exec-bbb'));
+      });
+
+      // Approve calls the service and re-fetches
+      expect(executionApiService.approveExecution).toHaveBeenCalledWith('exec-bbb', 'node-2');
+      // listAwaitingApprovals re-fetched: initial + after approve
+      await waitFor(() => {
+        expect(executionApiService.listAwaitingApprovals).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    it('does not show awaiting approval for non-admin non-architect', async () => {
+      setOrg(false, false);
+
+      await act(async () => {
+        render(React.createElement(GovernanceEscalations));
+      });
+
+      expect(screen.queryByTestId('awaiting-approval-section')).not.toBeInTheDocument();
+    });
   });
 });

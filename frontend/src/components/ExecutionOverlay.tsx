@@ -5,7 +5,7 @@
  * Uses useExecutionSubscription hook for real-time updates.
  * Fades out 10 seconds after execution completes.
  *
- * Requirements: 14.1, 14.2, 14.3, 14.4, 14.5, 14.6, 14.7, 14.8, 21.5
+ * Requirements: 14.1, 14.2, 14.3, 14.4, 14.5, 14.6, 14.7, 14.8, 21.5, CIT-030
  */
 
 import { useState, useEffect } from 'react';
@@ -24,6 +24,10 @@ export interface ExecutionOverlayProps {
   onRun: () => void;
   onCancel: () => void;
   executionId: string | null;
+  canApproveExecutions?: boolean;
+  onPause?: (executionId: string) => void;
+  onApprove?: (executionId: string) => void;
+  onDeny?: (executionId: string) => void;
 }
 
 function NodeStatusIndicator({ nodeId, result }: { nodeId: string; result: NodeResultEntry }) {
@@ -68,11 +72,16 @@ export function ExecutionOverlay({
   onRun,
   onCancel,
   executionId,
+  canApproveExecutions = false,
+  onPause,
+  onApprove,
+  onDeny,
 }: ExecutionOverlayProps) {
   const [fadedOut, setFadedOut] = useState(false);
 
   const isTerminal = executionStatus === 'completed' || executionStatus === 'failed';
   const isRunning = executionStatus === 'running';
+  const isAwaitingApproval = executionStatus === 'awaiting_approval';
 
   useEffect(() => {
     if (!isTerminal) {
@@ -118,6 +127,45 @@ export function ExecutionOverlay({
           >
             Cancel
           </Button>
+        )}
+
+        {isRunning && canApproveExecutions && executionId && onPause && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => onPause(executionId)}
+            data-testid="pause-execution"
+          >
+            Pause
+          </Button>
+        )}
+
+        {isAwaitingApproval && canApproveExecutions && executionId && (
+          <>
+            {onApprove && (
+              <Button
+                type="button"
+                variant="default"
+                size="sm"
+                onClick={() => onApprove(executionId)}
+                data-testid="approve-execution"
+              >
+                Approve
+              </Button>
+            )}
+            {onDeny && (
+              <Button
+                type="button"
+                variant="destructive"
+                size="sm"
+                onClick={() => onDeny(executionId)}
+                data-testid="deny-execution"
+              >
+                Deny
+              </Button>
+            )}
+          </>
         )}
 
         {executionId && (
