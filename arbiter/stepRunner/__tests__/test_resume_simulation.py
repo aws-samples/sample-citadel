@@ -252,9 +252,15 @@ class TestResumeContract:
 
     def test_resume_signature_accepts_only_execution_id(self):
         """SECURITY: the server re-derives the frontier from persisted state.
-        resume_execution's only parameter is executionId — there is no code
-        path for a caller-supplied node list / status override."""
+        resume_execution's positional parameter is executionId — there is no
+        code path for a caller-supplied node list / status override. The
+        keyword-only approval_decision routes to the fenced approve/deny path
+        (CIT-030) which uses its own conditional writes, not a caller frontier."""
         import inspect
         import executor
         params = list(inspect.signature(executor.resume_execution).parameters)
-        assert params == ['execution_id']
+        assert params == ['execution_id', 'approval_decision']
+        # approval_decision must be keyword-only with a None default
+        p = inspect.signature(executor.resume_execution).parameters['approval_decision']
+        assert p.kind == inspect.Parameter.KEYWORD_ONLY
+        assert p.default is None

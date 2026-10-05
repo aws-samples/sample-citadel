@@ -34,6 +34,7 @@ from dag import (
     merge_node_configuration,
     topological_sort,
 )
+from approval_requests import AWAITING_APPROVAL, build_approval_request, is_awaiting
 from condition import evaluate_condition
 from retry import calculate_backoff, should_retry
 from common import workflow_contract
@@ -174,6 +175,10 @@ EXECUTIONS_TABLE = os.environ.get('EXECUTIONS_TABLE', 'citadel-executions-dev')
 # agent-record lookups. The approval gate below (this story) is the first
 # stepRunner reader of this table.
 AGENT_CONFIG_TABLE = os.environ.get('AGENT_CONFIG_TABLE')
+
+# CIT-030: Feature flag for execution pause/resume engine.  Default off —
+# behaviour byte-identical to pre-feature when unset or not 'true'.
+APPROVAL_GATE_ENABLED = os.environ.get('APPROVAL_GATE_ENABLED', '') == 'true'
 
 # DynamoDB resource
 _dynamodb = boto3.resource('dynamodb')
@@ -772,9 +777,78 @@ def start_execution(execution_id: str, workflow_id: str) -> None:
                         run_id=_run_id)
 
 
+def _park_node_awaiting_approval(
+    execution_id: str, workflow_id: str, node_id: str, agent_id: str,
+    *, run_id: str | None = None,
+) -> None:
+    """Conditionally write pending → awaiting_approval for one node, persist
+    the approval-request record, and emit events.  No SQS dispatch.
+
+    Idempotent: the conditional write on ``status = pending`` means a second
+    call (race or retry) is a no-op.
+    """
+    now = _now_iso()
+    approval_record = build_approval_request(
+        request_type='approval_required',
+        reason='Execution pause requested',
+        requested_by='system',
+        expires_at=None,
+        metadata={},
+    )
+
+    try:
+        _executions_table.update_item(
+            Key={'executionId': execution_id},
+            UpdateExpression=(
+                'SET nodeResults.#nid.#status = :awaiting, '
+                'nodeResults.#nid.#parkedAt = :parkedAt, '
+                'approvalRequests.#nid = :record'
+            ),
+            ConditionExpression='nodeResults.#nid.#status = :pending',
+            ExpressionAttributeNames={
+                '#nid': node_id,
+                '#status': 'status',
+                '#parkedAt': 'parkedAt',
+            },
+            ExpressionAttributeValues={
+                ':awaiting': AWAITING_APPROVAL,
+                ':parkedAt': now,
+                ':pending': 'pending',
+                ':record': approval_record,
+            },
+        )
+    except ClientError as exc:
+        if exc.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            _log_event(
+                'park_node_skipped_not_pending',
+                executionId=execution_id, workflowId=workflow_id, nodeId=node_id,
+            )
+            return
+        _logger.error(
+            '_park_node_awaiting_approval: conditional write failed for '
+            'execution=%s node=%s: %s', execution_id, node_id, exc,
+        )
+        raise
+
+    _log_event(
+        'node_parked_awaiting_approval',
+        executionId=execution_id, workflowId=workflow_id, nodeId=node_id,
+    )
+
+    _run_id_kwargs = {'run_id': run_id} if run_id else {}
+    events.publish_event('execution.node.awaiting_approval', {
+        'executionId': execution_id,
+        'workflowId': workflow_id,
+        'nodeId': node_id,
+        'agentId': agent_id,
+        'parkedAt': now,
+        'correlationId': execution_id,
+    }, **_run_id_kwargs)
+
+
 def invoke_node(
     execution_id: str, workflow_id: str, node: dict, input_data: dict, configuration: dict,
-    *, run_id: str | None = None,
+    *, run_id: str | None = None, pause_requested: bool = False,
 ) -> None:
     """Invoke a single workflow node.
 
@@ -854,6 +928,22 @@ def invoke_node(
     if _approval_refused:
         handle_node_failure(execution_id, node_id, _approval_refusal_reason)
         return
+
+    # CIT-030: Execution pause/resume engine — park the node BEFORE any
+    # state mutation or SQS dispatch when the feature flag is active and a
+    # pause is requested (execution-level pauseRequested attribute or
+    # node-level data.requiresApproval flag).
+    if APPROVAL_GATE_ENABLED:
+        _pause_requested = (
+            pause_requested
+            or node.get('data', {}).get('requiresApproval', False)
+        )
+        if _pause_requested:
+            _park_node_awaiting_approval(
+                execution_id, workflow_id, node_id, agent_id,
+                run_id=run_id,
+            )
+            return
 
     now = _now_iso()
 
@@ -1269,6 +1359,9 @@ def schedule_frontier(execution, workflow, *, default_input=None) -> list:
 
     input_data = default_input if default_input is not None else {}
     dispatched = []
+    _pause_requested = bool(
+        APPROVAL_GATE_ENABLED and execution.get('pauseRequested')
+    )
     for ready_id in ready_ids:
         node = next((n for n in nodes if n['id'] == ready_id), None)
         if node:
@@ -1276,7 +1369,15 @@ def schedule_frontier(execution, workflow, *, default_input=None) -> list:
             # (decision 59376546) — same merge as the root-dispatch site.
             invoke_node(execution_id, workflow_id, node, input_data,
                         merge_node_configuration(configuration, node),
-                        run_id=execution.get('runId'))
+                        run_id=execution.get('runId'),
+                        pause_requested=_pause_requested)
+            # Track the effective status after invoke_node for the
+            # execution-level transition check below.
+            if _pause_requested or (
+                APPROVAL_GATE_ENABLED
+                and node.get('data', {}).get('requiresApproval', False)
+            ):
+                status_map[ready_id] = AWAITING_APPROVAL
             dispatched.append(ready_id)
 
     all_terminal = bool(nodes) and all(
@@ -1285,6 +1386,45 @@ def schedule_frontier(execution, workflow, *, default_input=None) -> list:
     )
     if all_terminal:
         _finalize_execution(execution, input_data)
+
+    # CIT-030: execution-level running → awaiting_approval transition.
+    # When all non-terminal nodes are completed/skipped/failed/awaiting_approval
+    # AND at least one is awaiting_approval, the execution itself is parked.
+    if APPROVAL_GATE_ENABLED and not all_terminal:
+        _settled_or_parked = ('completed', 'skipped', 'failed', AWAITING_APPROVAL)
+        _all_settled = bool(nodes) and all(
+            status_map.get(n['id'], 'pending') in _settled_or_parked
+            for n in nodes
+        )
+        _any_awaiting = any(
+            status_map.get(n['id']) == AWAITING_APPROVAL for n in nodes
+        )
+        if _all_settled and _any_awaiting:
+            try:
+                _executions_table.update_item(
+                    Key={'executionId': execution_id},
+                    UpdateExpression='SET #status = :awaiting',
+                    ConditionExpression='#status = :running',
+                    ExpressionAttributeNames={'#status': 'status'},
+                    ExpressionAttributeValues={
+                        ':awaiting': AWAITING_APPROVAL,
+                        ':running': 'running',
+                    },
+                )
+            except ClientError as exc:
+                if exc.response.get('Error', {}).get('Code') != 'ConditionalCheckFailedException':
+                    _logger.error(
+                        'schedule_frontier: exec awaiting_approval write failed '
+                        'for execution=%s: %s', execution_id, exc,
+                    )
+                    raise
+
+            _run_id_kwargs = {'run_id': execution.get('runId')} if execution.get('runId') else {}
+            events.publish_event('execution.paused', {
+                'executionId': execution_id,
+                'workflowId': workflow_id,
+                'correlationId': execution_id,
+            }, **_run_id_kwargs)
 
     return dispatched
 
@@ -1309,8 +1449,201 @@ def _reconcile_completed_edges(execution, workflow) -> None:
             )
 
 
-def resume_execution(execution_id: str) -> None:
+def approve_execution(
+    execution_id: str,
+    node_id: str,
+    resume_token: str,
+    decided_by: str,
+    org_id: str,
+) -> bool:
+    """Approve a parked node and resume the execution.
+
+    Fenced conditional write: the node must be ``awaiting_approval`` AND the
+    approval-request's ``resumeToken`` must match AND ``orgId`` must match AND
+    ``decision`` must be ``None`` (undecided).  On success the node flips to
+    ``pending``, the request is stamped decided, the execution status returns
+    to ``running``, and ``schedule_frontier`` re-derives the frontier.
+
+    Idempotent: a second call with the same token is a no-op
+    (``ConditionalCheckFailedException`` → already decided).
+
+    Returns ``True`` if this call performed the approval, ``False`` if it was
+    a no-op (already decided or mismatched token/org).
+    """
+    now = _now_iso()
+    try:
+        _executions_table.update_item(
+            Key={'executionId': execution_id},
+            UpdateExpression=(
+                'SET nodeResults.#nid.#status = :pending, '
+                'approvalRequests.#nid.#decidedBy = :decidedBy, '
+                'approvalRequests.#nid.#decidedAt = :decidedAt, '
+                'approvalRequests.#nid.#decision = :decision, '
+                '#status = :running'
+            ),
+            ConditionExpression=(
+                'nodeResults.#nid.#status = :awaiting '
+                'AND approvalRequests.#nid.#resumeToken = :token '
+                'AND approvalRequests.#nid.#orgId = :org '
+                'AND approvalRequests.#nid.#decision = :undecided'
+            ),
+            ExpressionAttributeNames={
+                '#nid': node_id,
+                '#status': 'status',
+                '#decidedBy': 'decidedBy',
+                '#decidedAt': 'decidedAt',
+                '#decision': 'decision',
+                '#resumeToken': 'resumeToken',
+                '#orgId': 'orgId',
+            },
+            ExpressionAttributeValues={
+                ':pending': 'pending',
+                ':awaiting': AWAITING_APPROVAL,
+                ':decidedBy': decided_by,
+                ':decidedAt': now,
+                ':decision': 'approved',
+                ':token': resume_token,
+                ':org': org_id,
+                ':undecided': None,
+                ':running': 'running',
+            },
+        )
+    except ClientError as exc:
+        if exc.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            _log_event(
+                'approve_execution_noop',
+                executionId=execution_id, nodeId=node_id,
+            )
+            return False
+        _logger.error(
+            'approve_execution: conditional write failed for execution=%s node=%s: %s',
+            execution_id, node_id, exc,
+        )
+        raise
+
+    _log_event(
+        'approve_execution',
+        executionId=execution_id, nodeId=node_id, decidedBy=decided_by,
+    )
+
+    execution = _load_execution(execution_id)
+    if not execution:
+        return True
+
+    workflow = _load_workflow(execution.get('workflowId', ''))
+    if not workflow:
+        return True
+
+    _run_id_kwargs = {'run_id': execution.get('runId')} if execution.get('runId') else {}
+    events.publish_event('execution.resumed', {
+        'executionId': execution_id,
+        'workflowId': execution.get('workflowId', ''),
+        'nodeId': node_id,
+        'decidedBy': decided_by,
+        'correlationId': execution_id,
+    }, **_run_id_kwargs)
+
+    schedule_frontier(execution, workflow)
+    return True
+
+
+def deny_execution(
+    execution_id: str,
+    node_id: str,
+    resume_token: str,
+    decided_by: str,
+    org_id: str,
+    reason: str = '',
+) -> bool:
+    """Deny a parked node — fail it via ``handle_node_failure``.
+
+    Same conditional fence as ``approve_execution``.  On success the
+    approval-request is stamped ``denied``, the node is failed via
+    ``handle_node_failure`` (which handles retry policy / execution-level
+    failure), and an ``execution.approval_denied`` event is emitted.
+
+    Idempotent: a second call with the same token is a no-op.
+
+    Returns ``True`` if this call performed the denial, ``False`` on no-op.
+    """
+    now = _now_iso()
+    try:
+        _executions_table.update_item(
+            Key={'executionId': execution_id},
+            UpdateExpression=(
+                'SET approvalRequests.#nid.#decidedBy = :decidedBy, '
+                'approvalRequests.#nid.#decidedAt = :decidedAt, '
+                'approvalRequests.#nid.#decision = :decision'
+            ),
+            ConditionExpression=(
+                'nodeResults.#nid.#status = :awaiting '
+                'AND approvalRequests.#nid.#resumeToken = :token '
+                'AND approvalRequests.#nid.#orgId = :org '
+                'AND approvalRequests.#nid.#decision = :undecided'
+            ),
+            ExpressionAttributeNames={
+                '#nid': node_id,
+                '#status': 'status',
+                '#decidedBy': 'decidedBy',
+                '#decidedAt': 'decidedAt',
+                '#decision': 'decision',
+                '#resumeToken': 'resumeToken',
+                '#orgId': 'orgId',
+            },
+            ExpressionAttributeValues={
+                ':awaiting': AWAITING_APPROVAL,
+                ':decidedBy': decided_by,
+                ':decidedAt': now,
+                ':decision': 'denied',
+                ':token': resume_token,
+                ':org': org_id,
+                ':undecided': None,
+            },
+        )
+    except ClientError as exc:
+        if exc.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            _log_event(
+                'deny_execution_noop',
+                executionId=execution_id, nodeId=node_id,
+            )
+            return False
+        _logger.error(
+            'deny_execution: conditional write failed for execution=%s node=%s: %s',
+            execution_id, node_id, exc,
+        )
+        raise
+
+    _log_event(
+        'deny_execution',
+        executionId=execution_id, nodeId=node_id, decidedBy=decided_by,
+    )
+
+    execution = _load_execution(execution_id)
+    _run_id_kwargs = {}
+    if execution:
+        _run_id_kwargs = {'run_id': execution.get('runId')} if execution.get('runId') else {}
+
+    denial_reason = f'approval_denied:{reason}' if reason else 'approval_denied'
+    events.publish_event('execution.approval_denied', {
+        'executionId': execution_id,
+        'workflowId': (execution or {}).get('workflowId', ''),
+        'nodeId': node_id,
+        'decidedBy': decided_by,
+        'reason': denial_reason,
+        'correlationId': execution_id,
+    }, **_run_id_kwargs)
+
+    handle_node_failure(execution_id, node_id, denial_reason)
+    return True
+
+
+def resume_execution(execution_id: str, *, approval_decision: dict | None = None) -> None:
     """Advance-only resume of a stuck execution (decisions O1 + O5).
+
+    When ``approval_decision`` is provided, routes to ``approve_execution`` or
+    ``deny_execution`` instead of the generic frontier re-derivation.  The dict
+    must contain ``node_id``, ``resume_token``, ``decided_by``, ``org_id``,
+    ``decision`` ('approved'|'denied'), and optionally ``reason`` (for deny).
 
     SECURITY: the caller supplies ONLY ``executionId``; the server re-derives
     the entire frontier from the persisted EXECUTIONS_TABLE row via
@@ -1334,6 +1667,25 @@ def resume_execution(execution_id: str) -> None:
       * completed / cancelled / failed -> REJECTED (decision O5): terminal,
                      nothing to resume; no event/dispatch, returns unchanged.
     """
+    # Route to approve/deny when an approval decision payload is present.
+    if approval_decision is not None:
+        decision = approval_decision.get('decision')
+        common_kwargs = dict(
+            execution_id=execution_id,
+            node_id=approval_decision['node_id'],
+            resume_token=approval_decision['resume_token'],
+            decided_by=approval_decision['decided_by'],
+            org_id=approval_decision['org_id'],
+        )
+        if decision == 'approved':
+            approve_execution(**common_kwargs)
+        elif decision == 'denied':
+            deny_execution(**common_kwargs, reason=approval_decision.get('reason', ''))
+        else:
+            _log_event('resume_execution_unknown_decision',
+                       executionId=execution_id, decision=decision)
+        return
+
     execution = _load_execution(execution_id)
     if not execution:
         _log_event('resume_execution_not_found', executionId=execution_id)
