@@ -5,6 +5,7 @@
  * Requirements: 14.1, 14.2, 14.3, 14.4, 14.5, 14.6, 14.7, 14.8, 27.4, CIT-030
  */
 
+import React from 'react';
 import { render, screen, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import '@testing-library/jest-dom';
@@ -20,6 +21,14 @@ jest.mock('../../services/executionApiService', () => ({
     startExecution: jest.fn(),
     cancelExecution: jest.fn(),
   },
+}));
+
+// Mock tooltip to make portal content testable in JSDOM
+jest.mock('../ui/tooltip', () => ({
+  Tooltip: ({ children }: any) => React.createElement('div', { 'data-testid': 'tooltip-root' }, children),
+  TooltipTrigger: ({ children }: any) => React.createElement('div', { 'data-testid': 'tooltip-trigger' }, children),
+  TooltipContent: ({ children }: any) => React.createElement('div', { 'data-testid': 'tooltip-content' }, children),
+  TooltipProvider: ({ children }: any) => React.createElement('div', null, children),
 }));
 
 import { ExecutionOverlay, NodeResultEntry } from '../ExecutionOverlay';
@@ -584,6 +593,38 @@ describe('ExecutionOverlay', () => {
 
       await user.click(screen.getByTestId('deny-execution'));
       expect(onDeny).toHaveBeenCalledWith('exec-99');
+    });
+  });
+
+  describe('Run button disabled tooltip (CIT-030)', () => {
+    it('shows "Publish the workflow to run it" tooltip when workflow is DRAFT', () => {
+      render(
+        <ExecutionOverlay
+          nodeResults={{}}
+          executionStatus="pending"
+          workflowStatus="DRAFT"
+          onRun={jest.fn()}
+          onCancel={jest.fn()}
+          executionId={null}
+        />
+      );
+
+      expect(screen.getByTestId('tooltip-content')).toHaveTextContent('Publish the workflow to run it');
+    });
+
+    it('does not show tooltip when workflow is PUBLISHED', () => {
+      render(
+        <ExecutionOverlay
+          nodeResults={{}}
+          executionStatus="pending"
+          workflowStatus="PUBLISHED"
+          onRun={jest.fn()}
+          onCancel={jest.fn()}
+          executionId={null}
+        />
+      );
+
+      expect(screen.queryByTestId('tooltip-content')).not.toBeInTheDocument();
     });
   });
 

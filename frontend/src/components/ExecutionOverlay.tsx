@@ -10,6 +10,7 @@
 
 import { useState, useEffect } from 'react';
 import { Button } from './ui/button';
+import { Tooltip, TooltipTrigger, TooltipContent } from './ui/tooltip';
 
 export interface NodeResultEntry {
   status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
@@ -99,6 +100,23 @@ export function ExecutionOverlay({
   const runDisabled = workflowStatus === 'DRAFT' || isRunning;
   const hasNodes = Object.keys(nodeResults).length > 0;
 
+  const runButton = (
+    <Button
+      type="button"
+      variant="default"
+      size="sm"
+      onClick={onRun}
+      disabled={runDisabled}
+      className="bg-chart-2 text-foreground hover:bg-chart-2/90 disabled:cursor-not-allowed"
+    >
+      Run Workflow
+    </Button>
+  );
+
+  const runTooltipContent = workflowStatus === 'DRAFT'
+    ? 'Publish the workflow to run it'
+    : null;
+
   return (
     <div
       data-testid="execution-overlay"
@@ -106,16 +124,16 @@ export function ExecutionOverlay({
     >
       {/* Execution controls toolbar */}
       <div className="flex items-center gap-2 mb-2">
-        <Button
-          type="button"
-          variant="default"
-          size="sm"
-          onClick={onRun}
-          disabled={runDisabled}
-          className="bg-chart-2 text-foreground hover:bg-chart-2/90 disabled:cursor-not-allowed"
-        >
-          Run Workflow
-        </Button>
+        {runTooltipContent ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span>{runButton}</span>
+            </TooltipTrigger>
+            <TooltipContent>{runTooltipContent}</TooltipContent>
+          </Tooltip>
+        ) : (
+          runButton
+        )}
 
         {isRunning && (
           <Button
