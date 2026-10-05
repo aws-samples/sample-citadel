@@ -90,6 +90,16 @@ from model_config_loader import load_model_id
 # today — unlike workerWrapper's deferred-bundling situation for
 # ``tools_config``/``workflow_contract``.
 from common.usage import build_usage_record, extract_converse_usage, extract_request_id
+
+# arbiter/stepRunner/ is a sibling directory (no __init__.py — same layout
+# as arbiter/supervisor/). conftest.py seeds sys.path for tests; the
+# Lambda asset layout may not include it, so add it explicitly. Safe to
+# do unconditionally — duplicates are checked.
+_step_runner_dir = os.path.join(_arbiter_dir, 'stepRunner')
+if _step_runner_dir not in sys.path:
+    sys.path.insert(0, _step_runner_dir)
+
+from approval_requests import build_approval_request
 from common.metrics_constants import (
     METRIC_NAMESPACE,
     METRIC_RELEASE_DISPATCH_EVALUATED,
@@ -1120,8 +1130,67 @@ def governed_process_agent_call(
             'reason': finding.reason,
         }
     else:
-        # ESCALATE or HALT — same SNS + block-dispatch behaviour per D7.
+        # ESCALATE or HALT — SNS notification (kept in all paths).
         _route_escalation(finding)
+
+        # CIT-030 insertion point 2: when APPROVAL_GATE_ENABLED is on and
+        # the decision is ESCALATE, park the orchestration as
+        # awaiting_approval instead of terminating. Resume of a parked
+        # supervisor orchestration is OUT OF SCOPE here — that is CIT-032
+        # (routing/resume for conversational dispatch). The existing SNS
+        # notification above stays in place regardless of the gate.
+        approval_gate_on = (
+            os.environ.get('APPROVAL_GATE_ENABLED', '') == 'true'
+            and decision == ArbitrationDecision.ESCALATE
+        )
+        if approval_gate_on:
+            # Mark the orchestration row awaiting_approval (additive attrs).
+            orchestration['status'] = 'awaiting_approval'
+            orchestration['approvalRequest'] = build_approval_request(
+                request_type='escalation',
+                reason=finding.reason,
+                requested_by=requesting_agent_id,
+                metadata={
+                    'finding_id': finding.finding_id,
+                    'target_agent': agent_name,
+                    'workflow_id': workflow_id,
+                },
+            )
+            save_orchestration(orchestration)
+
+            # Emit execution.paused event (mirrors stepRunner/executor.py's
+            # pattern: detail carries executionId/workflowId + requestType).
+            if EVENT_BUS_NAME:
+                try:
+                    events_client.put_events(
+                        Entries=[{
+                            'Source': SUPERVISOR_RESPONSE_SOURCE,
+                            'DetailType': 'execution.paused',
+                            'Detail': json.dumps({
+                                'orchestrationId': workflow_id,
+                                'requestType': 'escalation',
+                                'findingId': finding.finding_id,
+                                'reason': finding.reason,
+                            }, default=str),
+                            'EventBusName': EVENT_BUS_NAME,
+                        }],
+                    )
+                except Exception as exc:
+                    logger.error(
+                        'execution.paused event emit failed for %s: %s',
+                        workflow_id, exc,
+                    )
+
+            # Write the governance finding (already written at step 5
+            # above — this is the same finding, no duplicate write needed).
+
+            return {
+                'escalated': True,
+                'finding_id': finding.finding_id,
+                'reason': 'awaiting_approval:escalation',
+            }
+
+        # Gate off (or HALT) — terminal, byte-identical to pre-feature.
         return {
             'escalated': True,
             'finding_id': finding.finding_id,
