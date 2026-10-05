@@ -34,6 +34,7 @@ from dag import (
     merge_node_configuration,
     topological_sort,
 )
+from approval_requests import AWAITING_APPROVAL, build_approval_request, is_awaiting
 from condition import evaluate_condition
 from retry import calculate_backoff, should_retry
 from common import workflow_contract
@@ -174,6 +175,10 @@ EXECUTIONS_TABLE = os.environ.get('EXECUTIONS_TABLE', 'citadel-executions-dev')
 # agent-record lookups. The approval gate below (this story) is the first
 # stepRunner reader of this table.
 AGENT_CONFIG_TABLE = os.environ.get('AGENT_CONFIG_TABLE')
+
+# CIT-030: Feature flag for execution pause/resume engine.  Default off —
+# behaviour byte-identical to pre-feature when unset or not 'true'.
+APPROVAL_GATE_ENABLED = os.environ.get('APPROVAL_GATE_ENABLED', '') == 'true'
 
 # DynamoDB resource
 _dynamodb = boto3.resource('dynamodb')
@@ -772,9 +777,78 @@ def start_execution(execution_id: str, workflow_id: str) -> None:
                         run_id=_run_id)
 
 
+def _park_node_awaiting_approval(
+    execution_id: str, workflow_id: str, node_id: str, agent_id: str,
+    *, run_id: str | None = None,
+) -> None:
+    """Conditionally write pending → awaiting_approval for one node, persist
+    the approval-request record, and emit events.  No SQS dispatch.
+
+    Idempotent: the conditional write on ``status = pending`` means a second
+    call (race or retry) is a no-op.
+    """
+    now = _now_iso()
+    approval_record = build_approval_request(
+        request_type='approval_required',
+        reason='Execution pause requested',
+        requested_by='system',
+        expires_at=None,
+        metadata={},
+    )
+
+    try:
+        _executions_table.update_item(
+            Key={'executionId': execution_id},
+            UpdateExpression=(
+                'SET nodeResults.#nid.#status = :awaiting, '
+                'nodeResults.#nid.#parkedAt = :parkedAt, '
+                'approvalRequests.#nid = :record'
+            ),
+            ConditionExpression='nodeResults.#nid.#status = :pending',
+            ExpressionAttributeNames={
+                '#nid': node_id,
+                '#status': 'status',
+                '#parkedAt': 'parkedAt',
+            },
+            ExpressionAttributeValues={
+                ':awaiting': AWAITING_APPROVAL,
+                ':parkedAt': now,
+                ':pending': 'pending',
+                ':record': approval_record,
+            },
+        )
+    except ClientError as exc:
+        if exc.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            _log_event(
+                'park_node_skipped_not_pending',
+                executionId=execution_id, workflowId=workflow_id, nodeId=node_id,
+            )
+            return
+        _logger.error(
+            '_park_node_awaiting_approval: conditional write failed for '
+            'execution=%s node=%s: %s', execution_id, node_id, exc,
+        )
+        raise
+
+    _log_event(
+        'node_parked_awaiting_approval',
+        executionId=execution_id, workflowId=workflow_id, nodeId=node_id,
+    )
+
+    _run_id_kwargs = {'run_id': run_id} if run_id else {}
+    events.publish_event('execution.node.awaiting_approval', {
+        'executionId': execution_id,
+        'workflowId': workflow_id,
+        'nodeId': node_id,
+        'agentId': agent_id,
+        'parkedAt': now,
+        'correlationId': execution_id,
+    }, **_run_id_kwargs)
+
+
 def invoke_node(
     execution_id: str, workflow_id: str, node: dict, input_data: dict, configuration: dict,
-    *, run_id: str | None = None,
+    *, run_id: str | None = None, pause_requested: bool = False,
 ) -> None:
     """Invoke a single workflow node.
 
@@ -854,6 +928,22 @@ def invoke_node(
     if _approval_refused:
         handle_node_failure(execution_id, node_id, _approval_refusal_reason)
         return
+
+    # CIT-030: Execution pause/resume engine — park the node BEFORE any
+    # state mutation or SQS dispatch when the feature flag is active and a
+    # pause is requested (execution-level pauseRequested attribute or
+    # node-level data.requiresApproval flag).
+    if APPROVAL_GATE_ENABLED:
+        _pause_requested = (
+            pause_requested
+            or node.get('data', {}).get('requiresApproval', False)
+        )
+        if _pause_requested:
+            _park_node_awaiting_approval(
+                execution_id, workflow_id, node_id, agent_id,
+                run_id=run_id,
+            )
+            return
 
     now = _now_iso()
 
@@ -1269,6 +1359,9 @@ def schedule_frontier(execution, workflow, *, default_input=None) -> list:
 
     input_data = default_input if default_input is not None else {}
     dispatched = []
+    _pause_requested = bool(
+        APPROVAL_GATE_ENABLED and execution.get('pauseRequested')
+    )
     for ready_id in ready_ids:
         node = next((n for n in nodes if n['id'] == ready_id), None)
         if node:
@@ -1276,7 +1369,15 @@ def schedule_frontier(execution, workflow, *, default_input=None) -> list:
             # (decision 59376546) — same merge as the root-dispatch site.
             invoke_node(execution_id, workflow_id, node, input_data,
                         merge_node_configuration(configuration, node),
-                        run_id=execution.get('runId'))
+                        run_id=execution.get('runId'),
+                        pause_requested=_pause_requested)
+            # Track the effective status after invoke_node for the
+            # execution-level transition check below.
+            if _pause_requested or (
+                APPROVAL_GATE_ENABLED
+                and node.get('data', {}).get('requiresApproval', False)
+            ):
+                status_map[ready_id] = AWAITING_APPROVAL
             dispatched.append(ready_id)
 
     all_terminal = bool(nodes) and all(
@@ -1285,6 +1386,45 @@ def schedule_frontier(execution, workflow, *, default_input=None) -> list:
     )
     if all_terminal:
         _finalize_execution(execution, input_data)
+
+    # CIT-030: execution-level running → awaiting_approval transition.
+    # When all non-terminal nodes are completed/skipped/failed/awaiting_approval
+    # AND at least one is awaiting_approval, the execution itself is parked.
+    if APPROVAL_GATE_ENABLED and not all_terminal:
+        _settled_or_parked = ('completed', 'skipped', 'failed', AWAITING_APPROVAL)
+        _all_settled = bool(nodes) and all(
+            status_map.get(n['id'], 'pending') in _settled_or_parked
+            for n in nodes
+        )
+        _any_awaiting = any(
+            status_map.get(n['id']) == AWAITING_APPROVAL for n in nodes
+        )
+        if _all_settled and _any_awaiting:
+            try:
+                _executions_table.update_item(
+                    Key={'executionId': execution_id},
+                    UpdateExpression='SET #status = :awaiting',
+                    ConditionExpression='#status = :running',
+                    ExpressionAttributeNames={'#status': 'status'},
+                    ExpressionAttributeValues={
+                        ':awaiting': AWAITING_APPROVAL,
+                        ':running': 'running',
+                    },
+                )
+            except ClientError as exc:
+                if exc.response.get('Error', {}).get('Code') != 'ConditionalCheckFailedException':
+                    _logger.error(
+                        'schedule_frontier: exec awaiting_approval write failed '
+                        'for execution=%s: %s', execution_id, exc,
+                    )
+                    raise
+
+            _run_id_kwargs = {'run_id': execution.get('runId')} if execution.get('runId') else {}
+            events.publish_event('execution.paused', {
+                'executionId': execution_id,
+                'workflowId': workflow_id,
+                'correlationId': execution_id,
+            }, **_run_id_kwargs)
 
     return dispatched
 
