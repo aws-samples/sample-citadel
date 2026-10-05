@@ -294,19 +294,46 @@ describe("ProjectsStack — backend-stack-split phase 1", () => {
     }
   });
 
-  test("document-upload resolver's Bedrock KB actions are scoped to the two named actions only (no wildcard action)", () => {
-    template.hasResourceProperties("AWS::IAM::Policy", {
-      PolicyDocument: {
-        Statement: Match.arrayWith([
-          Match.objectLike({
-            Action: [
-              "bedrock:GetKnowledgeBaseDocuments",
-              "bedrock:DeleteKnowledgeBaseDocuments",
-            ],
-          }),
-        ]),
-      },
+  test("document-upload resolver's Bedrock KB actions are scoped to the knowledge base ARN (not '*')", () => {
+    const policies = template.findResources("AWS::IAM::Policy", {
+      Properties: Match.objectLike({
+        PolicyDocument: {
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Action: [
+                "bedrock:GetKnowledgeBaseDocuments",
+                "bedrock:DeleteKnowledgeBaseDocuments",
+              ],
+            }),
+          ]),
+        },
+      }),
     });
+    const policyEntries = Object.values(policies);
+    expect(policyEntries.length).toBeGreaterThan(0);
+
+    for (const policy of policyEntries) {
+      const statements =
+        (policy as CfnPolicyLike).Properties?.PolicyDocument?.Statement ?? [];
+      const kbStmt = statements.find((s) => {
+        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+        return actions.includes("bedrock:GetKnowledgeBaseDocuments");
+      });
+      expect(kbStmt).toBeDefined();
+      // Resource must be the KB ARN built via Fn::Join with the SSM token —
+      // NOT a bare '*'.
+      const resource = kbStmt!.Resource;
+      expect(resource).not.toBe("*");
+      // The resource is a Fn::Join that assembles the KB ARN from the
+      // SSM-resolved token; verify the join prefix contains the KB ARN
+      // pattern.
+      const join = resource as { "Fn::Join"?: [string, string[]] };
+      expect(join["Fn::Join"]).toBeDefined();
+      const joinParts = join["Fn::Join"]![1];
+      const joinStr = joinParts.join("");
+      expect(joinStr).toContain("arn:aws:bedrock:");
+      expect(joinStr).toContain(":knowledge-base/");
+    }
   });
 
   test("no IAM policy statement grants a full-service wildcard action (iam:*, dynamodb:*, or s3:*)", () => {

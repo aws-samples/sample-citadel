@@ -2275,4 +2275,25 @@ export const ALLOWED_SATELLITE_ADDED_STATEMENTS: Record<
       conditionKeys: [],
     },
   ],
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // Scope KB document actions to the deployment knowledge base (finding
+  // c2ecd5c9). The frozen baseline had resources: ["*"]; the satellite now
+  // resolves the KB id via SSM and scopes to the exact KB ARN — a strict
+  // privilege narrowing. Confirmed via a live `npm run split:gates` run,
+  // not hand-typed.
+  // ═══════════════════════════════════════════════════════════════════════
+  DocumentUploadResolverFunction905C268F: [
+    {
+      effect: "Allow",
+      actions: [
+        "bedrock:DeleteKnowledgeBaseDocuments",
+        "bedrock:GetKnowledgeBaseDocuments",
+      ],
+      resources: [
+        "JOIN::arn:aws:bedrock:us-west-2:000000000000:knowledge-base/GETATT:SsmParameterValuecitadelknowledgebaseiddevC96584B6F00A464EAD1953AFF4B05118Parameter:Ref",
+      ],
+      conditionKeys: [],
+    },
+  ],
 };
