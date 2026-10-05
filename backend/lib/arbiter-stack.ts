@@ -247,6 +247,38 @@ export class ArbiterStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: ArbiterStackProps) {
     super(scope, id, props);
 
+    // ----------------------------------------------------------------
+    // Approval-gate deployment toggles — env → context → default
+    // ----------------------------------------------------------------
+    // Precedence: process.env wins over CDK context, which wins over the
+    // hard-coded default.  Values are validated at synth time so a typo
+    // ("True" instead of "true") surfaces immediately, not at deploy.
+    const resolvedApprovalGateEnabled: string =
+      process.env.APPROVAL_GATE_ENABLED ??
+      (this.node.tryGetContext("approvalGateEnabled") as string | undefined) ??
+      "false";
+    if (
+      resolvedApprovalGateEnabled !== "true" &&
+      resolvedApprovalGateEnabled !== "false"
+    ) {
+      cdk.Annotations.of(this).addError(
+        `Invalid APPROVAL_GATE_ENABLED value '${resolvedApprovalGateEnabled}'. ` +
+          "Must be 'true' or 'false'.",
+      );
+    }
+
+    const resolvedApprovalTimeoutSeconds: string =
+      process.env.APPROVAL_TIMEOUT_SECONDS ??
+      (this.node.tryGetContext("approvalTimeoutSeconds") as
+        string | undefined) ??
+      "86400";
+    if (!/^[1-9]\d*$/.test(resolvedApprovalTimeoutSeconds)) {
+      cdk.Annotations.of(this).addError(
+        `Invalid APPROVAL_TIMEOUT_SECONDS value '${resolvedApprovalTimeoutSeconds}'. ` +
+          "Must be a positive integer.",
+      );
+    }
+
     const registryId = ssm.StringParameter.valueForStringParameter(
       this,
       `/citadel/${props.environment}/registry/id`,
@@ -429,11 +461,10 @@ export class ArbiterStack extends cdk.Stack {
         // Execution pause/resume engine: supervisor/index.py reads
         // APPROVAL_GATE_ENABLED to decide whether an ESCALATE decision
         // parks the orchestration pending human approval or falls back
-        // to the existing terminal behaviour. CDK context
-        // `approvalGateEnabled` overrides; default 'false' (gate
-        // disabled).
-        APPROVAL_GATE_ENABLED:
-          (this.node.tryGetContext("approvalGateEnabled") as string) ?? "false",
+        // to the existing terminal behaviour. Precedence:
+        // process.env.APPROVAL_GATE_ENABLED → CDK context
+        // `approvalGateEnabled` → 'false'. Validated at synth time above.
+        APPROVAL_GATE_ENABLED: resolvedApprovalGateEnabled,
       },
       initialPolicy: [
         new PolicyStatement({
@@ -902,11 +933,10 @@ export class ArbiterStack extends cdk.Stack {
           // Execution pause/resume engine: governance_tool_hook.py reads
           // APPROVAL_GATE_ENABLED to decide whether a REQUIRE_APPROVAL
           // governance decision parks the tool call pending human approval
-          // or falls back to DENY. CDK context `approvalGateEnabled`
-          // overrides; default 'false' (gate disabled).
-          APPROVAL_GATE_ENABLED:
-            (this.node.tryGetContext("approvalGateEnabled") as string) ??
-            "false",
+          // or falls back to DENY. Precedence:
+          // process.env.APPROVAL_GATE_ENABLED → CDK context
+          // `approvalGateEnabled` → 'false'. Validated at synth time above.
+          APPROVAL_GATE_ENABLED: resolvedApprovalGateEnabled,
         },
         initialPolicy: [
           new PolicyStatement({
@@ -1697,11 +1727,10 @@ export class ArbiterStack extends cdk.Stack {
             // Execution pause/resume engine: executor.py reads
             // APPROVAL_GATE_ENABLED at module level to decide whether
             // invoke_node parks a node pending human approval before
-            // dispatch. CDK context `approvalGateEnabled` overrides;
-            // default 'false' (gate disabled).
-            APPROVAL_GATE_ENABLED:
-              (this.node.tryGetContext("approvalGateEnabled") as string) ??
-              "false",
+            // dispatch. Precedence:
+            // process.env.APPROVAL_GATE_ENABLED → CDK context
+            // `approvalGateEnabled` → 'false'. Validated at synth time above.
+            APPROVAL_GATE_ENABLED: resolvedApprovalGateEnabled,
           },
           deadLetterQueueEnabled: true,
           deadLetterQueue: arbiterAsyncDlq,
@@ -1904,11 +1933,10 @@ export class ArbiterStack extends cdk.Stack {
             // Execution pause/resume engine: the approval-timeout watchdog
             // (arbiter/timeoutWatchdog/index.py) reads APPROVAL_TIMEOUT_SECONDS
             // as the fallback expiry when a paused node has no expiresAt.
-            // CDK context `approvalTimeoutSeconds` overrides; default '86400'
-            // (24 hours).
-            APPROVAL_TIMEOUT_SECONDS:
-              (this.node.tryGetContext("approvalTimeoutSeconds") as string) ??
-              "86400",
+            // Precedence: process.env.APPROVAL_TIMEOUT_SECONDS → CDK
+            // context `approvalTimeoutSeconds` → '86400'. Validated at
+            // synth time above.
+            APPROVAL_TIMEOUT_SECONDS: resolvedApprovalTimeoutSeconds,
           },
           deadLetterQueueEnabled: true,
           deadLetterQueue: arbiterAsyncDlq,
