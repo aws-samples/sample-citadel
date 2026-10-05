@@ -426,6 +426,14 @@ export class ArbiterStack extends cdk.Stack {
         // unconditionally (bin/app.ts defaults to 'Default') so the
         // release gate never runs with an empty org id.
         RELEASE_DEFAULT_ORG_ID: props.releaseDefaultOrgId ?? "Default",
+        // Execution pause/resume engine: supervisor/index.py reads
+        // APPROVAL_GATE_ENABLED to decide whether an ESCALATE decision
+        // parks the orchestration pending human approval or falls back
+        // to the existing terminal behaviour. CDK context
+        // `approvalGateEnabled` overrides; default 'false' (gate
+        // disabled).
+        APPROVAL_GATE_ENABLED:
+          (this.node.tryGetContext("approvalGateEnabled") as string) ?? "false",
       },
       initialPolicy: [
         new PolicyStatement({
@@ -891,6 +899,14 @@ export class ArbiterStack extends cdk.Stack {
           ...(smokeIdempotencyTable && {
             SMOKE_IDEMPOTENCY_TABLE: smokeIdempotencyTable.tableName,
           }),
+          // Execution pause/resume engine: governance_tool_hook.py reads
+          // APPROVAL_GATE_ENABLED to decide whether a REQUIRE_APPROVAL
+          // governance decision parks the tool call pending human approval
+          // or falls back to DENY. CDK context `approvalGateEnabled`
+          // overrides; default 'false' (gate disabled).
+          APPROVAL_GATE_ENABLED:
+            (this.node.tryGetContext("approvalGateEnabled") as string) ??
+            "false",
         },
         initialPolicy: [
           new PolicyStatement({

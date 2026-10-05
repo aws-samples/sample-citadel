@@ -7,6 +7,7 @@ from executor import (
     handle_compensation_result,
     cancel_execution,
     resume_execution,
+    handle_node_awaiting_approval,
 )
 from common import workflow_contract
 from common.tracing import annotate_from_carried, execution_trace_scope, extract_carried
@@ -59,6 +60,15 @@ def handler(event, context):
             )
         elif detail_type == 'workflow.node.failed':
             handle_node_failure(detail['executionId'], detail['nodeId'], detail.get('error', ''))
+        elif detail_type == workflow_contract.NODE_AWAITING_APPROVAL_DETAIL_TYPE:
+            handle_node_awaiting_approval(
+                execution_id=detail['executionId'],
+                node_id=detail['nodeId'],
+                request_type=detail.get('requestType', 'tool_approval'),
+                tool_name=detail.get('toolName', ''),
+                reason=detail.get('reason', ''),
+                idempotency_key=detail.get('idempotencyKey', ''),
+            )
         elif detail_type in (
             workflow_contract.COMPENSATION_COMPLETED_DETAIL_TYPE,
             workflow_contract.COMPENSATION_FAILED_DETAIL_TYPE,

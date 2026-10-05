@@ -44,9 +44,11 @@ from governed_tool_handler import (  # noqa: E402
     LedgerWriteError,
     _approval_required_result,
     _approval_unavailable_result,
+    _awaiting_approval_result,
     _parse_approval_required_tools_env,
     _parse_denied_tools_env,
     record_approval_finding,
+    record_awaiting_approval,
     record_governance_decision,
 )
 
@@ -166,6 +168,7 @@ class GovernanceEvaluator:
         workflow_definition_id: str = "",
         execution_id: str = "",
         node_id: str = "",
+        governance_engine_decision_fn: Any | None = None,
     ):
         self._agent_id = agent_id or 'unknown-agent'
         self._workflow_id = workflow_id or 'unknown-workflow'
@@ -188,6 +191,12 @@ class GovernanceEvaluator:
         self._workflow_definition_id = workflow_definition_id or ""
         self._execution_id = execution_id or ""
         self._node_id = node_id or ""
+        # CIT-031 hook: optional callback ``(tool_name) -> ArbitrationDecision``
+        # that returns the governance engine's decision for a tool call.
+        # ``None`` (the default) means the engine is not connected yet —
+        # all tool calls are implicitly PERMIT at this layer. CIT-031 wires
+        # the actual governance engine routing rules here.
+        self._governance_engine_decision_fn = governance_engine_decision_fn
 
     @property
     def denied_tools(self) -> set[str]:  # pragma: no cover — trivial accessor
@@ -199,9 +208,10 @@ class GovernanceEvaluator:
 
     def evaluate(self, event: Any) -> bool:
         """Return True if the call was REFUSED (and ``selected_tool`` swapped) —
-        by the deny-list decision OR the approval gate. On PERMIT (not denied
-        AND, for a gated tool, a valid approval was consumed) returns False and
-        leaves the event untouched so idempotency wrapping proceeds.
+        by the deny-list decision, the REQUIRE_APPROVAL gate, OR the approval
+        gate. On PERMIT (not denied AND, for a gated tool, a valid approval was
+        consumed) returns False and leaves the event untouched so idempotency
+        wrapping proceeds.
 
         ADDITIVE SPLIT (D2, 47b6abac): this keeps its EXACT current
         denylist-then-approval behaviour — it is the live contract for the
@@ -216,6 +226,16 @@ class GovernanceEvaluator:
             return True
         if outcome.token is None:
             return False  # nothing to gate (no real tool on the event)
+
+        # CIT-031 insertion point: REQUIRE_APPROVAL check AFTER deny-list pass,
+        # BEFORE approval-consume. If the governance engine returns
+        # REQUIRE_APPROVAL the tool is NOT executed; the node is parked.
+        if self.evaluate_require_approval(
+            event, outcome.token.tool_name, outcome.token.tool_use_id,
+            outcome.token.selected,
+        ):
+            return True
+
         return self.evaluate_approval(event, outcome.token)
 
     def evaluate_denylist(self, event: Any) -> DenylistOutcome:
@@ -257,6 +277,72 @@ class GovernanceEvaluator:
             tool_name=tool_name, tool_use_id=tool_use_id, selected=selected,
         )
         return DenylistOutcome(refused=False, token=token)
+
+    def evaluate_require_approval(
+        self, event: Any, tool_name: str, tool_use_id: str, selected: Any,
+    ) -> bool:
+        """REQUIRE_APPROVAL phase (CIT-030 substrate, CIT-031 hook).
+
+        Consults the governance engine decision callback (if configured). When
+        the decision is ``REQUIRE_APPROVAL`` AND the ``APPROVAL_GATE_ENABLED``
+        feature flag is active:
+          1. Records the pending call in the awaiting-approval signal list
+             (keyed by idempotency key derived from execution/node context).
+          2. Swaps ``selected_tool`` for a non-executing tool so the real tool
+             never runs.
+          3. Returns ``True`` (refused / parked).
+
+        When APPROVAL_GATE_ENABLED is off, REQUIRE_APPROVAL is treated as DENY
+        (fail-closed fallback — the governance engine should not be producing
+        this verdict when the gate is disabled, but if it does, refusing is
+        safer than executing). When no governance engine callback is configured
+        (the default until CIT-031), this method is a no-op and returns False.
+        """
+        if self._governance_engine_decision_fn is None:
+            return False
+
+        from governance.models import ArbitrationDecision  # noqa: E402 — avoid import cycle
+
+        try:
+            decision = self._governance_engine_decision_fn(tool_name)
+        except Exception:  # noqa: BLE001 — engine failure is fail-closed
+            logger.error(
+                'governance engine decision callback failed for tool=%s; '
+                'treating as DENY (fail-closed)', tool_name,
+            )
+            result = _awaiting_approval_result(tool_use_id, tool_name)
+            event.selected_tool = _GovernanceDeniedTool(selected, result)
+            return True
+
+        if decision != ArbitrationDecision.REQUIRE_APPROVAL:
+            return False
+
+        approval_gate_enabled = os.environ.get('APPROVAL_GATE_ENABLED', '') == 'true'
+
+        if not approval_gate_enabled:
+            # Flag off: REQUIRE_APPROVAL is treated as DENY (fail-closed).
+            from governed_tool_handler import _deny_error_result
+            result = _deny_error_result(tool_use_id, tool_name)
+            event.selected_tool = _GovernanceDeniedTool(selected, result)
+            return True
+
+        # Gate active + REQUIRE_APPROVAL: park the tool call.
+        # Build an idempotency key from the execution/node context. The actual
+        # tool-execution-ledger integration (reserve as awaiting_approval) is
+        # CIT-031; here we record the signal for the worker's outcome emitter.
+        idempotency_key = f'{self._execution_id}#{self._node_id}#{tool_name}#{tool_use_id}'
+
+        record_awaiting_approval(
+            tool_name,
+            reason=f'require_approval:{tool_name}',
+            idempotency_key=idempotency_key,
+            execution_id=self._execution_id,
+            node_id=self._node_id,
+        )
+
+        result = _awaiting_approval_result(tool_use_id, tool_name)
+        event.selected_tool = _GovernanceDeniedTool(selected, result)
+        return True
 
     def evaluate_approval(self, event: Any, token: DenylistPassed) -> bool:
         """Approval phase ONLY. REQUIRES the :class:`DenylistPassed` token the

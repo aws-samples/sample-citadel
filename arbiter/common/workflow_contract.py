@@ -50,6 +50,7 @@ WORKFLOW_EVENT_SOURCE = 'citadel.workflows'
 # helpers emit for these events.
 NODE_COMPLETED_DETAIL_TYPE = 'workflow.node.completed'
 NODE_FAILED_DETAIL_TYPE = 'workflow.node.failed'
+NODE_AWAITING_APPROVAL_DETAIL_TYPE = 'workflow.node.awaiting_approval'
 
 # --- Dispatch discriminator --------------------------------------------------
 

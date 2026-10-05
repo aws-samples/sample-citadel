@@ -36,6 +36,7 @@ class ArbitrationDecision(str, Enum):
     DENY = "deny"
     ESCALATE = "escalate"
     HALT = "halt"
+    REQUIRE_APPROVAL = "require_approval"
 
 
 class ScopeReductionReason(str, Enum):

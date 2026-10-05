@@ -67,11 +67,13 @@ def test_arbitration_decision_membership() -> None:
         "DENY",
         "ESCALATE",
         "HALT",
+        "REQUIRE_APPROVAL",
     }
     assert ArbitrationDecision.PERMIT.value == "permit"
     assert ArbitrationDecision.DENY.value == "deny"
     assert ArbitrationDecision.ESCALATE.value == "escalate"
     assert ArbitrationDecision.HALT.value == "halt"
+    assert ArbitrationDecision.REQUIRE_APPROVAL.value == "require_approval"
 
 
 def test_scope_reduction_reason_membership() -> None:

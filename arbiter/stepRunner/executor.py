@@ -846,6 +846,100 @@ def _park_node_awaiting_approval(
     }, **_run_id_kwargs)
 
 
+def handle_node_awaiting_approval(
+    *,
+    execution_id: str,
+    node_id: str,
+    request_type: str = 'tool_approval',
+    tool_name: str = '',
+    reason: str = '',
+    idempotency_key: str = '',
+) -> None:
+    """Handle a ``workflow.node.awaiting_approval`` event from the worker.
+
+    The worker emits this event when the governance engine returned
+    REQUIRE_APPROVAL for a tool call and APPROVAL_GATE_ENABLED is active.
+    This handler parks the node via :func:`_park_node_awaiting_approval`
+    (the PR1 park function) using ``approval_requests.build_approval_request``
+    to build the approval-request record.
+
+    The node transition is ``running → awaiting_approval`` (validated by
+    ``approval_requests.validate_transition``). The park write uses a
+    conditional expression on ``status = running`` (the worker dispatched
+    from running), so a duplicate event or a node already parked by a
+    concurrent path is a no-op.
+    """
+    execution = _load_execution(execution_id)
+    if not execution:
+        return
+    workflow_id = execution.get('workflowId', '')
+
+    node_results = execution.get('nodeResults', {})
+    node_data = node_results.get(node_id, {})
+    current_status = node_data.get('status', '')
+
+    # Only park from 'running' — the worker was dispatched from running.
+    if current_status != 'running':
+        _log_event(
+            'awaiting_approval_skipped_not_running',
+            executionId=execution_id, workflowId=workflow_id, nodeId=node_id,
+            currentStatus=current_status,
+        )
+        return
+
+    now = _now_iso()
+    approval_record = build_approval_request(
+        request_type=request_type,
+        reason=reason or f'Tool {tool_name} requires approval',
+        requested_by='worker',
+        expires_at=None,
+        metadata={
+            'toolName': tool_name,
+            'idempotencyKey': idempotency_key,
+        },
+    )
+
+    try:
+        _executions_table.update_item(
+            Key={'executionId': execution_id},
+            UpdateExpression=(
+                'SET nodeResults.#nid.#status = :awaiting, '
+                'nodeResults.#nid.#parkedAt = :parkedAt, '
+                'approvalRequests.#nid = :record'
+            ),
+            ConditionExpression='nodeResults.#nid.#status = :running',
+            ExpressionAttributeNames={
+                '#nid': node_id,
+                '#status': 'status',
+                '#parkedAt': 'parkedAt',
+            },
+            ExpressionAttributeValues={
+                ':awaiting': AWAITING_APPROVAL,
+                ':parkedAt': now,
+                ':running': 'running',
+                ':record': approval_record,
+            },
+        )
+    except ClientError as exc:
+        if exc.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            _log_event(
+                'awaiting_approval_conditional_write_skipped',
+                executionId=execution_id, workflowId=workflow_id, nodeId=node_id,
+            )
+            return
+        _logger.error(
+            'handle_node_awaiting_approval: conditional write failed for '
+            'execution=%s node=%s: %s', execution_id, node_id, exc,
+        )
+        raise
+
+    _log_event(
+        'node_parked_awaiting_tool_approval',
+        executionId=execution_id, workflowId=workflow_id, nodeId=node_id,
+        toolName=tool_name,
+    )
+
+
 def invoke_node(
     execution_id: str, workflow_id: str, node: dict, input_data: dict, configuration: dict,
     *, run_id: str | None = None, pause_requested: bool = False,
