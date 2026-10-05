@@ -93,4 +93,91 @@ describe('executionApiService', () => {
       expect(result).toEqual(mockCancelled);
     });
   });
+
+  describe('pauseExecution', () => {
+    it('calls mutate with executionId and reason', async () => {
+      const mockPaused = { executionId: 'exec-1', status: 'paused' };
+      (serverService.mutate as jest.Mock).mockResolvedValue({ pauseExecution: mockPaused });
+
+      const result = await executionApiService.pauseExecution('exec-1', 'Manual pause');
+
+      expect(serverService.mutate).toHaveBeenCalledWith(
+        expect.stringContaining('pauseExecution'),
+        { executionId: 'exec-1', reason: 'Manual pause' }
+      );
+      expect(result).toEqual(mockPaused);
+    });
+
+    it('includes nodeId when provided', async () => {
+      const mockPaused = { executionId: 'exec-1', status: 'paused' };
+      (serverService.mutate as jest.Mock).mockResolvedValue({ pauseExecution: mockPaused });
+
+      await executionApiService.pauseExecution('exec-1', 'Pause at node', 'node-5');
+
+      expect(serverService.mutate).toHaveBeenCalledWith(
+        expect.stringContaining('pauseExecution'),
+        { executionId: 'exec-1', reason: 'Pause at node', nodeId: 'node-5' }
+      );
+    });
+  });
+
+  describe('approveExecution', () => {
+    it('calls mutate with executionId and nodeId', async () => {
+      const mockApproved = { executionId: 'exec-1', status: 'running' };
+      (serverService.mutate as jest.Mock).mockResolvedValue({ approveExecution: mockApproved });
+
+      const result = await executionApiService.approveExecution('exec-1', 'node-3');
+
+      expect(serverService.mutate).toHaveBeenCalledWith(
+        expect.stringContaining('approveExecution'),
+        { executionId: 'exec-1', nodeId: 'node-3' }
+      );
+      expect(result).toEqual(mockApproved);
+    });
+  });
+
+  describe('denyExecution', () => {
+    it('calls mutate with executionId, nodeId, and reason', async () => {
+      const mockDenied = { executionId: 'exec-1', status: 'failed' };
+      (serverService.mutate as jest.Mock).mockResolvedValue({ denyExecution: mockDenied });
+
+      const result = await executionApiService.denyExecution('exec-1', 'node-3', 'Not safe');
+
+      expect(serverService.mutate).toHaveBeenCalledWith(
+        expect.stringContaining('denyExecution'),
+        { executionId: 'exec-1', nodeId: 'node-3', reason: 'Not safe' }
+      );
+      expect(result).toEqual(mockDenied);
+    });
+  });
+
+  describe('listAwaitingApprovals', () => {
+    it('calls query and returns execution connection', async () => {
+      const mockItems = [{ executionId: 'exec-1', status: 'awaiting_approval' }];
+      (serverService.query as jest.Mock).mockResolvedValue({
+        listAwaitingApprovals: { items: mockItems, nextToken: null },
+      });
+
+      const result = await executionApiService.listAwaitingApprovals();
+
+      expect(serverService.query).toHaveBeenCalledWith(
+        expect.stringContaining('listAwaitingApprovals'),
+        {}
+      );
+      expect(result.items).toEqual(mockItems);
+    });
+
+    it('passes limit and nextToken when provided', async () => {
+      (serverService.query as jest.Mock).mockResolvedValue({
+        listAwaitingApprovals: { items: [], nextToken: null },
+      });
+
+      await executionApiService.listAwaitingApprovals(10, 'tok-1');
+
+      expect(serverService.query).toHaveBeenCalledWith(
+        expect.stringContaining('listAwaitingApprovals'),
+        { limit: 10, nextToken: 'tok-1' }
+      );
+    });
+  });
 });

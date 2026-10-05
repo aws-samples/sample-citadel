@@ -24,6 +24,17 @@ interface NodeResult {
   retryCount: number;
 }
 
+interface ApprovalRequest {
+  requestType: string;
+  reason?: string | null;
+  requestedBy?: string | null;
+  requestedAt?: string | null;
+  expiresAt?: string | null;
+  decidedBy?: string | null;
+  decidedAt?: string | null;
+  decision?: string | null;
+}
+
 interface Execution {
   executionId: string;
   workflowId: string;
@@ -32,6 +43,7 @@ interface Execution {
   startedAt: string;
   completedAt?: string | null;
   nodeResults?: string;
+  approvalRequests?: ApprovalRequest[] | null;
 }
 
 export interface ExecutionHistoryPanelProps {
@@ -46,6 +58,7 @@ const STATUS_COLORS: Record<string, string> = {
   running: 'bg-chart-4',
   pending: 'bg-muted-foreground',
   cancelled: 'bg-primary',
+  awaiting_approval: 'bg-chart-3',
 };
 
 function formatDuration(start: string, end?: string | null): string {
@@ -150,6 +163,12 @@ export function ExecutionHistoryPanel({ workflowId, isOpen, onClose }: Execution
                   <span>{formatDuration(exec.startedAt, exec.completedAt)}</span>
                   {exec.workflowVersion != null && <span>v{exec.workflowVersion}</span>}
                 </div>
+                {exec.status === 'awaiting_approval' && exec.approvalRequests?.[0] && (
+                  <div data-testid={`approval-reason-${exec.executionId}`} className="text-xs text-chart-3 mt-1">
+                    {exec.approvalRequests[0].requestType}
+                    {exec.approvalRequests[0].reason && ` — ${exec.approvalRequests[0].reason}`}
+                  </div>
+                )}
               </div>
 
               {isExpanded && (
