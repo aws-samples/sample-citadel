@@ -943,7 +943,7 @@ async function listAwaitingApprovals(
 }
 
 async function emitEvent(eventType: string, detail: unknown): Promise<void> {
-  await eventBridgeClient.send(
+  const result = await eventBridgeClient.send(
     new PutEventsCommand({
       Entries: [
         {
@@ -955,4 +955,13 @@ async function emitEvent(eventType: string, detail: unknown): Promise<void> {
       ],
     }),
   );
+
+  if (result.FailedEntryCount && result.FailedEntryCount > 0) {
+    const entry = result.Entries?.[0];
+    const errorMsg =
+      `EventBridge publish failed for ${eventType}: ` +
+      `${entry?.ErrorCode ?? "unknown"} — ${entry?.ErrorMessage ?? "no message"}`;
+    console.error(errorMsg);
+    throw new Error(errorMsg);
+  }
 }
