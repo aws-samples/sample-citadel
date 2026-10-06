@@ -115,3 +115,10 @@ DIMENSION_RELEASE_ARM = 'ReleaseArm'
 METRIC_APPROVAL_DISPATCH_EVALUATED = 'ApprovalDispatchEvaluated'
 METRIC_APPROVAL_DISPATCH_WOULD_BLOCK = 'ApprovalDispatchWouldBlock'
 METRIC_APPROVAL_DISPATCH_REFUSED = 'ApprovalDispatchRefused'
+
+# CIT-030: Emitted when _park_node_awaiting_approval fails for any reason
+# other than a ConditionalCheckFailedException (the expected "already parked"
+# no-op).  Observability for the fail-closed park path: a park failure leaves
+# the node pending for retry rather than dispatching it, so this metric is the
+# signal that a frontier pass was intentionally held back.
+METRIC_APPROVAL_PARK_FAILED = 'ApprovalParkFailed'

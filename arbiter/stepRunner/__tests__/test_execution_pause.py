@@ -551,10 +551,11 @@ class TestHandlePauseRequested:
 
         # DDB write parks nB (the pending node)
         write_calls = fake_exec_table.update_item.call_args_list
-        assert len(write_calls) == 1
-        expr_values = write_calls[0].kwargs.get(
+        assert len(write_calls) == 2
+        # The second call is the conditional park (first is ensure-parents)
+        expr_values = write_calls[1].kwargs.get(
             'ExpressionAttributeValues',
-            write_calls[0][1].get('ExpressionAttributeValues', {}),
+            write_calls[1][1].get('ExpressionAttributeValues', {}),
         )
         assert expr_values.get(':awaiting') == AWAITING_APPROVAL
         assert expr_values.get(':pending') == 'pending'
@@ -631,5 +632,5 @@ class TestHandlePauseRequested:
                 'exec-1', reason='freeze', requested_by='ops',
             )
 
-        # Two pending nodes → two park writes
-        assert fake_exec_table.update_item.call_count == 2
+        # Two pending nodes → two park writes (2 calls each: ensure-parents + conditional park)
+        assert fake_exec_table.update_item.call_count == 4

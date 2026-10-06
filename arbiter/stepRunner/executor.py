@@ -53,6 +53,7 @@ from common.metrics_constants import (
     METRIC_APPROVAL_DISPATCH_EVALUATED,
     METRIC_APPROVAL_DISPATCH_WOULD_BLOCK,
     METRIC_APPROVAL_DISPATCH_REFUSED,
+    METRIC_APPROVAL_PARK_FAILED,
     UNIT_MILLISECONDS,
     UNIT_COUNT,
     DIMENSION_WORKFLOW_ID,
@@ -783,9 +784,21 @@ def _park_node_awaiting_approval(
     request_type: str = 'approval_required',
     reason: str = 'Execution pause requested',
     requested_by: str = 'system',
-) -> None:
+) -> bool:
     """Conditionally write pending → awaiting_approval for one node, persist
     the approval-request record, and emit events.  No SQS dispatch.
+
+    Returns ``True`` when the park write committed (or was a no-op because
+    the node was already past ``pending``), ``False`` when the write failed
+    for an unexpected reason (caller must NOT dispatch the node).
+
+    The write is split into two UpdateItem calls:
+      1. **Ensure parents**: initialise ``approvalRequests`` (top-level map)
+         and ``nodeResults.<node>`` (per-node stub) when absent, using
+         ``if_not_exists`` so existing data is never overwritten.
+      2. **Conditional park**: the ``pending → awaiting_approval`` flip +
+         approval-request record write, conditioned on the node still being
+         ``pending`` (or absent, treated as pending).
 
     Idempotent: the conditional write on ``status = pending`` means a second
     call (race or retry) is a no-op.
@@ -800,6 +813,25 @@ def _park_node_awaiting_approval(
     )
 
     try:
+        # Step 1: ensure parent maps exist.  ``if_not_exists`` is a no-op
+        # when the attribute already exists, so this is safe to run every
+        # time regardless of item shape.
+        _executions_table.update_item(
+            Key={'executionId': execution_id},
+            UpdateExpression=(
+                'SET approvalRequests = if_not_exists(approvalRequests, :emptyMap), '
+                'nodeResults.#nid = if_not_exists(nodeResults.#nid, :stub)'
+            ),
+            ExpressionAttributeNames={
+                '#nid': node_id,
+            },
+            ExpressionAttributeValues={
+                ':emptyMap': {},
+                ':stub': {'nodeId': node_id, 'status': 'pending', 'retryCount': 0},
+            },
+        )
+
+        # Step 2: conditional park — node must still be pending.
         _executions_table.update_item(
             Key={'executionId': execution_id},
             UpdateExpression=(
@@ -807,7 +839,9 @@ def _park_node_awaiting_approval(
                 'nodeResults.#nid.#parkedAt = :parkedAt, '
                 'approvalRequests.#nid = :record'
             ),
-            ConditionExpression='nodeResults.#nid.#status = :pending',
+            ConditionExpression=(
+                'nodeResults.#nid.#status = :pending'
+            ),
             ExpressionAttributeNames={
                 '#nid': node_id,
                 '#status': 'status',
@@ -826,12 +860,13 @@ def _park_node_awaiting_approval(
                 'park_node_skipped_not_pending',
                 executionId=execution_id, workflowId=workflow_id, nodeId=node_id,
             )
-            return
+            return True
         _logger.error(
-            '_park_node_awaiting_approval: conditional write failed for '
+            '_park_node_awaiting_approval: write failed for '
             'execution=%s node=%s: %s', execution_id, node_id, exc,
         )
-        raise
+        _emit_metric(METRIC_APPROVAL_PARK_FAILED, 1, UNIT_COUNT, workflow_id=workflow_id)
+        return False
 
     _log_event(
         'node_parked_awaiting_approval',
@@ -847,6 +882,8 @@ def _park_node_awaiting_approval(
         'parkedAt': now,
         'correlationId': execution_id,
     }, **_run_id_kwargs)
+
+    return True
 
 
 def handle_node_awaiting_approval(
@@ -1036,10 +1073,20 @@ def invoke_node(
             or node.get('data', {}).get('requiresApproval', False)
         )
         if _pause_requested:
-            _park_node_awaiting_approval(
+            parked = _park_node_awaiting_approval(
                 execution_id, workflow_id, node_id, agent_id,
                 run_id=run_id,
             )
+            if not parked:
+                # Fail-closed (decision f9489ed0): a park was requested but
+                # the write failed — leave the node pending for a future
+                # retry rather than dispatching it ungoverned.
+                _log_event(
+                    'node_dispatch_held_park_failed',
+                    executionId=execution_id,
+                    workflowId=workflow_id,
+                    nodeId=node_id,
+                )
             return
 
     now = _now_iso()
