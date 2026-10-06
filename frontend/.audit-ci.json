@@ -4,8 +4,10 @@
   "moderate": true,
   "high": true,
   "critical": true,
-  "allowlist": [],
+  "allowlist": [
+    "GHSA-rj75-hqrm-r3gf"
+  ],
   "report": true,
   "skip-dev": false,
-  "_comment": "Frontend-scoped audit-ci gate (finding 9c287884). Mirrors root .audit-ci.json's severity threshold (low and above, blocking). Empty allowlist: npm audit --prefix frontend currently reports 0 vulnerabilities. If a future advisory is unfixable, add its exact GHSA id here AND a corresponding justification entry in ../audit-ci-allowlist-justifications.md naming that GHSA id."
+  "_comment": "Frontend-scoped audit-ci gate (finding 9c287884). Carries GHSA-rj75-hqrm-r3gf (postcss-selector-parser, moderate; transitive via @tailwindcss/typography, fix requires semver-major downgrade of typography). See ../audit-ci-allowlist-justifications.md for details."
 }
