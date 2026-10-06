@@ -2041,6 +2041,7 @@ type DeleteAppResult {
 # resumeToken is deliberately SERVER-SIDE ONLY (RC-2) — never exposed in
 # the schema, queries, mutations, or subscriptions.
 type ApprovalRequest {
+  nodeId: ID!
   requestType: String!
   reason: String
   requestedBy: String

@@ -119,6 +119,7 @@ interface WorkflowInfo {
 }
 
 interface ApprovalRequest {
+  nodeId: string;
   requestType: string;
   reason?: string | null;
   requestedBy?: string | null;
@@ -324,6 +325,9 @@ function computeDuration(startedAt: string, completedAt?: string): string {
  */
 function deriveAwaitingNodeId(exec: Execution): string | null {
   if (exec.currentNode) return exec.currentNode;
+  // Prefer the nodeId from the first undecided approval request.
+  const pending = exec.approvalRequests?.find((r) => !r.decision);
+  if (pending?.nodeId) return pending.nodeId;
   try {
     const nr: Record<string, any> =
       typeof exec.nodeResults === 'string'
