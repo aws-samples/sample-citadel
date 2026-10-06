@@ -81,6 +81,7 @@ import {
 import { PageContainer } from '../components/PageContainer';
 import { ExecutionDetailSheet } from '../components/ExecutionDetailSheet';
 import { ExecutionDecisionDialog, ExecutionDecisionKind } from '../components/ExecutionDecisionDialog';
+import { normalizeExecutionStatus, isRunning, isAwaitingApproval } from '../lib/execution-status';
 
 // ---- Types ----
 
@@ -224,10 +225,12 @@ const COMPONENT_STATUS_COLORS: Record<string, { bg: string; text: string }> = {
 };
 
 const EXECUTION_STATUS_COLORS: Record<string, { bg: string; text: string }> = {
-  RUNNING: { bg: 'bg-primary/20', text: 'text-primary' },
-  SUCCEEDED: { bg: 'bg-chart-2/20', text: 'text-chart-2' },
-  FAILED: { bg: 'bg-destructive/20', text: 'text-destructive' },
-  PENDING: { bg: 'bg-chart-4/20', text: 'text-chart-4' },
+  running: { bg: 'bg-primary/20', text: 'text-primary' },
+  succeeded: { bg: 'bg-chart-2/20', text: 'text-chart-2' },
+  failed: { bg: 'bg-destructive/20', text: 'text-destructive' },
+  pending: { bg: 'bg-chart-4/20', text: 'text-chart-4' },
+  completed: { bg: 'bg-chart-2/20', text: 'text-chart-2' },
+  cancelled: { bg: 'bg-muted/20', text: 'text-muted-foreground' },
   awaiting_approval: { bg: 'bg-chart-4/20', text: 'text-chart-4' },
 };
 
@@ -595,7 +598,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
   // Single interval, cleared when no active executions or on unmount. Max 10 min.
   useEffect(() => {
     const hasActive = executions.some(
-      (e) => e.status === 'RUNNING' || e.status === 'awaiting_approval',
+      (e) => isRunning(e.status) || isAwaitingApproval(e.status),
     );
     if (!hasActive || !app?.workflowIds) return;
     const workflowIds = app.workflowIds;
@@ -645,8 +648,8 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
     if (runEvents.length === 0 || runEvents.length === processedRunEventCountRef.current) return;
     processedRunEventCountRef.current = runEvents.length;
     if (!detailSheetOpen || !selectedExecution || !app?.workflowIds) return;
-    const status = (selectedExecution.status || '').toUpperCase();
-    if (status !== 'RUNNING' && status !== 'PENDING') return;
+    const status = selectedExecution.status || '';
+    if (!isRunning(status) && normalizeExecutionStatus(status) !== 'pending') return;
     const hasEventForSelected = runEvents.some(
       (e: any) => e?.executionId === selectedExecution.executionId,
     );
@@ -710,7 +713,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
         {
           executionId: exec.executionId,
           workflowId,
-          status: 'RUNNING',
+          status: 'running',
           startedAt: new Date().toISOString(),
           triggeredBy: 'user',
         },
@@ -1639,7 +1642,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
           </thead>
           <tbody>
             {executions.map((exec) => {
-              const colors = EXECUTION_STATUS_COLORS[exec.status] || EXECUTION_STATUS_COLORS.PENDING;
+              const colors = EXECUTION_STATUS_COLORS[normalizeExecutionStatus(exec.status)] || EXECUTION_STATUS_COLORS.pending;
               const pendingApproval = exec.approvalRequests?.find((r) => !r.decision);
               return (
                 <tr
@@ -1661,7 +1664,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
                   <td className="py-2 px-3">
                     <div className="flex flex-col gap-1">
                       <Badge className={cn(colors.bg, colors.text, 'text-xs border-0')}>{exec.status}</Badge>
-                      {exec.status === 'awaiting_approval' && pendingApproval?.reason && (
+                      {isAwaitingApproval(exec.status) && pendingApproval?.reason && (
                         <span className="text-xs text-muted-foreground" data-testid="approval-reason">
                           {pendingApproval.reason}
                         </span>
@@ -1674,7 +1677,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
                   {showActions && (
                     <td className="py-2 px-3" onClick={(e) => e.stopPropagation()}>
                       <div className="flex items-center gap-1">
-                        {exec.status === 'RUNNING' && (
+                        {isRunning(exec.status) && (
                           <Button
                             variant="outline"
                             size="sm"
@@ -1685,7 +1688,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
                             <Pause className="size-3 mr-1" /> Pause
                           </Button>
                         )}
-                        {exec.status === 'awaiting_approval' && (
+                        {isAwaitingApproval(exec.status) && (
                           <>
                             <Button
                               variant="default"

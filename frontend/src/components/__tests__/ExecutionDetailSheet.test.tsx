@@ -695,7 +695,7 @@ describe('ExecutionDetailSheet — compensation states', () => {
 describe('ExecutionDetailSheet — execution actions (Pause/Approve/Deny)', () => {
   const runningExec = {
     ...baseExecution,
-    status: 'RUNNING',
+    status: 'running',
     completedAt: null,
   };
 
