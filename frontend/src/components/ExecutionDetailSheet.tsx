@@ -17,6 +17,7 @@ import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { cn } from './ui/utils';
 import { toast } from 'sonner';
+import { isRunning, isAwaitingApproval } from '../lib/execution-status';
 
 // ---- Types ----
 
@@ -564,9 +565,9 @@ export function ExecutionDetailSheet({
             )}
           </div>
           {/* Execution actions — Pause when RUNNING, Approve/Deny when awaiting_approval */}
-          {canApproveExecutions && (execution.status === 'RUNNING' || execution.status === 'awaiting_approval') && (
+          {canApproveExecutions && (isRunning(execution.status) || isAwaitingApproval(execution.status)) && (
             <div className="flex items-center gap-2 mt-1" data-testid="sheet-execution-actions">
-              {execution.status === 'RUNNING' && onPause && (
+              {isRunning(execution.status) && onPause && (
                 <Button
                   variant="outline"
                   size="sm"
@@ -577,7 +578,7 @@ export function ExecutionDetailSheet({
                   <Pause className="size-3 mr-1" /> Pause
                 </Button>
               )}
-              {execution.status === 'awaiting_approval' && onApprove && (
+              {isAwaitingApproval(execution.status) && onApprove && (
                 <Button
                   variant="default"
                   size="sm"
@@ -588,7 +589,7 @@ export function ExecutionDetailSheet({
                   Approve
                 </Button>
               )}
-              {execution.status === 'awaiting_approval' && onDeny && (
+              {isAwaitingApproval(execution.status) && onDeny && (
                 <Button
                   variant="destructive"
                   size="sm"

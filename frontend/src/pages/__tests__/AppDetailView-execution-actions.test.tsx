@@ -166,7 +166,7 @@ const baseApp = {
 const runningExecution = {
   executionId: 'exec-run-1',
   workflowId: 'wf-1',
-  status: 'RUNNING',
+  status: 'running',
   startedAt: '2024-06-01T00:00:00Z',
   triggeredBy: 'user',
   currentNode: 'node-a',
@@ -323,14 +323,14 @@ describe('AppDetailView execution actions', () => {
 
     // Now return an execution that's no longer RUNNING so polling stops
     (executionApiService.listExecutions as jest.Mock).mockResolvedValue({
-      items: [{ ...runningExecution, status: 'SUCCEEDED', completedAt: '2024-06-01T01:00:00Z' }],
+      items: [{ ...runningExecution, status: 'completed', completedAt: '2024-06-01T01:00:00Z' }],
       nextToken: null,
     });
 
     jest.advanceTimersByTime(3000);
     await waitFor(() => {
       // Let React settle
-      expect(screen.getByText('SUCCEEDED')).toBeInTheDocument();
+      expect(screen.getByText('completed')).toBeInTheDocument();
     });
 
     const callsAfterSucceeded = (executionApiService.listExecutions as jest.Mock).mock.calls.length;
