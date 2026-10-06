@@ -35,6 +35,13 @@ jest.mock("../../utils/appsync", () => ({
   getUserId: jest.fn().mockReturnValue("user-123"),
 }));
 
+// Set env vars BEFORE importing the handler so module-level constants
+// (EVENT_BUS_NAME, EXECUTIONS_TABLE, etc.) capture the test values.
+process.env.EXECUTIONS_TABLE = "citadel-executions-test";
+process.env.WORKFLOWS_TABLE = "citadel-workflows-test";
+process.env.EVENT_BUS_NAME = "citadel-agents-test";
+process.env.USER_POOL_ID = "us-east-1_test";
+
 import { handler, __resetColdStartForTest } from "../execution-resolver";
 
 type HandlerEvent = Parameters<typeof handler>[0];
@@ -113,13 +120,6 @@ const EXECUTION_RUNNING = {
 };
 
 describe("execution-resolver — CIT-030 approval mutations", () => {
-  beforeAll(() => {
-    process.env.EXECUTIONS_TABLE = "citadel-executions-test";
-    process.env.WORKFLOWS_TABLE = "citadel-workflows-test";
-    process.env.EVENT_BUS_NAME = "citadel-agents-test";
-    process.env.USER_POOL_ID = "us-east-1_test";
-  });
-
   beforeEach(() => {
     ddbMock.reset();
     ebMock.reset();
@@ -134,13 +134,6 @@ describe("execution-resolver — CIT-030 approval mutations", () => {
       ],
     });
     __resetColdStartForTest();
-  });
-
-  afterAll(() => {
-    delete process.env.EXECUTIONS_TABLE;
-    delete process.env.WORKFLOWS_TABLE;
-    delete process.env.EVENT_BUS_NAME;
-    delete process.env.USER_POOL_ID;
   });
 
   // ─── Role Gate Tests ───────────────────────────────────────────
@@ -577,6 +570,202 @@ describe("execution-resolver — CIT-030 approval mutations", () => {
       const resultStr = JSON.stringify(result);
       expect(resultStr).not.toContain("resumeToken");
       expect(resultStr).not.toContain("secret-token-uuid");
+    });
+  });
+
+  // ─── Event bus/source/detail-type parity ───────────────────────
+
+  describe("emitEvent uses correct bus, source, and detail type", () => {
+    test("pauseExecution emits on EVENT_BUS_NAME with Source citadel.workflows", async () => {
+      ddbMock.on(GetCommand).resolves({ Item: { ...EXECUTION_RUNNING } });
+      ddbMock.on(UpdateCommand).resolves({
+        Attributes: {
+          ...EXECUTION_RUNNING,
+          pauseRequested: {
+            reason: "hold",
+            requestedBy: "user-123",
+            requestedAt: "2026-10-05T01:00:00Z",
+          },
+        },
+      });
+
+      await invoke(
+        makeEvent(
+          "pauseExecution",
+          { executionId: "exec-2", reason: "hold" },
+          { groups: ["admin"], org: "org-1" },
+        ),
+      );
+
+      const ebCalls = ebMock.commandCalls(PutEventsCommand);
+      const entries = ebCalls.flatMap((c) => c.args[0].input.Entries ?? []);
+      const pauseEntry = entries.find(
+        (e) => e.DetailType === "execution.pause.requested",
+      );
+      expect(pauseEntry).toBeDefined();
+      expect(pauseEntry!.EventBusName).toBe("citadel-agents-test");
+      expect(pauseEntry!.Source).toBe("citadel.workflows");
+      expect(pauseEntry!.DetailType).toBe("execution.pause.requested");
+    });
+
+    test("approveExecution emits on EVENT_BUS_NAME with Source citadel.workflows", async () => {
+      ddbMock.on(GetCommand).resolves({ Item: { ...EXECUTION_AWAITING } });
+      ddbMock.on(UpdateCommand).resolves({
+        Attributes: {
+          ...EXECUTION_AWAITING,
+          approvalRequests: {
+            "node-a": {
+              ...EXECUTION_AWAITING.approvalRequests["node-a"],
+              decision: "approved",
+              decidedBy: "user-123",
+            },
+          },
+        },
+      });
+
+      await invoke(
+        makeEvent(
+          "approveExecution",
+          { executionId: "exec-1", nodeId: "node-a" },
+          { groups: ["architect"], org: "org-1" },
+        ),
+      );
+
+      const ebCalls = ebMock.commandCalls(PutEventsCommand);
+      const entries = ebCalls.flatMap((c) => c.args[0].input.Entries ?? []);
+      const resumeEntry = entries.find(
+        (e) => e.DetailType === "execution.resume.requested",
+      );
+      expect(resumeEntry).toBeDefined();
+      expect(resumeEntry!.EventBusName).toBe("citadel-agents-test");
+      expect(resumeEntry!.Source).toBe("citadel.workflows");
+    });
+
+    test("denyExecution emits on EVENT_BUS_NAME with Source citadel.workflows", async () => {
+      ddbMock.on(GetCommand).resolves({ Item: { ...EXECUTION_AWAITING } });
+      ddbMock.on(UpdateCommand).resolves({
+        Attributes: {
+          ...EXECUTION_AWAITING,
+          approvalRequests: {
+            "node-a": {
+              ...EXECUTION_AWAITING.approvalRequests["node-a"],
+              decision: "denied",
+              decidedBy: "user-123",
+            },
+          },
+        },
+      });
+
+      await invoke(
+        makeEvent(
+          "denyExecution",
+          { executionId: "exec-1", nodeId: "node-a", reason: "no" },
+          { groups: ["architect"], org: "org-1" },
+        ),
+      );
+
+      const ebCalls = ebMock.commandCalls(PutEventsCommand);
+      const entries = ebCalls.flatMap((c) => c.args[0].input.Entries ?? []);
+      const resumeEntry = entries.find(
+        (e) => e.DetailType === "execution.resume.requested",
+      );
+      expect(resumeEntry).toBeDefined();
+      expect(resumeEntry!.EventBusName).toBe("citadel-agents-test");
+      expect(resumeEntry!.Source).toBe("citadel.workflows");
+    });
+  });
+
+  // ─── FailedEntryCount surfaces error ───────────────────────────
+
+  describe("FailedEntryCount > 0 surfaces an error", () => {
+    test("pauseExecution throws when PutEvents has FailedEntryCount", async () => {
+      ddbMock.on(GetCommand).resolves({ Item: { ...EXECUTION_RUNNING } });
+      ddbMock.on(UpdateCommand).resolves({
+        Attributes: {
+          ...EXECUTION_RUNNING,
+          pauseRequested: {
+            reason: "hold",
+            requestedBy: "user-123",
+            requestedAt: "2026-10-05T01:00:00Z",
+          },
+        },
+      });
+      ebMock.on(PutEventsCommand).resolves({
+        FailedEntryCount: 1,
+        Entries: [{ ErrorCode: "InternalFailure", ErrorMessage: "bus down" }],
+      });
+
+      await expect(
+        invoke(
+          makeEvent(
+            "pauseExecution",
+            { executionId: "exec-2", reason: "hold" },
+            { groups: ["admin"], org: "org-1" },
+          ),
+        ),
+      ).rejects.toThrow("EventBridge publish failed");
+    });
+
+    test("approveExecution throws when PutEvents has FailedEntryCount", async () => {
+      ddbMock.on(GetCommand).resolves({ Item: { ...EXECUTION_AWAITING } });
+      ddbMock.on(UpdateCommand).resolves({
+        Attributes: {
+          ...EXECUTION_AWAITING,
+          approvalRequests: {
+            "node-a": {
+              ...EXECUTION_AWAITING.approvalRequests["node-a"],
+              decision: "approved",
+              decidedBy: "user-123",
+            },
+          },
+        },
+      });
+      ebMock.on(PutEventsCommand).resolves({
+        FailedEntryCount: 1,
+        Entries: [
+          { ErrorCode: "ThrottlingException", ErrorMessage: "rate exceeded" },
+        ],
+      });
+
+      await expect(
+        invoke(
+          makeEvent(
+            "approveExecution",
+            { executionId: "exec-1", nodeId: "node-a" },
+            { groups: ["architect"], org: "org-1" },
+          ),
+        ),
+      ).rejects.toThrow("EventBridge publish failed");
+    });
+
+    test("denyExecution throws when PutEvents has FailedEntryCount", async () => {
+      ddbMock.on(GetCommand).resolves({ Item: { ...EXECUTION_AWAITING } });
+      ddbMock.on(UpdateCommand).resolves({
+        Attributes: {
+          ...EXECUTION_AWAITING,
+          approvalRequests: {
+            "node-a": {
+              ...EXECUTION_AWAITING.approvalRequests["node-a"],
+              decision: "denied",
+              decidedBy: "user-123",
+            },
+          },
+        },
+      });
+      ebMock.on(PutEventsCommand).resolves({
+        FailedEntryCount: 1,
+        Entries: [{ ErrorCode: "InternalFailure", ErrorMessage: "bus error" }],
+      });
+
+      await expect(
+        invoke(
+          makeEvent(
+            "denyExecution",
+            { executionId: "exec-1", nodeId: "node-a", reason: "no" },
+            { groups: ["architect"], org: "org-1" },
+          ),
+        ),
+      ).rejects.toThrow("EventBridge publish failed");
     });
   });
 });
