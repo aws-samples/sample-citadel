@@ -151,3 +151,29 @@ Same bundled aws-cdk-lib copy. See GHSA-6j4f-fj2g-mc7p justification above.
 Same bundled aws-cdk-lib copy. See GHSA-6j4f-fj2g-mc7p justification above.
 
 **Exposure & Risk Acceptance:** Same as GHSA-6j4f-fj2g-mc7p — build-time-only, DoS-only, minimal risk.
+
+## GHSA-rj75-hqrm-r3gf — postcss-selector-parser (MODERATE quadratic complexity in flat selector parsing)
+
+**Added: 2026-10-06** | **revisitBy: 2026-12-06**
+
+**Affected instances:**
+- `frontend/node_modules/postcss-selector-parser@6.0.10` (transitive via `@tailwindcss/typography@0.5.19`)
+
+**Why remediation is blocked:**
+`@tailwindcss/typography@0.5.19` pins `postcss-selector-parser` to exactly `6.0.10`. The
+advisory fix requires `>=7.1.6` — a semver-major jump. The only `npm audit fix --force`
+resolution downgrades `@tailwindcss/typography` to `0.5.4` (a breaking change that removes
+features used in the project). No 0.5.x release of `@tailwindcss/typography` ships a patched
+`postcss-selector-parser`.
+
+**Exposure & Risk Acceptance:**
+- Build-time only dependency (Tailwind CSS typography plugin, used during `vite build`). Not
+  deployed to production runtime.
+- DoS-only (CPU exhaustion via crafted flat selectors). Requires attacker-controlled CSS input
+  at build time, which is not an applicable threat in this project's build pipeline.
+- Acceptance: risk is minimal; no remediation path until `@tailwindcss/typography` releases a
+  version depending on `postcss-selector-parser >=7.1.6`.
+
+**Recommended follow-ups:**
+1. Check for `@tailwindcss/typography` releases with `postcss-selector-parser >=7.1.6`.
+2. When available, bump `@tailwindcss/typography` and remove this allowlist entry.
