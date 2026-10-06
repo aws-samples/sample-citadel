@@ -133,13 +133,13 @@ interface Execution {
   workflowId: string;
   status: string;
   startedAt: string;
-  completedAt?: string;
-  workflowVersion?: number;
-  triggeredBy?: string;
+  completedAt?: string | null;
+  workflowVersion?: number | null;
+  triggeredBy?: string | null;
   input?: string | null;
   output?: string | null;
   error?: string | null;
-  nodeResults?: string | null;
+  nodeResults?: string | Record<string, unknown> | null;
   currentNode?: string | null;
   approvalRequests?: ApprovalRequest[] | null;
 }
@@ -591,6 +591,26 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
     }
   }, [app?.workflowIds, loadExecutions]);
 
+  // Poll executions every 3s while any execution is RUNNING or awaiting_approval.
+  // Single interval, cleared when no active executions or on unmount. Max 10 min.
+  useEffect(() => {
+    const hasActive = executions.some(
+      (e) => e.status === 'RUNNING' || e.status === 'awaiting_approval',
+    );
+    if (!hasActive || !app?.workflowIds) return;
+    const workflowIds = app.workflowIds;
+    const startedAt = Date.now();
+    const MAX_POLL_MS = 10 * 60 * 1000; // 10 minutes
+    const interval = setInterval(() => {
+      if (Date.now() - startedAt > MAX_POLL_MS) {
+        clearInterval(interval);
+        return;
+      }
+      loadExecutions(workflowIds);
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [executions, app?.workflowIds, loadExecutions]);
+
   // Derive the current run's status strictly from its own subscription events
   // (the hook accumulates events across executions, so filter by executionId).
   const runStatus = useMemo<string | null>(() => {
@@ -684,6 +704,18 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
       setStartingRun(workflowId);
       const exec = await executionApiService.startExecution(workflowId);
       setActiveRun({ executionId: exec.executionId, workflowId });
+      // Optimistically prepend the started execution so the Executions tab
+      // shows it immediately without waiting for a full reload.
+      setExecutions((prev) => [
+        {
+          executionId: exec.executionId,
+          workflowId,
+          status: 'RUNNING',
+          startedAt: new Date().toISOString(),
+          triggeredBy: 'user',
+        },
+        ...prev.filter((e) => e.executionId !== exec.executionId),
+      ]);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Failed to start workflow run';
       toast.error(message);
@@ -1638,7 +1670,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
                   </td>
                   <td className="py-2 px-3 text-muted-foreground text-xs">{formatDate(exec.startedAt)}</td>
                   <td className="py-2 px-3 text-muted-foreground text-xs">{exec.completedAt ? formatDate(exec.completedAt) : '—'}</td>
-                  <td className="py-2 px-3 text-right text-muted-foreground text-xs">{computeDuration(exec.startedAt, exec.completedAt)}</td>
+                  <td className="py-2 px-3 text-right text-muted-foreground text-xs">{computeDuration(exec.startedAt, exec.completedAt ?? undefined)}</td>
                   {showActions && (
                     <td className="py-2 px-3" onClick={(e) => e.stopPropagation()}>
                       <div className="flex items-center gap-1">
@@ -2256,6 +2288,10 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
         onClose={() => setDetailSheetOpen(false)}
         onViewTrace={(executionId) => onNavigate?.(`observability-trace:execution:${executionId}`)}
         onDownloadReplay={handleDownloadReplayPackage}
+        onPause={canApproveExecutions && !orgLoading ? handlePauseExecution : undefined}
+        onApprove={canApproveExecutions && !orgLoading ? handleApproveExecution : undefined}
+        onDeny={canApproveExecutions && !orgLoading ? handleDenyExecution : undefined}
+        canApproveExecutions={canApproveExecutions && !orgLoading}
       />
 
       {/* Unpublish dialog */}
