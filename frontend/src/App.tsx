@@ -41,6 +41,7 @@ const LazyApprovalsPage = lazy(() =>
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { serverService } from './services';
 import { OrganizationProvider } from './contexts/OrganizationContext';
+import { GovernanceModeProvider } from './contexts/GovernanceModeContext';
 import { Toaster } from './components/ui/sonner';
 import { TooltipProvider } from '@/components/ui/tooltip';
 
@@ -215,6 +216,7 @@ function App() {
     <TooltipProvider delayDuration={300}>
       <OrganizationProvider>
         <ProtectedRoute currentUser={currentUser} fallback={authFallback}>
+          <GovernanceModeProvider>
           <AppLayout currentUser={currentUser} onLogout={handleLogout}>
             <Routes>
               <Route path="/" element={<Navigate to="/dashboard" replace />} />
@@ -262,6 +264,7 @@ function App() {
               <Route path="*" element={<NotFound />} />
             </Routes>
           </AppLayout>
+          </GovernanceModeProvider>
         </ProtectedRoute>
         <Toaster />
       </OrganizationProvider>
