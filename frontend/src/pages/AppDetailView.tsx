@@ -143,6 +143,8 @@ interface Execution {
   nodeResults?: string | Record<string, unknown> | null;
   currentNode?: string | null;
   approvalRequests?: ApprovalRequest[] | null;
+  /** DDB-level marker set by pauseExecution; engine parks at next dispatch boundary. */
+  pauseRequested?: boolean | null;
 }
 
 interface RegistryAgentRecordDetail {
@@ -311,6 +313,33 @@ function computeDuration(startedAt: string, completedAt?: string): string {
   } catch {
     return '—';
   }
+}
+
+/**
+ * Derive the nodeId that is awaiting approval. The resolver strips the
+ * map key when converting DDB approvalRequests (keyed by nodeId) to a
+ * flat array, so `currentNode` may be null for awaiting_approval
+ * executions. Fall back to scanning nodeResults for a node whose status
+ * is 'awaiting_approval'.
+ */
+function deriveAwaitingNodeId(exec: Execution): string | null {
+  if (exec.currentNode) return exec.currentNode;
+  try {
+    const nr: Record<string, any> =
+      typeof exec.nodeResults === 'string'
+        ? JSON.parse(exec.nodeResults)
+        : exec.nodeResults;
+    if (nr && typeof nr === 'object') {
+      for (const [key, val] of Object.entries(nr)) {
+        if (val && typeof val === 'object' && (val as any).status === 'awaiting_approval') {
+          return (val as any).nodeId ?? key;
+        }
+      }
+    }
+  } catch {
+    // Unparseable nodeResults — give up.
+  }
+  return null;
 }
 
 function buildPreconditions(
@@ -583,8 +612,9 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
         .flatMap((r) => r.value.items || []);
       items.sort((a, b) => (b.startedAt || '').localeCompare(a.startedAt || ''));
       setExecutions(items);
-    } catch {
-      setExecutions([]);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Failed to load executions';
+      toast.error(message);
     }
   }, []);
 
@@ -1073,9 +1103,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
   };
 
   const handleApproveExecution = async (exec: Execution) => {
-    const nodeId = exec.approvalRequests?.find((r) => !r.decision)?.requestType
-      ? exec.currentNode
-      : exec.currentNode;
+    const nodeId = deriveAwaitingNodeId(exec);
     if (!nodeId) {
       toast.error('Cannot determine the node to approve');
       return;
@@ -1097,7 +1125,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
     if (!decisionDialog) return;
     const exec = executions.find((e) => e.executionId === decisionDialog.executionId);
     if (!exec) return;
-    const nodeId = exec.currentNode;
+    const nodeId = deriveAwaitingNodeId(exec);
     try {
       if (decisionDialog.kind === 'pause') {
         await executionApiService.pauseExecution(exec.executionId, reason, nodeId ?? undefined);
@@ -1667,6 +1695,11 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
                       {isAwaitingApproval(exec.status) && pendingApproval?.reason && (
                         <span className="text-xs text-muted-foreground" data-testid="approval-reason">
                           {pendingApproval.reason}
+                        </span>
+                      )}
+                      {isRunning(exec.status) && exec.pauseRequested && (
+                        <span className="text-xs text-chart-4" data-testid="pause-requested-hint">
+                          Pause requested
                         </span>
                       )}
                     </div>
