@@ -27,6 +27,7 @@ import {
   BarChart3,
   Upload,
   ChevronRight,
+  Pause,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -79,6 +80,7 @@ import {
 } from '../utils/publishUtils';
 import { PageContainer } from '../components/PageContainer';
 import { ExecutionDetailSheet } from '../components/ExecutionDetailSheet';
+import { ExecutionDecisionDialog, ExecutionDecisionKind } from '../components/ExecutionDecisionDialog';
 
 // ---- Types ----
 
@@ -115,6 +117,17 @@ interface WorkflowInfo {
   nodeCount: number;
 }
 
+interface ApprovalRequest {
+  requestType: string;
+  reason?: string | null;
+  requestedBy?: string | null;
+  requestedAt?: string | null;
+  expiresAt?: string | null;
+  decidedBy?: string | null;
+  decidedAt?: string | null;
+  decision?: string | null;
+}
+
 interface Execution {
   executionId: string;
   workflowId: string;
@@ -127,6 +140,8 @@ interface Execution {
   output?: string | null;
   error?: string | null;
   nodeResults?: string | null;
+  currentNode?: string | null;
+  approvalRequests?: ApprovalRequest[] | null;
 }
 
 interface RegistryAgentRecordDetail {
@@ -213,6 +228,7 @@ const EXECUTION_STATUS_COLORS: Record<string, { bg: string; text: string }> = {
   SUCCEEDED: { bg: 'bg-chart-2/20', text: 'text-chart-2' },
   FAILED: { bg: 'bg-destructive/20', text: 'text-destructive' },
   PENDING: { bg: 'bg-chart-4/20', text: 'text-chart-4' },
+  awaiting_approval: { bg: 'bg-chart-4/20', text: 'text-chart-4' },
 };
 
 // ---- Helpers ----
@@ -430,7 +446,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
   const [editBindingSaving, setEditBindingSaving] = useState(false);
 
   // Bind workflow dialog
-  const { selectedOrganization } = useOrganization();
+  const { selectedOrganization, canApproveExecutions, loading: orgLoading } = useOrganization();
   const [bindWorkflowDialogOpen, setBindWorkflowDialogOpen] = useState(false);
   const [unboundWorkflows, setUnboundWorkflows] = useState<Array<{ workflowId: string; name: string; status: string }>>([]);
   const [loadingUnboundWorkflows, setLoadingUnboundWorkflows] = useState(false);
@@ -462,6 +478,9 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
   const [unpublishDialogOpen, setUnpublishDialogOpen] = useState(false);
   const [unpublishLoading, setUnpublishLoading] = useState(false);
   const [unpublishWarnings, setUnpublishWarnings] = useState<string[]>([]);
+
+  // Execution decision dialog state (pause/deny)
+  const [decisionDialog, setDecisionDialog] = useState<{ kind: ExecutionDecisionKind; executionId: string } | null>(null);
 
   // Subscribe to onAppStatusChange for real-time status updates (Req 11 AC 12)
   useEffect(() => {
@@ -1012,6 +1031,56 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
     }
   };
 
+  // ---- Execution actions (pause / approve / deny) ----
+
+  const handlePauseExecution = (exec: Execution) => {
+    setDecisionDialog({ kind: 'pause', executionId: exec.executionId });
+  };
+
+  const handleApproveExecution = async (exec: Execution) => {
+    const nodeId = exec.approvalRequests?.find((r) => !r.decision)?.requestType
+      ? exec.currentNode
+      : exec.currentNode;
+    if (!nodeId) {
+      toast.error('Cannot determine the node to approve');
+      return;
+    }
+    try {
+      await executionApiService.approveExecution(exec.executionId, nodeId);
+      if (app?.workflowIds) await loadExecutions(app.workflowIds);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Failed to approve execution';
+      toast.error(message);
+    }
+  };
+
+  const handleDenyExecution = (exec: Execution) => {
+    setDecisionDialog({ kind: 'deny', executionId: exec.executionId });
+  };
+
+  const handleDecisionConfirm = async (reason: string) => {
+    if (!decisionDialog) return;
+    const exec = executions.find((e) => e.executionId === decisionDialog.executionId);
+    if (!exec) return;
+    const nodeId = exec.currentNode;
+    try {
+      if (decisionDialog.kind === 'pause') {
+        await executionApiService.pauseExecution(exec.executionId, reason, nodeId ?? undefined);
+      } else {
+        if (!nodeId) {
+          toast.error('Cannot determine the node to deny');
+          return;
+        }
+        await executionApiService.denyExecution(exec.executionId, nodeId, reason);
+      }
+      setDecisionDialog(null);
+      if (app?.workflowIds) await loadExecutions(app.workflowIds);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : `Failed to ${decisionDialog.kind} execution`;
+      toast.error(message);
+    }
+  };
+
   const executeTransition = async () => {
     if (!app || !pendingTransition) return;
 
@@ -1223,6 +1292,20 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
                         ? <Loader2 className="size-3 mr-1 animate-spin" />
                         : <Play className="size-3 mr-1" />} Run
                     </Button>
+                    {isActiveRun && runStatus === 'running' && canApproveExecutions && !orgLoading && activeRun && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="text-xs h-7 px-2"
+                        data-testid="pause-active-run"
+                        onClick={() => {
+                          const exec = executions.find((e) => e.executionId === activeRun.executionId);
+                          if (exec) handlePauseExecution(exec);
+                        }}
+                      >
+                        <Pause className="size-3 mr-1" /> Pause
+                      </Button>
+                    )}
                     {!isPublished && (
                       <Button
                         variant="outline"
@@ -1502,6 +1585,9 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
         </div>
       );
     }
+
+    const showActions = canApproveExecutions && !orgLoading;
+
     return (
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
@@ -1513,12 +1599,16 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
               <th className="text-left py-2 px-3 text-muted-foreground font-medium text-xs">Started</th>
               <th className="text-left py-2 px-3 text-muted-foreground font-medium text-xs">Completed</th>
               <th className="text-right py-2 px-3 text-muted-foreground font-medium text-xs">Duration</th>
+              {showActions && (
+                <th className="text-left py-2 px-3 text-muted-foreground font-medium text-xs">Actions</th>
+              )}
               <th className="py-2 px-3 w-8"><span className="sr-only">View details</span></th>
             </tr>
           </thead>
           <tbody>
             {executions.map((exec) => {
               const colors = EXECUTION_STATUS_COLORS[exec.status] || EXECUTION_STATUS_COLORS.PENDING;
+              const pendingApproval = exec.approvalRequests?.find((r) => !r.decision);
               return (
                 <tr
                   key={exec.executionId}
@@ -1537,11 +1627,57 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
                   <td className="py-2 px-3 text-foreground text-xs font-mono">{exec.executionId.slice(0, 12)}...</td>
                   <td className="py-2 px-3 text-muted-foreground text-xs">{exec.workflowId}</td>
                   <td className="py-2 px-3">
-                    <Badge className={cn(colors.bg, colors.text, 'text-xs border-0')}>{exec.status}</Badge>
+                    <div className="flex flex-col gap-1">
+                      <Badge className={cn(colors.bg, colors.text, 'text-xs border-0')}>{exec.status}</Badge>
+                      {exec.status === 'awaiting_approval' && pendingApproval?.reason && (
+                        <span className="text-xs text-muted-foreground" data-testid="approval-reason">
+                          {pendingApproval.reason}
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td className="py-2 px-3 text-muted-foreground text-xs">{formatDate(exec.startedAt)}</td>
                   <td className="py-2 px-3 text-muted-foreground text-xs">{exec.completedAt ? formatDate(exec.completedAt) : '—'}</td>
                   <td className="py-2 px-3 text-right text-muted-foreground text-xs">{computeDuration(exec.startedAt, exec.completedAt)}</td>
+                  {showActions && (
+                    <td className="py-2 px-3" onClick={(e) => e.stopPropagation()}>
+                      <div className="flex items-center gap-1">
+                        {exec.status === 'RUNNING' && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="text-xs h-7 px-2"
+                            data-testid="pause-execution-action"
+                            onClick={(e) => { e.stopPropagation(); handlePauseExecution(exec); }}
+                          >
+                            <Pause className="size-3 mr-1" /> Pause
+                          </Button>
+                        )}
+                        {exec.status === 'awaiting_approval' && (
+                          <>
+                            <Button
+                              variant="default"
+                              size="sm"
+                              className="text-xs h-7 px-2"
+                              data-testid="approve-execution-action"
+                              onClick={(e) => { e.stopPropagation(); handleApproveExecution(exec); }}
+                            >
+                              Approve
+                            </Button>
+                            <Button
+                              variant="destructive"
+                              size="sm"
+                              className="text-xs h-7 px-2"
+                              data-testid="deny-execution-action"
+                              onClick={(e) => { e.stopPropagation(); handleDenyExecution(exec); }}
+                            >
+                              Deny
+                            </Button>
+                          </>
+                        )}
+                      </div>
+                    </td>
+                  )}
                   <td className="py-2 px-3 text-right">
                     <ChevronRight className="size-3 text-muted-foreground inline-block" aria-hidden="true" />
                   </td>
@@ -2448,6 +2584,16 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Execution decision dialog (pause / deny) */}
+      {decisionDialog && (
+        <ExecutionDecisionDialog
+          kind={decisionDialog.kind}
+          executionId={decisionDialog.executionId}
+          onConfirm={handleDecisionConfirm}
+          onCancel={() => setDecisionDialog(null)}
+        />
+      )}
     </PageContainer>
   );
 }
