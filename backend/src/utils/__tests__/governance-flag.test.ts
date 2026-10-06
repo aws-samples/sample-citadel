@@ -5,6 +5,7 @@ import {
   getGovernanceEffectiveAt,
   __resetGovernanceFlagCacheForTest,
   type GovernanceEnforce,
+  DEFAULT_ENFORCEMENT_MODE,
 } from "../governance-flag";
 
 const ssmMock = mockClient(SSMClient);
@@ -210,5 +211,135 @@ describe("governance-flag", () => {
   test("GovernanceEnforce permits three literals", () => {
     const valid: GovernanceEnforce[] = ["permissive", "shadow", "strict"];
     expect(valid).toHaveLength(3);
+  });
+
+  describe("cache TTL and error resilience", () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+      delete process.env.GOVERNANCE_FLAG_CACHE_TTL_SECONDS;
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+      delete process.env.GOVERNANCE_FLAG_CACHE_TTL_SECONDS;
+    });
+
+    test("second call within TTL does not hit SSM", async () => {
+      ssmMock
+        .on(GetParameterCommand, {
+          Name: `/citadel/governance/enforce/${ENV}`,
+        })
+        .resolves({ Parameter: { Value: "strict" } });
+      ssmMock
+        .on(GetParameterCommand, {
+          Name: `/citadel/governance/effective_at/${ENV}`,
+        })
+        .resolves({ Parameter: { Value: "" } });
+
+      await getGovernanceEnforce(ENV);
+      const callsAfterFirst = ssmMock.calls().length;
+      expect(callsAfterFirst).toBe(2); // enforce + effective_at
+
+      // Advance time but stay within the 60s default TTL
+      jest.advanceTimersByTime(30_000);
+      await getGovernanceEnforce(ENV);
+
+      // No additional SSM calls — served from cache
+      expect(ssmMock.calls().length).toBe(2);
+    });
+
+    test("after TTL expires, next call refetches from SSM", async () => {
+      ssmMock
+        .on(GetParameterCommand, {
+          Name: `/citadel/governance/enforce/${ENV}`,
+        })
+        .resolves({ Parameter: { Value: "permissive" } });
+      ssmMock
+        .on(GetParameterCommand, {
+          Name: `/citadel/governance/effective_at/${ENV}`,
+        })
+        .resolves({ Parameter: { Value: "" } });
+
+      await getGovernanceEnforce(ENV);
+      expect(ssmMock.calls().length).toBe(2);
+
+      // Advance past the 60s TTL
+      jest.advanceTimersByTime(61_000);
+
+      await getGovernanceEnforce(ENV);
+      // Two more SSM calls for the refetch
+      expect(ssmMock.calls().length).toBe(4);
+    });
+
+    test("SSM error after a successful read keeps last good value", async () => {
+      // First call succeeds with 'strict'
+      ssmMock
+        .on(GetParameterCommand, {
+          Name: `/citadel/governance/enforce/${ENV}`,
+        })
+        .resolves({ Parameter: { Value: "strict" } });
+      ssmMock
+        .on(GetParameterCommand, {
+          Name: `/citadel/governance/effective_at/${ENV}`,
+        })
+        .resolves({ Parameter: { Value: "2026-06-01T00:00:00Z" } });
+
+      expect(await getGovernanceEnforce(ENV)).toBe("strict");
+
+      // Expire the cache
+      jest.advanceTimersByTime(61_000);
+
+      // Now SSM fails
+      ssmMock.reset();
+      ssmMock.on(GetParameterCommand).rejects(new Error("Rate exceeded"));
+
+      const warnSpy = jest
+        .spyOn(console, "warn")
+        .mockImplementation(() => undefined);
+
+      // Should keep the last good value ('strict'), not fall back to 'shadow'
+      expect(await getGovernanceEnforce(ENV)).toBe("strict");
+      expect(warnSpy).toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
+    test("GOVERNANCE_FLAG_CACHE_TTL_SECONDS env overrides default TTL", async () => {
+      process.env.GOVERNANCE_FLAG_CACHE_TTL_SECONDS = "10";
+
+      ssmMock
+        .on(GetParameterCommand, {
+          Name: `/citadel/governance/enforce/${ENV}`,
+        })
+        .resolves({ Parameter: { Value: "shadow" } });
+      ssmMock
+        .on(GetParameterCommand, {
+          Name: `/citadel/governance/effective_at/${ENV}`,
+        })
+        .resolves({ Parameter: { Value: "" } });
+
+      await getGovernanceEnforce(ENV);
+      expect(ssmMock.calls().length).toBe(2);
+
+      // At 9s: still cached
+      jest.advanceTimersByTime(9_000);
+      await getGovernanceEnforce(ENV);
+      expect(ssmMock.calls().length).toBe(2);
+
+      // At 11s: TTL expired, refetch
+      jest.advanceTimersByTime(2_000);
+      await getGovernanceEnforce(ENV);
+      expect(ssmMock.calls().length).toBe(4);
+    });
+
+    test("cold-start error (no prior cache) falls back to DEFAULT_ENFORCEMENT_MODE", async () => {
+      ssmMock.on(GetParameterCommand).rejects(new Error("Rate exceeded"));
+
+      const warnSpy = jest
+        .spyOn(console, "warn")
+        .mockImplementation(() => undefined);
+
+      expect(await getGovernanceEnforce(ENV)).toBe(DEFAULT_ENFORCEMENT_MODE);
+      warnSpy.mockRestore();
+    });
   });
 });

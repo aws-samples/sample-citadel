@@ -5,7 +5,7 @@
  * All JSON parsing is defensive — invalid payloads render as raw strings.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { ChevronDown, ChevronRight, Copy, Download, Waypoints } from 'lucide-react';
+import { ChevronDown, ChevronRight, Copy, Download, Pause, Waypoints } from 'lucide-react';
 import {
   Sheet,
   SheetContent,
@@ -109,6 +109,14 @@ interface ExecutionDetailSheetProps {
    * the button is omitted entirely (graceful, no crash).
    */
   onDownloadReplay?: (executionId: string) => void;
+  /** Callback to pause a running execution (renders Pause button when status is RUNNING). */
+  onPause?: (execution: ExecutionDetail) => void;
+  /** Callback to approve an execution awaiting approval (renders Approve button). */
+  onApprove?: (execution: ExecutionDetail) => void;
+  /** Callback to deny an execution awaiting approval (renders Deny button). */
+  onDeny?: (execution: ExecutionDetail) => void;
+  /** Whether the current user has permission to approve/pause/deny executions. */
+  canApproveExecutions?: boolean;
 }
 
 // ---- Style maps (reuse the execution status color idiom) ----
@@ -436,6 +444,10 @@ export function ExecutionDetailSheet({
   onClose,
   onViewTrace,
   onDownloadReplay,
+  onPause,
+  onApprove,
+  onDeny,
+  canApproveExecutions,
 }: ExecutionDetailSheetProps) {
   const [expandedNodes, setExpandedNodes] = useState<Record<string, boolean>>({});
   const [inputExpanded, setInputExpanded] = useState(false);
@@ -551,6 +563,44 @@ export function ExecutionDetailSheet({
               </Button>
             )}
           </div>
+          {/* Execution actions — Pause when RUNNING, Approve/Deny when awaiting_approval */}
+          {canApproveExecutions && (execution.status === 'RUNNING' || execution.status === 'awaiting_approval') && (
+            <div className="flex items-center gap-2 mt-1" data-testid="sheet-execution-actions">
+              {execution.status === 'RUNNING' && onPause && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="text-xs h-7 px-2"
+                  data-testid="sheet-pause-action"
+                  onClick={() => onPause(execution)}
+                >
+                  <Pause className="size-3 mr-1" /> Pause
+                </Button>
+              )}
+              {execution.status === 'awaiting_approval' && onApprove && (
+                <Button
+                  variant="default"
+                  size="sm"
+                  className="text-xs h-7 px-2"
+                  data-testid="sheet-approve-action"
+                  onClick={() => onApprove(execution)}
+                >
+                  Approve
+                </Button>
+              )}
+              {execution.status === 'awaiting_approval' && onDeny && (
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  className="text-xs h-7 px-2"
+                  data-testid="sheet-deny-action"
+                  onClick={() => onDeny(execution)}
+                >
+                  Deny
+                </Button>
+              )}
+            </div>
+          )}
           <div className="flex flex-col gap-0.5 text-xs text-muted-foreground">
             <span>Started {formatDate(execution.startedAt)}</span>
             {execution.completedAt && <span>Completed {formatDate(execution.completedAt)}</span>}

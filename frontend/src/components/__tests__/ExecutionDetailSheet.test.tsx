@@ -691,3 +691,87 @@ describe('ExecutionDetailSheet — compensation states', () => {
     expect(within(section).getByText(/compensating/i)).toBeInTheDocument();
   });
 });
+
+describe('ExecutionDetailSheet — execution actions (Pause/Approve/Deny)', () => {
+  const runningExec = {
+    ...baseExecution,
+    status: 'RUNNING',
+    completedAt: null,
+  };
+
+  const awaitingExec = {
+    ...baseExecution,
+    status: 'awaiting_approval',
+    completedAt: null,
+    currentNode: 'node-a',
+    approvalRequests: [{ requestType: 'human_approval', reason: 'Needs review' }],
+  };
+
+  test('renders Pause button for a RUNNING execution when canApproveExecutions + onPause', () => {
+    const onPause = jest.fn();
+    render(
+      React.createElement(ExecutionDetailSheet, {
+        execution: runningExec,
+        open: true,
+        onClose: jest.fn(),
+        canApproveExecutions: true,
+        onPause,
+      }),
+    );
+    const btn = screen.getByTestId('sheet-pause-action');
+    expect(btn).toBeInTheDocument();
+    expect(btn).toHaveTextContent('Pause');
+    fireEvent.click(btn);
+    expect(onPause).toHaveBeenCalledWith(runningExec);
+  });
+
+  test('renders Approve and Deny buttons for awaiting_approval when canApproveExecutions', () => {
+    const onApprove = jest.fn();
+    const onDeny = jest.fn();
+    render(
+      React.createElement(ExecutionDetailSheet, {
+        execution: awaitingExec,
+        open: true,
+        onClose: jest.fn(),
+        canApproveExecutions: true,
+        onApprove,
+        onDeny,
+      }),
+    );
+    expect(screen.getByTestId('sheet-approve-action')).toBeInTheDocument();
+    expect(screen.getByTestId('sheet-deny-action')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('sheet-approve-action'));
+    expect(onApprove).toHaveBeenCalledWith(awaitingExec);
+    fireEvent.click(screen.getByTestId('sheet-deny-action'));
+    expect(onDeny).toHaveBeenCalledWith(awaitingExec);
+  });
+
+  test('does not render actions when canApproveExecutions is false (developer role)', () => {
+    render(
+      React.createElement(ExecutionDetailSheet, {
+        execution: runningExec,
+        open: true,
+        onClose: jest.fn(),
+        canApproveExecutions: false,
+        onPause: jest.fn(),
+      }),
+    );
+    expect(screen.queryByTestId('sheet-execution-actions')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('sheet-pause-action')).not.toBeInTheDocument();
+  });
+
+  test('does not render actions for a SUCCEEDED execution', () => {
+    render(
+      React.createElement(ExecutionDetailSheet, {
+        execution: { ...baseExecution, status: 'SUCCEEDED' },
+        open: true,
+        onClose: jest.fn(),
+        canApproveExecutions: true,
+        onPause: jest.fn(),
+        onApprove: jest.fn(),
+        onDeny: jest.fn(),
+      }),
+    );
+    expect(screen.queryByTestId('sheet-execution-actions')).not.toBeInTheDocument();
+  });
+});

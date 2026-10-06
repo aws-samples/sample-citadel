@@ -205,8 +205,13 @@ async function goToExecutions() {
 describe('AppDetailView execution actions', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    jest.useFakeTimers();
     tabsOnValueChange = null;
     mockCanApproveExecutions.mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
   });
 
   it('shows Pause button for a RUNNING execution when user is architect', async () => {
@@ -265,5 +270,72 @@ describe('AppDetailView execution actions', () => {
     await waitFor(() => {
       expect(executionApiService.listExecutions).toHaveBeenCalledTimes(2);
     });
+  });
+
+  it('handleRunWorkflow optimistically prepends a RUNNING execution to the list', async () => {
+    (executionApiService.startExecution as jest.Mock).mockResolvedValue({
+      executionId: 'exec-new-1',
+    });
+    setup([]); // start with no executions
+    render(<AppDetailView {...defaultProps} />);
+    await goToExecutions();
+
+    // No executions initially
+    await waitFor(() => {
+      expect(screen.getByText('No executions recorded yet.')).toBeInTheDocument();
+    });
+
+    // Switch to workflows tab and click Run
+    fireEvent.click(screen.getByText('Workflows'));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Run Wf/i })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Run Wf/i }));
+
+    await waitFor(() => {
+      expect(executionApiService.startExecution).toHaveBeenCalledWith('wf-1');
+    });
+
+    // Switch to executions tab — should see the optimistically prepended row
+    fireEvent.click(screen.getByText('Executions'));
+    await waitFor(() => {
+      expect(screen.getByText('exec-new-1'.slice(0, 12) + '...')).toBeInTheDocument();
+    });
+  });
+
+  it('polls loadExecutions every 3s while a RUNNING execution exists and stops when none', async () => {
+    setup([runningExecution]);
+    render(<AppDetailView {...defaultProps} />);
+    await goToExecutions();
+
+    await waitFor(() => {
+      expect(screen.getByText(runningExecution.executionId.slice(0, 12) + '...')).toBeInTheDocument();
+    });
+
+    // Initial load = 1 call
+    const initialCalls = (executionApiService.listExecutions as jest.Mock).mock.calls.length;
+
+    // Advance by 3s — should trigger a poll
+    jest.advanceTimersByTime(3000);
+    await waitFor(() => {
+      expect((executionApiService.listExecutions as jest.Mock).mock.calls.length).toBeGreaterThan(initialCalls);
+    });
+
+    // Now return an execution that's no longer RUNNING so polling stops
+    (executionApiService.listExecutions as jest.Mock).mockResolvedValue({
+      items: [{ ...runningExecution, status: 'SUCCEEDED', completedAt: '2024-06-01T01:00:00Z' }],
+      nextToken: null,
+    });
+
+    jest.advanceTimersByTime(3000);
+    await waitFor(() => {
+      // Let React settle
+      expect(screen.getByText('SUCCEEDED')).toBeInTheDocument();
+    });
+
+    const callsAfterSucceeded = (executionApiService.listExecutions as jest.Mock).mock.calls.length;
+    jest.advanceTimersByTime(6000);
+    // No more polls — call count should not increase
+    expect((executionApiService.listExecutions as jest.Mock).mock.calls.length).toBe(callsAfterSucceeded);
   });
 });

@@ -54,7 +54,10 @@
  * Per QT3-8, effective_at is auto-written on the first permissive → shadow
  * flip by a CDK custom resource (defined in backend/lib/).
  *
- * Cache TTL is 60 minutes (process-local, per-Lambda-container).
+ * Cache TTL defaults to 60 seconds (process-local, per-Lambda-container),
+ * overridable via the GOVERNANCE_FLAG_CACHE_TTL_SECONDS env variable.
+ * On SSM error the cache keeps the last good value and logs; a cold-start
+ * error (no prior value) still falls back to DEFAULT_ENFORCEMENT_MODE.
  */
 
 import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
@@ -71,7 +74,16 @@ export type GovernanceEnforce = "permissive" | "shadow" | "strict";
  */
 export const DEFAULT_ENFORCEMENT_MODE: GovernanceEnforce = "shadow";
 
-const CACHE_TTL_MS = 60 * 60 * 1000;
+const DEFAULT_CACHE_TTL_SECONDS = 60;
+
+function cacheTtlMs(): number {
+  const envVal = process.env.GOVERNANCE_FLAG_CACHE_TTL_SECONDS;
+  if (envVal !== undefined) {
+    const parsed = Number(envVal);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed * 1000;
+  }
+  return DEFAULT_CACHE_TTL_SECONDS * 1000;
+}
 
 interface CacheEntry {
   enforce: GovernanceEnforce;
@@ -129,23 +141,61 @@ function emitGovernanceFlagDefaulted(
 }
 
 async function refresh(env: string): Promise<CacheEntry> {
-  const [enforceRaw, effectiveAtRaw] = await Promise.all([
-    fetchOne(`/citadel/governance/enforce/${env}`),
-    fetchOne(`/citadel/governance/effective_at/${env}`),
-  ]);
+  const previous = cache.get(env);
+
+  let enforceRaw: string | null;
+  let effectiveAtRaw: string | null;
+  try {
+    [enforceRaw, effectiveAtRaw] = await Promise.all([
+      fetchOne(`/citadel/governance/enforce/${env}`),
+      fetchOne(`/citadel/governance/effective_at/${env}`),
+    ]);
+  } catch (err) {
+    // Unexpected error from Promise.all itself — keep last good value.
+    console.warn("governance-flag: refresh failed unexpectedly:", err);
+    if (previous) return previous;
+    const fallback: CacheEntry = {
+      enforce: DEFAULT_ENFORCEMENT_MODE,
+      effectiveAt: null,
+      loadedAt: Date.now(),
+    };
+    cache.set(env, fallback);
+    return fallback;
+  }
+
+  // If both SSM reads returned null (fetchOne catches per-call errors and
+  // returns null), keep the last good cached entry instead of overwriting
+  // with the default — this preserves the last successfully-read mode
+  // through transient SSM outages.
+  if (enforceRaw === null && effectiveAtRaw === null && previous) {
+    console.warn(
+      `governance-flag: both SSM reads failed for env="${env}"; keeping last good cached value ("${previous.enforce}").`,
+    );
+    emitGovernanceFlagDefaulted(env, "ssm_error");
+    return previous;
+  }
 
   let enforce: GovernanceEnforce;
   if (isValidEnforce(enforceRaw)) {
     enforce = enforceRaw;
   } else {
-    enforce = DEFAULT_ENFORCEMENT_MODE;
-    if (enforceRaw === null) {
-      emitGovernanceFlagDefaulted(env, "ssm_error");
-    } else {
+    // Single-parameter failure with a prior good value: keep it.
+    if (enforceRaw === null && previous) {
       console.warn(
-        `governance-flag: unresolvable enforcement mode value "${enforceRaw}" for env="${env}"; defaulting to "${DEFAULT_ENFORCEMENT_MODE}".`,
+        `governance-flag: enforce SSM read failed for env="${env}"; keeping last good cached value ("${previous.enforce}").`,
       );
-      emitGovernanceFlagDefaulted(env, "invalid_value");
+      emitGovernanceFlagDefaulted(env, "ssm_error");
+      enforce = previous.enforce;
+    } else {
+      enforce = DEFAULT_ENFORCEMENT_MODE;
+      if (enforceRaw === null) {
+        emitGovernanceFlagDefaulted(env, "ssm_error");
+      } else {
+        console.warn(
+          `governance-flag: unresolvable enforcement mode value "${enforceRaw}" for env="${env}"; defaulting to "${DEFAULT_ENFORCEMENT_MODE}".`,
+        );
+        emitGovernanceFlagDefaulted(env, "invalid_value");
+      }
     }
   }
 
@@ -159,7 +209,7 @@ async function refresh(env: string): Promise<CacheEntry> {
 
 async function getOrRefresh(env: string): Promise<CacheEntry> {
   const existing = cache.get(env);
-  if (existing && Date.now() - existing.loadedAt < CACHE_TTL_MS)
+  if (existing && Date.now() - existing.loadedAt < cacheTtlMs())
     return existing;
   return refresh(env);
 }
