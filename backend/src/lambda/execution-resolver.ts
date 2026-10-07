@@ -280,7 +280,7 @@ export const handler: AppSyncResolverHandler<
     switch (fieldName) {
       case "getExecution": {
         const exec = await getExecution(args.executionId, userId, event);
-        return exec ? stripResumeTokens(exec) : null;
+        return exec ? toApiExecution(exec) : null;
       }
       case "listExecutions":
         return await listExecutions(args.workflowId, event);
@@ -352,10 +352,6 @@ async function getExecution(
   await assertRowOrg(result.Item as { orgId?: unknown }, event);
 
   const item = result.Item as ExecutionRecord;
-  // Additive: fold per-node usage into an execution-level total on read.
-  // Pure and idempotent — no stored/mutable counter, so redelivery of the
-  // underlying node-completed events has no bearing on this computation.
-  item.usageTotals = computeExecutionUsageTotals(item.nodeResults);
   return item;
 }
 
@@ -406,7 +402,9 @@ async function listExecutions(
   );
 
   return {
-    items: result.Items || [],
+    items: (result.Items || []).map((item) =>
+      toApiExecution(item as ExecutionRecord),
+    ),
     nextToken: result.LastEvaluatedKey
       ? JSON.stringify(result.LastEvaluatedKey)
       : undefined,
@@ -507,7 +505,7 @@ async function startExecution(
     runId: dispatchContext.runId,
   });
 
-  return execution;
+  return toApiExecution(execution as ExecutionRecord);
 }
 
 async function cancelExecution(
@@ -546,7 +544,7 @@ async function cancelExecution(
     workflowId: existing.workflowId,
   });
 
-  return result.Attributes;
+  return toApiExecution(result.Attributes as ExecutionRecord);
 }
 
 async function resumeExecution(
@@ -586,7 +584,7 @@ async function resumeExecution(
     ...(existing.runId ? { runId: existing.runId } : {}),
   });
 
-  return existing;
+  return toApiExecution(existing);
 }
 
 /**
@@ -603,17 +601,31 @@ function assertAdminOrArchitect(event: ExecutionResolverEvent): void {
 /**
  * Strip resumeToken from approvalRequests before returning to client (RC-2).
  * Returns a new object; never mutates the input.
+ *
+ * Idempotent: if approvalRequests is already an array (i.e. previously
+ * transformed), each element is still scrubbed of resumeToken so a
+ * double-call is safe.
  */
 function stripResumeTokens(
-  execution: ExecutionRecord,
+  execution: ExecutionRecord | Record<string, unknown>,
 ): Record<string, unknown> {
   const result: Record<string, unknown> = { ...execution };
-  if (
-    execution.approvalRequests &&
-    typeof execution.approvalRequests === "object"
-  ) {
+  const ar = (execution as Record<string, unknown>).approvalRequests;
+  if (!ar || typeof ar !== "object") return result;
+
+  if (Array.isArray(ar)) {
+    // Already array-shaped (idempotent path): strip resumeToken from each.
+    result.approvalRequests = ar.map((entry: Record<string, unknown>) => {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { resumeToken, ...safeFields } = entry;
+      return safeFields;
+    });
+  } else {
+    // Map-shaped (raw DynamoDB): convert to array with nodeId injected.
     const stripped: Record<string, unknown>[] = [];
-    for (const [key, req] of Object.entries(execution.approvalRequests)) {
+    for (const [key, req] of Object.entries(
+      ar as Record<string, ApprovalRequestRecord>,
+    )) {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const { resumeToken, ...safeFields } = req;
       stripped.push({ nodeId: key, ...safeFields });
@@ -621,6 +633,19 @@ function stripResumeTokens(
     result.approvalRequests = stripped;
   }
   return result;
+}
+
+/**
+ * Normalise an execution record for the API surface: fold usage totals and
+ * strip resumeTokens (map → array without secrets). Applied on EVERY return
+ * path so AppSync never sees the raw DynamoDB shape.
+ */
+function toApiExecution(
+  item: ExecutionRecord | Record<string, unknown>,
+): Record<string, unknown> {
+  const rec = item as ExecutionRecord;
+  rec.usageTotals = computeExecutionUsageTotals(rec.nodeResults);
+  return stripResumeTokens(rec);
 }
 
 /**
@@ -698,8 +723,7 @@ async function pauseExecution(
   });
 
   const updated = result.Attributes as ExecutionRecord;
-  updated.usageTotals = computeExecutionUsageTotals(updated.nodeResults);
-  return stripResumeTokens(updated);
+  return toApiExecution(updated);
 }
 
 async function approveExecution(
@@ -793,8 +817,7 @@ async function approveExecution(
   });
 
   const updated = result.Attributes as ExecutionRecord;
-  updated.usageTotals = computeExecutionUsageTotals(updated.nodeResults);
-  return stripResumeTokens(updated);
+  return toApiExecution(updated);
 }
 
 async function denyExecution(
@@ -889,8 +912,7 @@ async function denyExecution(
   });
 
   const updated = result.Attributes as ExecutionRecord;
-  updated.usageTotals = computeExecutionUsageTotals(updated.nodeResults);
-  return stripResumeTokens(updated);
+  return toApiExecution(updated);
 }
 
 async function listAwaitingApprovals(
@@ -928,11 +950,9 @@ async function listAwaitingApprovals(
     }),
   );
 
-  const items = (result.Items || []).slice(0, scanLimit).map((item) => {
-    const exec = item as ExecutionRecord;
-    exec.usageTotals = computeExecutionUsageTotals(exec.nodeResults);
-    return stripResumeTokens(exec);
-  });
+  const items = (result.Items || [])
+    .slice(0, scanLimit)
+    .map((item) => toApiExecution(item as ExecutionRecord));
 
   return {
     items,

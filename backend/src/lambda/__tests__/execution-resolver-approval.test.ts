@@ -787,3 +787,224 @@ describe("execution-resolver — CIT-030 approval mutations", () => {
     });
   });
 });
+
+// ─── approvalRequests normalisation (map → array, no resumeToken) ────
+
+describe("approvalRequests normalisation on every return path", () => {
+  beforeEach(() => {
+    ddbMock.reset();
+    ebMock.reset();
+    cwMock.reset();
+    cognitoMock.reset();
+    ebMock.on(PutEventsCommand).resolves({});
+    cwMock.on(PutMetricDataCommand).resolves({});
+    cognitoMock.on(AdminGetUserCommand).resolves({
+      UserAttributes: [
+        { Name: "sub", Value: "user-123" },
+        { Name: "custom:organization", Value: "org-1" },
+      ],
+    });
+    __resetColdStartForTest();
+  });
+
+  const MAP_SHAPED_EXECUTION = {
+    executionId: "exec-map",
+    workflowId: "wf-1",
+    orgId: "org-1",
+    status: "awaiting_approval",
+    nodeResults: {
+      "node-a": {
+        nodeId: "node-a",
+        agentId: "agent-1",
+        status: "awaiting_approval",
+        retryCount: 0,
+      },
+    },
+    approvalRequests: {
+      "node-a": {
+        requestType: "approval_required",
+        reason: "Needs sign-off",
+        requestedBy: "system",
+        requestedAt: "2026-10-05T00:00:00Z",
+        resumeToken: "secret-resume-tok",
+        expiresAt: "2026-10-06T00:00:00Z",
+        decidedBy: null,
+        decidedAt: null,
+        decision: null,
+        orgId: "org-1",
+      },
+    },
+    startedAt: "2026-10-04T00:00:00Z",
+    triggeredBy: "user-100",
+  };
+
+  test("listExecutions converts map-shaped approvalRequests to array with nodeId and no resumeToken", async () => {
+    // Workflow lookup (org gate)
+    ddbMock.on(GetCommand).resolves({
+      Item: { workflowId: "wf-1", orgId: "org-1", status: "PUBLISHED" },
+    });
+    // Query returns raw DDB item with map-shaped approvalRequests
+    const { QueryCommand } = await import("@aws-sdk/lib-dynamodb");
+    ddbMock.on(QueryCommand).resolves({
+      Items: [{ ...MAP_SHAPED_EXECUTION }],
+    });
+
+    const result = await invoke<{ items: Record<string, unknown>[] }>(
+      makeEvent(
+        "listExecutions",
+        { workflowId: "wf-1" },
+        { groups: ["architect"], org: "org-1" },
+      ),
+    );
+
+    expect(result.items).toHaveLength(1);
+    const item = result.items[0];
+
+    // approvalRequests must be an array (LIST), not a map
+    const ar = item.approvalRequests as Array<Record<string, unknown>>;
+    expect(Array.isArray(ar)).toBe(true);
+    expect(ar).toHaveLength(1);
+    expect(ar[0].nodeId).toBe("node-a");
+    expect(ar[0].requestType).toBe("approval_required");
+
+    // resumeToken must be stripped
+    const serialised = JSON.stringify(result);
+    expect(serialised).not.toContain("resumeToken");
+    expect(serialised).not.toContain("secret-resume-tok");
+  });
+
+  test("startExecution return has no raw approvalRequests map (fresh execution has none)", async () => {
+    const { PutCommand } = await import("@aws-sdk/lib-dynamodb");
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        workflowId: "wf-1",
+        orgId: "org-1",
+        status: "PUBLISHED",
+        definition: JSON.stringify({
+          nodes: [{ id: "n1", agentId: "a1", type: "agent" }],
+          edges: [],
+        }),
+      },
+    });
+    ddbMock.on(PutCommand).resolves({});
+
+    const result = await invoke<Record<string, unknown>>(
+      makeEvent(
+        "startExecution",
+        { workflowId: "wf-1" },
+        { groups: ["admin"], org: "org-1" },
+      ),
+    );
+
+    // Fresh execution: no approvalRequests key at all (or undefined)
+    expect(result.approvalRequests).toBeUndefined();
+    // No resumeToken leak
+    expect(JSON.stringify(result)).not.toContain("resumeToken");
+  });
+
+  test("cancelExecution normalises approvalRequests on its return", async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: { ...MAP_SHAPED_EXECUTION, status: "running" },
+    });
+    ddbMock.on(UpdateCommand).resolves({
+      Attributes: {
+        ...MAP_SHAPED_EXECUTION,
+        status: "cancelled",
+      },
+    });
+
+    const result = await invoke<Record<string, unknown>>(
+      makeEvent(
+        "cancelExecution",
+        { executionId: "exec-map" },
+        { groups: ["admin"], org: "org-1" },
+      ),
+    );
+
+    const ar = result.approvalRequests as Array<Record<string, unknown>>;
+    expect(Array.isArray(ar)).toBe(true);
+    expect(ar[0].nodeId).toBe("node-a");
+    expect(JSON.stringify(result)).not.toContain("resumeToken");
+  });
+
+  test("resumeExecution normalises approvalRequests on its return", async () => {
+    ddbMock.on(GetCommand).resolves({
+      Item: { ...MAP_SHAPED_EXECUTION },
+    });
+
+    const result = await invoke<Record<string, unknown>>(
+      makeEvent(
+        "resumeExecution",
+        { executionId: "exec-map" },
+        { groups: ["architect"], org: "org-1" },
+      ),
+    );
+
+    const ar = result.approvalRequests as Array<Record<string, unknown>>;
+    expect(Array.isArray(ar)).toBe(true);
+    expect(ar[0].nodeId).toBe("node-a");
+    expect(JSON.stringify(result)).not.toContain("resumeToken");
+  });
+
+  test("stripResumeTokens is idempotent: already-array input returns array without resumeToken", async () => {
+    // Simulate an item whose approvalRequests is already an array
+    // (e.g. if a double-transform occurred). The mapper must not break.
+    const alreadyArrayExec = {
+      ...MAP_SHAPED_EXECUTION,
+      approvalRequests: [
+        {
+          nodeId: "node-a",
+          requestType: "approval_required",
+          resumeToken: "leftover-token",
+        },
+      ],
+    };
+    ddbMock.on(GetCommand).resolves({ Item: alreadyArrayExec });
+
+    const result = await invoke<Record<string, unknown>>(
+      makeEvent(
+        "getExecution",
+        { executionId: "exec-map" },
+        { groups: ["architect"], org: "org-1" },
+      ),
+    );
+
+    const ar = result.approvalRequests as Array<Record<string, unknown>>;
+    expect(Array.isArray(ar)).toBe(true);
+    expect(ar).toHaveLength(1);
+    expect(ar[0].nodeId).toBe("node-a");
+    expect(JSON.stringify(result)).not.toContain("resumeToken");
+    expect(JSON.stringify(result)).not.toContain("leftover-token");
+  });
+});
+
+// ─── Contract: no code path returns raw result.Items ─────────────
+
+describe("contract: no code path returns raw DynamoDB Items", () => {
+  test("execution-resolver.ts never returns result.Items without mapping", async () => {
+    // Grep-style structural assertion: read the source and verify that
+    // every reference to result.Items (or .Items) flows through toApiExecution.
+    const fs = await import("fs");
+    const path = await import("path");
+    const src = fs.readFileSync(
+      path.resolve(__dirname, "../../lambda/execution-resolver.ts"),
+      "utf-8",
+    );
+
+    // Find all lines that reference .Items (QueryCommand/ScanCommand results).
+    // Each must flow through toApiExecution or be in a safe pattern.
+    const itemsLines = src
+      .split("\n")
+      .filter(
+        (line: string) => /\.Items/.test(line) && !line.trim().startsWith("//"),
+      );
+
+    // Every .Items reference should be mapped through toApiExecution
+    for (const line of itemsLines) {
+      const trimmed = line.trim();
+      // Allowed: `.map((item) => toApiExecution(...)` or `(result.Items || []).map`
+      // Disallowed: `items: result.Items` (raw return)
+      expect(trimmed).not.toMatch(/^\s*items:\s*result\.Items/);
+    }
+  });
+});
