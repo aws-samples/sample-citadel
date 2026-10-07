@@ -3,6 +3,7 @@
  */
 
 export interface ApprovalRequest {
+  nodeId: string;
   requestType: string;
   reason?: string | null;
   requestedBy?: string | null;

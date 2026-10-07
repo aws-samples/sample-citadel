@@ -571,6 +571,24 @@ describe("execution-resolver — CIT-030 approval mutations", () => {
       expect(resultStr).not.toContain("resumeToken");
       expect(resultStr).not.toContain("secret-token-uuid");
     });
+
+    test("approvalRequests carry nodeId from the map key", async () => {
+      ddbMock.on(GetCommand).resolves({ Item: { ...EXECUTION_AWAITING } });
+
+      const result = await invoke<Record<string, unknown>>(
+        makeEvent(
+          "getExecution",
+          { executionId: "exec-1" },
+          { groups: ["architect"], org: "org-1" },
+        ),
+      );
+
+      const requests = result.approvalRequests as Array<
+        Record<string, unknown>
+      >;
+      expect(requests).toHaveLength(1);
+      expect(requests[0].nodeId).toBe("node-a");
+    });
   });
 
   // ─── Event bus/source/detail-type parity ───────────────────────

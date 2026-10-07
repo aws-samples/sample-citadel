@@ -9,6 +9,7 @@ import serverService from './server';
 
 const APPROVAL_REQUEST_FIELDS = `
   approvalRequests {
+    nodeId
     requestType
     reason
     requestedBy

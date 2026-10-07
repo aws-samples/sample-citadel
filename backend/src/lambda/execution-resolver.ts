@@ -613,10 +613,10 @@ function stripResumeTokens(
     typeof execution.approvalRequests === "object"
   ) {
     const stripped: Record<string, unknown>[] = [];
-    for (const [, req] of Object.entries(execution.approvalRequests)) {
+    for (const [key, req] of Object.entries(execution.approvalRequests)) {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const { resumeToken, ...safeFields } = req;
-      stripped.push(safeFields);
+      stripped.push({ nodeId: key, ...safeFields });
     }
     result.approvalRequests = stripped;
   }
