@@ -580,5 +580,56 @@ describe('GovernanceEscalations', () => {
 
       expect(screen.queryByTestId('awaiting-approval-section')).not.toBeInTheDocument();
     });
+
+    it('approve sends the pending approvalRequests[0].nodeId, not currentNode', async () => {
+      setOrg(true);
+      (governanceService.listGovernanceFindings as jest.Mock).mockResolvedValue(
+        makeFindingsConn([]),
+      );
+      (governanceService.getEscalationMetricSeries as jest.Mock).mockResolvedValue(
+        makeMetricSeries({ datapoints: [], total: 0 }),
+      );
+      (executionApiService.listAwaitingApprovals as jest.Mock).mockResolvedValue({
+        items: [
+          {
+            executionId: 'exec-node-test',
+            workflowId: 'wf-3',
+            orgId: 'org-1',
+            status: 'awaiting_approval',
+            startedAt: '2026-10-01T00:00:00Z',
+            triggeredBy: 'user-1',
+            currentNode: 'stale-node',
+            approvalRequests: [
+              {
+                nodeId: 'parked-node-42',
+                requestType: 'manual',
+                reason: 'Needs review',
+                decision: null,
+              },
+            ],
+          },
+        ],
+        nextToken: null,
+      });
+      (executionApiService.approveExecution as jest.Mock).mockResolvedValue({});
+
+      await act(async () => {
+        render(React.createElement(GovernanceEscalations));
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('approve-exec-exec-node-test')).toBeInTheDocument();
+      });
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('approve-exec-exec-node-test'));
+      });
+
+      // Must use the nodeId from the pending approvalRequest, NOT currentNode
+      expect(executionApiService.approveExecution).toHaveBeenCalledWith(
+        'exec-node-test',
+        'parked-node-42',
+      );
+    });
   });
 });
