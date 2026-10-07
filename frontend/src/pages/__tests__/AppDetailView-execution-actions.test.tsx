@@ -132,7 +132,7 @@ jest.mock('@/services/server', () => ({
 }));
 
 jest.mock('@/hooks/useExecutionSubscription', () => ({
-  useExecutionSubscription: () => ({ events: [] }),
+  useExecutionSubscription: jest.fn(() => ({ events: [] })),
 }));
 
 jest.mock('@/services/replayService', () => ({
@@ -142,7 +142,10 @@ jest.mock('@/services/replayService', () => ({
 import { appApiService } from '../../services/appApiService';
 import { workflowApiService } from '../../services/workflowApiService';
 import { executionApiService } from '../../services/executionApiService';
+import { useExecutionSubscription } from '../../hooks/useExecutionSubscription';
 import { AppDetailView } from '../AppDetailView';
+
+const mockUseExecutionSubscription = useExecutionSubscription as jest.Mock;
 
 // ---- Fixtures ----
 
@@ -337,5 +340,127 @@ describe('AppDetailView execution actions', () => {
     jest.advanceTimersByTime(6000);
     // No more polls — call count should not increase
     expect((executionApiService.listExecutions as jest.Mock).mock.calls.length).toBe(callsAfterSucceeded);
+  });
+
+  it('Executions-tab Pause opens ExecutionDecisionDialog and calls pauseExecution after reason', async () => {
+    (executionApiService.pauseExecution as jest.Mock).mockResolvedValue({});
+    setup([runningExecution]);
+    render(<AppDetailView {...defaultProps} />);
+    await goToExecutions();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('pause-execution-action')).toBeInTheDocument();
+    });
+
+    // Click Pause in the Executions-tab row
+    fireEvent.click(screen.getByTestId('pause-execution-action'));
+
+    // The ExecutionDecisionDialog should now be open (rendered via the alert-dialog mock)
+    await waitFor(() => {
+      expect(screen.getByTestId('execution-decision-reason')).toBeInTheDocument();
+    });
+    expect(screen.getByTestId('confirm-execution-decision')).toBeInTheDocument();
+
+    // The confirm button should be disabled until a 3+ char reason is entered
+    expect(screen.getByTestId('confirm-execution-decision')).toBeDisabled();
+
+    // Type a reason (3+ chars)
+    fireEvent.change(screen.getByTestId('execution-decision-reason'), {
+      target: { value: 'investigating latency spike' },
+    });
+
+    // Now confirm should be enabled
+    await waitFor(() => {
+      expect(screen.getByTestId('confirm-execution-decision')).not.toBeDisabled();
+    });
+
+    fireEvent.click(screen.getByTestId('confirm-execution-decision'));
+
+    await waitFor(() => {
+      expect(executionApiService.pauseExecution).toHaveBeenCalledWith(
+        'exec-run-1',
+        'investigating latency spike',
+        'node-a',
+      );
+    });
+  });
+
+  it('Workflows-tab active-run Pause opens ExecutionDecisionDialog and calls pauseExecution after reason', async () => {
+    // Start a workflow run so the active run card appears.
+    (executionApiService.startExecution as jest.Mock).mockResolvedValue({
+      executionId: 'exec-run-new',
+    });
+    (executionApiService.pauseExecution as jest.Mock).mockResolvedValue({});
+
+    // Provide subscription events so runStatus becomes 'running' (not 'pending')
+    mockUseExecutionSubscription.mockReturnValue({
+      events: [{ executionId: 'exec-run-new', eventType: 'node.started' }],
+    });
+
+    // The running execution with currentNode
+    const runExec = {
+      ...runningExecution,
+      executionId: 'exec-run-new',
+    };
+    setup([runExec]);
+
+    render(<AppDetailView {...defaultProps} />);
+
+    // Wait for load
+    await waitFor(() => expect(screen.getByText('Test App')).toBeInTheDocument());
+
+    // Switch to workflows tab
+    fireEvent.click(screen.getByText('Workflows'));
+
+    // Run the workflow so it becomes the activeRun
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Run Wf/i })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Run Wf/i }));
+
+    await waitFor(() => {
+      expect(executionApiService.startExecution).toHaveBeenCalledWith('wf-1');
+    });
+
+    // The optimistic prepend creates a stripped execution without currentNode.
+    // Advance the polling interval so loadExecutions fires and replaces it
+    // with the full object from the mock (which has currentNode: 'node-a').
+    jest.advanceTimersByTime(3000);
+    await waitFor(() => {
+      // Wait for the polling to have called listExecutions again
+      expect((executionApiService.listExecutions as jest.Mock).mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
+
+    // The Pause button should appear on the workflow card for the active run
+    await waitFor(() => {
+      expect(screen.getByTestId('pause-active-run')).toBeInTheDocument();
+    });
+
+    // Click Pause on the workflow card
+    fireEvent.click(screen.getByTestId('pause-active-run'));
+
+    // ExecutionDecisionDialog opens
+    await waitFor(() => {
+      expect(screen.getByTestId('execution-decision-reason')).toBeInTheDocument();
+    });
+
+    // Type reason and confirm
+    fireEvent.change(screen.getByTestId('execution-decision-reason'), {
+      target: { value: 'need to check costs' },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('confirm-execution-decision')).not.toBeDisabled();
+    });
+
+    fireEvent.click(screen.getByTestId('confirm-execution-decision'));
+
+    await waitFor(() => {
+      expect(executionApiService.pauseExecution).toHaveBeenCalledWith(
+        'exec-run-new',
+        'need to check costs',
+        'node-a',
+      );
+    });
   });
 });

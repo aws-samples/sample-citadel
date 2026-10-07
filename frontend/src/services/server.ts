@@ -156,6 +156,16 @@ class ServerService {
 
       const errors = response?.errors;
       if (errors?.length) {
+        // If the response also carries data, log the errors but return the
+        // data — partial errors are common in GraphQL (e.g. a nullable field
+        // resolver fails while the rest of the query succeeds).
+        if (response.data != null) {
+          console.warn(
+            'GraphQL query returned partial errors:',
+            errors.map((e: any) => e.message).join(', '),
+          );
+          return response.data as T;
+        }
         throw new Error(
           errors.map((e: any) => e.message).join(", ")
         );
@@ -164,6 +174,15 @@ class ServerService {
       return response.data as T;
     } catch (error: any) {
       console.error("GraphQL query failed:", error);
+      // Amplify may throw an object with both data and errors; tolerate
+      // partial results the same way as the happy-path branch above.
+      if (error?.data != null && error?.errors?.length) {
+        console.warn(
+          'GraphQL query threw with partial errors:',
+          error.errors.map((e: any) => e.message).join(', '),
+        );
+        return error.data as T;
+      }
       if (error?.errors?.length) {
         throw new Error(error.errors.map((e: any) => e.message).join(", "));
       }

@@ -635,9 +635,9 @@ export function GovernanceEscalations() {
 
   const handleApproveExecution = async (exec: Execution) => {
     const pending = exec.approvalRequests?.find((r) => !r.decision);
-    const nodeId = exec.currentNode ?? '';
+    const nodeId = pending?.nodeId || exec.currentNode || '';
     try {
-      await executionApiService.approveExecution(exec.executionId, pending ? nodeId : nodeId);
+      await executionApiService.approveExecution(exec.executionId, nodeId);
       toast.success('Execution approved');
       fetchAwaiting();
     } catch (err: any) {
@@ -907,13 +907,14 @@ export function GovernanceEscalations() {
                             <Button
                               size="sm"
                               variant="destructive"
-                              onClick={() =>
+                              onClick={() => {
+                                const pendingReq = exec.approvalRequests?.find((r: ApprovalRequest) => !r.decision);
                                 setDecisionDialog({
                                   kind: 'deny',
                                   executionId: exec.executionId,
-                                  nodeId: exec.currentNode ?? '',
-                                })
-                              }
+                                  nodeId: pendingReq?.nodeId || exec.currentNode || '',
+                                });
+                              }}
                               data-testid={`deny-exec-${exec.executionId}`}
                             >
                               Deny
