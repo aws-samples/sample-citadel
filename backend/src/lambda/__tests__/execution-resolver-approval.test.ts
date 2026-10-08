@@ -997,9 +997,17 @@ describe("single-writer contract: approve/deny never write decision to DDB", () 
     expect(detail.approval_decision.reason).toBe("risky");
   });
 
-  test("already-decided request returns error", async () => {
+  test("already-decided request returns error when node is no longer awaiting", async () => {
     const alreadyDecided = {
       ...EXECUTION_AWAITING,
+      nodeResults: {
+        "node-a": {
+          nodeId: "node-a",
+          agentId: "agent-1",
+          status: "pending",
+          retryCount: 0,
+        },
+      },
       approvalRequests: {
         "node-a": {
           ...EXECUTION_AWAITING.approvalRequests["node-a"],
@@ -1019,7 +1027,7 @@ describe("single-writer contract: approve/deny never write decision to DDB", () 
           { groups: ["architect"], org: "org-1" },
         ),
       ),
-    ).rejects.toThrow("already decided");
+    ).rejects.toThrow("already approved");
   });
 
   test("approveExecution writes audit record", async () => {
@@ -1069,5 +1077,277 @@ describe("single-writer contract: approve/deny never write decision to DDB", () 
     const ar = result.approvalRequests as Array<Record<string, unknown>>;
     expect(Array.isArray(ar)).toBe(true);
     expect(ar[0].decision).toBeNull();
+  });
+});
+
+// ─── Pre-check fix: re-emit for parked nodes with pre-stamped decision ───
+
+describe("approve/deny pre-check — stamped decision + node status", () => {
+  beforeEach(() => {
+    ddbMock.reset();
+    ebMock.reset();
+    cwMock.reset();
+    cognitoMock.reset();
+    ebMock.on(PutEventsCommand).resolves({});
+    cwMock.on(PutMetricDataCommand).resolves({});
+    cognitoMock.on(AdminGetUserCommand).resolves({
+      UserAttributes: [
+        { Name: "sub", Value: "user-123" },
+        { Name: "custom:organization", Value: "org-1" },
+      ],
+    });
+    __resetColdStartForTest();
+  });
+
+  // --- approveExecution ---
+
+  test("approve: stamped 'approved' + node still awaiting_approval → event emitted (idempotent)", async () => {
+    const exec = {
+      ...EXECUTION_AWAITING,
+      approvalRequests: {
+        "node-a": {
+          ...EXECUTION_AWAITING.approvalRequests["node-a"],
+          decision: "approved",
+        },
+      },
+    };
+    ddbMock.on(GetCommand).resolves({ Item: exec });
+
+    const result = await invoke<Record<string, unknown>>(
+      makeEvent(
+        "approveExecution",
+        { executionId: "exec-1", nodeId: "node-a" },
+        { groups: ["architect"], org: "org-1" },
+      ),
+    );
+
+    expect(result.executionId).toBe("exec-1");
+
+    const ebCalls = ebMock.commandCalls(PutEventsCommand);
+    const entries = ebCalls.flatMap((c) => c.args[0].input.Entries ?? []);
+    const resumeEvent = entries.find(
+      (e) => e.DetailType === "execution.resume.requested",
+    );
+    expect(resumeEvent).toBeDefined();
+
+    const detail = JSON.parse(resumeEvent!.Detail!);
+    expect(detail.approval_decision.decision).toBe("approved");
+    expect(detail.approval_decision.node_id).toBe("node-a");
+  });
+
+  test("approve: stamped 'denied' (opposite) + node still awaiting → error", async () => {
+    const exec = {
+      ...EXECUTION_AWAITING,
+      approvalRequests: {
+        "node-a": {
+          ...EXECUTION_AWAITING.approvalRequests["node-a"],
+          decision: "denied",
+        },
+      },
+    };
+    ddbMock.on(GetCommand).resolves({ Item: exec });
+
+    await expect(
+      invoke(
+        makeEvent(
+          "approveExecution",
+          { executionId: "exec-1", nodeId: "node-a" },
+          { groups: ["architect"], org: "org-1" },
+        ),
+      ),
+    ).rejects.toThrow("already denied");
+  });
+
+  test("approve: node already pending (not awaiting_approval) → error", async () => {
+    const exec = {
+      ...EXECUTION_AWAITING,
+      nodeResults: {
+        "node-a": {
+          nodeId: "node-a",
+          agentId: "agent-1",
+          status: "pending",
+          retryCount: 0,
+        },
+      },
+      approvalRequests: {
+        "node-a": {
+          ...EXECUTION_AWAITING.approvalRequests["node-a"],
+          decision: "approved",
+        },
+      },
+    };
+    ddbMock.on(GetCommand).resolves({ Item: exec });
+
+    await expect(
+      invoke(
+        makeEvent(
+          "approveExecution",
+          { executionId: "exec-1", nodeId: "node-a" },
+          { groups: ["architect"], org: "org-1" },
+        ),
+      ),
+    ).rejects.toThrow("already approved");
+  });
+
+  test("approve: node already completed → error", async () => {
+    const exec = {
+      ...EXECUTION_AWAITING,
+      nodeResults: {
+        "node-a": {
+          nodeId: "node-a",
+          agentId: "agent-1",
+          status: "completed",
+          retryCount: 0,
+        },
+      },
+      approvalRequests: {
+        "node-a": {
+          ...EXECUTION_AWAITING.approvalRequests["node-a"],
+          decision: "approved",
+        },
+      },
+    };
+    ddbMock.on(GetCommand).resolves({ Item: exec });
+
+    await expect(
+      invoke(
+        makeEvent(
+          "approveExecution",
+          { executionId: "exec-1", nodeId: "node-a" },
+          { groups: ["architect"], org: "org-1" },
+        ),
+      ),
+    ).rejects.toThrow("already approved");
+  });
+
+  test("approve: clean (no stamped decision) + awaiting → event emitted", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { ...EXECUTION_AWAITING } });
+
+    const result = await invoke<Record<string, unknown>>(
+      makeEvent(
+        "approveExecution",
+        { executionId: "exec-1", nodeId: "node-a" },
+        { groups: ["architect"], org: "org-1" },
+      ),
+    );
+
+    expect(result.executionId).toBe("exec-1");
+
+    const ebCalls = ebMock.commandCalls(PutEventsCommand);
+    const entries = ebCalls.flatMap((c) => c.args[0].input.Entries ?? []);
+    const resumeEvent = entries.find(
+      (e) => e.DetailType === "execution.resume.requested",
+    );
+    expect(resumeEvent).toBeDefined();
+  });
+
+  // --- denyExecution ---
+
+  test("deny: stamped 'denied' + node still awaiting_approval → event emitted (idempotent)", async () => {
+    const exec = {
+      ...EXECUTION_AWAITING,
+      approvalRequests: {
+        "node-a": {
+          ...EXECUTION_AWAITING.approvalRequests["node-a"],
+          decision: "denied",
+        },
+      },
+    };
+    ddbMock.on(GetCommand).resolves({ Item: exec });
+
+    const result = await invoke<Record<string, unknown>>(
+      makeEvent(
+        "denyExecution",
+        { executionId: "exec-1", nodeId: "node-a", reason: "risky" },
+        { groups: ["architect"], org: "org-1" },
+      ),
+    );
+
+    expect(result.executionId).toBe("exec-1");
+
+    const ebCalls = ebMock.commandCalls(PutEventsCommand);
+    const entries = ebCalls.flatMap((c) => c.args[0].input.Entries ?? []);
+    const resumeEvent = entries.find(
+      (e) => e.DetailType === "execution.resume.requested",
+    );
+    expect(resumeEvent).toBeDefined();
+
+    const detail = JSON.parse(resumeEvent!.Detail!);
+    expect(detail.approval_decision.decision).toBe("denied");
+  });
+
+  test("deny: stamped 'approved' (opposite) + node still awaiting → error", async () => {
+    const exec = {
+      ...EXECUTION_AWAITING,
+      approvalRequests: {
+        "node-a": {
+          ...EXECUTION_AWAITING.approvalRequests["node-a"],
+          decision: "approved",
+        },
+      },
+    };
+    ddbMock.on(GetCommand).resolves({ Item: exec });
+
+    await expect(
+      invoke(
+        makeEvent(
+          "denyExecution",
+          { executionId: "exec-1", nodeId: "node-a", reason: "risky" },
+          { groups: ["architect"], org: "org-1" },
+        ),
+      ),
+    ).rejects.toThrow("already approved");
+  });
+
+  test("deny: node already pending (not awaiting_approval) → error", async () => {
+    const exec = {
+      ...EXECUTION_AWAITING,
+      nodeResults: {
+        "node-a": {
+          nodeId: "node-a",
+          agentId: "agent-1",
+          status: "pending",
+          retryCount: 0,
+        },
+      },
+      approvalRequests: {
+        "node-a": {
+          ...EXECUTION_AWAITING.approvalRequests["node-a"],
+          decision: "denied",
+        },
+      },
+    };
+    ddbMock.on(GetCommand).resolves({ Item: exec });
+
+    await expect(
+      invoke(
+        makeEvent(
+          "denyExecution",
+          { executionId: "exec-1", nodeId: "node-a", reason: "risky" },
+          { groups: ["architect"], org: "org-1" },
+        ),
+      ),
+    ).rejects.toThrow("already denied");
+  });
+
+  test("deny: clean (no stamped decision) + awaiting → event emitted", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { ...EXECUTION_AWAITING } });
+
+    const result = await invoke<Record<string, unknown>>(
+      makeEvent(
+        "denyExecution",
+        { executionId: "exec-1", nodeId: "node-a", reason: "no" },
+        { groups: ["architect"], org: "org-1" },
+      ),
+    );
+
+    expect(result.executionId).toBe("exec-1");
+
+    const ebCalls = ebMock.commandCalls(PutEventsCommand);
+    const entries = ebCalls.flatMap((c) => c.args[0].input.Entries ?? []);
+    const resumeEvent = entries.find(
+      (e) => e.DetailType === "execution.resume.requested",
+    );
+    expect(resumeEvent).toBeDefined();
   });
 });
