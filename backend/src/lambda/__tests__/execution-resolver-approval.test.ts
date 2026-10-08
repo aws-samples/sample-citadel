@@ -192,19 +192,6 @@ describe("execution-resolver — CIT-030 approval mutations", () => {
 
     test("architect can approve", async () => {
       ddbMock.on(GetCommand).resolves({ Item: { ...EXECUTION_AWAITING } });
-      ddbMock.on(UpdateCommand).resolves({
-        Attributes: {
-          ...EXECUTION_AWAITING,
-          approvalRequests: {
-            "node-a": {
-              ...EXECUTION_AWAITING.approvalRequests["node-a"],
-              decision: "approved",
-              decidedBy: "user-123",
-              decidedAt: "2026-10-05T01:00:00Z",
-            },
-          },
-        },
-      });
 
       const result = await invoke<Record<string, unknown>>(
         makeEvent(
@@ -219,19 +206,6 @@ describe("execution-resolver — CIT-030 approval mutations", () => {
 
     test("admin can approve", async () => {
       ddbMock.on(GetCommand).resolves({ Item: { ...EXECUTION_AWAITING } });
-      ddbMock.on(UpdateCommand).resolves({
-        Attributes: {
-          ...EXECUTION_AWAITING,
-          approvalRequests: {
-            "node-a": {
-              ...EXECUTION_AWAITING.approvalRequests["node-a"],
-              decision: "approved",
-              decidedBy: "admin-1",
-              decidedAt: "2026-10-05T01:00:00Z",
-            },
-          },
-        },
-      });
 
       const result = await invoke<Record<string, unknown>>(
         makeEvent(
@@ -279,18 +253,6 @@ describe("execution-resolver — CIT-030 approval mutations", () => {
   describe("approveExecution", () => {
     test("emits decision payload with stored resume token", async () => {
       ddbMock.on(GetCommand).resolves({ Item: { ...EXECUTION_AWAITING } });
-      ddbMock.on(UpdateCommand).resolves({
-        Attributes: {
-          ...EXECUTION_AWAITING,
-          approvalRequests: {
-            "node-a": {
-              ...EXECUTION_AWAITING.approvalRequests["node-a"],
-              decision: "approved",
-              decidedBy: "user-123",
-            },
-          },
-        },
-      });
 
       await invoke(
         makeEvent(
@@ -320,9 +282,6 @@ describe("execution-resolver — CIT-030 approval mutations", () => {
 
     test("resume token is absent from the response", async () => {
       ddbMock.on(GetCommand).resolves({ Item: { ...EXECUTION_AWAITING } });
-      ddbMock.on(UpdateCommand).resolves({
-        Attributes: { ...EXECUTION_AWAITING },
-      });
 
       const result = await invoke<Record<string, unknown>>(
         makeEvent(
@@ -358,18 +317,6 @@ describe("execution-resolver — CIT-030 approval mutations", () => {
   describe("denyExecution", () => {
     test("emits denied decision payload with stored resume token and reason", async () => {
       ddbMock.on(GetCommand).resolves({ Item: { ...EXECUTION_AWAITING } });
-      ddbMock.on(UpdateCommand).resolves({
-        Attributes: {
-          ...EXECUTION_AWAITING,
-          approvalRequests: {
-            "node-a": {
-              ...EXECUTION_AWAITING.approvalRequests["node-a"],
-              decision: "denied",
-              decidedBy: "user-123",
-            },
-          },
-        },
-      });
 
       await invoke(
         makeEvent(
@@ -398,9 +345,6 @@ describe("execution-resolver — CIT-030 approval mutations", () => {
 
     test("token absent from deny response", async () => {
       ddbMock.on(GetCommand).resolves({ Item: { ...EXECUTION_AWAITING } });
-      ddbMock.on(UpdateCommand).resolves({
-        Attributes: { ...EXECUTION_AWAITING },
-      });
 
       const result = await invoke<Record<string, unknown>>(
         makeEvent(
@@ -628,18 +572,6 @@ describe("execution-resolver — CIT-030 approval mutations", () => {
 
     test("approveExecution emits on EVENT_BUS_NAME with Source citadel.workflows", async () => {
       ddbMock.on(GetCommand).resolves({ Item: { ...EXECUTION_AWAITING } });
-      ddbMock.on(UpdateCommand).resolves({
-        Attributes: {
-          ...EXECUTION_AWAITING,
-          approvalRequests: {
-            "node-a": {
-              ...EXECUTION_AWAITING.approvalRequests["node-a"],
-              decision: "approved",
-              decidedBy: "user-123",
-            },
-          },
-        },
-      });
 
       await invoke(
         makeEvent(
@@ -661,18 +593,6 @@ describe("execution-resolver — CIT-030 approval mutations", () => {
 
     test("denyExecution emits on EVENT_BUS_NAME with Source citadel.workflows", async () => {
       ddbMock.on(GetCommand).resolves({ Item: { ...EXECUTION_AWAITING } });
-      ddbMock.on(UpdateCommand).resolves({
-        Attributes: {
-          ...EXECUTION_AWAITING,
-          approvalRequests: {
-            "node-a": {
-              ...EXECUTION_AWAITING.approvalRequests["node-a"],
-              decision: "denied",
-              decidedBy: "user-123",
-            },
-          },
-        },
-      });
 
       await invoke(
         makeEvent(
@@ -726,18 +646,6 @@ describe("execution-resolver — CIT-030 approval mutations", () => {
 
     test("approveExecution throws when PutEvents has FailedEntryCount", async () => {
       ddbMock.on(GetCommand).resolves({ Item: { ...EXECUTION_AWAITING } });
-      ddbMock.on(UpdateCommand).resolves({
-        Attributes: {
-          ...EXECUTION_AWAITING,
-          approvalRequests: {
-            "node-a": {
-              ...EXECUTION_AWAITING.approvalRequests["node-a"],
-              decision: "approved",
-              decidedBy: "user-123",
-            },
-          },
-        },
-      });
       ebMock.on(PutEventsCommand).resolves({
         FailedEntryCount: 1,
         Entries: [
@@ -758,18 +666,6 @@ describe("execution-resolver — CIT-030 approval mutations", () => {
 
     test("denyExecution throws when PutEvents has FailedEntryCount", async () => {
       ddbMock.on(GetCommand).resolves({ Item: { ...EXECUTION_AWAITING } });
-      ddbMock.on(UpdateCommand).resolves({
-        Attributes: {
-          ...EXECUTION_AWAITING,
-          approvalRequests: {
-            "node-a": {
-              ...EXECUTION_AWAITING.approvalRequests["node-a"],
-              decision: "denied",
-              decidedBy: "user-123",
-            },
-          },
-        },
-      });
       ebMock.on(PutEventsCommand).resolves({
         FailedEntryCount: 1,
         Entries: [{ ErrorCode: "InternalFailure", ErrorMessage: "bus error" }],
@@ -1006,5 +902,172 @@ describe("contract: no code path returns raw DynamoDB Items", () => {
       // Disallowed: `items: result.Items` (raw return)
       expect(trimmed).not.toMatch(/^\s*items:\s*result\.Items/);
     }
+  });
+});
+
+// ─── Single-writer contract: API delegates decision write to step runner ───
+
+describe("single-writer contract: approve/deny never write decision to DDB", () => {
+  beforeEach(() => {
+    ddbMock.reset();
+    ebMock.reset();
+    cwMock.reset();
+    cognitoMock.reset();
+    ebMock.on(PutEventsCommand).resolves({});
+    cwMock.on(PutMetricDataCommand).resolves({});
+    cognitoMock.on(AdminGetUserCommand).resolves({
+      UserAttributes: [
+        { Name: "sub", Value: "user-123" },
+        { Name: "custom:organization", Value: "org-1" },
+      ],
+    });
+    __resetColdStartForTest();
+  });
+
+  test("approveExecution issues no UpdateCommand on approvalRequests", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { ...EXECUTION_AWAITING } });
+
+    await invoke(
+      makeEvent(
+        "approveExecution",
+        { executionId: "exec-1", nodeId: "node-a" },
+        { groups: ["architect"], org: "org-1" },
+      ),
+    );
+
+    const updateCalls = ddbMock.commandCalls(UpdateCommand);
+    expect(updateCalls).toHaveLength(0);
+  });
+
+  test("denyExecution issues no UpdateCommand on approvalRequests", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { ...EXECUTION_AWAITING } });
+
+    await invoke(
+      makeEvent(
+        "denyExecution",
+        { executionId: "exec-1", nodeId: "node-a", reason: "no" },
+        { groups: ["architect"], org: "org-1" },
+      ),
+    );
+
+    const updateCalls = ddbMock.commandCalls(UpdateCommand);
+    expect(updateCalls).toHaveLength(0);
+  });
+
+  test("approveExecution emits execution.resume.requested event", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { ...EXECUTION_AWAITING } });
+
+    await invoke(
+      makeEvent(
+        "approveExecution",
+        { executionId: "exec-1", nodeId: "node-a" },
+        { groups: ["architect"], org: "org-1" },
+      ),
+    );
+
+    const ebCalls = ebMock.commandCalls(PutEventsCommand);
+    const entries = ebCalls.flatMap((c) => c.args[0].input.Entries ?? []);
+    const resumeEvent = entries.find(
+      (e) => e.DetailType === "execution.resume.requested",
+    );
+    expect(resumeEvent).toBeDefined();
+    const detail = JSON.parse(resumeEvent!.Detail!);
+    expect(detail.approval_decision.decision).toBe("approved");
+  });
+
+  test("denyExecution emits execution.resume.requested event", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { ...EXECUTION_AWAITING } });
+
+    await invoke(
+      makeEvent(
+        "denyExecution",
+        { executionId: "exec-1", nodeId: "node-a", reason: "risky" },
+        { groups: ["architect"], org: "org-1" },
+      ),
+    );
+
+    const ebCalls = ebMock.commandCalls(PutEventsCommand);
+    const entries = ebCalls.flatMap((c) => c.args[0].input.Entries ?? []);
+    const resumeEvent = entries.find(
+      (e) => e.DetailType === "execution.resume.requested",
+    );
+    expect(resumeEvent).toBeDefined();
+    const detail = JSON.parse(resumeEvent!.Detail!);
+    expect(detail.approval_decision.decision).toBe("denied");
+    expect(detail.approval_decision.reason).toBe("risky");
+  });
+
+  test("already-decided request returns error", async () => {
+    const alreadyDecided = {
+      ...EXECUTION_AWAITING,
+      approvalRequests: {
+        "node-a": {
+          ...EXECUTION_AWAITING.approvalRequests["node-a"],
+          decision: "approved",
+          decidedBy: "other-user",
+          decidedAt: "2026-10-05T01:00:00Z",
+        },
+      },
+    };
+    ddbMock.on(GetCommand).resolves({ Item: alreadyDecided });
+
+    await expect(
+      invoke(
+        makeEvent(
+          "approveExecution",
+          { executionId: "exec-1", nodeId: "node-a" },
+          { groups: ["architect"], org: "org-1" },
+        ),
+      ),
+    ).rejects.toThrow("already decided");
+  });
+
+  test("approveExecution writes audit record", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { ...EXECUTION_AWAITING } });
+
+    const logSpy = jest.spyOn(console, "log").mockImplementation(() => {});
+
+    await invoke(
+      makeEvent(
+        "approveExecution",
+        { executionId: "exec-1", nodeId: "node-a" },
+        { groups: ["architect"], org: "org-1" },
+      ),
+    );
+
+    const auditCalls = logSpy.mock.calls.filter((call) => {
+      try {
+        const parsed = JSON.parse(call[0] as string);
+        return parsed.auditType === "approval_decision";
+      } catch {
+        return false;
+      }
+    });
+
+    expect(auditCalls.length).toBeGreaterThanOrEqual(1);
+    const auditRecord = JSON.parse(auditCalls[0][0] as string);
+    expect(auditRecord.decision).toBe("approved");
+    expect(auditRecord.decidedBy).toBe("user-123");
+    expect(auditRecord.executionId).toBe("exec-1");
+    expect(auditRecord.nodeId).toBe("node-a");
+
+    logSpy.mockRestore();
+  });
+
+  test("returned execution has request still undecided", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: { ...EXECUTION_AWAITING } });
+
+    const result = await invoke<Record<string, unknown>>(
+      makeEvent(
+        "approveExecution",
+        { executionId: "exec-1", nodeId: "node-a" },
+        { groups: ["architect"], org: "org-1" },
+      ),
+    );
+
+    // approvalRequests should still show decision: null (undecided)
+    const ar = result.approvalRequests as Array<Record<string, unknown>>;
+    expect(Array.isArray(ar)).toBe(true);
+    expect(ar[0].decision).toBeNull();
   });
 });
