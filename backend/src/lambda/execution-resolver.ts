@@ -760,7 +760,7 @@ async function approveExecution(
 
   const callerOrgId = await extractOrgFromEvent(event);
 
-  // RC-3: Structured audit log BEFORE conditional write
+  // RC-3: Structured audit log
   auditApprovalDecision({
     executionId,
     nodeId,
@@ -769,39 +769,8 @@ async function approveExecution(
     orgId: callerOrgId || existing.orgId,
   });
 
-  const now = new Date().toISOString();
-  // Conditional write: idempotent (RC-2 fence on resumeToken + null decision).
-  const result = await docClient.send(
-    new UpdateCommand({
-      TableName: EXECUTIONS_TABLE,
-      Key: { executionId },
-      UpdateExpression:
-        "SET approvalRequests.#nid.#decision = :decision, " +
-        "approvalRequests.#nid.#decidedBy = :userId, " +
-        "approvalRequests.#nid.#decidedAt = :now",
-      ConditionExpression:
-        "approvalRequests.#nid.#resumeToken = :token " +
-        "AND (attribute_not_exists(approvalRequests.#nid.#decision) " +
-        "OR approvalRequests.#nid.#decision = :null)",
-      ExpressionAttributeNames: {
-        "#nid": nodeId,
-        "#decision": "decision",
-        "#decidedBy": "decidedBy",
-        "#decidedAt": "decidedAt",
-        "#resumeToken": "resumeToken",
-      },
-      ExpressionAttributeValues: {
-        ":decision": "approved",
-        ":userId": userId,
-        ":now": now,
-        ":token": resumeToken,
-        ":null": null,
-      },
-      ReturnValues: "ALL_NEW",
-    }),
-  );
-
-  // Emit execution.resume.requested with approval_decision payload (§3 contract)
+  // Decision write is delegated to the step runner so the resume fence can
+  // succeed — the API only validates, audits, and emits the event.
   await emitEvent("execution.resume.requested", {
     executionId,
     workflowId: existing.workflowId,
@@ -816,8 +785,9 @@ async function approveExecution(
     },
   });
 
-  const updated = result.Attributes as ExecutionRecord;
-  return toApiExecution(updated);
+  // Return the execution with the request still undecided; the UI shows
+  // "decision submitted" via the approval_decision event payload.
+  return toApiExecution(existing);
 }
 
 async function denyExecution(
@@ -855,7 +825,7 @@ async function denyExecution(
 
   const callerOrgId = await extractOrgFromEvent(event);
 
-  // RC-3: Structured audit log BEFORE conditional write
+  // RC-3: Structured audit log
   auditApprovalDecision({
     executionId,
     nodeId,
@@ -864,38 +834,8 @@ async function denyExecution(
     orgId: callerOrgId || existing.orgId,
   });
 
-  const now = new Date().toISOString();
-  const result = await docClient.send(
-    new UpdateCommand({
-      TableName: EXECUTIONS_TABLE,
-      Key: { executionId },
-      UpdateExpression:
-        "SET approvalRequests.#nid.#decision = :decision, " +
-        "approvalRequests.#nid.#decidedBy = :userId, " +
-        "approvalRequests.#nid.#decidedAt = :now",
-      ConditionExpression:
-        "approvalRequests.#nid.#resumeToken = :token " +
-        "AND (attribute_not_exists(approvalRequests.#nid.#decision) " +
-        "OR approvalRequests.#nid.#decision = :null)",
-      ExpressionAttributeNames: {
-        "#nid": nodeId,
-        "#decision": "decision",
-        "#decidedBy": "decidedBy",
-        "#decidedAt": "decidedAt",
-        "#resumeToken": "resumeToken",
-      },
-      ExpressionAttributeValues: {
-        ":decision": "denied",
-        ":userId": userId,
-        ":now": now,
-        ":token": resumeToken,
-        ":null": null,
-      },
-      ReturnValues: "ALL_NEW",
-    }),
-  );
-
-  // Emit execution.resume.requested with denial payload
+  // Decision write is delegated to the step runner so the resume fence can
+  // succeed — the API only validates, audits, and emits the event.
   await emitEvent("execution.resume.requested", {
     executionId,
     workflowId: existing.workflowId,
@@ -911,8 +851,9 @@ async function denyExecution(
     },
   });
 
-  const updated = result.Attributes as ExecutionRecord;
-  return toApiExecution(updated);
+  // Return the execution with the request still undecided; the UI shows
+  // "decision submitted" via the approval_decision event payload.
+  return toApiExecution(existing);
 }
 
 async function listAwaitingApprovals(

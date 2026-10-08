@@ -1604,15 +1604,19 @@ def approve_execution(
 
     Fenced conditional write: the node must be ``awaiting_approval`` AND the
     approval-request's ``resumeToken`` must match AND ``orgId`` must match AND
-    ``decision`` must be ``None`` (undecided).  On success the node flips to
-    ``pending``, the request is stamped decided, the execution status returns
-    to ``running``, and ``schedule_frontier`` re-derives the frontier.
+    the decision must be either absent/null (undecided) OR already stamped
+    ``approved`` (pre-stamped by the API — the engine is the authoritative
+    single-writer that flips the node).
 
-    Idempotent: a second call with the same token is a no-op
-    (``ConditionalCheckFailedException`` → already decided).
+    When the record was pre-stamped with the OPPOSITE decision (``denied``),
+    the condition fails and the call is a conflict no-op — the engine does
+    NOT override a prior denial.
+
+    Idempotent: a second call after the node has already left
+    ``awaiting_approval`` (i.e. the node was already resumed) is a no-op.
 
     Returns ``True`` if this call performed the approval, ``False`` if it was
-    a no-op (already decided or mismatched token/org).
+    a no-op (already resumed, mismatched token/org, or conflicting decision).
     """
     now = _now_iso()
     try:
@@ -1629,7 +1633,9 @@ def approve_execution(
                 'nodeResults.#nid.#status = :awaiting '
                 'AND approvalRequests.#nid.#resumeToken = :token '
                 'AND approvalRequests.#nid.#orgId = :org '
-                'AND approvalRequests.#nid.#decision = :undecided'
+                'AND (attribute_not_exists(approvalRequests.#nid.#decision) '
+                'OR approvalRequests.#nid.#decision = :undecided '
+                'OR approvalRequests.#nid.#decision = :decision)'
             ),
             ExpressionAttributeNames={
                 '#nid': node_id,
@@ -1654,6 +1660,22 @@ def approve_execution(
         )
     except ClientError as exc:
         if exc.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            # Distinguish a conflicting pre-stamped decision from a benign
+            # no-op (already resumed, wrong token, etc.) by peeking at the
+            # current state. Best-effort: a read failure degrades to the
+            # generic noop log.
+            try:
+                cur = _load_execution(execution_id)
+                cur_decision = (cur.get('approvalRequests') or {}).get(node_id, {}).get('decision')
+                if cur_decision is not None and cur_decision != 'approved':
+                    _log_event(
+                        'approve_execution_conflict',
+                        executionId=execution_id, nodeId=node_id,
+                        existingDecision=cur_decision,
+                    )
+                    return False
+            except Exception:  # noqa: BLE001
+                pass
             _log_event(
                 'approve_execution_noop',
                 executionId=execution_id, nodeId=node_id,
@@ -1706,7 +1728,12 @@ def deny_execution(
     ``handle_node_failure`` (which handles retry policy / execution-level
     failure), and an ``execution.approval_denied`` event is emitted.
 
-    Idempotent: a second call with the same token is a no-op.
+    When the record was pre-stamped with the OPPOSITE decision (``approved``),
+    the condition fails and the call is a conflict no-op — the engine does
+    NOT override a prior approval.
+
+    Idempotent: a second call after the node has already left
+    ``awaiting_approval`` is a no-op.
 
     Returns ``True`` if this call performed the denial, ``False`` on no-op.
     """
@@ -1723,7 +1750,9 @@ def deny_execution(
                 'nodeResults.#nid.#status = :awaiting '
                 'AND approvalRequests.#nid.#resumeToken = :token '
                 'AND approvalRequests.#nid.#orgId = :org '
-                'AND approvalRequests.#nid.#decision = :undecided'
+                'AND (attribute_not_exists(approvalRequests.#nid.#decision) '
+                'OR approvalRequests.#nid.#decision = :undecided '
+                'OR approvalRequests.#nid.#decision = :decision)'
             ),
             ExpressionAttributeNames={
                 '#nid': node_id,
@@ -1746,6 +1775,18 @@ def deny_execution(
         )
     except ClientError as exc:
         if exc.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            try:
+                cur = _load_execution(execution_id)
+                cur_decision = (cur.get('approvalRequests') or {}).get(node_id, {}).get('decision')
+                if cur_decision is not None and cur_decision != 'denied':
+                    _log_event(
+                        'deny_execution_conflict',
+                        executionId=execution_id, nodeId=node_id,
+                        existingDecision=cur_decision,
+                    )
+                    return False
+            except Exception:  # noqa: BLE001
+                pass
             _log_event(
                 'deny_execution_noop',
                 executionId=execution_id, nodeId=node_id,

@@ -15,6 +15,7 @@ All AWS is mocked; no real network or credentials are touched.
 import copy
 import json
 import os
+import re
 import sys
 from collections import Counter
 from contextlib import contextmanager
@@ -74,8 +75,21 @@ def _apply_set_expression(item, expr, names, values):
 
 
 def _eval_single_condition(item, expr, names, values):
-    """Evaluate a single comparison (=, <>)."""
+    """Evaluate a single comparison (=, <>, attribute_not_exists)."""
     expr = expr.strip()
+    # attribute_not_exists(path)
+    m = re.match(r'^attribute_not_exists\((.+)\)$', expr)
+    if m:
+        path_raw = m.group(1).strip()
+        resolved = [names[s.strip()] if s.strip().startswith('#') else s.strip()
+                    for s in path_raw.split('.')]
+        target = item
+        for seg in resolved:
+            if isinstance(target, dict) and seg in target:
+                target = target[seg]
+            else:
+                return True  # attribute does not exist
+        return False  # attribute exists
     op = '<>' if '<>' in expr else '='
     lhs, rhs = expr.split(op, 1)
     resolved = [names[s.strip()] if s.strip().startswith('#') else s.strip()
@@ -91,10 +105,45 @@ def _eval_single_condition(item, expr, names, values):
     return (found and target == expected) if op == '=' else ((not found) or target != expected)
 
 
+
+
+def _split_top_level_and(expr):
+    """Split a condition expression on top-level AND, respecting parentheses."""
+    parts = []
+    depth = 0
+    current = []
+    tokens = expr.split()
+    for token in tokens:
+        depth += token.count('(') - token.count(')')
+        if token.upper() == 'AND' and depth == 0:
+            parts.append(' '.join(current))
+            current = []
+        else:
+            current.append(token)
+    if current:
+        parts.append(' '.join(current))
+    return parts
+
+
 def _eval_condition_expression(item, expr, names, values):
-    """Evaluate a (possibly AND-compound) ConditionExpression."""
-    parts = [p.strip() for p in expr.split(' AND ')]
-    return all(_eval_single_condition(item, p, names, values) for p in parts)
+    """Evaluate a (possibly AND/OR-compound) ConditionExpression."""
+    # Split on top-level AND first, then each clause may be an OR group.
+    and_parts = _split_top_level_and(expr)
+    for and_part in and_parts:
+        and_part = and_part.strip()
+        # Strip outer parens if it's a grouped OR expression
+        inner = and_part
+        if inner.startswith('(') and inner.endswith(')'):
+            inner = inner[1:-1].strip()
+        # Check for OR within this clause
+        or_parts = re.split(r'\bOR\b', inner, flags=re.IGNORECASE)
+        if len(or_parts) > 1:
+            if not any(_eval_single_condition(item, p, names, values) for p in or_parts):
+                return False
+        else:
+            if not _eval_single_condition(item, and_part, names, values):
+                return False
+    return True
 
 
 class FakeTable:
@@ -574,3 +623,81 @@ class TestApprovalProperties:
         # No downstream node dispatched (chain is broken by the denial)
         for i in range(park_idx, n):
             assert f'n{i}' not in _dispatched(sqs)
+
+
+# ---------------------------------------------------------------------------
+# 5. Pre-stamped decision handling (single-writer fix)
+# ---------------------------------------------------------------------------
+
+class TestPreStampedDecision:
+    """When the API stamps approvalRequests.<node>.decision before the engine
+    runs approve/deny, the engine must still resume the node (same decision)
+    or gracefully no-op (opposite decision)."""
+
+    def test_prestamped_approved_then_approve_resumes(self):
+        """Record pre-stamped 'approved' + engine approve -> node resumes once."""
+        wf = _chain_wf(2)
+        ex = _exec_with_parked(['n1'], other_results={'n0': {'nodeId': 'n0', 'status': 'completed'}})
+        # Pre-stamp the decision as the API would
+        ex['approvalRequests']['n1']['decision'] = 'approved'
+
+        with _patched(wf, ex) as (executor, sqs, ex_table, ev):
+            result = executor.approve_execution('exec', 'n1', 'tok-1', 'user-A', 'org-1')
+
+        assert result is True
+        row = ex_table.current('exec')
+        assert row['nodeResults']['n1']['status'] == 'running'  # dispatched
+        assert row['approvalRequests']['n1']['decision'] == 'approved'
+        assert row['approvalRequests']['n1']['decidedBy'] == 'user-A'
+        assert row['status'] == 'running'
+        # execution.resumed event emitted
+        resumed = [c for c in ev.publish_event.call_args_list if c.args[0] == 'execution.resumed']
+        assert len(resumed) == 1
+
+    def test_prestamped_denied_then_approve_is_noop(self):
+        """Record pre-stamped 'denied' + engine approve -> conflict no-op."""
+        wf = _chain_wf(2)
+        ex = _exec_with_parked(['n1'], other_results={'n0': {'nodeId': 'n0', 'status': 'completed'}})
+        ex['approvalRequests']['n1']['decision'] = 'denied'
+
+        with _patched(wf, ex) as (executor, sqs, ex_table, ev):
+            result = executor.approve_execution('exec', 'n1', 'tok-1', 'user-A', 'org-1')
+
+        assert result is False
+        row = ex_table.current('exec')
+        # Node stays parked — engine did not override the prior denial
+        assert row['nodeResults']['n1']['status'] == AWAITING_APPROVAL
+        assert row['approvalRequests']['n1']['decision'] == 'denied'
+        # No dispatch, no resumed event
+        assert 'n1' not in _dispatched(sqs)
+        resumed = [c for c in ev.publish_event.call_args_list if c.args[0] == 'execution.resumed']
+        assert len(resumed) == 0
+
+    def test_clean_record_approve_resumes(self):
+        """Clean record (decision=None) + approve -> resumes normally."""
+        wf = _chain_wf(2)
+        ex = _exec_with_parked(['n1'], other_results={'n0': {'nodeId': 'n0', 'status': 'completed'}})
+        assert ex['approvalRequests']['n1']['decision'] is None  # clean
+
+        with _patched(wf, ex) as (executor, sqs, ex_table, ev):
+            result = executor.approve_execution('exec', 'n1', 'tok-1', 'user-A', 'org-1')
+
+        assert result is True
+        row = ex_table.current('exec')
+        assert row['nodeResults']['n1']['status'] == 'running'
+        assert row['approvalRequests']['n1']['decision'] == 'approved'
+        assert 'n1' in _dispatched(sqs)
+
+    def test_idempotent_second_approve_after_resume_is_noop(self):
+        """After a successful approve + resume, a second approve is a no-op
+        because the node status is no longer awaiting_approval."""
+        wf = _chain_wf(2)
+        ex = _exec_with_parked(['n1'], other_results={'n0': {'nodeId': 'n0', 'status': 'completed'}})
+
+        with _patched(wf, ex) as (executor, sqs, ex_table, ev):
+            r1 = executor.approve_execution('exec', 'n1', 'tok-1', 'user-A', 'org-1')
+            # After r1, node is running (dispatched). Second approve:
+            r2 = executor.approve_execution('exec', 'n1', 'tok-1', 'user-A', 'org-1')
+
+        assert r1 is True
+        assert r2 is False  # node no longer awaiting_approval
