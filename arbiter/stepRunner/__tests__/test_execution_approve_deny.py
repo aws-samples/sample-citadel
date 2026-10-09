@@ -19,6 +19,7 @@ import re
 import sys
 from collections import Counter
 from contextlib import contextmanager
+from decimal import Decimal
 
 import pytest
 from unittest.mock import patch, MagicMock, call
@@ -171,6 +172,22 @@ def _eval_condition_expression(item, expr, names, values):
     return True
 
 
+def _reject_floats(value, path=''):
+    """Raise TypeError if *value* (recursively) contains a Python float,
+    mirroring boto3/DynamoDB's real behaviour."""
+    if isinstance(value, float):
+        raise TypeError(
+            f'Float types are not supported. Use Decimal types instead. '
+            f'(path: {path or "<root>"})'
+        )
+    if isinstance(value, dict):
+        for k, v in value.items():
+            _reject_floats(v, f'{path}.{k}' if path else k)
+    elif isinstance(value, (list, tuple)):
+        for i, v in enumerate(value):
+            _reject_floats(v, f'{path}[{i}]')
+
+
 class FakeTable:
     def __init__(self, items, key_name):
         self._items = {k: copy.deepcopy(v) for k, v in items.items()}
@@ -184,6 +201,7 @@ class FakeTable:
                     ExpressionAttributeNames=None, ExpressionAttributeValues=None, **_kw):
         names = ExpressionAttributeNames or {}
         values = ExpressionAttributeValues or {}
+        _reject_floats(values, 'ExpressionAttributeValues')
         item = self._items.setdefault(Key[self._key], {self._key: Key[self._key]})
         if ConditionExpression is not None and not _eval_condition_expression(
                 item, ConditionExpression, names, values):
@@ -376,6 +394,27 @@ class TestApproveExecution:
         assert result is False
         row = ex_table.current('exec')
         assert row['nodeResults']['n1']['status'] == AWAITING_APPROVAL
+
+    def test_approve_paused_writes_int_pausedSeconds_and_accumulates_decimal(self):
+        """Approval of a paused execution: pausedSeconds must be int (not float)
+        and a prior Decimal value from DynamoDB must accumulate correctly."""
+        wf = _chain_wf(2)
+        ex = _exec_with_parked(['n1'], other_results={'n0': {'nodeId': 'n0', 'status': 'completed'}})
+        # Simulate DynamoDB returning Decimal for prior pausedSeconds
+        ex['pausedSeconds'] = Decimal('120')
+        # Set pausedAt 60 seconds in the past
+        ex['pausedAt'] = '2026-01-01T00:00:00+00:00'
+
+        with _patched(wf, ex) as (executor, sqs, ex_table, ev):
+            # Monkey-patch _now_iso to return a known time 60s after pausedAt
+            with patch.object(executor, '_now_iso', return_value='2026-01-01T00:01:00+00:00'):
+                result = executor.approve_execution('exec', 'n1', 'tok-1', 'user-A', 'org-1')
+
+        assert result is True
+        row = ex_table.current('exec')
+        ps = row['pausedSeconds']
+        assert isinstance(ps, int), f'pausedSeconds must be int, got {type(ps).__name__}'
+        assert ps == 180  # 120 prior + 60 delta
 
 
 # ---------------------------------------------------------------------------
