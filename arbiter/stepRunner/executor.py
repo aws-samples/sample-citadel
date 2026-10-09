@@ -832,12 +832,16 @@ def _park_node_awaiting_approval(
         )
 
         # Step 2: conditional park — node must still be pending.
+        # Bug-fix: consume pauseRequested (one-shot manual pause) and seed
+        # pausedAt for paused-time accounting (execution-level watchdog data).
         _executions_table.update_item(
             Key={'executionId': execution_id},
             UpdateExpression=(
                 'SET nodeResults.#nid.#status = :awaiting, '
                 'nodeResults.#nid.#parkedAt = :parkedAt, '
-                'approvalRequests.#nid = :record'
+                'approvalRequests.#nid = :record, '
+                '#pausedAt = if_not_exists(#pausedAt, :parkedAt) '
+                'REMOVE #pauseRequested'
             ),
             ConditionExpression=(
                 'nodeResults.#nid.#status = :pending'
@@ -846,6 +850,8 @@ def _park_node_awaiting_approval(
                 '#nid': node_id,
                 '#status': 'status',
                 '#parkedAt': 'parkedAt',
+                '#pauseRequested': 'pauseRequested',
+                '#pausedAt': 'pausedAt',
             },
             ExpressionAttributeValues={
                 ':awaiting': AWAITING_APPROVAL,
@@ -1620,6 +1626,24 @@ def approve_execution(
     a no-op (already resumed, mismatched token/org, or conflicting decision).
     """
     now = _now_iso()
+    # Compute accumulated paused time before the conditional write (which
+    # REMOVEs pausedAt).  Best-effort: if pausedAt is absent or unparseable,
+    # the delta is 0 — the watchdog will see a conservative (smaller) total
+    # rather than crashing the approval.
+    _pre = _load_execution(execution_id) or {}
+    _paused_at_raw = _pre.get('pausedAt')
+    _prior_paused_seconds = 0
+    if isinstance(_pre.get('pausedSeconds'), (int, float)):
+        _prior_paused_seconds = _pre['pausedSeconds']
+    _delta_seconds = 0
+    if _paused_at_raw:
+        try:
+            _paused_at_dt = datetime.fromisoformat(_paused_at_raw)
+            _now_dt = datetime.fromisoformat(now)
+            _delta_seconds = max(0, (_now_dt - _paused_at_dt).total_seconds())
+        except (TypeError, ValueError):
+            pass
+    _new_paused_seconds = _prior_paused_seconds + _delta_seconds
     try:
         _executions_table.update_item(
             Key={'executionId': execution_id},
@@ -1628,7 +1652,9 @@ def approve_execution(
                 'approvalRequests.#nid.#decidedBy = :decidedBy, '
                 'approvalRequests.#nid.#decidedAt = :decidedAt, '
                 'approvalRequests.#nid.#decision = :decision, '
-                '#status = :running'
+                '#status = :running, '
+                '#pausedSeconds = :pausedSeconds '
+                'REMOVE #pauseRequested, #pausedAt'
             ),
             ConditionExpression=(
                 'nodeResults.#nid.#status = :awaiting '
@@ -1646,6 +1672,9 @@ def approve_execution(
                 '#decision': 'decision',
                 '#resumeToken': 'resumeToken',
                 '#orgId': 'orgId',
+                '#pauseRequested': 'pauseRequested',
+                '#pausedAt': 'pausedAt',
+                '#pausedSeconds': 'pausedSeconds',
             },
             ExpressionAttributeValues={
                 ':pending': 'pending',
@@ -1657,6 +1686,7 @@ def approve_execution(
                 ':org': org_id,
                 ':undecided': None,
                 ':running': 'running',
+                ':pausedSeconds': _new_paused_seconds,
             },
         )
     except ClientError as exc:
@@ -1740,13 +1770,30 @@ def deny_execution(
     Returns ``True`` if this call performed the denial, ``False`` on no-op.
     """
     now = _now_iso()
+    # Compute accumulated paused time (same logic as approve_execution).
+    _pre = _load_execution(execution_id) or {}
+    _paused_at_raw = _pre.get('pausedAt')
+    _prior_paused_seconds = 0
+    if isinstance(_pre.get('pausedSeconds'), (int, float)):
+        _prior_paused_seconds = _pre['pausedSeconds']
+    _delta_seconds = 0
+    if _paused_at_raw:
+        try:
+            _paused_at_dt = datetime.fromisoformat(_paused_at_raw)
+            _now_dt = datetime.fromisoformat(now)
+            _delta_seconds = max(0, (_now_dt - _paused_at_dt).total_seconds())
+        except (TypeError, ValueError):
+            pass
+    _new_paused_seconds = _prior_paused_seconds + _delta_seconds
     try:
         _executions_table.update_item(
             Key={'executionId': execution_id},
             UpdateExpression=(
                 'SET approvalRequests.#nid.#decidedBy = :decidedBy, '
                 'approvalRequests.#nid.#decidedAt = :decidedAt, '
-                'approvalRequests.#nid.#decision = :decision'
+                'approvalRequests.#nid.#decision = :decision, '
+                '#pausedSeconds = :pausedSeconds '
+                'REMOVE #pauseRequested, #pausedAt'
             ),
             ConditionExpression=(
                 'nodeResults.#nid.#status = :awaiting '
@@ -1764,6 +1811,9 @@ def deny_execution(
                 '#decision': 'decision',
                 '#resumeToken': 'resumeToken',
                 '#orgId': 'orgId',
+                '#pauseRequested': 'pauseRequested',
+                '#pausedAt': 'pausedAt',
+                '#pausedSeconds': 'pausedSeconds',
             },
             ExpressionAttributeValues={
                 ':awaiting': AWAITING_APPROVAL,
@@ -1773,6 +1823,7 @@ def deny_execution(
                 ':token': resume_token,
                 ':org': org_id,
                 ':undecided': None,
+                ':pausedSeconds': _new_paused_seconds,
             },
         )
     except ClientError as exc:

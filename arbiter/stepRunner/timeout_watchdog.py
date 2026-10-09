@@ -378,6 +378,32 @@ def _reconcile(execution: dict, workflow: dict) -> str:
     return 'reconciled'
 
 
+def _effective_age_seconds(execution: dict, started: datetime, now: datetime) -> float:
+    """Compute the effective running time of an execution in seconds,
+    excluding time spent parked (paused).
+
+    ``pausedSeconds`` (numeric, default 0) is the total paused time already
+    accumulated by the step runner.  If the execution is *currently* paused
+    (``pausedAt`` is set), the ongoing pause duration ``now - pausedAt`` is
+    also subtracted so the watchdog does not kill an execution the moment it
+    resumes from a long park.
+    """
+    wall_clock = (now - started).total_seconds()
+
+    # Total previously-accumulated paused time.
+    try:
+        paused_seconds = float(execution.get('pausedSeconds') or 0)
+    except (TypeError, ValueError):
+        paused_seconds = 0.0
+
+    # Ongoing pause (execution is currently parked).
+    paused_at = _parse_iso(execution.get('pausedAt'))
+    ongoing_pause = (now - paused_at).total_seconds() if paused_at else 0.0
+
+    effective = wall_clock - paused_seconds - ongoing_pause
+    return max(effective, 0.0)
+
+
 def _process_execution(execution: dict, now: datetime, exec_timeout: int, node_stall: int) -> str:
     """Give one running execution a DEFINITE disposition (never silence a stuck
     run). Ordered: reconcile lost-event frontier BEFORE any fail path, then
@@ -400,8 +426,10 @@ def _process_execution(execution: dict, now: datetime, exec_timeout: int, node_s
             if stalled is not None:
                 return _reconcile_or_fail_node(execution, workflow, stalled)
 
-    # Execution-level backstop (preserved original behavior): fail an execution
-    # with no reconcilable/stalled state that is older than the exec timeout.
+    # Execution-level backstop: fail an execution with no reconcilable/stalled
+    # state whose *effective* running time exceeds the exec timeout.
+    # Effective age excludes time spent parked (pausedSeconds accumulated by
+    # the step runner, plus any ongoing pause measured from pausedAt).
     started = _parse_iso(execution.get('startedAt', ''))
     if started is None:
         _logger.info(
@@ -409,7 +437,8 @@ def _process_execution(execution: dict, now: datetime, exec_timeout: int, node_s
             execution.get('executionId'),
         )
         return 'skipped'
-    if started <= now - timedelta(seconds=exec_timeout):
+    effective = _effective_age_seconds(execution, started, now)
+    if effective > exec_timeout:
         return 'execution_failed' if _fail_stuck(execution, now, exec_timeout) else 'race_noop'
     return 'healthy'
 
