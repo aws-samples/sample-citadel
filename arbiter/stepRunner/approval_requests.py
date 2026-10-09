@@ -28,6 +28,7 @@ def build_approval_request(
     requested_by: str,
     expires_at: str | None = None,
     metadata: dict | None = None,
+    org_id: str | None = None,
 ) -> dict:
     """Build an approval-request record for one node.
 
@@ -36,6 +37,10 @@ def build_approval_request(
     The token gates the one-time approve/deny mutation (PR3).
 
     ``expiresAt`` is optional; ``None`` means no automatic timeout.
+
+    ``orgId`` is persisted on the request for audit completeness; the
+    approve/deny fence checks the *execution-level* ``orgId`` attribute
+    (not this copy) so the field is informational only.
     """
     return {
         'requestType': request_type,
@@ -47,6 +52,7 @@ def build_approval_request(
         'decidedBy': None,
         'decidedAt': None,
         'decision': None,
+        'orgId': org_id,
         'metadata': metadata if metadata is not None else {},
     }
 

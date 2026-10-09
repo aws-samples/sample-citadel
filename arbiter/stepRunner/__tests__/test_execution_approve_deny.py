@@ -190,24 +190,20 @@ def _chain_wf(n):
 
 
 def _make_approval_record(*, token='tok-1', org_id='org-1'):
-    """A minimal approval-request dict with defaults."""
-    return {
-        'requestType': 'approval_required',
-        'reason': 'test',
-        'requestedBy': 'system',
-        'requestedAt': '2026-01-01T00:00:00Z',
-        'resumeToken': token,
-        'expiresAt': None,
-        'decidedBy': None,
-        'decidedAt': None,
-        'decision': None,
-        'orgId': org_id,
-        'metadata': {},
-    }
+    """Build an approval-request dict via the real helper, then pin the token."""
+    rec = build_approval_request(
+        request_type='approval_required',
+        reason='test',
+        requested_by='system',
+        org_id=org_id,
+    )
+    rec['resumeToken'] = token  # pin for deterministic assertions
+    rec['requestedAt'] = '2026-01-01T00:00:00Z'
+    return rec
 
 
 def _exec_with_parked(node_ids_parked, *, other_results=None, token='tok-1', org_id='org-1'):
-    """Build an execution row with parked nodes."""
+    """Build an execution row with parked nodes and a top-level orgId."""
     nr = {}
     for nid in node_ids_parked:
         nr[nid] = {'nodeId': nid, 'status': AWAITING_APPROVAL, 'parkedAt': '2026-01-01T00:00:00Z'}
@@ -216,6 +212,7 @@ def _exec_with_parked(node_ids_parked, *, other_results=None, token='tok-1', org
     ar = {nid: _make_approval_record(token=token, org_id=org_id) for nid in node_ids_parked}
     return {
         'executionId': 'exec', 'workflowId': 'wf', 'appId': 'app-1',
+        'orgId': org_id,
         'status': AWAITING_APPROVAL,
         'nodeResults': nr,
         'approvalRequests': ar,
@@ -552,6 +549,7 @@ class TestApprovalProperties:
         ar = {f'n{park_idx}': _make_approval_record()}
         ex = {
             'executionId': 'exec', 'workflowId': 'wf', 'appId': 'app-1',
+            'orgId': 'org-1',
             'status': AWAITING_APPROVAL,
             'nodeResults': nr,
             'approvalRequests': ar,
@@ -610,6 +608,7 @@ class TestApprovalProperties:
         ar = {f'n{park_idx}': _make_approval_record()}
         ex = {
             'executionId': 'exec', 'workflowId': 'wf', 'appId': 'app-1',
+            'orgId': 'org-1',
             'status': AWAITING_APPROVAL,
             'nodeResults': nr,
             'approvalRequests': ar,
@@ -701,3 +700,207 @@ class TestPreStampedDecision:
 
         assert r1 is True
         assert r2 is False  # node no longer awaiting_approval
+
+
+# ---------------------------------------------------------------------------
+# 6. Round-trip: build_approval_request → park on FakeTable → approve/deny
+#    Records are constructed via the real helpers, never hand-made dicts.
+# ---------------------------------------------------------------------------
+
+def _park_on_fake_table(ex_table, execution_id, node_id, *, org_id='org-1'):
+    """Simulate _park_node_awaiting_approval on a FakeTable using the real
+    build_approval_request helper (the same code the production park calls).
+
+    The caller must ensure ``nodeResults.<node_id>`` exists with status
+    ``pending`` and ``approvalRequests`` exists as a map on the item — the
+    real park function does this via an ``if_not_exists`` step that the
+    FakeTable does not support."""
+    record = build_approval_request(
+        request_type='approval_required',
+        reason='test park',
+        requested_by='system',
+        org_id=org_id,
+    )
+    token = record['resumeToken']
+    # Conditional park (step 2 of the real _park_node_awaiting_approval)
+    ex_table.update_item(
+        Key={'executionId': execution_id},
+        UpdateExpression=(
+            'SET nodeResults.#nid.#status = :awaiting, '
+            'nodeResults.#nid.#parkedAt = :parkedAt, '
+            'approvalRequests.#nid = :record'
+        ),
+        ConditionExpression='nodeResults.#nid.#status = :pending',
+        ExpressionAttributeNames={
+            '#nid': node_id,
+            '#status': 'status',
+            '#parkedAt': 'parkedAt',
+        },
+        ExpressionAttributeValues={
+            ':awaiting': AWAITING_APPROVAL,
+            ':parkedAt': '2026-01-01T00:00:00Z',
+            ':pending': 'pending',
+            ':record': record,
+        },
+    )
+    return token
+
+
+class TestRoundTripParkApproveDeny:
+    """End-to-end: build_approval_request → park → approve/deny.
+
+    Records are built with the real ``build_approval_request`` helper and
+    parked on the ``FakeTable`` via the same two-step UpdateItem sequence
+    the production ``_park_node_awaiting_approval`` uses — never hand-made
+    dicts."""
+
+    def test_park_then_approve_resumes(self):
+        wf = _chain_wf(2)
+        ex = {
+            'executionId': 'exec', 'workflowId': 'wf', 'appId': 'app-1',
+            'orgId': 'org-1',
+            'status': 'running',
+            'nodeResults': {
+                'n0': {'nodeId': 'n0', 'status': 'completed'},
+                'n1': {'nodeId': 'n1', 'status': 'pending', 'retryCount': 0},
+            },
+            'approvalRequests': {},
+        }
+
+        with _patched(wf, ex) as (executor, sqs, ex_table, ev):
+            token = _park_on_fake_table(ex_table, 'exec', 'n1')
+            # Flip execution status to awaiting_approval (normally done by park)
+            ex_table.update_item(
+                Key={'executionId': 'exec'},
+                UpdateExpression='SET #status = :awaiting',
+                ExpressionAttributeNames={'#status': 'status'},
+                ExpressionAttributeValues={':awaiting': AWAITING_APPROVAL},
+            )
+
+            result = executor.approve_execution('exec', 'n1', token, 'user-A', 'org-1')
+
+        assert result is True
+        row = ex_table.current('exec')
+        assert row['approvalRequests']['n1']['decision'] == 'approved'
+        assert row['nodeResults']['n1']['status'] != AWAITING_APPROVAL
+
+    def test_park_then_deny_fails_node(self):
+        wf = _chain_wf(2)
+        ex = {
+            'executionId': 'exec', 'workflowId': 'wf', 'appId': 'app-1',
+            'orgId': 'org-1',
+            'status': 'running',
+            'nodeResults': {
+                'n0': {'nodeId': 'n0', 'status': 'completed'},
+                'n1': {'nodeId': 'n1', 'status': 'pending', 'retryCount': 0},
+            },
+            'approvalRequests': {},
+        }
+
+        with _patched(wf, ex) as (executor, sqs, ex_table, ev):
+            token = _park_on_fake_table(ex_table, 'exec', 'n1')
+            ex_table.update_item(
+                Key={'executionId': 'exec'},
+                UpdateExpression='SET #status = :awaiting',
+                ExpressionAttributeNames={'#status': 'status'},
+                ExpressionAttributeValues={':awaiting': AWAITING_APPROVAL},
+            )
+
+            result = executor.deny_execution('exec', 'n1', token, 'user-A', 'org-1', reason='nope')
+
+        assert result is True
+        row = ex_table.current('exec')
+        assert row['approvalRequests']['n1']['decision'] == 'denied'
+        assert row['nodeResults']['n1']['status'] == 'failed'
+
+    def test_park_then_wrong_org_is_noop(self):
+        wf = _chain_wf(2)
+        ex = {
+            'executionId': 'exec', 'workflowId': 'wf', 'appId': 'app-1',
+            'orgId': 'org-1',
+            'status': 'running',
+            'nodeResults': {
+                'n0': {'nodeId': 'n0', 'status': 'completed'},
+                'n1': {'nodeId': 'n1', 'status': 'pending', 'retryCount': 0},
+            },
+            'approvalRequests': {},
+        }
+
+        with _patched(wf, ex) as (executor, sqs, ex_table, ev):
+            token = _park_on_fake_table(ex_table, 'exec', 'n1')
+            ex_table.update_item(
+                Key={'executionId': 'exec'},
+                UpdateExpression='SET #status = :awaiting',
+                ExpressionAttributeNames={'#status': 'status'},
+                ExpressionAttributeValues={':awaiting': AWAITING_APPROVAL},
+            )
+
+            result = executor.approve_execution('exec', 'n1', token, 'user-A', 'wrong-org')
+
+        assert result is False
+        row = ex_table.current('exec')
+        assert row['nodeResults']['n1']['status'] == AWAITING_APPROVAL
+
+    def test_park_then_wrong_token_is_noop(self):
+        wf = _chain_wf(2)
+        ex = {
+            'executionId': 'exec', 'workflowId': 'wf', 'appId': 'app-1',
+            'orgId': 'org-1',
+            'status': 'running',
+            'nodeResults': {
+                'n0': {'nodeId': 'n0', 'status': 'completed'},
+                'n1': {'nodeId': 'n1', 'status': 'pending', 'retryCount': 0},
+            },
+            'approvalRequests': {},
+        }
+
+        with _patched(wf, ex) as (executor, sqs, ex_table, ev):
+            _park_on_fake_table(ex_table, 'exec', 'n1')
+            ex_table.update_item(
+                Key={'executionId': 'exec'},
+                UpdateExpression='SET #status = :awaiting',
+                ExpressionAttributeNames={'#status': 'status'},
+                ExpressionAttributeValues={':awaiting': AWAITING_APPROVAL},
+            )
+
+            result = executor.approve_execution('exec', 'n1', 'wrong-token', 'user-A', 'org-1')
+
+        assert result is False
+        row = ex_table.current('exec')
+        assert row['nodeResults']['n1']['status'] == AWAITING_APPROVAL
+
+    def test_park_prestamped_same_decision_resumes(self):
+        wf = _chain_wf(2)
+        ex = {
+            'executionId': 'exec', 'workflowId': 'wf', 'appId': 'app-1',
+            'orgId': 'org-1',
+            'status': 'running',
+            'nodeResults': {
+                'n0': {'nodeId': 'n0', 'status': 'completed'},
+                'n1': {'nodeId': 'n1', 'status': 'pending', 'retryCount': 0},
+            },
+            'approvalRequests': {},
+        }
+
+        with _patched(wf, ex) as (executor, sqs, ex_table, ev):
+            token = _park_on_fake_table(ex_table, 'exec', 'n1')
+            ex_table.update_item(
+                Key={'executionId': 'exec'},
+                UpdateExpression='SET #status = :awaiting',
+                ExpressionAttributeNames={'#status': 'status'},
+                ExpressionAttributeValues={':awaiting': AWAITING_APPROVAL},
+            )
+            # Pre-stamp same decision the engine will attempt
+            ex_table.update_item(
+                Key={'executionId': 'exec'},
+                UpdateExpression='SET approvalRequests.#nid.#decision = :d',
+                ExpressionAttributeNames={'#nid': 'n1', '#decision': 'decision'},
+                ExpressionAttributeValues={':d': 'approved'},
+            )
+
+            result = executor.approve_execution('exec', 'n1', token, 'user-A', 'org-1')
+
+        assert result is True
+        row = ex_table.current('exec')
+        assert row['approvalRequests']['n1']['decision'] == 'approved'
+        assert row['nodeResults']['n1']['status'] != AWAITING_APPROVAL

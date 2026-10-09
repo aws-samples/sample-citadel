@@ -1603,10 +1603,11 @@ def approve_execution(
     """Approve a parked node and resume the execution.
 
     Fenced conditional write: the node must be ``awaiting_approval`` AND the
-    approval-request's ``resumeToken`` must match AND ``orgId`` must match AND
-    the decision must be either absent/null (undecided) OR already stamped
-    ``approved`` (pre-stamped by the API — the engine is the authoritative
-    single-writer that flips the node).
+    approval-request's ``resumeToken`` must match AND the execution's
+    top-level ``orgId`` must match AND the decision must be either
+    absent/null (undecided) OR already stamped ``approved`` (pre-stamped by
+    the API — the engine is the authoritative single-writer that flips the
+    node).
 
     When the record was pre-stamped with the OPPOSITE decision (``denied``),
     the condition fails and the call is a conflict no-op — the engine does
@@ -1632,7 +1633,7 @@ def approve_execution(
             ConditionExpression=(
                 'nodeResults.#nid.#status = :awaiting '
                 'AND approvalRequests.#nid.#resumeToken = :token '
-                'AND approvalRequests.#nid.#orgId = :org '
+                'AND #orgId = :org '
                 'AND (attribute_not_exists(approvalRequests.#nid.#decision) '
                 'OR approvalRequests.#nid.#decision = :undecided '
                 'OR approvalRequests.#nid.#decision = :decision)'
@@ -1723,10 +1724,11 @@ def deny_execution(
 ) -> bool:
     """Deny a parked node — fail it via ``handle_node_failure``.
 
-    Same conditional fence as ``approve_execution``.  On success the
-    approval-request is stamped ``denied``, the node is failed via
-    ``handle_node_failure`` (which handles retry policy / execution-level
-    failure), and an ``execution.approval_denied`` event is emitted.
+    Same conditional fence as ``approve_execution`` (checks the execution's
+    top-level ``orgId``).  On success the approval-request is stamped
+    ``denied``, the node is failed via ``handle_node_failure`` (which
+    handles retry policy / execution-level failure), and an
+    ``execution.approval_denied`` event is emitted.
 
     When the record was pre-stamped with the OPPOSITE decision (``approved``),
     the condition fails and the call is a conflict no-op — the engine does
@@ -1749,7 +1751,7 @@ def deny_execution(
             ConditionExpression=(
                 'nodeResults.#nid.#status = :awaiting '
                 'AND approvalRequests.#nid.#resumeToken = :token '
-                'AND approvalRequests.#nid.#orgId = :org '
+                'AND #orgId = :org '
                 'AND (attribute_not_exists(approvalRequests.#nid.#decision) '
                 'OR approvalRequests.#nid.#decision = :undecided '
                 'OR approvalRequests.#nid.#decision = :decision)'
