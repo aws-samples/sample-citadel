@@ -749,8 +749,23 @@ async function approveExecution(
   if (!approvalRequest) {
     throw new Error(`No approval request found for node '${nodeId}'`);
   }
+
+  // Pre-check: the "already decided" error applies only when the node is no
+  // longer awaiting (already resumed/denied by the engine) OR the stamped
+  // decision differs from the requested one. When the node is still
+  // awaiting_approval and the stamped decision is absent or identical to
+  // "approved", proceed — audit + re-emit the resume event so the engine
+  // picks up the decision (idempotent at the engine side).
+  const nodeStatus = existing.nodeResults?.[nodeId]?.status;
   if (approvalRequest.decision) {
-    throw new Error(`Approval request for node '${nodeId}' already decided`);
+    if (
+      nodeStatus !== "awaiting_approval" ||
+      approvalRequest.decision !== "approved"
+    ) {
+      throw new Error(
+        `Approval request for node '${nodeId}' already ${approvalRequest.decision}`,
+      );
+    }
   }
 
   const resumeToken = approvalRequest.resumeToken;
@@ -814,8 +829,19 @@ async function denyExecution(
   if (!approvalRequest) {
     throw new Error(`No approval request found for node '${nodeId}'`);
   }
+
+  // Pre-check: mirror the approveExecution logic — error only when the node
+  // is no longer awaiting OR the stamped decision differs from "denied".
+  const nodeStatus = existing.nodeResults?.[nodeId]?.status;
   if (approvalRequest.decision) {
-    throw new Error(`Approval request for node '${nodeId}' already decided`);
+    if (
+      nodeStatus !== "awaiting_approval" ||
+      approvalRequest.decision !== "denied"
+    ) {
+      throw new Error(
+        `Approval request for node '${nodeId}' already ${approvalRequest.decision}`,
+      );
+    }
   }
 
   const resumeToken = approvalRequest.resumeToken;
