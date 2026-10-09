@@ -51,6 +51,14 @@ def _apply_set_expression(item, expr, names, values):
     body = expr.strip()
     if body.upper().startswith('SET '):
         body = body[4:]
+
+    # Strip trailing REMOVE clause before parsing SET/ADD.
+    _ri = body.upper().find(' REMOVE ')
+    _remove_body = None
+    if _ri != -1:
+        _remove_body = body[_ri + 8:]
+        body = body[:_ri]
+
     _ai = body.upper().find(' ADD ')
     if _ai != -1:
         _add_body = body[_ai + 5:]
@@ -72,6 +80,23 @@ def _apply_set_expression(item, expr, names, values):
         for seg in resolved[:-1]:
             target = target.setdefault(seg, {})
         target[resolved[-1]] = values[rhs.strip()]
+
+    # Process REMOVE
+    if _remove_body:
+        for attr_path in _remove_body.split(','):
+            attr_path = attr_path.strip()
+            if not attr_path:
+                continue
+            segs = [names[s.strip()] if s.strip().startswith('#') else s.strip()
+                    for s in attr_path.split('.')]
+            target = item
+            for seg in segs[:-1]:
+                if isinstance(target, dict) and seg in target:
+                    target = target[seg]
+                else:
+                    break
+            else:
+                target.pop(segs[-1], None)
 
 
 def _eval_single_condition(item, expr, names, values):
