@@ -16,6 +16,8 @@ import sys
 from datetime import datetime, timezone
 from numbers import Number
 
+from decimal import Decimal
+
 from botocore.exceptions import ClientError
 
 # Tracing foundation (architect task 5459301e-1e7b-4bfd-bccb-b106aba2748c):
@@ -1633,14 +1635,15 @@ def approve_execution(
     _pre = _load_execution(execution_id) or {}
     _paused_at_raw = _pre.get('pausedAt')
     _prior_paused_seconds = 0
-    if isinstance(_pre.get('pausedSeconds'), (int, float)):
-        _prior_paused_seconds = _pre['pausedSeconds']
+    _raw_ps = _pre.get('pausedSeconds')
+    if isinstance(_raw_ps, (int, float, Decimal)):
+        _prior_paused_seconds = int(_raw_ps)
     _delta_seconds = 0
     if _paused_at_raw:
         try:
             _paused_at_dt = datetime.fromisoformat(_paused_at_raw)
             _now_dt = datetime.fromisoformat(now)
-            _delta_seconds = max(0, (_now_dt - _paused_at_dt).total_seconds())
+            _delta_seconds = max(0, int(round((_now_dt - _paused_at_dt).total_seconds())))
         except (TypeError, ValueError):
             pass
     _new_paused_seconds = _prior_paused_seconds + _delta_seconds
@@ -1774,14 +1777,15 @@ def deny_execution(
     _pre = _load_execution(execution_id) or {}
     _paused_at_raw = _pre.get('pausedAt')
     _prior_paused_seconds = 0
-    if isinstance(_pre.get('pausedSeconds'), (int, float)):
-        _prior_paused_seconds = _pre['pausedSeconds']
+    _raw_ps = _pre.get('pausedSeconds')
+    if isinstance(_raw_ps, (int, float, Decimal)):
+        _prior_paused_seconds = int(_raw_ps)
     _delta_seconds = 0
     if _paused_at_raw:
         try:
             _paused_at_dt = datetime.fromisoformat(_paused_at_raw)
             _now_dt = datetime.fromisoformat(now)
-            _delta_seconds = max(0, (_now_dt - _paused_at_dt).total_seconds())
+            _delta_seconds = max(0, int(round((_now_dt - _paused_at_dt).total_seconds())))
         except (TypeError, ValueError):
             pass
     _new_paused_seconds = _prior_paused_seconds + _delta_seconds
