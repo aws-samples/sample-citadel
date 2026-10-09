@@ -118,13 +118,13 @@ jobs:
           aws-region: ${{ vars.CDK_DEFAULT_REGION || 'us-east-1' }}
 
       - name: Download frontend artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: frontend-build
           path: frontend/build/
 
       - name: Download backend artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: backend-dist
           path: backend/dist/

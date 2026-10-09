@@ -72,7 +72,7 @@ jobs:
         working-directory: ${{ github.workspace }}
 
       - name: Download cdk.out (synthesized by Backend Build + Synth)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: cdk-out
           path: backend/cdk.out
