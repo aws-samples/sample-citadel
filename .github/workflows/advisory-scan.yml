@@ -1,0 +1,204 @@
+# Scheduled advisory scan with auto-remediation PR
+name: Advisory Scan
+
+on:
+  schedule:
+    - cron: "0 3 * * *" # daily at 03:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: advisory-scan
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  NODE_VERSION: "24"
+  PYTHON_VERSION: "3.14"
+
+jobs:
+  # ── npm audit (root workspace) ──
+  npm-root:
+    name: npm Audit (root)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - run: npm ci
+
+      - name: Audit dependencies (blocking, with justified allowlist)
+        run: npx audit-ci --config .audit-ci.json
+
+  # ── npm audit (frontend) ──
+  npm-frontend:
+    name: npm Audit (frontend)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+
+      - name: Audit frontend dependencies (blocking, with justified allowlist)
+        run: npx audit-ci --config .audit-ci.json
+
+  # ── pip-audit (arbiter Python packages) ──
+  python:
+    name: pip-audit (arbiter)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Audit arbiter requirements files
+        run: |
+          set -euo pipefail
+          failed=0
+          while IFS= read -r -d '' f; do
+            echo "::group::pip-audit $f"
+            pip-audit -r "$f" --no-deps || failed=1
+            echo "::endgroup::"
+          done < <(find arbiter -name 'requirements*.txt' -not -path '*/.hypothesis/*' -print0)
+          exit $failed
+
+  # ── Allowlist expiry check ──
+  allowlist-expiry:
+    name: Allowlist revisitBy Expiry
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check revisitBy dates
+        run: |
+          today=$(date -u +%Y-%m-%d)
+          expired=0
+          while IFS= read -r line; do
+            date=$(echo "$line" | grep -oP 'revisitBy[:\s]+\K\d{4}-\d{2}-\d{2}')
+            if [ -n "$date" ] && [ "$date" \< "$today" ] || [ "$date" = "$today" ]; then
+              echo "::error::Expired revisitBy date: $date in audit-ci-allowlist-justifications.md"
+              expired=1
+            fi
+          done < <(grep -i 'revisitBy' audit-ci-allowlist-justifications.md || true)
+          if [ "$expired" -eq 1 ]; then
+            echo "One or more allowlist justifications have expired. Review and renew them."
+            exit 1
+          fi
+          echo "All revisitBy dates are in the future."
+
+  # ── Auto-remediation ──
+  remediate:
+    name: Remediate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    needs: [npm-root, npm-frontend, python, allowlist-expiry]
+    if: failure()
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+
+      - name: Attempt npm audit fix (root)
+        run: npm audit fix --no-fund || true
+
+      - name: Attempt npm audit fix (frontend)
+        run: npm audit fix --no-fund || true
+        working-directory: frontend
+
+      - name: Re-run audit-ci (root)
+        id: reaudit-root
+        run: npx audit-ci --config .audit-ci.json
+        continue-on-error: true
+
+      - name: Re-run audit-ci (frontend)
+        id: reaudit-frontend
+        run: npx audit-ci --config .audit-ci.json
+        working-directory: frontend
+        continue-on-error: true
+
+      - name: Check for changes
+        id: changes
+        run: |
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open auto-fix PR
+        if: >-
+          steps.changes.outputs.changed == 'true' &&
+          steps.reaudit-root.outcome == 'success' &&
+          steps.reaudit-frontend.outcome == 'success'
+        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7
+        with:
+          branch: chore/advisory-autofix
+          title: "chore(deps): resolve new dependency advisories"
+          body: |
+            This PR was automatically generated by the **Advisory Scan** workflow
+            (`advisory-scan.yml`) running on a daily schedule.
+
+            `npm audit fix` was run in both the root workspace and `frontend/`
+            directories. Both `audit-ci` checks pass after the fix.
+
+            **This PR must still pass full CI before merging.**
+          commit-message: "chore(deps): resolve new dependency advisories"
+          labels: dependencies
+
+      - name: Open or update issue if auto-fix insufficient
+        if: >-
+          steps.changes.outputs.changed == 'false' ||
+          steps.reaudit-root.outcome != 'success' ||
+          steps.reaudit-frontend.outcome != 'success'
+        run: |
+          title="Dependency advisories need attention"
+          existing=$(gh issue list --state open --search "in:title $title" --json number --jq '.[0].number // empty')
+          body="The scheduled advisory scan found unresolved advisories that \`npm audit fix\` could not resolve automatically.
+
+          **Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          Please investigate manually and update the allowlist justifications if needed."
+
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body" --label dependencies
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
