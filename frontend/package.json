@@ -79,7 +79,7 @@
             "@types/react": "^19.0.6",
             "@types/react-dom": "^19.0.2",
             "@vitejs/plugin-react-swc": "^3.10.2",
-            "fast-check": "^3.23.2",
+            "fast-check": "^4.10.2",
             "jest": "^30.4.2",
             "jest-environment-jsdom": "^30.4.1",
             "ts-jest": "^29.4.12",
