@@ -1,4 +1,6 @@
 strands-agents==1.59.0
 strands-agents-tools==0.8.9
-boto3==1.43.111
-aws-xray-sdk==2.15.0
+# boto3 and aws-xray-sdk are intentionally NOT listed here — they are provided
+# by the shared common layer (arbiter/layers/common/requirements.txt) at
+# /opt/python and must stay pinned there.  Duplicating them in this file
+# bloats the worker bundle past the 250 MB Lambda limit.
