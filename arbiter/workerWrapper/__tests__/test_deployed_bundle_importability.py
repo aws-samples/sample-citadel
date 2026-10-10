@@ -131,6 +131,49 @@ class TestDeployedBundleImportability:
         assert result.returncode != 0
         assert "No module named 'arbiter'" in result.stderr
 
+    def test_layer_provided_packages_resolve_from_layer_not_bundle(self, tmp_path):
+        """boto3 and aws_xray_sdk must resolve from the layer (/opt/python),
+        NOT from the bundle root.  After removing the explicit pins from
+        workerWrapper/requirements.txt, these packages are provided solely by
+        the common layer (arbiter/layers/common/requirements.txt).  This test
+        pip-installs the layer requirements into the staged layer path and
+        asserts the two packages import successfully and resolve from the
+        layer directory — and that they are NOT present in the bundle root."""
+        bundle_root, layer_python = _stage_deployed_layout(str(tmp_path))
+
+        # Install layer requirements (boto3, aws-xray-sdk) into the layer dir.
+        layer_reqs = os.path.join(_ARBITER_ROOT, "layers", "common", "requirements.txt")
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "-q",
+             "--target", layer_python, "-r", layer_reqs],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        result = _run_import(
+            bundle_root,
+            layer_python,
+            "import boto3, aws_xray_sdk\n"
+            "import os, pathlib\n"
+            f"layer = '{layer_python}'\n"
+            f"bundle = '{bundle_root}'\n"
+            "b3 = pathlib.Path(boto3.__file__).resolve()\n"
+            "xr = pathlib.Path(aws_xray_sdk.__file__).resolve()\n"
+            "assert str(b3).startswith(layer), "
+            "f'boto3 resolved from {b3}, expected under {layer}'\n"
+            "assert str(xr).startswith(layer), "
+            "f'aws_xray_sdk resolved from {xr}, expected under {layer}'\n"
+            "assert not os.path.exists(os.path.join(bundle, 'boto3')), "
+            "'boto3 must NOT be in the bundle root'\n"
+            "assert not os.path.exists(os.path.join(bundle, 'aws_xray_sdk')), "
+            "'aws_xray_sdk must NOT be in the bundle root'\n",
+        )
+        assert result.returncode == 0, (
+            "layer-provided packages did NOT resolve from the layer:\n"
+            f"stdout={result.stdout}\nstderr={result.stderr}"
+        )
+        assert "IMPORT_OK" in result.stdout
+
     def test_missing_layer_governance_package_bites(self, tmp_path):
         """Negative control: if the layer regresses and stops staging the
         ``governance`` package, importing the hook chain MUST fail — this is

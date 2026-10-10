@@ -59,6 +59,52 @@ function resolveArbiterRoot(startDir: string): string {
 const ARBITER_ROOT = resolveArbiterRoot(__dirname);
 
 // ---------------------------------------------------------------------------
+// Strip layer-provided packages from PythonFunction bundles
+// ---------------------------------------------------------------------------
+// The catalogLayer (arbiter/layers/common/requirements.txt) already ships
+// boto3, botocore, s3transfer, jmespath, dateutil, six, urllib3,
+// aws_xray_sdk, and wrapt at /opt/python. PythonFunction's pip install
+// re-bundles them (botocore alone is ~31 MB), pushing Lambda towards the
+// 250 MB code + layers limit. This hook deletes those packages from the
+// asset output AFTER pip installs.
+//
+// This list MUST mirror arbiter/layers/common/requirements.txt plus its
+// transitive dependency set. Update both in lockstep.
+const LAYER_PROVIDED_PACKAGES = [
+  "boto3",
+  "botocore",
+  "s3transfer",
+  "jmespath",
+  "dateutil",
+  "python_dateutil",
+  "six",
+  "six.py",
+  "urllib3",
+  "aws_xray_sdk",
+  "wrapt",
+] as const;
+
+/**
+ * Build an ICommandHooks that strips layer-provided packages from the
+ * PythonFunction asset output after pip install.
+ */
+export function buildStripLayerPackagesHook(): import("@aws-cdk/aws-lambda-python-alpha").ICommandHooks {
+  return {
+    beforeBundling(_inputDir: string, _outputDir: string): string[] {
+      return [];
+    },
+    afterBundling(_inputDir: string, outputDir: string): string[] {
+      return LAYER_PROVIDED_PACKAGES.map(
+        (p) => `rm -rf ${outputDir}/${p} ${outputDir}/${p}-*.dist-info`,
+      );
+    },
+  };
+}
+
+/** Exported for tests. */
+export { LAYER_PROVIDED_PACKAGES };
+
+// ---------------------------------------------------------------------------
 // Seed-module content digest (finding 588c7fb8)
 // ---------------------------------------------------------------------------
 // The seed custom resource (SeedAgentConfigResource, below) uploads agent
@@ -362,6 +408,10 @@ export class ArbiterStack extends cdk.Stack {
         "plus aws-xray-sdk for common.tracing.",
     });
 
+    // --- Strip layer-provided packages from PythonFunction bundles ----------
+    // See LAYER_PROVIDED_PACKAGES and buildStripLayerPackagesHook() above.
+    const stripLayerPackagesHook = buildStripLayerPackagesHook();
+
     // --- Shared per-stack async DLQ (CIT-125 slice A) ----------------------
     // Function-level Lambda DeadLetterConfig, matching governance-notifier's
     // established shape — catches handler-throw drops that Lambda's
@@ -400,6 +450,7 @@ export class ArbiterStack extends cdk.Stack {
       layers: [catalogLayer],
       bundling: {
         assetHashType: cdk.AssetHashType.SOURCE,
+        commandHooks: stripLayerPackagesHook,
         assetExcludes: [
           "fabricator",
           "stepRunner",
@@ -866,7 +917,10 @@ export class ArbiterStack extends cdk.Stack {
         entry: path.join(ARBITER_ROOT, "workerWrapper"),
         handler: "lambda_handler",
         layers: [catalogLayer],
-        bundling: { assetHashType: cdk.AssetHashType.SOURCE },
+        bundling: {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          commandHooks: stripLayerPackagesHook,
+        },
         timeout: cdk.Duration.minutes(15),
         memorySize: 1024,
         environment: {
@@ -1282,7 +1336,10 @@ export class ArbiterStack extends cdk.Stack {
       entry: path.join(ARBITER_ROOT, "fabricator"),
       handler: "lambda_handler",
       layers: [catalogLayer],
-      bundling: { assetHashType: cdk.AssetHashType.SOURCE },
+      bundling: {
+        assetHashType: cdk.AssetHashType.SOURCE,
+        commandHooks: stripLayerPackagesHook,
+      },
       // Platform max reached — Lambda's hard cap is 900s (15 min): verified
       // against the installed generated service models (aws-cdk-lib 2.261.0
       // lambda.generated.d.ts and @aws-sdk/client-lambda 3.1071.0
@@ -1648,7 +1705,10 @@ export class ArbiterStack extends cdk.Stack {
       entry: path.join(ARBITER_ROOT, "activator"),
       handler: "handler",
       layers: [catalogLayer],
-      bundling: { assetHashType: cdk.AssetHashType.SOURCE },
+      bundling: {
+        assetHashType: cdk.AssetHashType.SOURCE,
+        commandHooks: stripLayerPackagesHook,
+      },
       timeout: cdk.Duration.seconds(30),
       memorySize: 512,
       environment: {
