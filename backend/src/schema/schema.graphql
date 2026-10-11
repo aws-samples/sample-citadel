@@ -2050,6 +2050,11 @@ type ApprovalRequest {
   decidedBy: String
   decidedAt: AWSDateTime
   decision: String
+  # CIT-237: Execution-scoped pause — nullable additive fields.
+  # scope: "execution" for execution-scoped, "node" or null for legacy per-node.
+  scope: String
+  # Non-null only when scope = "execution": the node ids parked under this request.
+  nodeIds: [String!]
 }
 
 type Execution {
