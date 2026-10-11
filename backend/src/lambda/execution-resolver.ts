@@ -142,6 +142,8 @@ interface ExecutionRecord {
   runId?: string;
   /** CIT-030: per-node approval requests written by the step runner. */
   approvalRequests?: Record<string, ApprovalRequestRecord>;
+  /** CIT-237: engine-maintained marker — 'Y' when any undecided approval request exists. */
+  pendingApproval?: string;
 }
 
 /** Shape of a per-node approval request stored in DDB (PR1). */
@@ -157,6 +159,10 @@ interface ApprovalRequestRecord {
   decision?: string | null;
   orgId?: string;
   metadata?: Record<string, unknown>;
+  /** CIT-237: "execution" for execution-scoped, absent/null for legacy per-node. */
+  scope?: string | null;
+  /** CIT-237: node ids parked under an execution-scoped request. */
+  nodeIds?: string[];
 }
 
 function _coerceNonNegativeInt(value: unknown): number {
@@ -622,6 +628,8 @@ function stripResumeTokens(
     });
   } else {
     // Map-shaped (raw DynamoDB): convert to array with nodeId injected.
+    // CIT-237: scope and nodeIds are passed through as-is (they are
+    // part of the approval request record written by the engine).
     const stripped: Record<string, unknown>[] = [];
     for (const [key, req] of Object.entries(
       ar as Record<string, ApprovalRequestRecord>,
@@ -739,7 +747,19 @@ async function approveExecution(
     throw new Error("Execution not found");
   }
 
-  if (existing.status !== "awaiting_approval") {
+  // CIT-237: For execution-scoped requests, accept status 'running' as well
+  // because the engine may flip the execution to 'running' while nodes are
+  // still parked under the __execution__ sentinel.
+  if (nodeId === "__execution__") {
+    if (
+      existing.status !== "awaiting_approval" &&
+      existing.status !== "running"
+    ) {
+      throw new Error(
+        `Cannot approve execution: status is '${existing.status}', expected 'awaiting_approval' or 'running'`,
+      );
+    }
+  } else if (existing.status !== "awaiting_approval") {
     throw new Error(
       `Cannot approve execution: status is '${existing.status}', expected 'awaiting_approval'`,
     );
@@ -756,15 +776,31 @@ async function approveExecution(
   // awaiting_approval and the stamped decision is absent or identical to
   // "approved", proceed — audit + re-emit the resume event so the engine
   // picks up the decision (idempotent at the engine side).
-  const nodeStatus = existing.nodeResults?.[nodeId]?.status;
+  //
+  // CIT-237: For execution-scoped requests, the "node still awaiting" check
+  // applies to ANY node in nodeIds — if at least one is still awaiting, proceed.
   if (approvalRequest.decision) {
-    if (
-      nodeStatus !== "awaiting_approval" ||
-      approvalRequest.decision !== "approved"
-    ) {
-      throw new Error(
-        `Approval request for node '${nodeId}' already ${approvalRequest.decision}`,
+    if (nodeId === "__execution__") {
+      const nodeIds = approvalRequest.nodeIds ?? [];
+      const anyStillAwaiting = nodeIds.some(
+        (nid: string) =>
+          existing.nodeResults?.[nid]?.status === "awaiting_approval",
       );
+      if (!anyStillAwaiting || approvalRequest.decision !== "approved") {
+        throw new Error(
+          `Approval request for node '${nodeId}' already ${approvalRequest.decision}`,
+        );
+      }
+    } else {
+      const nodeStatus = existing.nodeResults?.[nodeId]?.status;
+      if (
+        nodeStatus !== "awaiting_approval" ||
+        approvalRequest.decision !== "approved"
+      ) {
+        throw new Error(
+          `Approval request for node '${nodeId}' already ${approvalRequest.decision}`,
+        );
+      }
     }
   }
 
@@ -786,6 +822,7 @@ async function approveExecution(
 
   // Decision write is delegated to the step runner so the resume fence can
   // succeed — the API only validates, audits, and emits the event.
+  // CIT-237: event payload unchanged — node_id='__execution__' for execution scope.
   await emitEvent("execution.resume.requested", {
     executionId,
     workflowId: existing.workflowId,
@@ -819,7 +856,17 @@ async function denyExecution(
     throw new Error("Execution not found");
   }
 
-  if (existing.status !== "awaiting_approval") {
+  // CIT-237: For execution-scoped requests, accept status 'running' as well.
+  if (nodeId === "__execution__") {
+    if (
+      existing.status !== "awaiting_approval" &&
+      existing.status !== "running"
+    ) {
+      throw new Error(
+        `Cannot deny execution: status is '${existing.status}', expected 'awaiting_approval' or 'running'`,
+      );
+    }
+  } else if (existing.status !== "awaiting_approval") {
     throw new Error(
       `Cannot deny execution: status is '${existing.status}', expected 'awaiting_approval'`,
     );
@@ -832,15 +879,29 @@ async function denyExecution(
 
   // Pre-check: mirror the approveExecution logic — error only when the node
   // is no longer awaiting OR the stamped decision differs from "denied".
-  const nodeStatus = existing.nodeResults?.[nodeId]?.status;
+  // CIT-237: For execution-scoped requests, check ANY node in nodeIds.
   if (approvalRequest.decision) {
-    if (
-      nodeStatus !== "awaiting_approval" ||
-      approvalRequest.decision !== "denied"
-    ) {
-      throw new Error(
-        `Approval request for node '${nodeId}' already ${approvalRequest.decision}`,
+    if (nodeId === "__execution__") {
+      const nodeIds = approvalRequest.nodeIds ?? [];
+      const anyStillAwaiting = nodeIds.some(
+        (nid: string) =>
+          existing.nodeResults?.[nid]?.status === "awaiting_approval",
       );
+      if (!anyStillAwaiting || approvalRequest.decision !== "denied") {
+        throw new Error(
+          `Approval request for node '${nodeId}' already ${approvalRequest.decision}`,
+        );
+      }
+    } else {
+      const nodeStatus = existing.nodeResults?.[nodeId]?.status;
+      if (
+        nodeStatus !== "awaiting_approval" ||
+        approvalRequest.decision !== "denied"
+      ) {
+        throw new Error(
+          `Approval request for node '${nodeId}' already ${approvalRequest.decision}`,
+        );
+      }
     }
   }
 
@@ -862,6 +923,7 @@ async function denyExecution(
 
   // Decision write is delegated to the step runner so the resume fence can
   // succeed — the API only validates, audits, and emits the event.
+  // CIT-237: event payload unchanged — node_id='__execution__' for execution scope.
   await emitEvent("execution.resume.requested", {
     executionId,
     workflowId: existing.workflowId,
@@ -894,9 +956,18 @@ async function listAwaitingApprovals(
 
   const scanLimit = Math.min(limit || 20, 100);
 
-  const filterParts: string[] = ["#status = :awaitingApproval"];
-  const exprNames: Record<string, string> = { "#status": "status" };
+  // CIT-237: filter on pendingApproval = 'Y' (engine-maintained marker) with
+  // a fallback OR status = 'awaiting_approval' for records parked before the
+  // engine change that sets the marker.
+  const filterParts: string[] = [
+    "(#pendingApproval = :pendingY OR #status = :awaitingApproval)",
+  ];
+  const exprNames: Record<string, string> = {
+    "#pendingApproval": "pendingApproval",
+    "#status": "status",
+  };
   const exprValues: Record<string, unknown> = {
+    ":pendingY": "Y",
     ":awaitingApproval": "awaiting_approval",
   };
 
