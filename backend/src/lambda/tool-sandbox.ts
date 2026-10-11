@@ -365,7 +365,7 @@ export async function handler(event: {
   identity?: ToolSandboxEventIdentity;
   arguments: {
     toolId: string;
-    inputs: string;
+    inputs: string | Record<string, unknown>;
     /** Client-supplied org — advisory only. The caller's ACTUAL org is
      * always re-derived server-side via extractOrgFromEvent (finding
      * 615aa5bb); a value here that disagrees with the derived org is
@@ -405,11 +405,27 @@ export async function handler(event: {
   // supplied value so admin tooling isn't blocked.
   const effectiveOrgId = callerOrgId || suppliedOrgId;
 
-  // Validate inputs
+  // Validate inputs — AWSJSON! may arrive as an already-parsed object
+  // (AppSync resolves the scalar before invoking the Lambda) or as a raw
+  // JSON string (direct invocation / test harness).
   let inputs: unknown;
-  try {
-    inputs = JSON.parse(inputsJson);
-  } catch {
+  if (typeof inputsJson === "string") {
+    try {
+      inputs = JSON.parse(inputsJson);
+    } catch {
+      return {
+        success: false,
+        error: "Invalid inputs: must be valid JSON",
+        executionTimeMs: 0,
+      };
+    }
+  } else if (
+    typeof inputsJson === "object" &&
+    inputsJson !== null &&
+    !Array.isArray(inputsJson)
+  ) {
+    inputs = inputsJson;
+  } else {
     return {
       success: false,
       error: "Invalid inputs: must be valid JSON",
