@@ -18,6 +18,8 @@ const APPROVAL_REQUEST_FIELDS = `
     decidedBy
     decidedAt
     decision
+    scope
+    nodeIds
   }
 `;
 

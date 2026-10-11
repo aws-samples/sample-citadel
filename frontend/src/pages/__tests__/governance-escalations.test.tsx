@@ -168,10 +168,11 @@ jest.mock('../../services/executionApiService', () => ({
 jest.mock('../../components/ExecutionDecisionDialog', () => {
   const React = require('react');
   return {
-    ExecutionDecisionDialog: ({ kind, executionId: _eid, onConfirm, onCancel }: any) =>
+    ExecutionDecisionDialog: ({ kind, executionId: _eid, onConfirm, onCancel, scope, count }: any) =>
       React.createElement(
         'div',
-        { 'data-testid': 'execution-decision-dialog', 'data-kind': kind },
+        { 'data-testid': 'execution-decision-dialog', 'data-kind': kind, 'data-scope': scope ?? '', 'data-count': count ?? '' },
+        scope === 'execution' && React.createElement('p', { 'data-testid': 'dialog-description' }, `Deny and fail ${count ?? 0} ${(count ?? 0) === 1 ? 'node' : 'nodes'}.`),
         React.createElement('button', {
           'data-testid': 'dialog-confirm',
           onClick: () => onConfirm('test reason'),
@@ -581,6 +582,114 @@ describe('GovernanceEscalations', () => {
       expect(screen.queryByTestId('awaiting-approval-section')).not.toBeInTheDocument();
     });
 
+    it('renders one row for execution-scoped request with correct label and calls approve with __execution__', async () => {
+      setOrg(true);
+      (governanceService.listGovernanceFindings as jest.Mock).mockResolvedValue(
+        makeFindingsConn([]),
+      );
+      (governanceService.getEscalationMetricSeries as jest.Mock).mockResolvedValue(
+        makeMetricSeries({ datapoints: [], total: 0 }),
+      );
+      (executionApiService.listAwaitingApprovals as jest.Mock).mockResolvedValue({
+        items: [
+          {
+            executionId: 'exec-scoped',
+            workflowId: 'wf-scoped',
+            orgId: 'org-1',
+            status: 'awaiting_approval',
+            startedAt: '2026-10-01T00:00:00Z',
+            triggeredBy: 'user-1',
+            currentNode: null,
+            approvalRequests: [
+              {
+                nodeId: '__execution__',
+                requestType: 'execution_pause',
+                reason: 'Cost exceeded',
+                requestedBy: 'system',
+                requestedAt: '2026-10-01T01:00:00Z',
+                expiresAt: null,
+                decision: null,
+                scope: 'execution',
+                nodeIds: ['node-1', 'node-2', 'node-3'],
+              },
+            ],
+          },
+        ],
+        nextToken: null,
+      });
+      (executionApiService.approveExecution as jest.Mock).mockResolvedValue({});
+
+      await act(async () => {
+        render(React.createElement(GovernanceEscalations));
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('awaiting-row-exec-scoped')).toBeInTheDocument();
+      });
+
+      // One row, not three per-node rows
+      const rows = screen.getAllByTestId(/^awaiting-row-/);
+      expect(rows).toHaveLength(1);
+
+      // Shows execution-scoped label with node count and reason
+      expect(screen.getByTestId('exec-scoped-label')).toHaveTextContent(
+        'Execution paused — 3 nodes: Cost exceeded',
+      );
+
+      // Approve sends __execution__
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('approve-exec-exec-scoped'));
+      });
+      expect(executionApiService.approveExecution).toHaveBeenCalledWith(
+        'exec-scoped',
+        '__execution__',
+      );
+    });
+
+    it('singular node word when execution-scoped with 1 node', async () => {
+      setOrg(true);
+      (governanceService.listGovernanceFindings as jest.Mock).mockResolvedValue(
+        makeFindingsConn([]),
+      );
+      (governanceService.getEscalationMetricSeries as jest.Mock).mockResolvedValue(
+        makeMetricSeries({ datapoints: [], total: 0 }),
+      );
+      (executionApiService.listAwaitingApprovals as jest.Mock).mockResolvedValue({
+        items: [
+          {
+            executionId: 'exec-single',
+            workflowId: 'wf-1',
+            orgId: 'org-1',
+            status: 'awaiting_approval',
+            startedAt: '2026-10-01T00:00:00Z',
+            triggeredBy: 'user-1',
+            currentNode: null,
+            approvalRequests: [
+              {
+                nodeId: '__execution__',
+                requestType: 'execution_pause',
+                reason: null,
+                decision: null,
+                scope: 'execution',
+                nodeIds: ['node-only'],
+              },
+            ],
+          },
+        ],
+        nextToken: null,
+      });
+
+      await act(async () => {
+        render(React.createElement(GovernanceEscalations));
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('exec-scoped-label')).toHaveTextContent(
+          'Execution paused — 1 node',
+        );
+      });
+    });
+
     it('approve sends the pending approvalRequests[0].nodeId, not currentNode', async () => {
       setOrg(true);
       (governanceService.listGovernanceFindings as jest.Mock).mockResolvedValue(
@@ -629,6 +738,64 @@ describe('GovernanceEscalations', () => {
       expect(executionApiService.approveExecution).toHaveBeenCalledWith(
         'exec-node-test',
         'parked-node-42',
+      );
+    });
+
+    it('execution-scoped deny dialog copy mentions node count', async () => {
+      setOrg(true);
+      (governanceService.listGovernanceFindings as jest.Mock).mockResolvedValue(
+        makeFindingsConn([]),
+      );
+      (governanceService.getEscalationMetricSeries as jest.Mock).mockResolvedValue(
+        makeMetricSeries({ datapoints: [], total: 0 }),
+      );
+      (executionApiService.listAwaitingApprovals as jest.Mock).mockResolvedValue({
+        items: [
+          {
+            executionId: 'exec-deny-scoped',
+            workflowId: 'wf-deny',
+            orgId: 'org-1',
+            status: 'awaiting_approval',
+            startedAt: '2026-10-01T00:00:00Z',
+            triggeredBy: 'user-1',
+            currentNode: null,
+            approvalRequests: [
+              {
+                nodeId: '__execution__',
+                requestType: 'execution_pause',
+                reason: 'Budget exceeded',
+                requestedBy: 'system',
+                requestedAt: '2026-10-01T01:00:00Z',
+                expiresAt: null,
+                decision: null,
+                scope: 'execution',
+                nodeIds: ['n-1', 'n-2'],
+              },
+            ],
+          },
+        ],
+        nextToken: null,
+      });
+
+      await act(async () => {
+        render(React.createElement(GovernanceEscalations));
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('deny-exec-exec-deny-scoped')).toBeInTheDocument();
+      });
+
+      // Click Deny to open the dialog
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('deny-exec-exec-deny-scoped'));
+      });
+
+      // Dialog should render with execution scope and show node count
+      const dialog = screen.getByTestId('execution-decision-dialog');
+      expect(dialog).toHaveAttribute('data-scope', 'execution');
+      expect(dialog).toHaveAttribute('data-count', '2');
+      expect(screen.getByTestId('dialog-description')).toHaveTextContent(
+        'Deny and fail 2 nodes.',
       );
     });
   });

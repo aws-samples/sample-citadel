@@ -28,6 +28,10 @@ export interface ExecutionDecisionDialogProps {
   executionId: string;
   onConfirm: (reason: string) => Promise<void>;
   onCancel: () => void;
+  /** When set to 'execution', the dialog shows execution-scoped copy. */
+  scope?: 'execution' | 'node' | null;
+  /** Number of paused nodes (used in execution-scoped copy). */
+  count?: number;
 }
 
 const TITLES: Record<ExecutionDecisionKind, string> = {
@@ -40,11 +44,37 @@ const DESCRIPTIONS: Record<ExecutionDecisionKind, string> = {
   deny: 'Provide a reason for denying this execution.',
 };
 
+function getTitle(kind: ExecutionDecisionKind, scope?: string | null, _count?: number): string {
+  if (scope === 'execution') {
+    return kind === 'deny' ? 'Deny execution' : 'Resume execution';
+  }
+  return TITLES[kind];
+}
+
+function getDescription(kind: ExecutionDecisionKind, scope?: string | null, count?: number): string {
+  const n = count ?? 0;
+  const nodeWord = n === 1 ? 'node' : 'nodes';
+  if (scope === 'execution') {
+    if (kind === 'pause') return `Resume all ${n} paused ${nodeWord}.`;
+    return `Deny and fail ${n} ${nodeWord}.`;
+  }
+  return DESCRIPTIONS[kind];
+}
+
+function getConfirmLabel(kind: ExecutionDecisionKind, scope?: string | null): string {
+  if (scope === 'execution') {
+    return kind === 'deny' ? 'Deny' : 'Resume';
+  }
+  return kind === 'pause' ? 'Pause' : 'Deny';
+}
+
 export const ExecutionDecisionDialog: React.FC<ExecutionDecisionDialogProps> = ({
   kind,
   executionId,
   onConfirm,
   onCancel,
+  scope,
+  count,
 }) => {
   const [reason, setReason] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -63,9 +93,9 @@ export const ExecutionDecisionDialog: React.FC<ExecutionDecisionDialogProps> = (
     <AlertDialog open onOpenChange={(open) => { if (!open) onCancel(); }}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>{TITLES[kind]}</AlertDialogTitle>
+          <AlertDialogTitle>{getTitle(kind, scope, count)}</AlertDialogTitle>
           <AlertDialogDescription>
-            {DESCRIPTIONS[kind]} (Execution {executionId.slice(0, 8)}…)
+            {getDescription(kind, scope, count)} (Execution {executionId.slice(0, 8)}…)
           </AlertDialogDescription>
         </AlertDialogHeader>
 
@@ -96,7 +126,7 @@ export const ExecutionDecisionDialog: React.FC<ExecutionDecisionDialogProps> = (
             }}
             data-testid="confirm-execution-decision"
           >
-            {submitting ? 'Submitting…' : kind === 'pause' ? 'Pause' : 'Deny'}
+            {submitting ? 'Submitting…' : getConfirmLabel(kind, scope)}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

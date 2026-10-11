@@ -612,6 +612,8 @@ export function GovernanceEscalations() {
     kind: ExecutionDecisionKind;
     executionId: string;
     nodeId: string;
+    scope?: 'execution' | 'node' | null;
+    count?: number;
   } | null>(null);
 
   const fetchAwaiting = useCallback(async () => {
@@ -635,7 +637,8 @@ export function GovernanceEscalations() {
 
   const handleApproveExecution = async (exec: Execution) => {
     const pending = exec.approvalRequests?.find((r) => !r.decision);
-    const nodeId = pending?.nodeId || exec.currentNode || '';
+    const isExecScoped = pending?.scope === 'execution';
+    const nodeId = isExecScoped ? '__execution__' : (pending?.nodeId || exec.currentNode || '');
     try {
       await executionApiService.approveExecution(exec.executionId, nodeId);
       toast.success('Execution approved');
@@ -859,7 +862,6 @@ export function GovernanceEscalations() {
                   <TableRow>
                     <TableHead>Execution</TableHead>
                     <TableHead>Workflow</TableHead>
-                    <TableHead>Request type</TableHead>
                     <TableHead>Reason</TableHead>
                     <TableHead>Requested by</TableHead>
                     <TableHead>Requested at</TableHead>
@@ -870,6 +872,10 @@ export function GovernanceEscalations() {
                 <TableBody>
                   {awaitingApprovals.map((exec) => {
                     const pending = exec.approvalRequests?.find((r: ApprovalRequest) => !r.decision);
+                    const isExecScoped = pending?.scope === 'execution';
+                    const nodeCount = isExecScoped ? (pending?.nodeIds?.length ?? 0) : 0;
+                    const nodeWord = nodeCount === 1 ? 'node' : 'nodes';
+                    const approveNodeId = isExecScoped ? '__execution__' : (pending?.nodeId || exec.currentNode || '');
                     return (
                       <TableRow key={exec.executionId} data-testid={`awaiting-row-${exec.executionId}`}>
                         <TableCell>
@@ -878,11 +884,15 @@ export function GovernanceEscalations() {
                         <TableCell>
                           <span className="font-mono text-xs">{exec.workflowId}</span>
                         </TableCell>
-                        <TableCell>
-                          <Badge variant="warning">{pending?.requestType ?? '—'}</Badge>
-                        </TableCell>
-                        <TableCell className="max-w-48 truncate" title={pending?.reason ?? undefined}>
-                          {pending?.reason ?? '—'}
+                        <TableCell className="max-w-48" title={pending?.reason ?? undefined}>
+                          {isExecScoped ? (
+                            <span data-testid="exec-scoped-label">
+                              Execution paused — {nodeCount} {nodeWord}
+                              {pending?.reason ? `: ${pending.reason}` : ''}
+                            </span>
+                          ) : (
+                            <>{pending?.reason ?? '—'}</>
+                          )}
                         </TableCell>
                         <TableCell>{pending?.requestedBy ?? '—'}</TableCell>
                         <TableCell>
@@ -908,11 +918,12 @@ export function GovernanceEscalations() {
                               size="sm"
                               variant="destructive"
                               onClick={() => {
-                                const pendingReq = exec.approvalRequests?.find((r: ApprovalRequest) => !r.decision);
                                 setDecisionDialog({
                                   kind: 'deny',
                                   executionId: exec.executionId,
-                                  nodeId: pendingReq?.nodeId || exec.currentNode || '',
+                                  nodeId: approveNodeId,
+                                  scope: isExecScoped ? 'execution' : undefined,
+                                  count: isExecScoped ? nodeCount : undefined,
                                 });
                               }}
                               data-testid={`deny-exec-${exec.executionId}`}
@@ -937,6 +948,8 @@ export function GovernanceEscalations() {
           executionId={decisionDialog.executionId}
           onConfirm={handleDenyExecution}
           onCancel={() => setDecisionDialog(null)}
+          scope={decisionDialog.scope}
+          count={decisionDialog.count}
         />
       )}
 
