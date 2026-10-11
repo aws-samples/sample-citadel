@@ -12,6 +12,8 @@ export interface ApprovalRequest {
   decidedBy?: string | null;
   decidedAt?: string | null;
   decision?: string | null;
+  scope?: string | null;
+  nodeIds?: string[] | null;
 }
 
 export interface Execution {

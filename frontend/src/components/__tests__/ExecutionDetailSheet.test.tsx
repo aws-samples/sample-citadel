@@ -704,7 +704,7 @@ describe('ExecutionDetailSheet — execution actions (Pause/Approve/Deny)', () =
     status: 'awaiting_approval',
     completedAt: null,
     currentNode: 'node-a',
-    approvalRequests: [{ requestType: 'human_approval', reason: 'Needs review' }],
+    approvalRequests: [{ nodeId: 'node-a', requestType: 'human_approval', reason: 'Needs review' }],
   };
 
   test('renders Pause button for a RUNNING execution when canApproveExecutions + onPause', () => {

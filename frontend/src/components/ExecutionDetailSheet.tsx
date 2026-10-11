@@ -90,6 +90,20 @@ export interface ExecutionDetail {
    * insertion order. */
   compensationPlan?: string[] | null;
   compensationSummary?: string | CompensationSummary | null;
+  /** Approval requests from the backend schema. */
+  approvalRequests?: Array<{
+    nodeId: string;
+    requestType: string;
+    reason?: string | null;
+    decision?: string | null;
+    scope?: string | null;
+    nodeIds?: string[] | null;
+    requestedBy?: string | null;
+    requestedAt?: string | null;
+    expiresAt?: string | null;
+    decidedBy?: string | null;
+    decidedAt?: string | null;
+  }> | null;
 }
 
 interface ExecutionDetailSheetProps {
@@ -565,7 +579,12 @@ export function ExecutionDetailSheet({
             )}
           </div>
           {/* Execution actions — Pause when RUNNING, Approve/Deny when awaiting_approval */}
-          {canApproveExecutions && (isRunning(execution.status) || isAwaitingApproval(execution.status)) && (
+          {canApproveExecutions && (isRunning(execution.status) || isAwaitingApproval(execution.status)) && (() => {
+            const pendingReq = execution.approvalRequests?.find((r) => !r.decision);
+            const isExecScoped = pendingReq?.scope === 'execution';
+            const execNodeCount = isExecScoped ? (pendingReq?.nodeIds?.length ?? 0) : 0;
+            const execNodeWord = execNodeCount === 1 ? 'node' : 'nodes';
+            return (
             <div className="flex items-center gap-2 mt-1" data-testid="sheet-execution-actions">
               {isRunning(execution.status) && onPause && (
                 <Button
@@ -578,6 +597,11 @@ export function ExecutionDetailSheet({
                   <Pause className="size-3 mr-1" /> Pause
                 </Button>
               )}
+              {isAwaitingApproval(execution.status) && isExecScoped && (
+                <span className="text-xs text-muted-foreground" data-testid="sheet-exec-scoped-label">
+                  Execution paused — {execNodeCount} {execNodeWord}
+                </span>
+              )}
               {isAwaitingApproval(execution.status) && onApprove && (
                 <Button
                   variant="default"
@@ -586,7 +610,7 @@ export function ExecutionDetailSheet({
                   data-testid="sheet-approve-action"
                   onClick={() => onApprove(execution)}
                 >
-                  Approve
+                  {isExecScoped ? 'Resume' : 'Approve'}
                 </Button>
               )}
               {isAwaitingApproval(execution.status) && onDeny && (
@@ -601,7 +625,8 @@ export function ExecutionDetailSheet({
                 </Button>
               )}
             </div>
-          )}
+            );
+          })()}
           <div className="flex flex-col gap-0.5 text-xs text-muted-foreground">
             <span>Started {formatDate(execution.startedAt)}</span>
             {execution.completedAt && <span>Completed {formatDate(execution.completedAt)}</span>}

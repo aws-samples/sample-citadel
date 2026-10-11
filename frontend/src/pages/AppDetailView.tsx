@@ -128,6 +128,8 @@ interface ApprovalRequest {
   decidedBy?: string | null;
   decidedAt?: string | null;
   decision?: string | null;
+  scope?: string | null;
+  nodeIds?: string[] | null;
 }
 
 interface Execution {
@@ -322,11 +324,15 @@ function computeDuration(startedAt: string, completedAt?: string): string {
  * flat array, so `currentNode` may be null for awaiting_approval
  * executions. Fall back to scanning nodeResults for a node whose status
  * is 'awaiting_approval'.
+ *
+ * For execution-scoped requests (scope === 'execution'), return the
+ * sentinel '__execution__' — the backend routes that to the bulk handler.
  */
 function deriveAwaitingNodeId(exec: Execution): string | null {
+  const pending = exec.approvalRequests?.find((r) => !r.decision);
+  if (pending?.scope === 'execution') return '__execution__';
   if (exec.currentNode) return exec.currentNode;
   // Prefer the nodeId from the first undecided approval request.
-  const pending = exec.approvalRequests?.find((r) => !r.decision);
   if (pending?.nodeId) return pending.nodeId;
   try {
     const nr: Record<string, any> =
@@ -516,7 +522,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
   const [unpublishWarnings, setUnpublishWarnings] = useState<string[]>([]);
 
   // Execution decision dialog state (pause/deny)
-  const [decisionDialog, setDecisionDialog] = useState<{ kind: ExecutionDecisionKind; executionId: string } | null>(null);
+  const [decisionDialog, setDecisionDialog] = useState<{ kind: ExecutionDecisionKind; executionId: string; scope?: 'execution' | 'node' | null; count?: number } | null>(null);
 
   // Subscribe to onAppStatusChange for real-time status updates (Req 11 AC 12)
   useEffect(() => {
@@ -1103,7 +1109,14 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
   // ---- Execution actions (pause / approve / deny) ----
 
   const handlePauseExecution = (exec: Execution) => {
-    setDecisionDialog({ kind: 'pause', executionId: exec.executionId });
+    const pending = exec.approvalRequests?.find((r) => !r.decision);
+    const scope = pending?.scope === 'execution' ? 'execution' as const : pending?.scope === 'node' ? 'node' as const : null;
+    setDecisionDialog({
+      kind: 'pause',
+      executionId: exec.executionId,
+      scope,
+      count: scope === 'execution' ? (pending?.nodeIds?.length ?? 0) : undefined,
+    });
   };
 
   const handleApproveExecution = async (exec: Execution) => {
@@ -1122,7 +1135,14 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
   };
 
   const handleDenyExecution = (exec: Execution) => {
-    setDecisionDialog({ kind: 'deny', executionId: exec.executionId });
+    const pending = exec.approvalRequests?.find((r) => !r.decision);
+    const scope = pending?.scope === 'execution' ? 'execution' as const : pending?.scope === 'node' ? 'node' as const : null;
+    setDecisionDialog({
+      kind: 'deny',
+      executionId: exec.executionId,
+      scope,
+      count: scope === 'execution' ? (pending?.nodeIds?.length ?? 0) : undefined,
+    });
   };
 
   const handleDecisionConfirm = async (reason: string) => {
@@ -1676,6 +1696,9 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
             {executions.map((exec) => {
               const colors = EXECUTION_STATUS_COLORS[normalizeExecutionStatus(exec.status)] || EXECUTION_STATUS_COLORS.pending;
               const pendingApproval = exec.approvalRequests?.find((r) => !r.decision);
+              const isExecScoped = pendingApproval?.scope === 'execution';
+              const execScopedCount = isExecScoped ? (pendingApproval?.nodeIds?.length ?? 0) : 0;
+              const execScopedNodeWord = execScopedCount === 1 ? 'node' : 'nodes';
               return (
                 <tr
                   key={exec.executionId}
@@ -1696,6 +1719,11 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
                   <td className="py-2 px-3">
                     <div className="flex flex-col gap-1">
                       <Badge className={cn(colors.bg, colors.text, 'text-xs border-0')}>{exec.status}</Badge>
+                      {isAwaitingApproval(exec.status) && isExecScoped && (
+                        <span className="text-xs text-muted-foreground" data-testid="exec-scoped-label">
+                          Execution paused — {execScopedCount} {execScopedNodeWord}
+                        </span>
+                      )}
                       {isAwaitingApproval(exec.status) && pendingApproval?.reason && (
                         <span className="text-xs text-muted-foreground" data-testid="approval-reason">
                           {pendingApproval.reason}
@@ -1734,7 +1762,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
                               data-testid="approve-execution-action"
                               onClick={(e) => { e.stopPropagation(); handleApproveExecution(exec); }}
                             >
-                              Approve
+                              {isExecScoped ? 'Resume' : 'Approve'}
                             </Button>
                             <Button
                               variant="destructive"
@@ -2668,6 +2696,8 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
           executionId={decisionDialog.executionId}
           onConfirm={handleDecisionConfirm}
           onCancel={() => setDecisionDialog(null)}
+          scope={decisionDialog.scope}
+          count={decisionDialog.count}
         />
       )}
     </PageContainer>

@@ -184,7 +184,28 @@ const awaitingExecution = {
   triggeredBy: 'user',
   currentNode: 'node-b',
   approvalRequests: [
-    { requestType: 'human_approval', reason: 'Needs review', requestedBy: 'agent', requestedAt: '2024-06-01T00:01:00Z' },
+    { nodeId: 'node-b', requestType: 'human_approval', reason: 'Needs review', requestedBy: 'agent', requestedAt: '2024-06-01T00:01:00Z' },
+  ],
+};
+
+const execScopedAwaitingExecution = {
+  executionId: 'exec-scoped-1',
+  workflowId: 'wf-1',
+  status: 'awaiting_approval',
+  startedAt: '2024-06-01T00:00:00Z',
+  triggeredBy: 'user',
+  currentNode: null,
+  approvalRequests: [
+    {
+      nodeId: '__execution__',
+      requestType: 'execution_pause',
+      reason: 'Budget exceeded',
+      requestedBy: 'system',
+      requestedAt: '2024-06-01T00:01:00Z',
+      decision: null,
+      scope: 'execution',
+      nodeIds: ['node-x', 'node-y'],
+    },
   ],
 };
 
@@ -462,5 +483,39 @@ describe('AppDetailView execution actions', () => {
         'node-a',
       );
     });
+  });
+
+  it('execution-scoped request shows Resume button and calls approve with __execution__', async () => {
+    (executionApiService.approveExecution as jest.Mock).mockResolvedValue({});
+    setup([execScopedAwaitingExecution]);
+    render(<AppDetailView {...defaultProps} />);
+    await goToExecutions();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('approve-execution-action')).toBeInTheDocument();
+    });
+
+    // Shows "Resume" instead of "Approve"
+    expect(screen.getByTestId('approve-execution-action')).toHaveTextContent('Resume');
+    // Shows execution-scoped label
+    expect(screen.getByTestId('exec-scoped-label')).toHaveTextContent('Execution paused — 2 nodes');
+
+    fireEvent.click(screen.getByTestId('approve-execution-action'));
+
+    await waitFor(() => {
+      expect(executionApiService.approveExecution).toHaveBeenCalledWith('exec-scoped-1', '__execution__');
+    });
+  });
+
+  it('legacy per-node awaiting_approval still renders Approve (not Resume)', async () => {
+    setup([awaitingExecution]);
+    render(<AppDetailView {...defaultProps} />);
+    await goToExecutions();
+
+    await waitFor(() => {
+      expect(screen.getByTestId('approve-execution-action')).toBeInTheDocument();
+    });
+    expect(screen.getByTestId('approve-execution-action')).toHaveTextContent('Approve');
+    expect(screen.queryByTestId('exec-scoped-label')).not.toBeInTheDocument();
   });
 });
