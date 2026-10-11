@@ -417,6 +417,21 @@ export async function handler(event: {
     };
   }
 
+  // Audit: this path bypasses the governed tool handler (tool-config-resolver's
+  // approval/governance pipeline). Log explicitly so the ungoverned execution
+  // is traceable in CloudWatch and audit tooling.
+  console.log(
+    JSON.stringify({
+      level: "WARN",
+      component: "ToolSandbox",
+      governance: "ungoverned_test_run",
+      toolId,
+      orgId: effectiveOrgId,
+      callerUserId: authContext.userId,
+      timestamp: new Date().toISOString(),
+    }),
+  );
+
   const result = await executeTool(
     toolId,
     inputs,

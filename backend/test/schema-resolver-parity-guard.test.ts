@@ -102,15 +102,6 @@ const DELIBERATELY_UNWIRED: ReadonlyMap<string, string> = new Map([
       "org's project progress with no org-membership check. Finding 0018a6d7.",
   ],
   [
-    "Mutation.testTool",
-    "Finding 615aa5bb: org-scoping + tool:execute permission gate now fixed " +
-      "(tool-sandbox.ts). Still not wired — separate blocker filed: " +
-      "ToolSandboxFunction's TOOLS_CONFIG_TABLE env var points at a table " +
-      "name (citadel-tools-config-{env}) no stack creates (real table is " +
-      "citadel-tools-{env}); testTool would always fail at runtime until " +
-      "that's corrected. Was: finding 0018a6d7.",
-  ],
-  [
     "Query.getDashboardMetrics",
     "Finding 615aa5bb: cross-tenant scan fixed (app-metrics-handler.ts now " +
       "scopes via AppsTable.OrgIndex + per-app GroupIndex, no ScanCommand " +

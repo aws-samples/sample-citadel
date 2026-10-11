@@ -115,6 +115,15 @@ const DOCUMENTED_EXEMPTIONS: ReadonlyMap<string, string> = new Map([
       "(onFabricationEvent) is connect-gated by the shared " +
       "chatter-subscription-authorizer (pinned in the chatter guard).",
   ],
+  [
+    "tool-sandbox",
+    "Single-handler Lambda (no dispatch switch to enumerate): " +
+      "Mutation.testTool is the only field, gated by tool:execute " +
+      "permission (admin/architect-only) and server-derived org scoping " +
+      "(finding 615aa5bb). Stack wiring and auth assertions are covered " +
+      "in services-stack-test-tool-resolver.test.ts and " +
+      "tool-sandbox-org-scoping.test.ts respectively.",
+  ],
 ]);
 
 /** Mutations whose IAM-only schema directive an exemption reason relies on. */
