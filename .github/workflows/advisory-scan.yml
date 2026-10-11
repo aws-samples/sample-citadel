@@ -97,21 +97,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Check revisitBy dates
-        run: |
-          today=$(date -u +%Y-%m-%d)
-          expired=0
-          while IFS= read -r line; do
-            date=$(echo "$line" | grep -oP 'revisitBy[:\s]+\K\d{4}-\d{2}-\d{2}')
-            if [ -n "$date" ] && [ "$date" \< "$today" ] || [ "$date" = "$today" ]; then
-              echo "::error::Expired revisitBy date: $date in audit-ci-allowlist-justifications.md"
-              expired=1
-            fi
-          done < <(grep -i 'revisitBy' audit-ci-allowlist-justifications.md || true)
-          if [ "$expired" -eq 1 ]; then
-            echo "One or more allowlist justifications have expired. Review and renew them."
-            exit 1
-          fi
-          echo "All revisitBy dates are in the future."
+        run: scripts/check-allowlist-expiry.sh audit-ci-allowlist-justifications.md
 
   # ── Auto-remediation ──
   remediate:

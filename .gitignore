@@ -22,6 +22,9 @@ ENV/
 scripts/*
 !scripts/test-deploy-sh.sh
 !scripts/verify-doc-claims.js
+!scripts/check-allowlist-expiry.sh
+!scripts/__tests__/
+!scripts/__tests__/**
 !scripts/smoke/
 !scripts/smoke/**
 scripts/smoke/**/node_modules/
