@@ -735,10 +735,9 @@ _TERMINAL = {'completed', 'skipped', 'failed'}
 @h_settings(max_examples=200, deadline=None)
 def test_status_derivation_property(statuses):
     """For any combination of node statuses, the derived execution status
-    matches:
-      - awaiting_approval iff no node dispatched/running AND >=1 awaiting
-      - running iff any node dispatched/running
-      - completed iff all nodes terminal
+    matches the rule: once started, never pending; terminal states win;
+    awaiting_approval iff no node dispatched/running AND >=1 awaiting;
+    otherwise running.
     """
     any_running = any(s in ('running', 'dispatched') for s in statuses)
     any_awaiting = any(s == AWAITING_APPROVAL for s in statuses)
@@ -762,6 +761,10 @@ def test_status_derivation_property(statuses):
         status_map.get(n['id'], 'pending') in ('completed', 'skipped', 'failed')
         for n in nodes
     )
+    _any_running_or_dispatched = any(
+        status_map.get(n['id'], 'pending') in ('running', 'dispatched')
+        for n in nodes
+    )
     _settled_or_parked = ('completed', 'skipped', 'failed', AWAITING_APPROVAL)
     _all_settled = bool(nodes) and all(
         status_map.get(n['id'], 'pending') in _settled_or_parked
@@ -773,12 +776,50 @@ def test_status_derivation_property(statuses):
 
     if _all_terminal:
         derived = 'completed'
-    elif _all_settled and _any_awaiting:
+    elif _all_settled and _any_awaiting and not _any_running_or_dispatched:
         derived = AWAITING_APPROVAL
     else:
         derived = 'running'
 
     assert derived == expected, f'statuses={statuses} expected={expected} derived={derived}'
+
+
+def test_node_completes_while_siblings_not_yet_dispatched_stays_running():
+    """Explicit regression test: when one node completes and siblings are
+    still pending (not yet dispatched), the derived execution status stays
+    running — never flips to pending.
+    """
+    statuses = ['completed', 'pending', 'pending']
+    status_map = {f'n{i}': s for i, s in enumerate(statuses)}
+    nodes = [{'id': f'n{i}'} for i in range(len(statuses))]
+
+    _all_terminal = all(
+        status_map.get(n['id'], 'pending') in ('completed', 'skipped', 'failed')
+        for n in nodes
+    )
+    _any_running_or_dispatched = any(
+        status_map.get(n['id'], 'pending') in ('running', 'dispatched')
+        for n in nodes
+    )
+    _settled_or_parked = ('completed', 'skipped', 'failed', AWAITING_APPROVAL)
+    _all_settled = all(
+        status_map.get(n['id'], 'pending') in _settled_or_parked
+        for n in nodes
+    )
+    _any_awaiting = any(
+        status_map.get(n['id']) == AWAITING_APPROVAL for n in nodes
+    )
+
+    if _all_terminal:
+        derived = 'completed'
+    elif _all_settled and _any_awaiting and not _any_running_or_dispatched:
+        derived = AWAITING_APPROVAL
+    else:
+        derived = 'running'
+
+    assert derived == 'running', (
+        f'statuses={statuses}: execution must stay running, got {derived}'
+    )
 
 
 # ---------------------------------------------------------------------------
