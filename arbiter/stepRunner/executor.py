@@ -36,7 +36,7 @@ from dag import (
     merge_node_configuration,
     topological_sort,
 )
-from approval_requests import AWAITING_APPROVAL, build_approval_request, is_awaiting
+from approval_requests import AWAITING_APPROVAL, EXECUTION_SENTINEL, build_approval_request, is_awaiting
 from condition import evaluate_condition
 from retry import calculate_backoff, should_retry
 from common import workflow_contract
@@ -842,7 +842,8 @@ def _park_node_awaiting_approval(
                 'SET nodeResults.#nid.#status = :awaiting, '
                 'nodeResults.#nid.#parkedAt = :parkedAt, '
                 'approvalRequests.#nid = :record, '
-                '#pausedAt = if_not_exists(#pausedAt, :parkedAt) '
+                '#pausedAt = if_not_exists(#pausedAt, :parkedAt), '
+                '#pendingApproval = :Y '
                 'REMOVE #pauseRequested'
             ),
             ConditionExpression=(
@@ -854,12 +855,14 @@ def _park_node_awaiting_approval(
                 '#parkedAt': 'parkedAt',
                 '#pauseRequested': 'pauseRequested',
                 '#pausedAt': 'pausedAt',
+                '#pendingApproval': 'pendingApproval',
             },
             ExpressionAttributeValues={
                 ':awaiting': AWAITING_APPROVAL,
                 ':parkedAt': now,
                 ':pending': 'pending',
                 ':record': approval_record,
+                ':Y': 'Y',
             },
         )
     except ClientError as exc:
@@ -953,19 +956,22 @@ def handle_node_awaiting_approval(
             UpdateExpression=(
                 'SET nodeResults.#nid.#status = :awaiting, '
                 'nodeResults.#nid.#parkedAt = :parkedAt, '
-                'approvalRequests.#nid = :record'
+                'approvalRequests.#nid = :record, '
+                '#pendingApproval = :Y'
             ),
             ConditionExpression='nodeResults.#nid.#status = :running',
             ExpressionAttributeNames={
                 '#nid': node_id,
                 '#status': 'status',
                 '#parkedAt': 'parkedAt',
+                '#pendingApproval': 'pendingApproval',
             },
             ExpressionAttributeValues={
                 ':awaiting': AWAITING_APPROVAL,
                 ':parkedAt': now,
                 ':running': 'running',
                 ':record': approval_record,
+                ':Y': 'Y',
             },
         )
     except ClientError as exc:
@@ -1608,30 +1614,35 @@ def approve_execution(
     decided_by: str,
     org_id: str,
 ) -> bool:
-    """Approve a parked node and resume the execution.
+    """Approve a parked node (or all parked nodes under an execution-scoped
+    request) and resume the execution.
+
+    When ``node_id == EXECUTION_SENTINEL`` (``'__execution__'``), reads
+    ``approvalRequests['__execution__']``, verifies ``resumeToken``, then
+    flips ALL ``nodeIds`` from ``awaiting_approval`` → ``pending`` in a
+    single ``UpdateItem``. Stamps the decision on the ``__execution__``
+    request. Sets execution status to ``running``. Clears ``pausedAt``,
+    accumulates ``pausedSeconds`` (int). Removes ``pendingApproval`` if no
+    other undecided approval request remains.
+
+    When ``node_id`` is a real node id: existing per-node behavior unchanged.
 
     Fenced conditional write: the node must be ``awaiting_approval`` AND the
     approval-request's ``resumeToken`` must match AND the execution's
     top-level ``orgId`` must match AND the decision must be either
-    absent/null (undecided) OR already stamped ``approved`` (pre-stamped by
-    the API — the engine is the authoritative single-writer that flips the
-    node).
+    absent/null (undecided) OR already stamped ``approved``.
 
-    When the record was pre-stamped with the OPPOSITE decision (``denied``),
-    the condition fails and the call is a conflict no-op — the engine does
-    NOT override a prior denial.
+    Idempotent: a second call is a no-op.
 
-    Idempotent: a second call after the node has already left
-    ``awaiting_approval`` (i.e. the node was already resumed) is a no-op.
-
-    Returns ``True`` if this call performed the approval, ``False`` if it was
-    a no-op (already resumed, mismatched token/org, or conflicting decision).
+    Returns ``True`` if this call performed the approval, ``False`` on no-op.
     """
+    if node_id == EXECUTION_SENTINEL:
+        return _approve_execution_scoped(execution_id, resume_token, decided_by, org_id)
+
     now = _now_iso()
     # Compute accumulated paused time before the conditional write (which
     # REMOVEs pausedAt).  Best-effort: if pausedAt is absent or unparseable,
-    # the delta is 0 — the watchdog will see a conservative (smaller) total
-    # rather than crashing the approval.
+    # the delta is 0.
     _pre = _load_execution(execution_id) or {}
     _paused_at_raw = _pre.get('pausedAt')
     _prior_paused_seconds = 0
@@ -1647,6 +1658,20 @@ def approve_execution(
         except (TypeError, ValueError):
             pass
     _new_paused_seconds = _prior_paused_seconds + _delta_seconds
+
+    # Check whether removing pendingApproval is warranted:
+    # After approving this node, are there any OTHER undecided requests?
+    _approval_requests = _pre.get('approvalRequests') or {}
+    _has_other_undecided = any(
+        v.get('decision') is None
+        for k, v in _approval_requests.items()
+        if k != node_id and isinstance(v, dict)
+    )
+
+    _remove_clause = '#pauseRequested, #pausedAt'
+    if not _has_other_undecided:
+        _remove_clause += ', #pendingApproval'
+
     try:
         _executions_table.update_item(
             Key={'executionId': execution_id},
@@ -1657,7 +1682,7 @@ def approve_execution(
                 'approvalRequests.#nid.#decision = :decision, '
                 '#status = :running, '
                 '#pausedSeconds = :pausedSeconds '
-                'REMOVE #pauseRequested, #pausedAt'
+                f'REMOVE {_remove_clause}'
             ),
             ConditionExpression=(
                 'nodeResults.#nid.#status = :awaiting '
@@ -1678,6 +1703,7 @@ def approve_execution(
                 '#pauseRequested': 'pauseRequested',
                 '#pausedAt': 'pausedAt',
                 '#pausedSeconds': 'pausedSeconds',
+                '#pendingApproval': 'pendingApproval',
             },
             ExpressionAttributeValues={
                 ':pending': 'pending',
@@ -1694,10 +1720,6 @@ def approve_execution(
         )
     except ClientError as exc:
         if exc.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
-            # Distinguish a conflicting pre-stamped decision from a benign
-            # no-op (already resumed, wrong token, etc.) by peeking at the
-            # current state. Best-effort: a read failure degrades to the
-            # generic noop log.
             try:
                 cur = _load_execution(execution_id)
                 cur_decision = (cur.get('approvalRequests') or {}).get(node_id, {}).get('decision')
@@ -1747,6 +1769,161 @@ def approve_execution(
     return True
 
 
+def _approve_execution_scoped(
+    execution_id: str,
+    resume_token: str,
+    decided_by: str,
+    org_id: str,
+) -> bool:
+    """Approve an execution-scoped pause: flip ALL nodeIds
+    awaiting_approval → pending in a single conditional write."""
+    now = _now_iso()
+    _pre = _load_execution(execution_id) or {}
+    exec_req = (_pre.get('approvalRequests') or {}).get(EXECUTION_SENTINEL)
+    if not exec_req:
+        _log_event('approve_execution_noop', executionId=execution_id, nodeId=EXECUTION_SENTINEL)
+        return False
+
+    # Fence: token + org + decision absent/same
+    if exec_req.get('resumeToken') != resume_token:
+        _log_event('approve_execution_noop', executionId=execution_id, nodeId=EXECUTION_SENTINEL)
+        return False
+    if _pre.get('orgId') != org_id:
+        _log_event('approve_execution_noop', executionId=execution_id, nodeId=EXECUTION_SENTINEL)
+        return False
+    cur_decision = exec_req.get('decision')
+    if cur_decision is not None and cur_decision != 'approved':
+        _log_event('approve_execution_conflict', executionId=execution_id,
+                    nodeId=EXECUTION_SENTINEL, existingDecision=cur_decision)
+        return False
+
+    parked_node_ids = exec_req.get('nodeIds', [])
+
+    # Filter to only nodes still awaiting_approval (idempotent)
+    node_results = _pre.get('nodeResults', {})
+    still_parked = [nid for nid in parked_node_ids
+                    if node_results.get(nid, {}).get('status') == AWAITING_APPROVAL]
+
+    if not still_parked and cur_decision == 'approved':
+        # Already fully approved — idempotent no-op
+        _log_event('approve_execution_noop', executionId=execution_id, nodeId=EXECUTION_SENTINEL)
+        return False
+
+    # Compute paused seconds (int)
+    _paused_at_raw = _pre.get('pausedAt')
+    _prior_paused_seconds = 0
+    _raw_ps = _pre.get('pausedSeconds')
+    if isinstance(_raw_ps, (int, float, Decimal)):
+        _prior_paused_seconds = int(_raw_ps)
+    _delta_seconds = 0
+    if _paused_at_raw:
+        try:
+            _paused_at_dt = datetime.fromisoformat(_paused_at_raw)
+            _now_dt = datetime.fromisoformat(now)
+            _delta_seconds = max(0, int(round((_now_dt - _paused_at_dt).total_seconds())))
+        except (TypeError, ValueError):
+            pass
+    _new_paused_seconds = _prior_paused_seconds + _delta_seconds
+
+    # Build a single UpdateItem:
+    # - Flip each still-parked node awaiting_approval -> pending
+    # - Stamp decision on __execution__ request
+    # - Set execution status = running, pausedSeconds
+    # - REMOVE pauseRequested, pausedAt
+    # - REMOVE pendingApproval if no other undecided request
+    set_parts = []
+    names = {
+        '#ar': 'approvalRequests',
+        '#sentinel': EXECUTION_SENTINEL,
+        '#decidedBy': 'decidedBy',
+        '#decidedAt': 'decidedAt',
+        '#decision': 'decision',
+        '#status': 'status',
+        '#pauseRequested': 'pauseRequested',
+        '#pausedAt': 'pausedAt',
+        '#pausedSeconds': 'pausedSeconds',
+        '#pendingApproval': 'pendingApproval',
+    }
+    values = {
+        ':decidedBy': decided_by,
+        ':decidedAt': now,
+        ':approved': 'approved',
+        ':running': 'running',
+        ':pending': 'pending',
+        ':pausedSeconds': _new_paused_seconds,
+    }
+
+    for i, nid in enumerate(still_parked):
+        n_alias = f'#sn{i}'
+        names[n_alias] = nid
+        set_parts.append(f'nodeResults.{n_alias}.#status = :pending')
+
+    set_parts.append('#ar.#sentinel.#decidedBy = :decidedBy')
+    set_parts.append('#ar.#sentinel.#decidedAt = :decidedAt')
+    set_parts.append('#ar.#sentinel.#decision = :approved')
+    set_parts.append('#status = :running')
+    set_parts.append('#pausedSeconds = :pausedSeconds')
+
+    # Determine if pendingApproval should be removed
+    _approval_requests = _pre.get('approvalRequests') or {}
+    _has_other_undecided = any(
+        v.get('decision') is None
+        for k, v in _approval_requests.items()
+        if k != EXECUTION_SENTINEL and isinstance(v, dict)
+    )
+
+    remove_parts = ['#pauseRequested', '#pausedAt']
+    if not _has_other_undecided:
+        remove_parts.append('#pendingApproval')
+
+    update_expr = 'SET ' + ', '.join(set_parts) + ' REMOVE ' + ', '.join(remove_parts)
+
+    try:
+        _executions_table.update_item(
+            Key={'executionId': execution_id},
+            UpdateExpression=update_expr,
+            ExpressionAttributeNames=names,
+            ExpressionAttributeValues=values,
+        )
+    except ClientError as exc:
+        if exc.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            _log_event('approve_execution_noop', executionId=execution_id, nodeId=EXECUTION_SENTINEL)
+            return False
+        _logger.error(
+            '_approve_execution_scoped: write failed for execution=%s: %s',
+            execution_id, exc,
+        )
+        raise
+
+    _log_event(
+        'approve_execution',
+        executionId=execution_id, nodeId=EXECUTION_SENTINEL,
+        decidedBy=decided_by, nodeCount=len(still_parked),
+    )
+
+    execution = _load_execution(execution_id)
+    if not execution:
+        return True
+
+    workflow = _load_workflow(execution.get('workflowId', ''))
+    if not workflow:
+        return True
+
+    _run_id_kwargs = {'run_id': execution.get('runId')} if execution.get('runId') else {}
+    events.publish_event('execution.resumed', {
+        'executionId': execution_id,
+        'workflowId': execution.get('workflowId', ''),
+        'nodeId': EXECUTION_SENTINEL,
+        'decidedBy': decided_by,
+        'scope': 'execution',
+        'nodeIds': parked_node_ids,
+        'correlationId': execution_id,
+    }, **_run_id_kwargs)
+
+    schedule_frontier(execution, workflow)
+    return True
+
+
 def deny_execution(
     execution_id: str,
     node_id: str,
@@ -1755,23 +1932,24 @@ def deny_execution(
     org_id: str,
     reason: str = '',
 ) -> bool:
-    """Deny a parked node — fail it via ``handle_node_failure``.
+    """Deny a parked node (or all parked nodes under an execution-scoped
+    request) — fail it via ``handle_node_failure``.
+
+    When ``node_id == EXECUTION_SENTINEL``, stamps ``denied`` on the
+    ``__execution__`` request and fails ALL ``nodeIds`` via the existing
+    failure path → execution failed.
 
     Same conditional fence as ``approve_execution`` (checks the execution's
     top-level ``orgId``).  On success the approval-request is stamped
-    ``denied``, the node is failed via ``handle_node_failure`` (which
-    handles retry policy / execution-level failure), and an
-    ``execution.approval_denied`` event is emitted.
+    ``denied``, the node(s) are failed via ``handle_node_failure``.
 
-    When the record was pre-stamped with the OPPOSITE decision (``approved``),
-    the condition fails and the call is a conflict no-op — the engine does
-    NOT override a prior approval.
-
-    Idempotent: a second call after the node has already left
-    ``awaiting_approval`` is a no-op.
+    Idempotent: a second call is a no-op.
 
     Returns ``True`` if this call performed the denial, ``False`` on no-op.
     """
+    if node_id == EXECUTION_SENTINEL:
+        return _deny_execution_scoped(execution_id, resume_token, decided_by, org_id, reason)
+
     now = _now_iso()
     # Compute accumulated paused time (same logic as approve_execution).
     _pre = _load_execution(execution_id) or {}
@@ -1789,6 +1967,19 @@ def deny_execution(
         except (TypeError, ValueError):
             pass
     _new_paused_seconds = _prior_paused_seconds + _delta_seconds
+
+    # Check whether removing pendingApproval is warranted
+    _approval_requests = _pre.get('approvalRequests') or {}
+    _has_other_undecided = any(
+        v.get('decision') is None
+        for k, v in _approval_requests.items()
+        if k != node_id and isinstance(v, dict)
+    )
+
+    _remove_clause = '#pauseRequested, #pausedAt'
+    if not _has_other_undecided:
+        _remove_clause += ', #pendingApproval'
+
     try:
         _executions_table.update_item(
             Key={'executionId': execution_id},
@@ -1797,7 +1988,7 @@ def deny_execution(
                 'approvalRequests.#nid.#decidedAt = :decidedAt, '
                 'approvalRequests.#nid.#decision = :decision, '
                 '#pausedSeconds = :pausedSeconds '
-                'REMOVE #pauseRequested, #pausedAt'
+                f'REMOVE {_remove_clause}'
             ),
             ConditionExpression=(
                 'nodeResults.#nid.#status = :awaiting '
@@ -1818,6 +2009,7 @@ def deny_execution(
                 '#pauseRequested': 'pauseRequested',
                 '#pausedAt': 'pausedAt',
                 '#pausedSeconds': 'pausedSeconds',
+                '#pendingApproval': 'pendingApproval',
             },
             ExpressionAttributeValues={
                 ':awaiting': AWAITING_APPROVAL,
@@ -1876,6 +2068,131 @@ def deny_execution(
     }, **_run_id_kwargs)
 
     handle_node_failure(execution_id, node_id, denial_reason)
+    return True
+
+
+def _deny_execution_scoped(
+    execution_id: str,
+    resume_token: str,
+    decided_by: str,
+    org_id: str,
+    reason: str = '',
+) -> bool:
+    """Deny an execution-scoped pause: stamp denied, fail all nodeIds."""
+    now = _now_iso()
+    _pre = _load_execution(execution_id) or {}
+    exec_req = (_pre.get('approvalRequests') or {}).get(EXECUTION_SENTINEL)
+    if not exec_req:
+        _log_event('deny_execution_noop', executionId=execution_id, nodeId=EXECUTION_SENTINEL)
+        return False
+
+    # Fence: token + org + decision absent/same
+    if exec_req.get('resumeToken') != resume_token:
+        _log_event('deny_execution_noop', executionId=execution_id, nodeId=EXECUTION_SENTINEL)
+        return False
+    if _pre.get('orgId') != org_id:
+        _log_event('deny_execution_noop', executionId=execution_id, nodeId=EXECUTION_SENTINEL)
+        return False
+    cur_decision = exec_req.get('decision')
+    if cur_decision is not None and cur_decision != 'denied':
+        _log_event('deny_execution_conflict', executionId=execution_id,
+                    nodeId=EXECUTION_SENTINEL, existingDecision=cur_decision)
+        return False
+    if cur_decision == 'denied':
+        # Already denied — idempotent no-op
+        _log_event('deny_execution_noop', executionId=execution_id, nodeId=EXECUTION_SENTINEL)
+        return False
+
+    parked_node_ids = exec_req.get('nodeIds', [])
+
+    # Compute paused seconds
+    _paused_at_raw = _pre.get('pausedAt')
+    _prior_paused_seconds = 0
+    _raw_ps = _pre.get('pausedSeconds')
+    if isinstance(_raw_ps, (int, float, Decimal)):
+        _prior_paused_seconds = int(_raw_ps)
+    _delta_seconds = 0
+    if _paused_at_raw:
+        try:
+            _paused_at_dt = datetime.fromisoformat(_paused_at_raw)
+            _now_dt = datetime.fromisoformat(now)
+            _delta_seconds = max(0, int(round((_now_dt - _paused_at_dt).total_seconds())))
+        except (TypeError, ValueError):
+            pass
+    _new_paused_seconds = _prior_paused_seconds + _delta_seconds
+
+    # Stamp denied + remove pendingApproval if no other undecided
+    _approval_requests = _pre.get('approvalRequests') or {}
+    _has_other_undecided = any(
+        v.get('decision') is None
+        for k, v in _approval_requests.items()
+        if k != EXECUTION_SENTINEL and isinstance(v, dict)
+    )
+
+    remove_parts = ['#pauseRequested', '#pausedAt']
+    if not _has_other_undecided:
+        remove_parts.append('#pendingApproval')
+
+    try:
+        _executions_table.update_item(
+            Key={'executionId': execution_id},
+            UpdateExpression=(
+                'SET #ar.#sentinel.#decidedBy = :decidedBy, '
+                '#ar.#sentinel.#decidedAt = :decidedAt, '
+                '#ar.#sentinel.#decision = :denied, '
+                '#pausedSeconds = :pausedSeconds '
+                'REMOVE ' + ', '.join(remove_parts)
+            ),
+            ExpressionAttributeNames={
+                '#ar': 'approvalRequests',
+                '#sentinel': EXECUTION_SENTINEL,
+                '#decidedBy': 'decidedBy',
+                '#decidedAt': 'decidedAt',
+                '#decision': 'decision',
+                '#pauseRequested': 'pauseRequested',
+                '#pausedAt': 'pausedAt',
+                '#pausedSeconds': 'pausedSeconds',
+                '#pendingApproval': 'pendingApproval',
+            },
+            ExpressionAttributeValues={
+                ':decidedBy': decided_by,
+                ':decidedAt': now,
+                ':denied': 'denied',
+                ':pausedSeconds': _new_paused_seconds,
+            },
+        )
+    except ClientError as exc:
+        _logger.error(
+            '_deny_execution_scoped: write failed for execution=%s: %s',
+            execution_id, exc,
+        )
+        raise
+
+    _log_event(
+        'deny_execution',
+        executionId=execution_id, nodeId=EXECUTION_SENTINEL, decidedBy=decided_by,
+    )
+
+    denial_reason = f'approval_denied:{reason}' if reason else 'approval_denied'
+    execution = _load_execution(execution_id)
+    _run_id_kwargs = {}
+    if execution:
+        _run_id_kwargs = {'run_id': execution.get('runId')} if execution.get('runId') else {}
+
+    events.publish_event('execution.approval_denied', {
+        'executionId': execution_id,
+        'workflowId': (execution or _pre).get('workflowId', ''),
+        'nodeId': EXECUTION_SENTINEL,
+        'decidedBy': decided_by,
+        'reason': denial_reason,
+        'scope': 'execution',
+        'nodeIds': parked_node_ids,
+        'correlationId': execution_id,
+    }, **_run_id_kwargs)
+
+    # Fail all parked nodes via the existing failure path
+    for nid in parked_node_ids:
+        handle_node_failure(execution_id, nid, denial_reason)
     return True
 
 
@@ -2713,8 +3030,13 @@ def handle_pause_requested(
     """Handle an ``execution.pause.requested`` event from the API.
 
     When ``APPROVAL_GATE_ENABLED`` is on, parks every currently **pending**
-    (not yet dispatched) node of the given execution via
-    :func:`_park_node_awaiting_approval` with request type ``manual_pause``.
+    (not yet dispatched) node of the given execution via a SINGLE
+    ``approvalRequests.__execution__`` entry that covers all pending nodes
+    (execution-scoped pause — CIT-237).
+
+    If an ``__execution__`` request already exists (e.g. a prior
+    ``schedule_frontier`` batch already parked some nodes), new node ids are
+    appended under the SAME token via ``list_append``.
 
     If no pending nodes exist the handler logs an INFO event and returns —
     the pause marker written by the API layer still ensures
@@ -2749,17 +3071,146 @@ def handle_pause_requested(
         )
         return
 
-    # Resolve node definitions once for agentId lookup.
-    workflow = _load_workflow(workflow_id)
-    definition = _parse_definition(workflow) if workflow else {}
-    nodes_by_id = {n['id']: n for n in definition.get('nodes', [])}
+    now = _now_iso()
+    org_id = execution.get('orgId', '')
 
-    for nid in pending_nodes:
-        agent_id = nodes_by_id.get(nid, {}).get('agentId', '')
-        _park_node_awaiting_approval(
-            execution_id, workflow_id, nid, agent_id,
-            run_id=execution.get('runId'),
-            request_type='manual_pause',
-            reason=reason or 'Manual pause requested',
-            requested_by=requested_by or 'system',
+    # Check whether an __execution__ request already exists (concurrent
+    # schedule_frontier may have created one).
+    existing_exec_req = (execution.get('approvalRequests') or {}).get(EXECUTION_SENTINEL)
+
+    if existing_exec_req and existing_exec_req.get('decision') is None:
+        # Append new node ids under the SAME token via list_append.
+        # Build SET clauses to flip each pending node to awaiting_approval.
+        set_parts = []
+        names = {
+            '#ar': 'approvalRequests',
+            '#sentinel': EXECUTION_SENTINEL,
+            '#nids': 'nodeIds',
+            '#pausedAt': 'pausedAt',
+            '#pauseRequested': 'pauseRequested',
+            '#pendingApproval': 'pendingApproval',
+        }
+        values = {
+            ':newIds': pending_nodes,
+            ':emptyList': [],
+            ':awaiting': AWAITING_APPROVAL,
+            ':now': now,
+            ':Y': 'Y',
+        }
+
+        for i, nid in enumerate(pending_nodes):
+            n_alias = f'#pn{i}'
+            names[n_alias] = nid
+            names['#status'] = 'status'
+            names['#parkedAt'] = 'parkedAt'
+            set_parts.append(f'nodeResults.{n_alias}.#status = :awaiting')
+            set_parts.append(f'nodeResults.{n_alias}.#parkedAt = :now')
+
+        set_parts.append(
+            '#ar.#sentinel.#nids = list_append(if_not_exists(#ar.#sentinel.#nids, :emptyList), :newIds)'
         )
+        set_parts.append('#pausedAt = if_not_exists(#pausedAt, :now)')
+        set_parts.append('#pendingApproval = :Y')
+
+        update_expr = 'SET ' + ', '.join(set_parts) + ' REMOVE #pauseRequested'
+
+        try:
+            _executions_table.update_item(
+                Key={'executionId': execution_id},
+                UpdateExpression=update_expr,
+                ExpressionAttributeNames=names,
+                ExpressionAttributeValues=values,
+            )
+        except ClientError as exc:
+            _logger.error(
+                'handle_pause_requested: append write failed for '
+                'execution=%s: %s', execution_id, exc,
+            )
+            return
+    else:
+        # Create a fresh __execution__ request covering all pending nodes.
+        approval_record = build_approval_request(
+            request_type='execution_pause',
+            reason=reason or 'Execution pause requested',
+            requested_by=requested_by or 'system',
+            expires_at=None,
+            metadata={},
+            org_id=org_id,
+            scope='execution',
+            node_ids=pending_nodes,
+        )
+
+        # Build a single UpdateItem that:
+        # - Sets approvalRequests.__execution__ = record
+        # - Flips each pending node to awaiting_approval with parkedAt
+        # - Sets pausedAt if_not_exists
+        # - Sets pendingApproval = 'Y'
+        # - REMOVEs pauseRequested
+        set_parts = []
+        names = {
+            '#ar': 'approvalRequests',
+            '#sentinel': EXECUTION_SENTINEL,
+            '#pausedAt': 'pausedAt',
+            '#pauseRequested': 'pauseRequested',
+            '#pendingApproval': 'pendingApproval',
+        }
+        values = {
+            ':record': approval_record,
+            ':awaiting': AWAITING_APPROVAL,
+            ':now': now,
+            ':Y': 'Y',
+        }
+
+        set_parts.append('#ar.#sentinel = :record')
+        for i, nid in enumerate(pending_nodes):
+            n_alias = f'#pn{i}'
+            names[n_alias] = nid
+            names['#status'] = 'status'
+            names['#parkedAt'] = 'parkedAt'
+            set_parts.append(f'nodeResults.{n_alias}.#status = :awaiting')
+            set_parts.append(f'nodeResults.{n_alias}.#parkedAt = :now')
+
+        set_parts.append('#pausedAt = if_not_exists(#pausedAt, :now)')
+        set_parts.append('#pendingApproval = :Y')
+
+        update_expr = 'SET ' + ', '.join(set_parts) + ' REMOVE #pauseRequested'
+
+        # Ensure approvalRequests map exists
+        try:
+            _executions_table.update_item(
+                Key={'executionId': execution_id},
+                UpdateExpression='SET approvalRequests = if_not_exists(approvalRequests, :emptyMap)',
+                ExpressionAttributeValues={':emptyMap': {}},
+            )
+        except ClientError:
+            pass
+
+        try:
+            _executions_table.update_item(
+                Key={'executionId': execution_id},
+                UpdateExpression=update_expr,
+                ExpressionAttributeNames=names,
+                ExpressionAttributeValues=values,
+            )
+        except ClientError as exc:
+            _logger.error(
+                'handle_pause_requested: park write failed for '
+                'execution=%s: %s', execution_id, exc,
+            )
+            return
+
+    _log_event(
+        'execution_pause_requested',
+        executionId=execution_id,
+        workflowId=workflow_id,
+        nodeCount=len(pending_nodes),
+    )
+
+    _run_id_kwargs = {'run_id': execution.get('runId')} if execution.get('runId') else {}
+    events.publish_event('execution.node.awaiting_approval', {
+        'executionId': execution_id,
+        'workflowId': workflow_id,
+        'scope': 'execution',
+        'nodeIds': pending_nodes,
+        'correlationId': execution_id,
+    }, **_run_id_kwargs)

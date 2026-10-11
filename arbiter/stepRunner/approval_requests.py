@@ -16,6 +16,14 @@ from datetime import datetime, timezone
 AWAITING_APPROVAL = 'awaiting_approval'
 """Node and execution status while a human decision is outstanding."""
 
+EXECUTION_SENTINEL = '__execution__'
+"""Sentinel key in ``approvalRequests`` for execution-scoped pause requests.
+
+Real node ids come from the workflow definition's ``nodes[].id``, which the
+frontend validator disallows containing ``__`` double-underscore prefixes
+(confirmed: ``^[a-zA-Z0-9-]+$``), so no collision is possible.
+"""
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -29,8 +37,11 @@ def build_approval_request(
     expires_at: str | None = None,
     metadata: dict | None = None,
     org_id: str | None = None,
+    *,
+    scope: str | None = None,
+    node_ids: list[str] | None = None,
 ) -> dict:
-    """Build an approval-request record for one node.
+    """Build an approval-request record for one node or execution-wide.
 
     ``resumeToken`` is a server-generated, unguessable, URL-safe token
     (``secrets.token_urlsafe``) — never logged, never included in events.
@@ -41,8 +52,24 @@ def build_approval_request(
     ``orgId`` is persisted on the request for audit completeness; the
     approve/deny fence checks the *execution-level* ``orgId`` attribute
     (not this copy) so the field is informational only.
+
+    ``scope`` is ``'execution'`` for execution-scoped pause requests,
+    absent/``None`` for legacy per-node requests.
+
+    ``node_ids`` records which nodes are parked under this request
+    (execution-scoped only).  Validated: node ids starting with ``'__'``
+    are rejected (reserved namespace) EXCEPT the ``EXECUTION_SENTINEL``
+    itself (which is the map key, never an element of ``node_ids``).
     """
-    return {
+    if node_ids is not None:
+        bad = [nid for nid in node_ids if nid.startswith('__')]
+        if bad:
+            raise ValueError(
+                f"node ids starting with '__' are reserved and cannot appear "
+                f"in an approval request's nodeIds list: {bad}"
+            )
+
+    record: dict = {
         'requestType': request_type,
         'reason': reason,
         'requestedBy': requested_by,
@@ -55,6 +82,11 @@ def build_approval_request(
         'orgId': org_id,
         'metadata': metadata if metadata is not None else {},
     }
+    if scope is not None:
+        record['scope'] = scope
+    if node_ids is not None:
+        record['nodeIds'] = list(node_ids)
+    return record
 
 
 def is_awaiting(status: str | None) -> bool:

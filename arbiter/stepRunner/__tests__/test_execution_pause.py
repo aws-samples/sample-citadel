@@ -525,10 +525,12 @@ class TestHandlePauseRequested:
         execution = {
             'executionId': 'exec-1',
             'workflowId': 'wf-1',
+            'orgId': 'org-1',
             'nodeResults': {
                 'nA': {'status': 'completed'},
                 'nB': {'status': 'pending'},
             },
+            'approvalRequests': {},
         }
         workflow = {
             'workflowId': 'wf-1',
@@ -549,21 +551,22 @@ class TestHandlePauseRequested:
                 'exec-1', reason='deploy freeze', requested_by='admin@co.com',
             )
 
-        # DDB write parks nB (the pending node)
+        # CIT-237: single __execution__ request — 2 writes: ensure-parents + conditional park
         write_calls = fake_exec_table.update_item.call_args_list
         assert len(write_calls) == 2
-        # The second call is the conditional park (first is ensure-parents)
+        # The second call is the execution-scoped park
         expr_values = write_calls[1].kwargs.get(
             'ExpressionAttributeValues',
             write_calls[1][1].get('ExpressionAttributeValues', {}),
         )
         assert expr_values.get(':awaiting') == AWAITING_APPROVAL
-        assert expr_values.get(':pending') == 'pending'
-        # Approval record carries the manual_pause request type
+        # Approval record carries the execution_pause request type
         record = expr_values.get(':record', {})
-        assert record.get('requestType') == 'manual_pause'
+        assert record.get('requestType') == 'execution_pause'
+        assert record.get('scope') == 'execution'
         assert record.get('reason') == 'deploy freeze'
         assert record.get('requestedBy') == 'admin@co.com'
+        assert record.get('nodeIds') == ['nB']
 
     def test_noop_log_when_no_pending_nodes(self, capsys):
         _enable_gate()
@@ -607,11 +610,13 @@ class TestHandlePauseRequested:
         execution = {
             'executionId': 'exec-1',
             'workflowId': 'wf-1',
+            'orgId': 'org-1',
             'nodeResults': {
                 'nA': {'status': 'pending'},
                 'nB': {'status': 'pending'},
                 'nC': {'status': 'running'},
             },
+            'approvalRequests': {},
         }
         workflow = {
             'workflowId': 'wf-1',
@@ -632,5 +637,5 @@ class TestHandlePauseRequested:
                 'exec-1', reason='freeze', requested_by='ops',
             )
 
-        # Two pending nodes → two park writes (2 calls each: ensure-parents + conditional park)
-        assert fake_exec_table.update_item.call_count == 4
+        # CIT-237: single __execution__ request — 2 writes: ensure-parents + park
+        assert fake_exec_table.update_item.call_count == 2
