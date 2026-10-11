@@ -1536,6 +1536,8 @@ def schedule_frontier(execution, workflow, *, default_input=None) -> list:
                 and node.get('data', {}).get('requiresApproval', False)
             ):
                 status_map[ready_id] = AWAITING_APPROVAL
+            else:
+                status_map[ready_id] = 'running'
             dispatched.append(ready_id)
 
     all_terminal = bool(nodes) and all(
@@ -1545,44 +1547,71 @@ def schedule_frontier(execution, workflow, *, default_input=None) -> list:
     if all_terminal:
         _finalize_execution(execution, input_data)
 
-    # CIT-030: execution-level running → awaiting_approval transition.
-    # When all non-terminal nodes are completed/skipped/failed/awaiting_approval
-    # AND at least one is awaiting_approval, the execution itself is parked.
-    if APPROVAL_GATE_ENABLED and not all_terminal:
-        _settled_or_parked = ('completed', 'skipped', 'failed', AWAITING_APPROVAL)
-        _all_settled = bool(nodes) and all(
-            status_map.get(n['id'], 'pending') in _settled_or_parked
+    # Execution-level status derivation.  Rule: once an execution has
+    # started it never returns to pending.  Terminal states win;
+    # awaiting_approval iff no node dispatched/running AND >=1 node
+    # awaiting_approval; otherwise running.
+    if not all_terminal:
+        _any_running_or_dispatched = any(
+            status_map.get(n['id'], 'pending') in ('running', 'dispatched')
             for n in nodes
         )
         _any_awaiting = any(
             status_map.get(n['id']) == AWAITING_APPROVAL for n in nodes
         )
-        if _all_settled and _any_awaiting:
+        _settled_or_parked = ('completed', 'skipped', 'failed', AWAITING_APPROVAL)
+        _all_settled = bool(nodes) and all(
+            status_map.get(n['id'], 'pending') in _settled_or_parked
+            for n in nodes
+        )
+
+        if _all_settled and _any_awaiting and not _any_running_or_dispatched:
+            # CIT-030: execution-level running → awaiting_approval transition.
+            if APPROVAL_GATE_ENABLED:
+                try:
+                    _executions_table.update_item(
+                        Key={'executionId': execution_id},
+                        UpdateExpression='SET #status = :awaiting',
+                        ConditionExpression='#status = :running',
+                        ExpressionAttributeNames={'#status': 'status'},
+                        ExpressionAttributeValues={
+                            ':awaiting': AWAITING_APPROVAL,
+                            ':running': 'running',
+                        },
+                    )
+                except ClientError as exc:
+                    if exc.response.get('Error', {}).get('Code') != 'ConditionalCheckFailedException':
+                        _logger.error(
+                            'schedule_frontier: exec awaiting_approval write failed '
+                            'for execution=%s: %s', execution_id, exc,
+                        )
+                        raise
+
+                _run_id_kwargs = {'run_id': execution.get('runId')} if execution.get('runId') else {}
+                events.publish_event('execution.paused', {
+                    'executionId': execution_id,
+                    'workflowId': workflow_id,
+                    'correlationId': execution_id,
+                }, **_run_id_kwargs)
+        else:
+            # Ensure the execution stays running — never regresses to
+            # pending between node dispatches.  The conditional write
+            # is a no-op when the status is already 'running'.
             try:
                 _executions_table.update_item(
                     Key={'executionId': execution_id},
-                    UpdateExpression='SET #status = :awaiting',
-                    ConditionExpression='#status = :running',
+                    UpdateExpression='SET #status = :running',
+                    ConditionExpression='#status <> :running',
                     ExpressionAttributeNames={'#status': 'status'},
-                    ExpressionAttributeValues={
-                        ':awaiting': AWAITING_APPROVAL,
-                        ':running': 'running',
-                    },
+                    ExpressionAttributeValues={':running': 'running'},
                 )
             except ClientError as exc:
                 if exc.response.get('Error', {}).get('Code') != 'ConditionalCheckFailedException':
                     _logger.error(
-                        'schedule_frontier: exec awaiting_approval write failed '
+                        'schedule_frontier: exec running write failed '
                         'for execution=%s: %s', execution_id, exc,
                     )
                     raise
-
-            _run_id_kwargs = {'run_id': execution.get('runId')} if execution.get('runId') else {}
-            events.publish_event('execution.paused', {
-                'executionId': execution_id,
-                'workflowId': workflow_id,
-                'correlationId': execution_id,
-            }, **_run_id_kwargs)
 
     return dispatched
 
