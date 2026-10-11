@@ -1602,6 +1602,47 @@ def handler(event, context):
         );
         resolver.addResourceDependency(intakeOrchestrationDataSource);
       }
+
+      // --- Mutation.testTool → ToolSandboxFunction ---
+      // Wires the schema's testTool field to the existing ToolSandboxFunction
+      // (L1 CfnDataSource/CfnResolver cross-stack pattern, same as the
+      // intake-orchestration resolvers above). The ToolSandboxFunction is
+      // defined earlier in this stack; we attach it to BackendStack's API via
+      // the appSyncApiId/appSyncApiArn props passed from app.ts.
+      const toolSandboxDataSourceRole = new iam.Role(
+        this,
+        "ToolSandboxDataSourceRole",
+        { assumedBy: new iam.ServicePrincipal("appsync.amazonaws.com") },
+      );
+      toolSandboxFunction.grantInvoke(toolSandboxDataSourceRole);
+
+      const toolSandboxDataSource = new appsyncCfn.CfnDataSource(
+        this,
+        "ToolSandboxLambdaDataSource",
+        {
+          apiId: props.appSyncApiId,
+          name: "ToolSandboxLambdaDataSource",
+          type: "AWS_LAMBDA",
+          serviceRoleArn: toolSandboxDataSourceRole.roleArn,
+          lambdaConfig: {
+            lambdaFunctionArn: toolSandboxFunction.functionArn,
+          },
+        },
+      );
+
+      const testToolResolver = new appsyncCfn.CfnResolver(
+        this,
+        "TestToolResolver",
+        {
+          apiId: props.appSyncApiId,
+          typeName: "Mutation",
+          fieldName: "testTool",
+          dataSourceName: toolSandboxDataSource.attrName,
+          requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
+          responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
+        },
+      );
+      testToolResolver.addResourceDependency(toolSandboxDataSource);
     }
 
     // ── Outputs ──────────────────────────────────────────────────────────────

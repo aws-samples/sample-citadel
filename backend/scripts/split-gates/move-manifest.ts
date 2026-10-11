@@ -1687,6 +1687,15 @@ export const EXPECTED_NEW_FIELDS: AllowlistEntry[] = [
       "AgenticAIApiApproveExecutionResolverCDDF9ECC.",
   },
   {
+    logicalId: "Mutation.testTool",
+    justification:
+      "Wiring fix: ToolSandboxFunction (services-stack.ts) now attached " +
+      "to BackendStack's AppSync API via L1 CfnDataSource/CfnResolver. " +
+      "Admin/architect-only (tool:execute permission gate in " +
+      "tool-sandbox.ts), org-scoped (finding 615aa5bb). Satellite-only " +
+      "addition (citadel-services-dev); rail 1 doesn't see it.",
+  },
+  {
     logicalId: "Mutation.denyExecution",
     justification:
       "Execution approval API: see ADDITION_ALLOWLIST entry " +
