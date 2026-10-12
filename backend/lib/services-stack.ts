@@ -20,6 +20,7 @@ import * as targets from "aws-cdk-lib/aws-events-targets";
 import * as opensearchserverless from "aws-cdk-lib/aws-opensearchserverless";
 import * as s3n from "aws-cdk-lib/aws-s3-notifications";
 import { NagSuppressions } from "cdk-nag";
+import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import { REGISTRY_GENERATION } from "./registry-generation";
@@ -1089,6 +1090,130 @@ def handler(event, context):
           ],
           resources: [registryArn, `${registryArn}/*`],
         }),
+      );
+    }
+
+    // ================================================================
+    // Seed Smoke Echo Tool — non-prod only
+    // ================================================================
+    // Uploads tools/smoke-echo-tool/index.js to TOOLS_BUCKET and upserts
+    // a registry record, then submits for approval (auto-approved when
+    // the registry has autoApproval configured). Gated identically to the
+    // arbiter smoke agent: ENVIRONMENT !== 'prod'.
+    const isNonProdSmokeEnv = props.environment !== "prod";
+    const toolsBucketName = `citadel-tools-${props.environment}-${this.account}-${this.region}`;
+
+    if (isNonProdSmokeEnv) {
+      // Content digest: any edit to the seeder source triggers a re-run.
+      // Resolve the source path regardless of whether __dirname is
+      // backend/lib/ (source, ts-jest) or backend/dist/lib/ (compiled, CDK).
+      const seedSmokeToolSourceFile = (() => {
+        const candidates = [
+          path.resolve(
+            __dirname,
+            "..",
+            "src",
+            "lambda",
+            "seed-smoke-echo-tool",
+            "index.ts",
+          ),
+          path.resolve(
+            __dirname,
+            "..",
+            "..",
+            "src",
+            "lambda",
+            "seed-smoke-echo-tool",
+            "index.ts",
+          ),
+        ];
+        for (const c of candidates) {
+          if (fs.existsSync(c)) return c;
+        }
+        throw new Error(
+          `Cannot locate seed-smoke-echo-tool source from ${__dirname}. Tried: ${candidates.join(", ")}`,
+        );
+      })();
+      const seedSmokeToolDigest = crypto
+        .createHash("sha256")
+        .update(fs.readFileSync(seedSmokeToolSourceFile))
+        .digest("hex");
+
+      const seedSmokeToolFn = new lambda.Function(
+        this,
+        "SeedSmokeEchoToolFunction",
+        {
+          runtime: lambda.Runtime.NODEJS_24_X,
+          handler: "seed-smoke-echo-tool/index.handler",
+          code: lambda.Code.fromAsset("dist/lambda"),
+          timeout: cdk.Duration.seconds(30),
+          environment: {
+            ENVIRONMENT: props.environment,
+            SMOKE_FIXTURES_ENABLED: "true",
+            TOOLS_BUCKET: toolsBucketName,
+            REGISTRY_ID: registryId,
+            REGISTRY_ENABLED: "true",
+            REGISTRY_GENERATION,
+          },
+        },
+      );
+
+      // S3: PutObject + GetObject (HeadObject for idempotency check)
+      // on tools/* prefix only.
+      seedSmokeToolFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["s3:PutObject", "s3:GetObject", "s3:HeadObject"],
+          resources: [`arn:aws:s3:::${toolsBucketName}/tools/*`],
+        }),
+      );
+      NagSuppressions.addResourceSuppressions(
+        seedSmokeToolFn.role!,
+        [
+          {
+            id: "AwsSolutions-IAM5",
+            reason:
+              "Seed S3 write is path-scoped to tools/* (writes only " +
+              "tools/smoke-echo-tool/index.js). The residual wildcard is " +
+              "the object-key prefix inherent to any S3 PutObject.",
+            appliesTo: [
+              {
+                regex:
+                  "/^Resource::arn:<AWS::Partition>:s3:::.+\\/tools\\/\\*$/g",
+              },
+            ],
+          },
+        ],
+        true,
+      );
+
+      // Registry: Create + Get + List + SubmitForApproval
+      if (registryArn) {
+        seedSmokeToolFn.addToRolePolicy(
+          new iam.PolicyStatement({
+            effect: iam.Effect.ALLOW,
+            actions: [
+              "agent-registry:CreateRegistryRecord",
+              "agent-registry:GetRegistryRecord",
+              "agent-registry:ListRegistryRecords",
+              "agent-registry:SubmitRegistryRecordForApproval",
+            ],
+            resources: [registryArn, `${registryArn}/*`],
+          }),
+        );
+      }
+
+      const _seedSmokeToolResource = new cdk.CustomResource(
+        this,
+        "SeedSmokeEchoToolResource",
+        {
+          serviceToken: seedSmokeToolFn.functionArn,
+          properties: {
+            Version: "v1.0.0",
+            ContentDigest: seedSmokeToolDigest,
+            RegistryGeneration: REGISTRY_GENERATION,
+          },
+        },
       );
     }
 
