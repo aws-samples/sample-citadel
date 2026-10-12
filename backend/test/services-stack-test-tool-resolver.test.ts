@@ -110,4 +110,34 @@ describe("ServicesStack — Mutation.testTool resolver wiring", () => {
       FunctionName: "citadel-tool-sandbox-test",
     });
   });
+
+  test("ToolSandboxFunction has REGISTRY_ENABLED and REGISTRY_ID env vars", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      FunctionName: "citadel-tool-sandbox-test",
+      Environment: {
+        Variables: cdk.assertions.Match.objectLike({
+          REGISTRY_ENABLED: "true",
+          // REGISTRY_ID is resolved from SSM at deploy time — CDK synthesizes
+          // it as a dynamic reference token, so we only assert it is present.
+          REGISTRY_ID: cdk.assertions.Match.anyValue(),
+        }),
+      },
+    });
+  });
+
+  test("ToolSandboxFunction has read-only registry IAM grants", () => {
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: {
+        Statement: cdk.assertions.Match.arrayWith([
+          cdk.assertions.Match.objectLike({
+            Effect: "Allow",
+            Action: [
+              "agent-registry:GetRegistryRecord",
+              "agent-registry:ListRegistryRecords",
+            ],
+          }),
+        ]),
+      },
+    });
+  });
 });

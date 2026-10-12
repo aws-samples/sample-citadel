@@ -9,9 +9,8 @@
  * Requirement references: 7.3, 7.4, 7.5, 7.8, 10.9
  */
 
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
+import { resolveToolConfig } from "./utils/resolve-tool-config";
 import * as vm from "vm";
 import {
   extractOrgFromEvent,
@@ -23,10 +22,8 @@ import type { AuthContext } from "../types";
 
 // --- Clients ---
 
-const dynamodb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const s3 = new S3Client({});
 
-const TOOLS_CONFIG_TABLE = process.env.TOOLS_CONFIG_TABLE!;
 const TOOLS_BUCKET = process.env.TOOLS_BUCKET!;
 
 // --- Types ---
@@ -251,13 +248,14 @@ export async function executeTool(
 function defaultDeps(): ExecuteToolDeps {
   return {
     loadToolConfig: async (toolId: string) => {
-      const result = await dynamodb.send(
-        new GetCommand({
-          TableName: TOOLS_CONFIG_TABLE,
-          Key: { toolId },
-        }),
-      );
-      return result.Item || null;
+      const resolved = await resolveToolConfig(toolId);
+      return resolved
+        ? {
+            orgId: resolved.orgId,
+            integrationBindings: resolved.integrationBindings ?? undefined,
+            dataStoreBindings: resolved.dataStoreBindings ?? undefined,
+          }
+        : null;
     },
 
     loadToolCode: async (toolId: string) => {
