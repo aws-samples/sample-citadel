@@ -1068,6 +1068,17 @@ if (app.node.tryGetContext("nag") !== "false") {
       registryStack,
       "AgentCodeResolverFunction/ServiceRole/DefaultPolicy/Resource",
     ],
+    // SeedSmokeEchoToolFunction (services-stack.ts, non-prod only):
+    // Create + Get + List + SubmitForApproval to seed the smoke echo
+    // tool in the AgentCore registry. Only present when ENVIRONMENT != prod.
+    ...(environment !== "prod"
+      ? [
+          [
+            servicesStack,
+            "SeedSmokeEchoToolFunction/ServiceRole/DefaultPolicy/Resource",
+          ] as [cdk.Stack, string],
+        ]
+      : []),
   ];
   for (const [stack, path] of registryArnPaths) {
     NagSuppressions.addResourceSuppressionsByPath(
