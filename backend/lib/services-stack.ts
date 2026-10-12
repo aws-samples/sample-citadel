@@ -1032,6 +1032,9 @@ def handler(event, context):
         environment: {
           TOOLS_CONFIG_TABLE: `citadel-tools-${props.environment}`,
           TOOLS_BUCKET: `citadel-tools-${props.environment}-${this.account}-${this.region}`,
+          REGISTRY_ENABLED: "true",
+          REGISTRY_ID: registryId,
+          REGISTRY_GENERATION,
           POWERTOOLS_SERVICE_NAME: "citadel",
           POWERTOOLS_LOG_LEVEL: "INFO",
         },
@@ -1071,6 +1074,23 @@ def handler(event, context):
         resources: ["*"],
       }),
     );
+
+    // Grant read-only access to the AgentCore Registry so the sandbox can
+    // resolve tool configs via the same dual-source lookup (registry-first,
+    // DynamoDB fallback) used by tool-config-resolver. Least privilege:
+    // Get + List only — the sandbox never mutates registry records.
+    if (registryArn) {
+      toolSandboxFunction.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: [
+            "agent-registry:GetRegistryRecord",
+            "agent-registry:ListRegistryRecords",
+          ],
+          resources: [registryArn, `${registryArn}/*`],
+        }),
+      );
+    }
 
     // Outputs
 
