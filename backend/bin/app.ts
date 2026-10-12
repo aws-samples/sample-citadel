@@ -1040,6 +1040,10 @@ if (app.node.tryGetContext("nag") !== "false") {
       servicesStack,
       "IntakeOrchestrationResolverFunction/ServiceRole/DefaultPolicy/Resource",
     ],
+    // ToolSandboxFunction (services-stack.ts): read-only registry lookup
+    // (Get + List) for dual-source tool-config resolution, same grant
+    // shape as ToolConfigResolverFunction above.
+    [servicesStack, "ToolSandboxFunction/ServiceRole/DefaultPolicy/Resource"],
     // AgentReleaseWriterRole (backend-stack.ts): assumed by
     // AgentReleaseResolverFunction (governance-stack.ts) to read the
     // AgentCore registry record being released via GetRegistryRecord
