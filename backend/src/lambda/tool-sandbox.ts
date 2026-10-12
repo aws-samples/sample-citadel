@@ -259,13 +259,26 @@ function defaultDeps(): ExecuteToolDeps {
     },
 
     loadToolCode: async (toolId: string) => {
-      const result = await s3.send(
-        new GetObjectCommand({
-          Bucket: TOOLS_BUCKET,
-          Key: `tools/${toolId}/index.js`,
-        }),
-      );
-      return (await result.Body?.transformToString()) || "";
+      try {
+        const result = await s3.send(
+          new GetObjectCommand({
+            Bucket: TOOLS_BUCKET,
+            Key: `tools/${toolId}/index.js`,
+          }),
+        );
+        return (await result.Body?.transformToString()) || "";
+      } catch (err: unknown) {
+        const code =
+          err && typeof err === "object" && "name" in err
+            ? (err as { name: string }).name
+            : "";
+        if (code === "NoSuchKey" || code === "NoSuchBucket") {
+          throw new Error(
+            "Tool has no runnable implementation (no code uploaded for this tool)",
+          );
+        }
+        throw err;
+      }
     },
 
     resolveCredentials: async (bindings) => {

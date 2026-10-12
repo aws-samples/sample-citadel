@@ -81,12 +81,13 @@ describe("SeedSmokeEchoTool", () => {
     });
 
     it("grants S3 access on the tools bucket", () => {
-      // The seeder needs PutObject/GetObject/HeadObject on tools/*
+      // The seeder gets grantReadWrite(fn, 'tools/*') which includes
+      // s3:GetObject, s3:PutObject, s3:DeleteObject, etc.
       template.hasResourceProperties("AWS::IAM::Policy", {
         PolicyDocument: {
           Statement: Match.arrayWith([
             Match.objectLike({
-              Action: ["s3:PutObject", "s3:GetObject", "s3:HeadObject"],
+              Action: Match.arrayWith(["s3:GetObject*", "s3:GetBucket*"]),
               Effect: "Allow",
             }),
           ]),
