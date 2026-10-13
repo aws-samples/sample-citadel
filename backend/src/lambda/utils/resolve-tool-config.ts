@@ -70,6 +70,11 @@ export interface ResolvedToolConfig {
     integrationId?: string;
     dataStoreId?: string;
   }> | null;
+  /** S3 key prefix for the tool's code (e.g. "tools/smoke-echo-tool"). When
+   *  present the sandbox loads `${codeKey}/index.js` instead of
+   *  `tools/${toolId}/index.js`, decoupling the code location from the
+   *  registry-assigned recordId. */
+  codeKey?: string;
 }
 
 /**
@@ -86,7 +91,19 @@ export async function resolveToolConfig(
       const record = await registryService.getResource("tool", toolId);
       if (record) {
         const mapped = registryService.mapToToolConfig(record);
-        return toResolvedConfig(mapped);
+        // Extract codeKey from custom metadata if present — allows the
+        // sandbox to load code by the original upload key rather than the
+        // registry-assigned recordId.
+        let codeKey: string | undefined;
+        if (record.customDescriptorContent) {
+          try {
+            const meta = JSON.parse(record.customDescriptorContent);
+            codeKey = meta.codeKey ?? undefined;
+          } catch {
+            // malformed metadata — ignore
+          }
+        }
+        return toResolvedConfig(mapped, codeKey);
       }
     } catch (err) {
       // Registry unavailable — fall through to DynamoDB.
@@ -118,12 +135,16 @@ export async function resolveToolConfig(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-function toResolvedConfig(tc: ToolConfig): ResolvedToolConfig {
+function toResolvedConfig(
+  tc: ToolConfig,
+  codeKey?: string,
+): ResolvedToolConfig {
   return {
     toolId: tc.toolId,
     orgId: tc.orgId,
     integrationBindings: tc.integrationBindings ?? null,
     dataStoreBindings: tc.dataStoreBindings ?? null,
+    ...(codeKey ? { codeKey } : {}),
   };
 }
 

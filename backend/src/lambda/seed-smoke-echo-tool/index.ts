@@ -81,6 +81,21 @@ function getRegistryService(): RegistryService {
 }
 
 // ---------------------------------------------------------------------------
+// Poll budget helper — derive the maximum time we can spend polling from the
+// Lambda's remaining execution time so a CFN response is ALWAYS sent before
+// the function dies.  Subtracts a 10 s safety margin and caps at 60 s.
+// ---------------------------------------------------------------------------
+const SAFETY_MARGIN_MS = 10_000;
+const MAX_POLL_BUDGET_MS = 60_000;
+
+export function pollBudgetMs(
+  context: Pick<Context, "getRemainingTimeInMillis">,
+): number {
+  const remaining = context.getRemainingTimeInMillis() - SAFETY_MARGIN_MS;
+  return Math.max(0, Math.min(remaining, MAX_POLL_BUDGET_MS));
+}
+
+// ---------------------------------------------------------------------------
 // Handler
 // ---------------------------------------------------------------------------
 export const handler: CloudFormationCustomResourceHandler = async (
@@ -125,7 +140,7 @@ export const handler: CloudFormationCustomResourceHandler = async (
     const uploaded = await uploadToolModule(toolsBucket);
 
     // --- (b) Upsert registry record ----------------------------------------
-    const registryResult = await upsertRegistryRecord();
+    const registryResult = await upsertRegistryRecord(context);
 
     await sendCfnResponse(event, context, "SUCCESS", {
       toolId: TOOL_ID,
@@ -179,6 +194,41 @@ async function uploadToolModule(bucket: string): Promise<boolean> {
   return true;
 }
 
+/**
+ * Upload a copy of the tool module under `tools/<recordId>/index.js` so the
+ * sandbox fallback (`tools/${toolId}/index.js` where toolId = recordId) also
+ * resolves.
+ */
+async function uploadToolModuleByRecordId(
+  bucket: string,
+  recordId: string,
+): Promise<void> {
+  const key = `tools/${recordId}/index.js`;
+  // Skip when recordId matches the friendly name (no copy needed).
+  if (key === S3_KEY) return;
+  try {
+    const head = await getS3().send(
+      new HeadObjectCommand({ Bucket: bucket, Key: key }),
+    );
+    if (head.Metadata?.["content-hash"] === CONTENT_HASH) {
+      console.log(`S3 ${key}: content hash unchanged — skipping copy.`);
+      return;
+    }
+  } catch {
+    // Object doesn't exist yet — proceed.
+  }
+  await getS3().send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Body: TOOL_MODULE_SOURCE,
+      ContentType: "application/javascript",
+      Metadata: { "content-hash": CONTENT_HASH },
+    }),
+  );
+  console.log(`S3 ${key}: uploaded recordId copy (hash=${CONTENT_HASH}).`);
+}
+
 // ---------------------------------------------------------------------------
 // Registry record upsert + submit for approval
 // ---------------------------------------------------------------------------
@@ -187,49 +237,82 @@ interface RegistryResult {
   status: string;
 }
 
-async function upsertRegistryRecord(): Promise<RegistryResult> {
+async function upsertRegistryRecord(context: Context): Promise<RegistryResult> {
   const svc = getRegistryService();
 
-  // Check if a record already exists by listing with a name filter
+  // Idempotent: find existing record by name so re-runs don't create
+  // duplicates. listResourceSummaries returns all CUSTOM records with
+  // recordId/name/status — sufficient for the name filter.
+  let existing: { recordId: string; status: string } | undefined;
   try {
-    const existing = await svc.getResource("tool", TOOL_ID);
-    if (existing) {
-      console.log(
-        `Registry record for ${TOOL_ID} already exists (recordId=${existing.recordId}, status=${existing.status}).`,
-      );
-      // If already APPROVED, nothing to do.
-      if (existing.status === "APPROVED") {
-        return { recordId: existing.recordId, status: existing.status };
+    const summaries = await svc.listResourceSummaries();
+    const match = summaries.find((s: { name?: string }) => s.name === TOOL_ID);
+    if (match?.recordId) {
+      existing = { recordId: match.recordId, status: match.status ?? "" };
+    }
+  } catch (err) {
+    console.warn(
+      "Registry list lookup failed (will try getResource fallback):",
+      err,
+    );
+  }
+
+  // Fallback: try direct getResource (works when the recordId IS the name).
+  if (!existing) {
+    try {
+      const record = await svc.getResource("tool", TOOL_ID);
+      if (record) {
+        existing = { recordId: record.recordId, status: record.status };
       }
-      // If DRAFT, submit for approval.
-      if (existing.status === "DRAFT") {
-        console.log("Submitting existing DRAFT record for approval...");
+    } catch (err) {
+      console.warn(
+        "Registry getResource fallback failed (will try create):",
+        err,
+      );
+    }
+  }
+
+  if (existing) {
+    console.log(
+      `Registry record for ${TOOL_ID} already exists (recordId=${existing.recordId}, status=${existing.status}).`,
+    );
+    // Upload the recordId copy so the sandbox fallback works.
+    const toolsBucket = process.env.TOOLS_BUCKET;
+    if (toolsBucket) {
+      await uploadToolModuleByRecordId(toolsBucket, existing.recordId);
+    }
+    if (existing.status === "APPROVED") {
+      return { recordId: existing.recordId, status: existing.status };
+    }
+    if (existing.status === "DRAFT") {
+      console.log("Submitting existing DRAFT record for approval...");
+      try {
         const approved = await svc.submitForApproval(existing.recordId);
         return {
           recordId: approved.recordId,
           status: approved.status ?? "PENDING_APPROVAL",
         };
+      } catch (err) {
+        console.warn("submitForApproval on existing DRAFT failed:", err);
+        return { recordId: existing.recordId, status: existing.status };
       }
-      // PENDING_APPROVAL or other — leave as-is.
-      return {
-        recordId: existing.recordId,
-        status: existing.status ?? "unknown",
-      };
     }
-  } catch (err) {
-    console.warn(
-      "Registry lookup for existing record failed (will try create):",
-      err,
-    );
+    // PENDING_APPROVAL, CREATING, or other — leave as-is.
+    return {
+      recordId: existing.recordId,
+      status: existing.status ?? "unknown",
+    };
   }
 
-  // Create the record
+  // Create the record — include codeKey so the sandbox can resolve code by
+  // the original upload key rather than the registry-assigned recordId.
   const metadata = JSON.stringify({
     toolId: TOOL_ID,
     orgId: ORG_ID,
     inputSchema: INPUT_SCHEMA,
     contentHash: CONTENT_HASH,
     createdBy: "SYSTEM_SEED",
+    codeKey: `tools/${TOOL_ID}`,
   });
 
   const created = await svc.createResource("tool", TOOL_ID, {
@@ -243,9 +326,27 @@ async function upsertRegistryRecord(): Promise<RegistryResult> {
     `Registry record created: recordId=${created.recordId}, status=${created.status}`,
   );
 
-  // Submit for approval — with autoApproval on the registry this lands
-  // APPROVED immediately. Without autoApproval, it lands on
-  // PENDING_APPROVAL and must be approved once via the Approvals UI.
+  // Upload a copy under tools/<recordId>/index.js so the sandbox fallback
+  // (`tools/${toolId}/index.js` where toolId = recordId) also resolves.
+  const toolsBucket = process.env.TOOLS_BUCKET;
+  if (toolsBucket) {
+    await uploadToolModuleByRecordId(toolsBucket, created.recordId);
+  }
+
+  // Poll until the record leaves CREATING — submitForApproval on a
+  // CREATING record throws ConflictException.
+  const stableStatus = await waitForRecordReady(
+    svc,
+    created.recordId,
+    pollBudgetMs(context),
+  );
+  if (stableStatus === "CREATING") {
+    console.warn(
+      `Registry record ${created.recordId} still CREATING after timeout — leaving as DRAFT.`,
+    );
+    return { recordId: created.recordId, status: "CREATING" };
+  }
+
   try {
     const approved = await svc.submitForApproval(created.recordId);
     console.log(
@@ -259,9 +360,35 @@ async function upsertRegistryRecord(): Promise<RegistryResult> {
     console.warn("submitForApproval failed (non-fatal):", err);
     return {
       recordId: created.recordId,
-      status: created.status ?? "DRAFT",
+      status: stableStatus ?? created.status ?? "DRAFT",
     };
   }
+}
+
+/**
+ * Poll the registry record until it leaves CREATING state (bounded with
+ * exponential backoff). Returns the settled status or "CREATING" on timeout.
+ */
+async function waitForRecordReady(
+  svc: RegistryService,
+  recordId: string,
+  maxWaitMs: number,
+): Promise<string> {
+  const start = Date.now();
+  let delayMs = 1000;
+  while (Date.now() - start < maxWaitMs) {
+    try {
+      const record = await svc.getResource("tool", recordId);
+      if (record && record.status !== "CREATING") {
+        return record.status;
+      }
+    } catch (err) {
+      console.warn("waitForRecordReady: poll error (retrying):", err);
+    }
+    await new Promise((r) => setTimeout(r, delayMs));
+    delayMs = Math.min(delayMs * 2, 8000);
+  }
+  return "CREATING";
 }
 
 // ---------------------------------------------------------------------------
@@ -319,4 +446,6 @@ export {
   TOOL_MODULE_SOURCE,
   INPUT_SCHEMA,
   S3_KEY,
+  SAFETY_MARGIN_MS,
+  MAX_POLL_BUDGET_MS,
 };

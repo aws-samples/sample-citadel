@@ -767,7 +767,9 @@ export async function updateToolConfigRegistry(
 
     await registryService.updateResource("tool", input.toolId, {
       name: existing.name,
-      description: existing.description ?? "",
+      // Omit description when not present on the existing record — the
+      // registry rejects an empty optionalValue (length < 1).
+      ...(existing.description ? { description: existing.description } : {}),
       customMetadata: decisionMeta,
     });
 
@@ -900,7 +902,12 @@ export async function updateToolConfigRegistry(
 
     const record = await registryService.updateResource("tool", input.toolId, {
       name: (parsedNewConfig.name as string | undefined) || existing.name,
-      description: (parsedNewConfig.description as string | undefined) ?? "",
+      // Omit description when not supplied — the registry rejects an empty
+      // optionalValue (length < 1), and omitting the wrapper leaves the
+      // existing description unchanged (see registry-service.updateResource).
+      ...(parsedNewConfig.description != null
+        ? { description: parsedNewConfig.description as string }
+        : {}),
       customMetadata: updatedMeta,
     });
     // Re-fetch so the returned state reflects the post-transition record
@@ -912,7 +919,12 @@ export async function updateToolConfigRegistry(
 
   const record = await registryService.updateResource("tool", input.toolId, {
     name: (parsedNewConfig.name as string | undefined) || existing.name,
-    description: (parsedNewConfig.description as string | undefined) ?? "",
+    // Omit description when not supplied — the registry rejects an empty
+    // optionalValue (length < 1), and omitting the wrapper leaves the
+    // existing description unchanged (see registry-service.updateResource).
+    ...(parsedNewConfig.description != null
+      ? { description: parsedNewConfig.description as string }
+      : {}),
     customMetadata: updatedMeta,
   });
 

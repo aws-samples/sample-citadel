@@ -74,6 +74,13 @@ describe("SeedSmokeEchoTool", () => {
       });
     });
 
+    it("sets a 3-minute (180 s) timeout so the handler can always send a CFN response", () => {
+      template.hasResourceProperties("AWS::Lambda::Function", {
+        Handler: "seed-smoke-echo-tool/index.handler",
+        Timeout: 180,
+      });
+    });
+
     it("creates the SeedSmokeEchoToolResource custom resource", () => {
       template.hasResourceProperties("AWS::CloudFormation::CustomResource", {
         Version: "v1.0.0",
