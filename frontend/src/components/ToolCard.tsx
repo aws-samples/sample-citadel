@@ -1,4 +1,4 @@
-import { Pause, Play, Settings, Wrench, AlertTriangle } from 'lucide-react';
+import { Pause, Play, Wrench, AlertTriangle, Send, ExternalLink } from 'lucide-react';
 import { useState } from 'react';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
@@ -30,8 +30,15 @@ interface ToolCardProps {
   tool: ToolConfig;
   onToggleState: (tool: ToolConfig) => void;
   onConfigure: (toolId: string) => void;
+  onSubmitForReview?: (tool: ToolConfig) => void;
   userRole?: string;
   orgId?: string;
+  /**
+   * When true the Submit-for-review button shows a success confirmation
+   * instead of the default label, after a successful API call. Controlled
+   * by the parent page (AgentTools).
+   */
+  submitSuccess?: boolean;
   /**
    * When true, the Configure (Settings) button is rendered but disabled
    * with a "Coming soon" tooltip. Defaults to true while ToolDetails is
@@ -82,15 +89,12 @@ function toRenderableConfig(raw: unknown): RenderableToolConfig {
     : {};
 }
 
-export function ToolCard({ tool, onToggleState, onConfigure, userRole, orgId, configureDisabled = true }: ToolCardProps) {
+export function ToolCard({ tool, onToggleState, onConfigure: _onConfigure, onSubmitForReview, userRole: _userRole, orgId, submitSuccess, configureDisabled: _configureDisabled = true }: ToolCardProps) {
   const { selectedOrganization } = useOrganization();
   const resolvedOrgId = orgId || selectedOrganization || 'default';
   const [showSandbox, setShowSandbox] = useState(false);
   const [showDeprecateConfirm, setShowDeprecateConfirm] = useState(false);
   const config = toRenderableConfig(tool.config);
-
-  // Only show config button for admin and developer roles
-  const canConfigure = userRole === 'admin' || userRole === 'developer';
 
   const registryBacked = isRegistryBacked(tool);
   // Registry-backed DEPRECATED/REJECTED records surface as internal state
@@ -240,7 +244,67 @@ export function ToolCard({ tool, onToggleState, onConfigure, userRole, orgId, co
         )}
         
         <div className="flex gap-2 pt-2">
-          {isTerminalDeprecated ? null : tool.state === 'active' && registryBacked ? (
+          {/* Lifecycle-aware action controls: render by registryStatus */}
+          {registryBacked && tool.registryStatus === 'DRAFT' ? (
+            /* DRAFT → Submit for review */
+            submitSuccess ? (
+              <Badge className="flex-1 bg-chart-2/20 text-chart-2 border-0 justify-center py-1.5">
+                Submitted for review
+              </Badge>
+            ) : (
+              <Button
+                variant="outline"
+                size="sm"
+                className="flex-1 bg-transparent border-border text-foreground hover:bg-accent"
+                onClick={() => onSubmitForReview?.(tool)}
+                data-testid="submit-for-review"
+              >
+                <Send className="size-4 mr-1" />
+                Submit for review
+              </Button>
+            )
+          ) : registryBacked && (tool.registryStatus === 'PENDING_APPROVAL' || tool.registryStatus === 'PENDING_REVIEW') ? (
+            /* PENDING_APPROVAL / PENDING_REVIEW → badge + link to approvals */
+            <div className="flex-1 flex items-center gap-2">
+              <Badge className="bg-chart-4/20 text-chart-4 border-0">
+                Awaiting approval
+              </Badge>
+              <a
+                href="/approvals"
+                className="text-xs text-primary hover:underline inline-flex items-center gap-1"
+                data-testid="approvals-link"
+              >
+                <ExternalLink className="size-3" />
+                View approvals
+              </a>
+            </div>
+          ) : registryBacked && tool.registryStatus === 'REJECTED' ? (
+            /* REJECTED → badge with statusReason; no resubmit (backend rejects it) */
+            <div className="flex-1 flex flex-col gap-1">
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="inline-flex">
+                      <Badge className="bg-destructive/20 text-destructive border-0" data-testid="rejected-badge">
+                        Rejected
+                      </Badge>
+                    </span>
+                  </TooltipTrigger>
+                  {tool.statusReason && (
+                    <TooltipContent>
+                      {tool.statusReason}
+                    </TooltipContent>
+                  )}
+                </Tooltip>
+              </TooltipProvider>
+              {tool.statusReason && (
+                <p className="text-xs text-muted-foreground truncate" data-testid="rejection-reason">
+                  {tool.statusReason}
+                </p>
+              )}
+            </div>
+          ) : isTerminalDeprecated ? null : tool.state === 'active' && registryBacked ? (
+            /* APPROVED + active → Deprecate (existing behavior) */
             <>
               <Button
                 variant="outline"
@@ -270,6 +334,7 @@ export function ToolCard({ tool, onToggleState, onConfigure, userRole, orgId, co
               </AlertDialog>
             </>
           ) : tool.state === 'active' ? (
+            /* Legacy active → Deactivate */
             <Button
               variant="outline"
               size="sm"
@@ -279,7 +344,8 @@ export function ToolCard({ tool, onToggleState, onConfigure, userRole, orgId, co
               <Pause className="size-4 mr-1" />
               Deactivate
             </Button>
-          ) : (
+          ) : !registryBacked ? (
+            /* Legacy inactive → Activate */
             <Button
               variant="outline"
               size="sm"
@@ -289,33 +355,11 @@ export function ToolCard({ tool, onToggleState, onConfigure, userRole, orgId, co
               <Play className="size-4 mr-1" />
               Activate
             </Button>
-          )}
-          {!isTerminalDeprecated && canConfigure && (
-            <TooltipProvider>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <span className="inline-flex">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="bg-transparent border-border text-foreground hover:bg-accent"
-                      onClick={() => onConfigure(tool.toolId)}
-                      disabled={configureDisabled}
-                      aria-disabled={configureDisabled}
-                      aria-label="Configure tool"
-                    >
-                      <Settings className="size-4" />
-                    </Button>
-                  </span>
-                </TooltipTrigger>
-                {configureDisabled && (
-                  <TooltipContent>
-                    Coming soon — Configure UI is being built
-                  </TooltipContent>
-                )}
-              </Tooltip>
-            </TooltipProvider>
-          )}
+          ) : null}
+          {/* TODO: Configure button — hidden until ToolDetails view is implemented.
+              The backend CRUD exists (updateToolConfig); the UI surface (sub-view
+              shape, editable fields, permissions for bindings vs basic config,
+              governance/audit trail) is not yet specified. */}
           <Button
             variant="outline"
             size="sm"

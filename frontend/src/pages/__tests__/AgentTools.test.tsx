@@ -1,19 +1,23 @@
 /**
- * AgentTools (Tools page) unit tests — stub-button regression suite
+ * AgentTools (Tools page) unit tests — Configure button removal regression
  *
- * Validates the BLOCKED safe-default plan: per-tool Settings (Configure)
- * button is rendered but disabled with a "Coming soon" tooltip pending
- * the ToolDetails view spec.
+ * Validates that the Configure (Settings) button is no longer rendered
+ * (removed pending ToolDetails view implementation; TODO comment in
+ * ToolCard.tsx). The button was previously rendered but disabled with a
+ * "Coming soon" tooltip.
  *
  * Tests:
- *  1. Configure (Settings) button on each ToolCard is disabled
- *  2. Clicking the disabled Configure button is a no-op (no alert)
- *  3. "Coming soon" tooltip text is present in the DOM
- *  4. Permission gate preserved: Configure button absent for non-admin/dev role
+ *  1. Configure (Settings) button is absent from tool cards
+ *  2. "Coming soon" tooltip is absent
+ *  3. Permission gate preserved: viewer role does not see Configure button
  */
 import React from 'react';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
+
+jest.mock('sonner', () => ({
+  toast: { success: jest.fn(), error: jest.fn() },
+}));
 
 // Mock UI primitives
 jest.mock('@/components/ui/button', () => ({
@@ -148,44 +152,25 @@ const makeTool = (overrides: Record<string, any> = {}) => ({
   ...overrides,
 });
 
-describe('AgentTools — Configure tool stub button (BLOCKED → disabled + tooltip)', () => {
-  let alertSpy: jest.SpyInstance;
-
+describe('AgentTools — Configure tool button removed (TODO: implement ToolDetails view)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     orgCtx.currentUser = { role: 'admin' };
     (toolConfigService.listToolConfigs as jest.Mock).mockResolvedValue([
       makeTool({ toolId: 'tool-a', config: { name: 'Tool A', version: 'v1' } }),
     ]);
-    alertSpy = jest.spyOn(window, 'alert').mockImplementation(() => undefined);
   });
 
-  afterEach(() => {
-    alertSpy.mockRestore();
-  });
-
-  it('renders the Configure (Settings) button as disabled on each tool card', async () => {
+  it('does not render a Configure (Settings) button on tool cards', async () => {
     render(<Tools />);
     await waitFor(() => expect(screen.getByText('Tool A')).toBeInTheDocument());
 
-    const configureBtns = screen.getAllByRole('button', { name: /configure tool/i });
-    expect(configureBtns.length).toBeGreaterThan(0);
-    configureBtns.forEach((btn) => {
-      expect(btn).toBeDisabled();
-    });
+    expect(
+      screen.queryByRole('button', { name: /configure tool/i }),
+    ).not.toBeInTheDocument();
   });
 
-  it('does not invoke window.alert when the disabled Configure button is clicked', async () => {
-    render(<Tools />);
-    await waitFor(() => expect(screen.getByText('Tool A')).toBeInTheDocument());
-
-    const configureBtns = screen.getAllByRole('button', { name: /configure tool/i });
-    configureBtns.forEach((btn) => fireEvent.click(btn));
-
-    expect(alertSpy).not.toHaveBeenCalled();
-  });
-
-  it('renders a "Coming soon" tooltip near the disabled Configure button', async () => {
+  it('does not render a "Coming soon" tooltip (Configure button removed)', async () => {
     render(<Tools />);
     await waitFor(() => expect(screen.getByText('Tool A')).toBeInTheDocument());
 
@@ -193,7 +178,7 @@ describe('AgentTools — Configure tool stub button (BLOCKED → disabled + tool
     const matched = tooltipContents.some((el) =>
       /coming soon/i.test(el.textContent || ''),
     );
-    expect(matched).toBe(true);
+    expect(matched).toBe(false);
   });
 
   it('preserves the permission gate: viewer role does not see Configure button', async () => {

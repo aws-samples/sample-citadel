@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { Search, Filter, Wrench, Code, Database, Cloud, Save, ChevronDown, FileText, Link, Layers } from 'lucide-react';
+import { toast } from 'sonner';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Badge } from '../components/ui/badge';
@@ -88,6 +89,7 @@ export function Tools() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isFabricationTrayOpen, setIsFabricationTrayOpen] = useState(false);
+  const [submitSuccessToolIds, setSubmitSuccessToolIds] = useState<Set<string>>(new Set());
   
   const { queueItems, reload: reloadQueue, addPendingItem } = useFabricatorQueue({
     onFabricationComplete: () => { loadTools(); },
@@ -135,6 +137,18 @@ export function Tools() {
     // BLOCKED pending ToolDetails view spec (sub-view shape, editable surface,
     // permissions for bindings vs basic config, governance/audit). Backend
     // tool-config CRUD exists; UI surface does not. No-op until specified.
+  };
+
+  const handleSubmitForReview = async (tool: ToolConfig) => {
+    try {
+      setError(null);
+      await toolConfigService.updateToolConfig({ toolId: tool.toolId, status: 'PENDING_APPROVAL' });
+      setSubmitSuccessToolIds((prev) => new Set(prev).add(tool.toolId));
+      toast.success('Submitted for review');
+      await loadTools();
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to submit for review');
+    }
   };
 
   const categories = useMemo(() => {
@@ -263,7 +277,9 @@ export function Tools() {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {filteredTools.map((tool) => (
             <ToolCard key={tool.toolId} tool={tool} onToggleState={handleToggleState}
-              onConfigure={handleConfigureTool} userRole={currentUser?.role}
+              onConfigure={handleConfigureTool} onSubmitForReview={handleSubmitForReview}
+              userRole={currentUser?.role}
+              submitSuccess={submitSuccessToolIds.has(tool.toolId)}
               configureDisabled={true} />
           ))}
         </div>
