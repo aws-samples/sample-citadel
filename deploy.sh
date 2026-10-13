@@ -1,6 +1,11 @@
 #!/bin/bash
 # Citadel Deployment Script
 #
+# Synthesises the CDK app ONCE (cdk synth) into backend/cdk.out, then reuses
+# that cloud assembly for diff, stack-coverage verification, and every
+# per-stack deploy (via --app cdk.out). This avoids redundant synthesis passes
+# — one per diff + one per stack — which previously dominated wall-clock time.
+#
 # Usage:
 #   ./deploy.sh [options] [stack-name]
 #
@@ -180,6 +185,50 @@ cdk_provenance_context() {
   echo "--context gitSha=${GIT_FULL_SHA:-unknown} --context gitRef=${GIT_BRANCH:-unknown}"
 }
 
+# --- CDK synth once (perf: avoid redundant synthesis) ---
+# Synthesises the entire CDK app into backend/cdk.out ONCE. Every subsequent
+# cdk invocation (diff, list, deploy) passes `--app cdk.out` to reuse the
+# assembly, skipping re-synthesis. Context flags (-c adminEmail, provenance)
+# are baked in at synth time and MUST NOT be repeated on consumer commands
+# (they would trigger implicit re-synthesis or conflict with the assembly).
+cdk_synth_once() {
+  header "CDK Synth (one-time)"
+  pushd backend > /dev/null
+
+  # Remove a stale assembly so an old cdk.out can never be deployed.
+  rm -rf cdk.out
+
+  local synth_cmd="npx cdk synth --quiet"
+  [ -n "${AWS_PROFILE:-}" ] && synth_cmd="$synth_cmd --profile $AWS_PROFILE"
+  synth_cmd="$synth_cmd $(cdk_provenance_context)"
+  local admin_email="${ADMIN_EMAIL_ARG:-${ADMIN_EMAIL:-}}"
+  [ -n "$admin_email" ] && synth_cmd="$synth_cmd -c adminEmail=$admin_email"
+
+  log "Running: $synth_cmd"
+  local synth_output
+  local synth_rc=0
+  synth_output=$($synth_cmd 2>&1) || synth_rc=$?
+  echo "$synth_output" | tee -a "$DEPLOY_LOG"
+
+  if [ $synth_rc -ne 0 ]; then
+    # Classify exactly like a deploy failure — deterministic client-side
+    # errors (missing binary, TS errors, subprocess crash) fail fast.
+    local classification
+    classification=$(classify_deploy_failure "$synth_output")
+    if [[ "$classification" == fail-fast:* ]]; then
+      err "cdk synth failed with a deterministic error — aborting."
+      err "Root cause: ${classification#fail-fast:}"
+    else
+      err "cdk synth failed (exit $synth_rc). See $DEPLOY_LOG"
+    fi
+    popd > /dev/null
+    exit 1
+  fi
+
+  ok "CDK cloud assembly written to backend/cdk.out"
+  popd > /dev/null
+}
+
 # --- Build frontend ---
 build_frontend() {
   log "Building frontend..."
@@ -212,11 +261,11 @@ build_backend() {
 cdk_diff() {
   log "Running cdk diff..."
   pushd backend > /dev/null
-  local diff_cmd="npx cdk diff"
+  local diff_cmd="npx cdk diff --app cdk.out"
   [ -n "${AWS_PROFILE:-}" ] && diff_cmd="$diff_cmd --profile $AWS_PROFILE"
-  diff_cmd="$diff_cmd $(cdk_provenance_context)"
-  local admin_email="${ADMIN_EMAIL_ARG:-${ADMIN_EMAIL:-}}"
-  [ -n "$admin_email" ] && diff_cmd="$diff_cmd -c adminEmail=$admin_email"
+  # Context flags are baked into the assembly at synth time — do NOT repeat
+  # them here (they would trigger implicit re-synthesis or conflict).
+  #
   # cdk diff stays non-blocking by design (it's a preview, not a gate) —
   # but a failure is now named instead of silently swallowed by `|| true`.
   # Note: --all is intentionally NOT passed; it is not a supported cdk diff
@@ -248,11 +297,9 @@ cdk_diff() {
 verify_stack_coverage() {
   log "Verifying deploy.sh stack coverage against 'cdk list'..."
   pushd backend > /dev/null
-  local list_cmd="npx cdk list"
+  local list_cmd="npx cdk list --app cdk.out"
   [ -n "${AWS_PROFILE:-}" ] && list_cmd="$list_cmd --profile $AWS_PROFILE"
-  list_cmd="$list_cmd $(cdk_provenance_context)"
-  local admin_email="${ADMIN_EMAIL_ARG:-${ADMIN_EMAIL:-}}"
-  [ -n "$admin_email" ] && list_cmd="$list_cmd -c adminEmail=$admin_email"
+  # Context flags are baked into the assembly at synth time — do NOT repeat them.
 
   local cdk_stacks
   if ! cdk_stacks=$($list_cmd 2>>"$DEPLOY_LOG"); then
@@ -471,15 +518,11 @@ deploy_stack() {
 
     log "Deploying $stack_name (attempt $attempt/$max_attempts)..."
     pushd backend > /dev/null
-    local cmd="npx cdk deploy $stack_name --require-approval never --outputs-file ../cdk-outputs.json"
+    local cmd="npx cdk deploy $stack_name --app cdk.out --require-approval never --outputs-file ../cdk-outputs.json"
     [ "$exclusively" = "true" ] && cmd="$cmd --exclusively"
     [ -n "${AWS_PROFILE:-}" ] && cmd="$cmd --profile $AWS_PROFILE"
-    # CIT-215: GitSha/GitRef provenance tags on every stack
-    cmd="$cmd $(cdk_provenance_context)"
-
-    # Pass admin email as CDK context if provided via --admin-email or ADMIN_EMAIL env var
-    local admin_email="${ADMIN_EMAIL_ARG:-${ADMIN_EMAIL:-}}"
-    [ -n "$admin_email" ] && cmd="$cmd -c adminEmail=$admin_email"
+    # Context flags (provenance, adminEmail) are baked into the cloud assembly
+    # at synth time — do NOT repeat them here.
 
     local attempt_output
     local attempt_rc=0
@@ -1057,6 +1100,9 @@ is_known_stack_arg() {
 print_usage() {
   echo "Citadel Deployment Script"
   echo ""
+  echo "Synthesises the CDK app once into backend/cdk.out, then reuses the"
+  echo "cloud assembly for diff, stack-coverage verification, and every deploy."
+  echo ""
   echo "Usage: ./deploy.sh [options] [stack-name]"
   echo ""
   echo "  stack-name must exactly match one of the known stacks (bare name or"
@@ -1257,6 +1303,9 @@ fi
 
 # Ensure the API-key HMAC pepper exists before any stack deploys (idempotent)
 ensure_api_key_pepper
+
+# Synthesise once — all subsequent cdk commands reuse backend/cdk.out
+cdk_synth_once
 
 # Recurrence guard: abort if this script's stack list has drifted from bin/app.ts
 verify_stack_coverage
