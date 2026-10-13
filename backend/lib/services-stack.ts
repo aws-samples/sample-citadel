@@ -1020,6 +1020,33 @@ def handler(event, context):
       }),
     );
 
+    // --- Tools S3 Bucket ---
+    // Stores tool code bundles (tools/<toolId>/index.js) referenced by the
+    // sandbox Lambda and seeded by the smoke-tool custom resource.
+    const toolsBucket = new s3.Bucket(this, "ToolsBucket", {
+      bucketName: `citadel-tools-${props.environment}-${this.account}-${this.region}`,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true,
+      versioned: true,
+      serverAccessLogsBucket: accessLogsBucket,
+      serverAccessLogsPrefix: "tools/",
+      removalPolicy:
+        props.environment === "prod"
+          ? cdk.RemovalPolicy.RETAIN
+          : cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: props.environment !== "prod",
+    });
+    NagSuppressions.addResourceSuppressions(toolsBucket, [
+      {
+        id: "AwsSolutions-S1",
+        reason:
+          "ToolsBucket already logs to the shared AccessLogsBucket under " +
+          "the tools/ prefix — this suppression is for the access-logs " +
+          "bucket itself (S1 flags the logs bucket for not logging itself).",
+      },
+    ]);
+
     // --- Tool Testing Sandbox Lambda (DS-11) ---
     // Isolated Lambda for executing tools with scoped credentials (Req 7.3, 7.4, 7.5, 7.8, 10.9)
     const toolSandboxFunction = new lambda.Function(
@@ -1032,7 +1059,7 @@ def handler(event, context):
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
           TOOLS_CONFIG_TABLE: `citadel-tools-${props.environment}`,
-          TOOLS_BUCKET: `citadel-tools-${props.environment}-${this.account}-${this.region}`,
+          TOOLS_BUCKET: toolsBucket.bucketName,
           REGISTRY_ENABLED: "true",
           REGISTRY_ID: registryId,
           REGISTRY_GENERATION,
@@ -1057,15 +1084,7 @@ def handler(event, context):
     );
 
     // Grant S3 read on TOOLS_BUCKET
-    toolSandboxFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["s3:GetObject"],
-        resources: [
-          `arn:aws:s3:::citadel-tools-${props.environment}-${this.account}-${this.region}/tools/*`,
-        ],
-      }),
-    );
+    toolsBucket.grantRead(toolSandboxFunction, "tools/*");
 
     // Grant STS assume role for scoped credentials
     toolSandboxFunction.addToRolePolicy(
@@ -1101,7 +1120,6 @@ def handler(event, context):
     // the registry has autoApproval configured). Gated identically to the
     // arbiter smoke agent: ENVIRONMENT !== 'prod'.
     const isNonProdSmokeEnv = props.environment !== "prod";
-    const toolsBucketName = `citadel-tools-${props.environment}-${this.account}-${this.region}`;
 
     if (isNonProdSmokeEnv) {
       // Content digest: any edit to the seeder source triggers a re-run.
@@ -1150,7 +1168,7 @@ def handler(event, context):
           environment: {
             ENVIRONMENT: props.environment,
             SMOKE_FIXTURES_ENABLED: "true",
-            TOOLS_BUCKET: toolsBucketName,
+            TOOLS_BUCKET: toolsBucket.bucketName,
             REGISTRY_ID: registryId,
             REGISTRY_ENABLED: "true",
             REGISTRY_GENERATION,
@@ -1160,28 +1178,16 @@ def handler(event, context):
 
       // S3: PutObject + GetObject (HeadObject for idempotency check)
       // on tools/* prefix only.
-      seedSmokeToolFn.addToRolePolicy(
-        new iam.PolicyStatement({
-          effect: iam.Effect.ALLOW,
-          actions: ["s3:PutObject", "s3:GetObject", "s3:HeadObject"],
-          resources: [`arn:aws:s3:::${toolsBucketName}/tools/*`],
-        }),
-      );
+      toolsBucket.grantReadWrite(seedSmokeToolFn, "tools/*");
       NagSuppressions.addResourceSuppressions(
         seedSmokeToolFn.role!,
         [
           {
             id: "AwsSolutions-IAM5",
             reason:
-              "Seed S3 write is path-scoped to tools/* (writes only " +
+              "Seed S3 read/write is path-scoped to tools/* (writes only " +
               "tools/smoke-echo-tool/index.js). The residual wildcard is " +
               "the object-key prefix inherent to any S3 PutObject.",
-            appliesTo: [
-              {
-                regex:
-                  "/^Resource::arn:<AWS::Partition>:s3:::.+\\/tools\\/\\*$/g",
-              },
-            ],
           },
         ],
         true,

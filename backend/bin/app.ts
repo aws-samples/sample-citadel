@@ -636,6 +636,7 @@ if (app.node.tryGetContext("nag") !== "false") {
         },
         { regex: "/^Resource::<.+\\.Arn>\\/\\*$/g" },
         { regex: "/^Resource::<.+\\.Arn>\\/tool-results\\/\\*$/g" },
+        { regex: "/^Resource::<.+\\.Arn>\\/tools\\/\\*$/g" },
         {
           regex:
             "/^Resource::arn:aws:bedrock-agentcore:.*:.*:workload-identity-directory\\/.+-\\*$/g",
@@ -1200,6 +1201,29 @@ if (app.node.tryGetContext("nag") !== "false") {
         appliesTo: [
           {
             regex: "/^Resource::<CodeBucket[A-F0-9]+\\.Arn>\\/agents\\/\\*$/g",
+          },
+        ],
+      },
+    ],
+  );
+
+  // IAM5 — ToolSandboxFunction: CDK grantRead(toolsBucket, "tools/*")
+  // generates <ToolsBucket.Arn>/tools/* — the minimum scope for reading
+  // tool code bundles (tools/<toolId>/index.js). Must run AFTER all other
+  // suppressions for the same path to avoid metadata being overwritten.
+  NagSuppressions.addResourceSuppressionsByPath(
+    servicesStack,
+    `/${servicesStack.stackName}/ToolSandboxFunction/ServiceRole/DefaultPolicy/Resource`,
+    [
+      {
+        id: "AwsSolutions-IAM5",
+        reason:
+          "Sandbox S3 grantRead is path-scoped to tools/* (reads only " +
+          "tools/<toolId>/index.js). The residual wildcard is the " +
+          "object-key prefix inherent to any S3 GetObject grant.",
+        appliesTo: [
+          {
+            regex: "/^Resource::<.+\\.Arn>\\/tools\\/\\*$/g",
           },
         ],
       },
