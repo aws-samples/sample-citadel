@@ -882,7 +882,24 @@ export async function updateToolConfigRegistry(
           "ValidationError: Rejected records cannot be resubmitted; create a new record",
         );
       }
-      await registryService.submitForApproval(input.toolId);
+      // CIT-238: Never silently submit for review when the caller asked to
+      // activate. The state:'active' toggle only makes sense for APPROVED
+      // records (where desiredRegistryStatus === existing.status, so the
+      // outer guard prevents entry). DRAFT and PENDING_APPROVAL callers
+      // must use the explicit status field (input.status =
+      // "PENDING_APPROVAL") to submit for review — that path is handled
+      // above. Any other status reaching here is invalid.
+      const allowed =
+        existing.status === "DRAFT"
+          ? ["PENDING_APPROVAL (submit for review)", "DEPRECATED"]
+          : (REGISTRY_TRANSITIONS.transitions[existing.status] ?? []);
+      throw new Error(
+        `ValidationError: Tool is in ${existing.status}; ` +
+          (existing.status === "DRAFT"
+            ? "submit it for review first"
+            : `active/maintenance toggle is only allowed when registryStatus is APPROVED. ` +
+              `Valid transitions from ${existing.status}: ${Array.isArray(allowed) ? allowed.join(", ") : String(allowed) || "none"}`),
+      );
     } else {
       // Route through the validated-transition gate: pass existing.status as
       // currentStatus so registry-service.updateResourceStatus enforces

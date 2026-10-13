@@ -860,24 +860,19 @@ describe("Registry-backed CRUD functions (tasks 7.2–7.6)", () => {
 
     // ─── finding adde5b79: submit-not-approve activation (tool parity) ─────
 
-    test("DRAFT + active → submits for approval, never issues a direct UpdateRegistryRecordStatus(APPROVED)", async () => {
+    test("DRAFT + active → rejects with 'submit it for review first' (CIT-238: no silent submit)", async () => {
       const draftRecord = { ...existingRecord, status: "DRAFT" };
-      mockGetResource
-        .mockResolvedValueOnce(draftRecord)
-        .mockResolvedValueOnce({ ...draftRecord, status: "PENDING_APPROVAL" });
-      mockUpdateResource.mockResolvedValue(draftRecord);
-      mockSubmitForApproval.mockResolvedValue({
-        ...draftRecord,
-        status: "PENDING_APPROVAL",
-      });
+      mockGetResource.mockResolvedValueOnce(draftRecord);
 
-      await updateToolConfigRegistry(
-        { toolId: "tool-1", state: "active" },
-        "unknown",
-        eventWithOrg,
-      );
+      await expect(
+        updateToolConfigRegistry(
+          { toolId: "tool-1", state: "active" },
+          "unknown",
+          eventWithOrg,
+        ),
+      ).rejects.toThrow(/Tool is in DRAFT.*submit it for review first/);
 
-      expect(mockSubmitForApproval).toHaveBeenCalledWith("tool-1");
+      expect(mockSubmitForApproval).not.toHaveBeenCalled();
       expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
     });
 
@@ -903,10 +898,9 @@ describe("Registry-backed CRUD functions (tasks 7.2–7.6)", () => {
       expect(mockUpdateResource).not.toHaveBeenCalled();
     });
 
-    test("metadata is left untouched when submitForApproval fails (no partial drift)", async () => {
+    test("metadata is left untouched when DRAFT + active is rejected (no partial drift)", async () => {
       const draftRecord = { ...existingRecord, status: "DRAFT" };
       mockGetResource.mockResolvedValue(draftRecord);
-      mockSubmitForApproval.mockRejectedValue(new Error("submit failed"));
 
       await expect(
         updateToolConfigRegistry(
@@ -914,9 +908,10 @@ describe("Registry-backed CRUD functions (tasks 7.2–7.6)", () => {
           "unknown",
           eventWithOrg,
         ),
-      ).rejects.toThrow("submit failed");
+      ).rejects.toThrow(/Tool is in DRAFT/);
 
       expect(mockUpdateResource).not.toHaveBeenCalled();
+      expect(mockSubmitForApproval).not.toHaveBeenCalled();
     });
 
     // ── Phase-2a: update preserves existingMeta.orgId, never derives from input ──
