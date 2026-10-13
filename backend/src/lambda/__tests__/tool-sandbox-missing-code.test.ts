@@ -79,4 +79,56 @@ describe("tool-sandbox — missing tool code", () => {
 
     expect(result.success).toBe(true);
   });
+
+  test("uses codeKey from tool config when loading code", async () => {
+    const loadedWith: string[] = [];
+    const deps = baseDeps({
+      loadToolConfig: async () => ({
+        orgId: "org-1",
+        codeKey: "tools/smoke-echo-tool",
+      }),
+      loadToolCode: async (id: string) => {
+        loadedWith.push(id);
+        return 'module.exports = function() { return "ok"; }';
+      },
+    });
+
+    const result = await executeTool(
+      "rec-abc123", // recordId, NOT the friendly name
+      {},
+      adminAuth,
+      "org-1",
+      deps,
+    );
+
+    expect(result.success).toBe(true);
+    // loadToolCode should be called with codeKey, not the recordId
+    expect(loadedWith).toEqual(["tools/smoke-echo-tool"]);
+  });
+
+  test("falls back to toolId when codeKey is absent", async () => {
+    const loadedWith: string[] = [];
+    const deps = baseDeps({
+      loadToolConfig: async () => ({
+        orgId: "org-1",
+        // no codeKey
+      }),
+      loadToolCode: async (id: string) => {
+        loadedWith.push(id);
+        return 'module.exports = function() { return "ok"; }';
+      },
+    });
+
+    const result = await executeTool(
+      "rec-abc123",
+      {},
+      adminAuth,
+      "org-1",
+      deps,
+    );
+
+    expect(result.success).toBe(true);
+    // loadToolCode should be called with the original toolId
+    expect(loadedWith).toEqual(["rec-abc123"]);
+  });
 });

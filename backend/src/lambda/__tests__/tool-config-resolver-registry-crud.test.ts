@@ -996,6 +996,47 @@ describe("Registry-backed CRUD functions (tasks 7.2–7.6)", () => {
       ).rejects.toThrow("Access denied");
       expect(mockUpdateResource).not.toHaveBeenCalled();
     });
+
+    test("state-only update omits description from updateResource call", async () => {
+      const stateOnlyRecord = {
+        recordId: "tool-state",
+        name: "StateTool",
+        description: '{"name":"StateTool"}',
+        status: "APPROVED",
+        customDescriptorContent: JSON.stringify({
+          categories: [],
+          icon: "icon.png",
+          state: "active",
+          orgId: "test-org-a",
+        }),
+        createdAt: new Date("2025-01-01"),
+        updatedAt: new Date("2025-01-01"),
+      };
+
+      mockGetResource.mockResolvedValue(stateOnlyRecord);
+      mockUpdateResource.mockResolvedValue({
+        ...stateOnlyRecord,
+        status: "DEPRECATED",
+      });
+      mockToRegistryStatus.mockReturnValue("DEPRECATED");
+      mockUpdateResourceStatus.mockResolvedValue({
+        ...stateOnlyRecord,
+        status: "DEPRECATED",
+      });
+
+      await updateToolConfigRegistry(
+        { toolId: "tool-state", state: "maintenance" },
+        "unknown",
+        eventWithOrg,
+      );
+
+      // The updateResource call should NOT include a description key
+      const updateCall = mockUpdateResource.mock.calls[0]![2] as Record<
+        string,
+        unknown
+      >;
+      expect(updateCall).not.toHaveProperty("description");
+    });
   });
 
   // ─── Legacy fallback & new contract mapping ─────────────────

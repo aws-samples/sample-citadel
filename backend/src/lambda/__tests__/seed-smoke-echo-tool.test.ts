@@ -43,12 +43,15 @@ const mockRegistryCreateResource =
   jest.fn<(...args: unknown[]) => Promise<unknown>>();
 const mockRegistrySubmitForApproval =
   jest.fn<(...args: unknown[]) => Promise<unknown>>();
+const mockRegistryListResourceSummaries =
+  jest.fn<(...args: unknown[]) => Promise<unknown>>();
 
 jest.mock("../../services/registry-service", () => ({
   RegistryService: jest.fn().mockImplementation(() => ({
     getResource: mockRegistryGetResource,
     createResource: mockRegistryCreateResource,
     submitForApproval: mockRegistrySubmitForApproval,
+    listResourceSummaries: mockRegistryListResourceSummaries,
   })),
 }));
 
@@ -75,6 +78,9 @@ import {
   TOOL_MODULE_SOURCE,
   INPUT_SCHEMA,
   S3_KEY,
+  SAFETY_MARGIN_MS,
+  MAX_POLL_BUDGET_MS,
+  pollBudgetMs,
   _resetSeedSmokeEchoTool,
 } from "../seed-smoke-echo-tool/index";
 
@@ -101,6 +107,7 @@ function makeEvent(
 
 const mockContext = {
   logStreamName: "test-log-stream",
+  getRemainingTimeInMillis: () => 180_000,
 } as unknown as Context;
 
 // ---------------------------------------------------------------------------
@@ -158,10 +165,23 @@ describe("seed-smoke-echo-tool", () => {
     // PutObject → success
     mockS3Send.mockResolvedValueOnce({});
 
-    // Registry lookup → not found
+    // Registry list → no match
+    mockRegistryListResourceSummaries.mockResolvedValueOnce([]);
+    // Registry getResource fallback → not found
     mockRegistryGetResource.mockResolvedValueOnce(null);
     // Create → DRAFT record
     mockRegistryCreateResource.mockResolvedValueOnce({
+      recordId: "rec-001",
+      status: "DRAFT",
+    });
+    // HeadObject for recordId copy → not found
+    mockS3Send.mockRejectedValueOnce(
+      Object.assign(new Error("not found"), { name: "NotFound" }),
+    );
+    // PutObject for recordId copy
+    mockS3Send.mockResolvedValueOnce({});
+    // Poll: getResource → DRAFT (stable)
+    mockRegistryGetResource.mockResolvedValueOnce({
       recordId: "rec-001",
       status: "DRAFT",
     });
@@ -173,8 +193,8 @@ describe("seed-smoke-echo-tool", () => {
 
     await handler(makeEvent(), mockContext, jest.fn());
 
-    // S3 upload happened
-    expect(mockS3Send).toHaveBeenCalledTimes(2); // HeadObject + PutObject
+    // S3 upload happened (HeadObject + PutObject + HeadObject copy + PutObject copy)
+    expect(mockS3Send).toHaveBeenCalledTimes(4);
     const putCall = mockS3Send.mock.calls[1]![0] as {
       input: {
         Bucket: string;
@@ -204,6 +224,7 @@ describe("seed-smoke-echo-tool", () => {
     expect(metadata.orgId).toBe(ORG_ID);
     expect(metadata.inputSchema).toBe(INPUT_SCHEMA);
     expect(metadata.createdBy).toBe("SYSTEM_SEED");
+    expect(metadata.codeKey).toBe(`tools/${TOOL_ID}`);
 
     expect(mockRegistrySubmitForApproval).toHaveBeenCalledWith("rec-001");
   });
@@ -215,16 +236,19 @@ describe("seed-smoke-echo-tool", () => {
       Metadata: { "content-hash": CONTENT_HASH },
     });
 
-    // Registry → already APPROVED
-    mockRegistryGetResource.mockResolvedValueOnce({
-      recordId: "rec-001",
-      status: "APPROVED",
+    // Registry list → already APPROVED by name
+    mockRegistryListResourceSummaries.mockResolvedValueOnce([
+      { recordId: "rec-001", name: TOOL_ID, status: "APPROVED" },
+    ]);
+    // HeadObject for recordId copy → hash matches
+    mockS3Send.mockResolvedValueOnce({
+      Metadata: { "content-hash": CONTENT_HASH },
     });
 
     await handler(makeEvent(), mockContext, jest.fn());
 
-    // Only HeadObject, no PutObject
-    expect(mockS3Send).toHaveBeenCalledTimes(1);
+    // HeadObject for primary + HeadObject for recordId copy
+    expect(mockS3Send).toHaveBeenCalledTimes(2);
     // No registry create/submit
     expect(mockRegistryCreateResource).not.toHaveBeenCalled();
     expect(mockRegistrySubmitForApproval).not.toHaveBeenCalled();
@@ -238,11 +262,16 @@ describe("seed-smoke-echo-tool", () => {
     );
     mockS3Send.mockResolvedValueOnce({});
 
-    // Registry → already APPROVED
-    mockRegistryGetResource.mockResolvedValueOnce({
-      recordId: "rec-existing",
-      status: "APPROVED",
-    });
+    // Registry list → already APPROVED
+    mockRegistryListResourceSummaries.mockResolvedValueOnce([
+      { recordId: "rec-existing", name: TOOL_ID, status: "APPROVED" },
+    ]);
+    // HeadObject for recordId copy → not found
+    mockS3Send.mockRejectedValueOnce(
+      Object.assign(new Error("not found"), { name: "NotFound" }),
+    );
+    // PutObject for recordId copy
+    mockS3Send.mockResolvedValueOnce({});
 
     await handler(makeEvent(), mockContext, jest.fn());
 
@@ -257,10 +286,16 @@ describe("seed-smoke-echo-tool", () => {
     );
     mockS3Send.mockResolvedValueOnce({});
 
-    mockRegistryGetResource.mockResolvedValueOnce({
-      recordId: "rec-draft",
-      status: "DRAFT",
-    });
+    // Registry list → DRAFT by name
+    mockRegistryListResourceSummaries.mockResolvedValueOnce([
+      { recordId: "rec-draft", name: TOOL_ID, status: "DRAFT" },
+    ]);
+    // HeadObject for recordId copy → not found
+    mockS3Send.mockRejectedValueOnce(
+      Object.assign(new Error("not found"), { name: "NotFound" }),
+    );
+    // PutObject for recordId copy
+    mockS3Send.mockResolvedValueOnce({});
     mockRegistrySubmitForApproval.mockResolvedValueOnce({
       recordId: "rec-draft",
       status: "APPROVED",
@@ -285,8 +320,21 @@ describe("seed-smoke-echo-tool", () => {
       Object.assign(new Error("not found"), { name: "NotFound" }),
     );
     mockS3Send.mockResolvedValueOnce({});
+    // Registry list → no match
+    mockRegistryListResourceSummaries.mockResolvedValueOnce([]);
     mockRegistryGetResource.mockResolvedValueOnce(null);
     mockRegistryCreateResource.mockResolvedValueOnce({
+      recordId: "rec-002",
+      status: "DRAFT",
+    });
+    // HeadObject for recordId copy → not found
+    mockS3Send.mockRejectedValueOnce(
+      Object.assign(new Error("not found"), { name: "NotFound" }),
+    );
+    // PutObject for recordId copy
+    mockS3Send.mockResolvedValueOnce({});
+    // Poll → DRAFT (stable)
+    mockRegistryGetResource.mockResolvedValueOnce({
       recordId: "rec-002",
       status: "DRAFT",
     });
@@ -297,7 +345,136 @@ describe("seed-smoke-echo-tool", () => {
 
     await handler(makeEvent("Update"), mockContext, jest.fn());
 
-    expect(mockS3Send).toHaveBeenCalledTimes(2);
+    expect(mockS3Send).toHaveBeenCalledTimes(4);
     expect(mockRegistryCreateResource).toHaveBeenCalledTimes(1);
+  });
+
+  // --- Defect C: polls CREATING status before submitForApproval ------------
+  it("polls until record leaves CREATING before submitting for approval", async () => {
+    jest.useFakeTimers();
+    mockS3Send.mockRejectedValueOnce(
+      Object.assign(new Error("not found"), { name: "NotFound" }),
+    );
+    mockS3Send.mockResolvedValueOnce({});
+
+    // Registry list → no match
+    mockRegistryListResourceSummaries.mockResolvedValueOnce([]);
+    mockRegistryGetResource.mockResolvedValueOnce(null);
+    // Create → CREATING (transitional)
+    mockRegistryCreateResource.mockResolvedValueOnce({
+      recordId: "rec-creating",
+      status: "CREATING",
+    });
+    // HeadObject for recordId copy → not found
+    mockS3Send.mockRejectedValueOnce(
+      Object.assign(new Error("not found"), { name: "NotFound" }),
+    );
+    // PutObject for recordId copy
+    mockS3Send.mockResolvedValueOnce({});
+    // Poll 1: still CREATING
+    mockRegistryGetResource.mockResolvedValueOnce({
+      recordId: "rec-creating",
+      status: "CREATING",
+    });
+    // Poll 2: settled to DRAFT
+    mockRegistryGetResource.mockResolvedValueOnce({
+      recordId: "rec-creating",
+      status: "DRAFT",
+    });
+    mockRegistrySubmitForApproval.mockResolvedValueOnce({
+      recordId: "rec-creating",
+      status: "APPROVED",
+    });
+
+    const handlerPromise = handler(makeEvent(), mockContext, jest.fn());
+    // Advance past the poll delays
+    await jest.advanceTimersByTimeAsync(120_000);
+    await handlerPromise;
+
+    jest.useRealTimers();
+
+    // getResource called: fallback + poll1 + poll2 = 3
+    expect(mockRegistryGetResource).toHaveBeenCalledTimes(3);
+    expect(mockRegistrySubmitForApproval).toHaveBeenCalledWith("rec-creating");
+  });
+
+  // --- Defect C: logs and succeeds if still CREATING after timeout ----------
+  it("succeeds with CREATING status if record never settles", async () => {
+    jest.useFakeTimers();
+    mockS3Send.mockRejectedValueOnce(
+      Object.assign(new Error("not found"), { name: "NotFound" }),
+    );
+    mockS3Send.mockResolvedValueOnce({});
+
+    mockRegistryListResourceSummaries.mockResolvedValueOnce([]);
+    mockRegistryGetResource.mockResolvedValueOnce(null);
+    mockRegistryCreateResource.mockResolvedValueOnce({
+      recordId: "rec-stuck",
+      status: "CREATING",
+    });
+    // HeadObject for recordId copy → not found
+    mockS3Send.mockRejectedValueOnce(
+      Object.assign(new Error("not found"), { name: "NotFound" }),
+    );
+    // PutObject for recordId copy
+    mockS3Send.mockResolvedValueOnce({});
+    // Every poll returns CREATING
+    mockRegistryGetResource.mockResolvedValue({
+      recordId: "rec-stuck",
+      status: "CREATING",
+    });
+
+    const handlerPromise = handler(makeEvent(), mockContext, jest.fn());
+    await jest.advanceTimersByTimeAsync(120_000);
+    await handlerPromise;
+
+    jest.useRealTimers();
+
+    // Should NOT have called submitForApproval
+    expect(mockRegistrySubmitForApproval).not.toHaveBeenCalled();
+    // Should not have thrown — handler succeeds with CREATING status
+    expect(mockRegistryCreateResource).toHaveBeenCalledTimes(1);
+  });
+
+  // --- Defect B: finds existing record by name via listResourceSummaries ---
+  it("finds existing record by name and reuses it (no duplicate creation)", async () => {
+    mockS3Send.mockRejectedValueOnce(
+      Object.assign(new Error("not found"), { name: "NotFound" }),
+    );
+    mockS3Send.mockResolvedValueOnce({});
+
+    // Registry list → existing record with different recordId
+    mockRegistryListResourceSummaries.mockResolvedValueOnce([
+      { recordId: "rec-existing-abc", name: TOOL_ID, status: "APPROVED" },
+    ]);
+    // HeadObject for recordId copy → not found
+    mockS3Send.mockRejectedValueOnce(
+      Object.assign(new Error("not found"), { name: "NotFound" }),
+    );
+    // PutObject for recordId copy
+    mockS3Send.mockResolvedValueOnce({});
+
+    await handler(makeEvent(), mockContext, jest.fn());
+
+    // Should NOT create a new record
+    expect(mockRegistryCreateResource).not.toHaveBeenCalled();
+    expect(mockRegistrySubmitForApproval).not.toHaveBeenCalled();
+  });
+});
+
+describe("pollBudgetMs", () => {
+  it("subtracts safety margin and caps at 60 s", () => {
+    const ctx = { getRemainingTimeInMillis: () => 180_000 };
+    expect(pollBudgetMs(ctx)).toBe(MAX_POLL_BUDGET_MS);
+  });
+
+  it("returns remaining minus margin when under 60 s", () => {
+    const ctx = { getRemainingTimeInMillis: () => 40_000 };
+    expect(pollBudgetMs(ctx)).toBe(40_000 - SAFETY_MARGIN_MS);
+  });
+
+  it("returns 0 when remaining is less than the safety margin", () => {
+    const ctx = { getRemainingTimeInMillis: () => 5_000 };
+    expect(pollBudgetMs(ctx)).toBe(0);
   });
 });

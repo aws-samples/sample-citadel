@@ -1164,7 +1164,7 @@ def handler(event, context):
           runtime: lambda.Runtime.NODEJS_24_X,
           handler: "seed-smoke-echo-tool/index.handler",
           code: lambda.Code.fromAsset("dist/lambda"),
-          timeout: cdk.Duration.seconds(30),
+          timeout: cdk.Duration.minutes(3),
           environment: {
             ENVIRONMENT: props.environment,
             SMOKE_FIXTURES_ENABLED: "true",

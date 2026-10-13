@@ -58,6 +58,9 @@ export interface SandboxToolConfig {
    * `mapped.orgId && mapped.orgId !== callerOrgId` guard in
    * tool-config-resolver.ts's getToolConfigRegistry. */
   orgId?: string;
+  /** S3 key prefix for the tool's code. When present the sandbox loads
+   *  `${codeKey}/index.js` instead of `tools/${toolId}/index.js`. */
+  codeKey?: string;
 }
 
 /**
@@ -181,7 +184,9 @@ export async function executeTool(
     // 2. Load tool code from S3
     let code: string;
     try {
-      code = await deps.loadToolCode(toolId);
+      // Prefer the config's codeKey (decouples code location from
+      // registry-assigned recordId); fall back to toolId.
+      code = await deps.loadToolCode(toolConfig.codeKey ?? toolId);
     } catch {
       return {
         success: false,
@@ -254,6 +259,7 @@ function defaultDeps(): ExecuteToolDeps {
             orgId: resolved.orgId,
             integrationBindings: resolved.integrationBindings ?? undefined,
             dataStoreBindings: resolved.dataStoreBindings ?? undefined,
+            codeKey: resolved.codeKey,
           }
         : null;
     },
