@@ -33,6 +33,12 @@ export interface ToolConfig {
    * do not infer it from any other field (finding 414f8013).
    */
   registryStatus?: string | null;
+  /** Admin who approved or rejected the record. */
+  decidedBy?: string | null;
+  /** ISO timestamp of the approval/rejection decision. */
+  decidedAt?: string | null;
+  /** Rejection reason (null unless REJECTED). */
+  statusReason?: string | null;
   /** Resource tags (key=value pairs, AWSJSON on the wire). */
   tags?: Record<string, string> | null;
 }
@@ -48,6 +54,9 @@ const listToolConfigsQuery = `
       integrationBindings { integrationId integrationType operations direction }
       dataStoreBindings { dataStoreId dataStoreType operations direction }
       registryStatus
+      decidedBy
+      decidedAt
+      statusReason
       createdAt
       updatedAt
     }
@@ -65,6 +74,9 @@ const getToolConfigQuery = `
       integrationBindings { integrationId integrationType operations direction }
       dataStoreBindings { dataStoreId dataStoreType operations direction }
       registryStatus
+      decidedBy
+      decidedAt
+      statusReason
       createdAt
       updatedAt
     }
@@ -82,6 +94,9 @@ const searchToolConfigsQuery = `
       integrationBindings { integrationId integrationType operations direction }
       dataStoreBindings { dataStoreId dataStoreType operations direction }
       registryStatus
+      decidedBy
+      decidedAt
+      statusReason
       createdAt
       updatedAt
     }
@@ -98,6 +113,10 @@ const createToolConfigMutation = `
       tags
       integrationBindings { integrationId integrationType operations direction }
       dataStoreBindings { dataStoreId dataStoreType operations direction }
+      registryStatus
+      decidedBy
+      decidedAt
+      statusReason
       createdAt
       updatedAt
     }
@@ -114,6 +133,10 @@ const updateToolConfigMutation = `
       tags
       integrationBindings { integrationId integrationType operations direction }
       dataStoreBindings { dataStoreId dataStoreType operations direction }
+      registryStatus
+      decidedBy
+      decidedAt
+      statusReason
       createdAt
       updatedAt
     }
