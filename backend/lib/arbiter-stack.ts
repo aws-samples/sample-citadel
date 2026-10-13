@@ -33,6 +33,7 @@ import * as path from "path";
 import * as fs from "fs";
 import * as crypto from "crypto";
 import { REGISTRY_GENERATION } from "./registry-generation";
+import { PYTHON_ASSET_EXCLUDES } from "./python-asset-excludes";
 
 // Resolve the repo-root `arbiter/` directory regardless of whether this
 // module is loaded from source (`backend/lib/`) via ts-jest or from the
@@ -103,6 +104,7 @@ export function buildStripLayerPackagesHook(): import("@aws-cdk/aws-lambda-pytho
 
 /** Exported for tests. */
 export { LAYER_PROVIDED_PACKAGES };
+export { PYTHON_ASSET_EXCLUDES } from "./python-asset-excludes";
 
 // ---------------------------------------------------------------------------
 // Seed-module content digest (finding 588c7fb8)
@@ -393,6 +395,7 @@ export class ArbiterStack extends cdk.Stack {
     const catalogLayer = new lambda.LayerVersion(this, "ArbiterCatalogLayer", {
       layerVersionName: `citadel-arbiter-catalog-${props.environment}`,
       code: lambda.Code.fromAsset(ARBITER_ROOT, {
+        exclude: [...PYTHON_ASSET_EXCLUDES],
         bundling: {
           image: lambda.Runtime.PYTHON_3_14.bundlingImage,
           command: [
@@ -458,10 +461,7 @@ export class ArbiterStack extends cdk.Stack {
           "activator",
           "seedConfig",
           "catalog",
-          "__tests__",
-          "__pycache__",
-          "conftest.py",
-          "*.md",
+          ...PYTHON_ASSET_EXCLUDES,
         ],
       },
       timeout: cdk.Duration.seconds(30),
@@ -920,6 +920,7 @@ export class ArbiterStack extends cdk.Stack {
         bundling: {
           assetHashType: cdk.AssetHashType.SOURCE,
           commandHooks: stripLayerPackagesHook,
+          assetExcludes: [...PYTHON_ASSET_EXCLUDES],
         },
         timeout: cdk.Duration.minutes(15),
         memorySize: 1024,
@@ -1339,6 +1340,7 @@ export class ArbiterStack extends cdk.Stack {
       bundling: {
         assetHashType: cdk.AssetHashType.SOURCE,
         commandHooks: stripLayerPackagesHook,
+        assetExcludes: [...PYTHON_ASSET_EXCLUDES],
       },
       // Platform max reached — Lambda's hard cap is 900s (15 min): verified
       // against the installed generated service models (aws-cdk-lib 2.261.0
@@ -1540,7 +1542,9 @@ export class ArbiterStack extends cdk.Stack {
       {
         runtime: lambda.Runtime.PYTHON_3_14,
         handler: "index.handler",
-        code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, "seedConfig")),
+        code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, "seedConfig"), {
+          exclude: [...PYTHON_ASSET_EXCLUDES],
+        }),
         // Catalog layer so the seed can `from catalog.registry_client import
         // list_agent_records` for the demo agent registry-record idempotency
         // lookup (the seed degrades to DDB-only seeding when unavailable).
@@ -1708,6 +1712,7 @@ export class ArbiterStack extends cdk.Stack {
       bundling: {
         assetHashType: cdk.AssetHashType.SOURCE,
         commandHooks: stripLayerPackagesHook,
+        assetExcludes: [...PYTHON_ASSET_EXCLUDES],
       },
       timeout: cdk.Duration.seconds(30),
       memorySize: 512,
@@ -1743,7 +1748,9 @@ export class ArbiterStack extends cdk.Stack {
         {
           runtime: lambda.Runtime.PYTHON_3_14,
           handler: "index.handler",
-          code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, "stepRunner")),
+          code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, "stepRunner"), {
+            exclude: [...PYTHON_ASSET_EXCLUDES],
+          }),
           // Shared arbiter layer so `from common import workflow_contract`
           // resolves at runtime (common/ is staged at /opt/python/common).
           layers: [catalogLayer],
@@ -1972,7 +1979,9 @@ export class ArbiterStack extends cdk.Stack {
         {
           runtime: lambda.Runtime.PYTHON_3_14,
           handler: "timeout_watchdog.handler",
-          code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, "stepRunner")),
+          code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, "stepRunner"), {
+            exclude: [...PYTHON_ASSET_EXCLUDES],
+          }),
           layers: [catalogLayer],
           timeout: cdk.Duration.minutes(2),
           memorySize: 256,
