@@ -316,32 +316,63 @@ record that is not `APPROVED`. In shadow mode the gate logs the refusal
 without blocking. Unapproved records never serve production traffic in
 strict mode.
 
-### Enabling manual review in a development deployment
+### Registry approval mode
 
-By default the registry auto-approves every submission. To test the approval
-workflow, deploy with the CDK context flag set to `false`:
+By default the registry requires **manual review** — every submitted agent
+or tool record enters `PENDING_APPROVAL` and appears on the `/approvals`
+page until an administrator approves or rejects it.
+
+To enable auto-approval (for example in a sandbox account), set the CDK
+context flag:
 
 ```bash
-npx cdk deploy -c registryAutoApproval=false
+npx cdk deploy -c registryAutoApproval=true
+```
+
+You can also pin it in `cdk.json` for a given environment:
+
+```json
+{
+  "context": {
+    "registryAutoApproval": "true"
+  }
+}
+```
+
+When auto-approval is enabled, CDK synth emits a warning annotation so the
+setting is visible in every deploy. To restore manual review, remove the
+flag (the default is `false`).
+
+The Approvals page (`/approvals`) lists every agent and tool record
+awaiting a decision. A badge on the sidebar nav entry shows the pending
+count. After a decision is recorded, the approval history (decided by,
+decided at, reason) appears on the agent or tool detail view.
+
+### Enabling auto-approval in a development deployment
+
+To auto-approve every submission (useful for rapid iteration), deploy with:
+
+```bash
+npx cdk deploy -c registryAutoApproval=true
 ```
 
 The provisioner calls `UpdateRegistryCommand` with the new approval
 configuration. The change applies in place — it does not replace the
 registry. Records already in `APPROVED` are unaffected; only future
-submissions enter `PENDING_APPROVAL`.
+submissions are auto-approved.
 
-To restore auto-approval, redeploy without the flag (the default is
-`true`):
+To restore manual review, redeploy without the flag (the default is
+`false`):
 
 ```bash
 npx cdk deploy
 ```
 
-Records that entered `PENDING_APPROVAL` during the manual-review window
+Records that entered `PENDING_APPROVAL` during auto-approval-off windows
 stay pending until an administrator approves or rejects them.
 
-**Producing a `PENDING_APPROVAL` record.** After deploying with manual
-review, create an agent (or tool), then use the Activate action. Activate
+**Producing a `PENDING_APPROVAL` record.** With the default manual-review
+setting, create an agent (or tool), then use the Activate action. Activate
 submits the record for approval; with auto-approval disabled, the record
 stays in `PENDING_APPROVAL` and appears on the `/approvals` page.
 
