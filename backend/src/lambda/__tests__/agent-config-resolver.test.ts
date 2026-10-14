@@ -618,10 +618,9 @@ describe("updateAgentConfigRegistry — lazy IAM trust-path activation (US-IMP)"
 
     expect(mockComputeTrustPath).toHaveBeenCalledWith(ROLE_ARN);
     // best-effort skip — no attestation folded into the persisted metadata.
-    const persisted = JSON.parse(
-      mockUpdateResource.mock.calls[0][2].customMetadata,
-    );
-    expect(persisted.governanceAttestation).toBeUndefined();
+    // With no content fields and no attestation, the submit-only path skips
+    // the UpdateRegistryRecord entirely to avoid demoting the record.
+    expect(mockUpdateResource).not.toHaveBeenCalled();
     // permissive gate proceeds (telemetry only), so activation still happens
     // via SubmitRegistryRecordForApproval, never a direct
     // UpdateRegistryRecordStatus(APPROVED) — finding adde5b79.

@@ -789,14 +789,90 @@ export async function updateToolConfigRegistry(
 
   // Submit path: DRAFT -> PENDING_APPROVAL when input.status is
   // PENDING_APPROVAL (mirrors updateApp's submit special-case).
+  //
+  // Two sub-cases:
+  //   A) Status-only (no content fields) — just submit, no content write.
+  //   B) Content + submit — write content first so the submitted record
+  //      carries the new content, then submit. Writing after submit would
+  //      trigger the registry's content-edit demotion (PENDING_APPROVAL →
+  //      DRAFT), defeating the purpose.
   if (
     isStatusChange &&
     currentStatus === "DRAFT" &&
     input.status === "PENDING_APPROVAL"
   ) {
-    const record = await registryService.submitForApproval(input.toolId);
+    const hasContentFields =
+      input.config !== undefined ||
+      input.categories !== undefined ||
+      input.icon !== undefined ||
+      input.appId !== undefined ||
+      input.integrationBindings !== undefined ||
+      input.dataStoreBindings !== undefined ||
+      input.tags !== undefined;
+
+    if (hasContentFields) {
+      // Write content BEFORE submit so the submitted snapshot is what gets
+      // reviewed. Re-use the merge logic below but inline to keep the early-
+      // return structure.
+      const existingConfig = existingMeta.config ?? existing.description ?? "";
+      const mergedConfig = input.config
+        ? typeof input.config === "string"
+          ? input.config
+          : JSON.stringify(input.config)
+        : existingConfig;
+      let parsedMerged: Record<string, unknown> = {};
+      if (mergedConfig && typeof mergedConfig === "string") {
+        try {
+          parsedMerged = JSON.parse(mergedConfig);
+        } catch {
+          parsedMerged = {};
+        }
+      } else if (mergedConfig && typeof mergedConfig === "object") {
+        parsedMerged = mergedConfig;
+      }
+      const mergedBindingsInt =
+        input.integrationBindings !== undefined
+          ? input.integrationBindings
+          : existingMeta.integrationBindings;
+      const mergedBindingsDs =
+        input.dataStoreBindings !== undefined
+          ? input.dataStoreBindings
+          : existingMeta.dataStoreBindings;
+      const mergedMeta = registryService.serializeCustomMetadata({
+        categories:
+          input.categories !== undefined
+            ? input.categories
+            : existingMeta.categories,
+        icon: input.icon !== undefined ? input.icon : existingMeta.icon,
+        state: existingMeta.state,
+        integrationBindings: mergedBindingsInt || undefined,
+        dataStoreBindings: mergedBindingsDs || undefined,
+        appId: input.appId !== undefined ? input.appId : existingMeta.appId,
+        config: mergedConfig,
+        createdBy: existingMeta.createdBy ?? userId,
+        orgId: preservedOrgId,
+        tags:
+          input.tags !== undefined
+            ? normaliseTags(input.tags)
+            : existingMeta.tags,
+      } as ToolCustomMetadata);
+
+      await registryService.updateResource("tool", input.toolId, {
+        name: (parsedMerged.name as string | undefined) || existing.name,
+        ...(parsedMerged.description != null
+          ? { description: parsedMerged.description as string }
+          : existing.description
+            ? { description: existing.description }
+            : {}),
+        customMetadata: mergedMeta,
+      });
+    }
+
+    await registryService.submitForApproval(input.toolId);
     const refreshed = await registryService.getResource("tool", input.toolId);
-    return registryService.mapToToolConfig(refreshed ?? record);
+    return registryService.mapToToolConfig(
+      refreshed ?? { ...existing, status: "PENDING_APPROVAL" },
+    );
   }
 
   // Merge config. Source of truth for the "existing" config is
