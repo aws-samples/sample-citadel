@@ -1077,9 +1077,9 @@ else
 fi
 
 ########################################
-# CIT-215: every cdk invocation carries --context gitSha=<full sha> / gitRef=<branch>
+# CIT-215: provenance context baked at synth; diff/list/deploy reuse assembly
 ########################################
-section "provenance: cdk deploy/diff/list receive --context gitSha=<full sha> and gitRef=<branch>"
+section "provenance: cdk synth receives --context gitSha/gitRef; deploy/diff/list use --app cdk.out without context"
 reset_fakes
 write_fake_git
 export FAKE_BRANCH="feat/deploy-sha-stack-tag"
@@ -1118,14 +1118,39 @@ mkdir -p "$TMP_DIR/backend"
   # capture_git_info is what main flow runs before any cdk call; it must
   # resolve the FULL sha (not the short one) for the tag.
   capture_git_info >/dev/null 2>&1
+  cdk_synth_once >/dev/null 2>&1
   deploy_stack "citadel-backend-test" </dev/null >/dev/null 2>&1
   cdk_diff >/dev/null 2>&1
   verify_stack_coverage >/dev/null 2>&1
 )
 prov_log="$TMP_DIR/prov-npx-log"
+synth_line=$(grep '^cdk synth' "$prov_log" 2>/dev/null | head -1 || true)
 deploy_line=$(grep '^cdk deploy' "$prov_log" 2>/dev/null | head -1 || true)
 diff_line=$(grep '^cdk diff' "$prov_log" 2>/dev/null | head -1 || true)
 list_line=$(grep '^cdk list' "$prov_log" 2>/dev/null | head -1 || true)
+
+# synth must carry the provenance context flags
+if [ -z "$synth_line" ]; then
+  fail "no 'cdk synth' invocation recorded: $(cat "$prov_log" 2>/dev/null)"
+else
+  if echo "$synth_line" | grep -q -- "--context gitSha=${FAKE_FULL_SHA}"; then
+    pass "cdk synth receives --context gitSha=<full 40-char sha>"
+  else
+    fail "cdk synth missing --context gitSha=<full sha>: $synth_line"
+  fi
+  if echo "$synth_line" | grep -q -- "--context gitRef=${FAKE_BRANCH}"; then
+    pass "cdk synth receives --context gitRef=<branch>"
+  else
+    fail "cdk synth missing --context gitRef=<branch>: $synth_line"
+  fi
+  if echo "$synth_line" | grep -q -- "gitSha=${FAKE_SHORT_SHA} \|gitSha=${FAKE_SHORT_SHA}\$"; then
+    fail "cdk synth passed the SHORT sha — merge-base needs the full sha: $synth_line"
+  else
+    pass "cdk synth does not pass the short sha"
+  fi
+fi
+
+# deploy, diff, list must use --app cdk.out and must NOT carry context flags
 for pair in "deploy:$deploy_line" "diff:$diff_line" "list:$list_line"; do
   kind="${pair%%:*}"
   line="${pair#*:}"
@@ -1133,25 +1158,25 @@ for pair in "deploy:$deploy_line" "diff:$diff_line" "list:$list_line"; do
     fail "no 'cdk $kind' invocation recorded: $(cat "$prov_log" 2>/dev/null)"
     continue
   fi
-  if echo "$line" | grep -q -- "--context gitSha=${FAKE_FULL_SHA}"; then
-    pass "cdk $kind receives --context gitSha=<full 40-char sha>"
+  if echo "$line" | grep -q -- "--app cdk.out"; then
+    pass "cdk $kind uses --app cdk.out (reuses assembly)"
   else
-    fail "cdk $kind missing --context gitSha=<full sha>: $line"
+    fail "cdk $kind missing --app cdk.out: $line"
   fi
-  if echo "$line" | grep -q -- "--context gitRef=${FAKE_BRANCH}"; then
-    pass "cdk $kind receives --context gitRef=<branch>"
+  if echo "$line" | grep -q -- "--context gitSha="; then
+    fail "cdk $kind still passes --context gitSha (should be baked at synth): $line"
   else
-    fail "cdk $kind missing --context gitRef=<branch>: $line"
+    pass "cdk $kind omits --context gitSha (baked at synth)"
   fi
-  if echo "$line" | grep -q -- "gitSha=${FAKE_SHORT_SHA} \|gitSha=${FAKE_SHORT_SHA}\$"; then
-    fail "cdk $kind passed the SHORT sha — merge-base needs the full sha: $line"
+  if echo "$line" | grep -q -- "--context gitRef="; then
+    fail "cdk $kind still passes --context gitRef (should be baked at synth): $line"
   else
-    pass "cdk $kind does not pass the short sha"
+    pass "cdk $kind omits --context gitRef (baked at synth)"
   fi
 done
 unset FAKE_BRANCH FAKE_FULL_SHA FAKE_SHORT_SHA
 
-section "provenance: no git available -> gitSha=unknown, deploy still invoked (never fails)"
+section "provenance: no git available -> synth still invoked with gitSha=unknown (never fails)"
 reset_fakes
 cat > "$FAKE_BIN/git" <<'FAKE_GIT_EOF'
 #!/bin/bash
@@ -1183,14 +1208,14 @@ mkdir -p "$TMP_DIR/backend"
   cd "$TMP_DIR" || exit 1
   export PATH="$FAKE_BIN:$PATH" DEPLOY_LOG="$TMP_DIR/deploy.log"
   capture_git_info >/dev/null 2>&1
-  deploy_stack "citadel-backend-test" </dev/null >/dev/null 2>&1
+  cdk_synth_once >/dev/null 2>&1
 )
 unknown_rc=$?
-unknown_line=$(grep '^cdk deploy' "$TMP_DIR/prov-unknown-npx-log" 2>/dev/null | head -1 || true)
-if [ $unknown_rc -eq 0 ] && echo "$unknown_line" | grep -q -- "--context gitSha=unknown"; then
-  pass "without git, cdk deploy still runs with --context gitSha=unknown"
+synth_unknown_line=$(grep '^cdk synth' "$TMP_DIR/prov-unknown-npx-log" 2>/dev/null | head -1 || true)
+if [ $unknown_rc -eq 0 ] && echo "$synth_unknown_line" | grep -q -- "--context gitSha=unknown"; then
+  pass "without git, cdk synth still runs with --context gitSha=unknown"
 else
-  fail "expected rc=0 and gitSha=unknown; rc=$unknown_rc line=$unknown_line"
+  fail "expected rc=0 and gitSha=unknown in synth; rc=$unknown_rc line=$synth_unknown_line"
 fi
 
 ########################################
