@@ -535,6 +535,8 @@ export class BackendStack extends cdk.Stack {
           "agent-registry:DeleteRegistry",
           "agent-registry:GetRegistry",
           "agent-registry:ListRegistries",
+          "agent-registry:ListRegistryRecords",
+          "agent-registry:UpdateRegistry",
           // Workload-identity actions stay on the bedrock-agentcore
           // namespace per the agent-registry GA migration guide — the
           // registry GA split moved only the Registry/RegistryRecord
@@ -584,6 +586,13 @@ export class BackendStack extends cdk.Stack {
         },
       },
     );
+
+    // Ensure the provisioner's IAM policy is applied before CloudFormation
+    // invokes the custom resource on update — otherwise an UpdateRegistry call
+    // can race ahead of the policy grant and fail with AccessDeniedException.
+    const provisionerDefaultPolicy =
+      registryProvisionerFunction.role!.node.findChild("DefaultPolicy");
+    agentCoreRegistry.node.addDependency(provisionerDefaultPolicy);
 
     const registryArn = agentCoreRegistry.getAttString("RegistryArn");
     const registryId = agentCoreRegistry.getAttString("RegistryId");
