@@ -215,6 +215,67 @@ describe('ToolCard — Configuration button absent', () => {
   });
 });
 
+describe('ToolCard — transient and unknown statuses', () => {
+  const noop = () => {};
+
+  it('UPDATING → renders disabled "Updating…" button with no lifecycle actions', () => {
+    render(
+      <ToolCard tool={makeTool('UPDATING', 'active')} onToggleState={noop} onConfigure={noop}
+        userRole="admin" />,
+    );
+    const btn = screen.getByTestId('updating-button');
+    expect(btn).toBeInTheDocument();
+    expect(btn).toHaveTextContent('Updating…');
+    expect(btn).toBeDisabled();
+    expect(screen.queryByText('Deprecate')).not.toBeInTheDocument();
+    expect(screen.queryByText('Submit for review')).not.toBeInTheDocument();
+    expect(screen.queryByText('Deactivate')).not.toBeInTheDocument();
+  });
+
+  it('CREATING → also renders disabled "Updating…" button', () => {
+    render(
+      <ToolCard tool={makeTool('CREATING', 'maintenance')} onToggleState={noop} onConfigure={noop}
+        userRole="admin" />,
+    );
+    const btn = screen.getByTestId('updating-button');
+    expect(btn).toHaveTextContent('Updating…');
+    expect(btn).toBeDisabled();
+  });
+
+  it('PENDING_APPROVAL → renders "Awaiting approval" badge and approvals link', () => {
+    render(
+      <ToolCard tool={makeTool('PENDING_APPROVAL', 'active')} onToggleState={noop}
+        onConfigure={noop} userRole="admin" />,
+    );
+    expect(screen.getByText('Awaiting approval')).toBeInTheDocument();
+    const link = screen.getByTestId('approvals-link');
+    expect(link).toHaveAttribute('href', '/approvals');
+    expect(screen.queryByText('Deprecate')).not.toBeInTheDocument();
+  });
+
+  it('DRAFT → never shows Deprecate', () => {
+    render(
+      <ToolCard tool={makeTool('DRAFT', 'maintenance')} onToggleState={noop} onConfigure={noop}
+        onSubmitForReview={noop} userRole="admin" />,
+    );
+    expect(screen.queryByText('Deprecate')).not.toBeInTheDocument();
+    // Should show Submit instead
+    expect(screen.getByText('Submit for review')).toBeInTheDocument();
+  });
+
+  it('unknown status → renders a badge with the raw status value', () => {
+    render(
+      <ToolCard tool={makeTool('BETA_TESTING', 'active')} onToggleState={noop} onConfigure={noop}
+        userRole="admin" />,
+    );
+    const badge = screen.getByTestId('unknown-status-badge');
+    expect(badge).toHaveTextContent('BETA_TESTING');
+    expect(screen.queryByText('Deprecate')).not.toBeInTheDocument();
+    expect(screen.queryByText('Submit for review')).not.toBeInTheDocument();
+    expect(screen.queryByText('Deactivate')).not.toBeInTheDocument();
+  });
+});
+
 // --- AgentTools integration: submit + error toast ---
 
 jest.mock('@/services/toolConfigService', () => ({
@@ -310,6 +371,34 @@ describe('AgentTools — Submit for review integration', () => {
       }),
     );
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Submitted for review'));
+  });
+
+  it('after submit, optimistically shows "Awaiting approval" from the mutation result', async () => {
+    (toolConfigService.listToolConfigs as jest.Mock).mockResolvedValue([
+      {
+        toolId: 'draft-tool',
+        state: 'maintenance',
+        categories: [],
+        config: { name: 'Draft Tool' },
+        registryStatus: 'DRAFT',
+      },
+    ]);
+    (toolConfigService.updateToolConfig as jest.Mock).mockResolvedValue({
+      toolId: 'draft-tool',
+      state: 'active',
+      registryStatus: 'PENDING_APPROVAL',
+    });
+
+    render(<Tools />);
+    await waitFor(() => expect(screen.getByText('Draft Tool')).toBeInTheDocument());
+    // Initially DRAFT: shows Submit button
+    expect(screen.getByTestId('submit-for-review')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('submit-for-review'));
+
+    // After submit resolves, the card updates to PENDING_APPROVAL → "Awaiting approval"
+    await waitFor(() => expect(screen.getByText('Awaiting approval')).toBeInTheDocument());
+    expect(screen.getByTestId('approvals-link')).toHaveAttribute('href', '/approvals');
   });
 
   it('API error on submit shows error toast', async () => {
