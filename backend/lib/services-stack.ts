@@ -1246,6 +1246,9 @@ def handler(event, context):
           {
             platform: Platform.LINUX_ARM64,
             exclude: [
+              ".venv",
+              ".venv-*",
+              "venv",
               "__pycache__",
               "*.pyc",
               "*.pyo",
