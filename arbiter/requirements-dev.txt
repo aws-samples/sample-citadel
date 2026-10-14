@@ -1,5 +1,5 @@
 pytest==9.1.1
-hypothesis==6.168.5
+hypothesis==6.169.0
 # Real-client DynamoDB contract tests (deployment-contract hardening): moto
 # provides an in-process AWS mock that ENFORCES DynamoDB wire semantics
 # (attribute typing S/M, float-vs-Decimal marshalling, expression/attribute-name
@@ -7,5 +7,5 @@ hypothesis==6.168.5
 # cannot catch. Chosen over DynamoDB Local (no Docker/JVM dependency; pure
 # Python, integrates directly with the existing pytest suite). Version resolved
 # from PyPI (latest, no advisories), not hand-written.
-moto[dynamodb]==5.2.3
+moto[dynamodb]==5.2.4
 pytest-timeout==2.4.0
