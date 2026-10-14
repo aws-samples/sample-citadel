@@ -228,6 +228,39 @@ describe("registry-provisioner handler", () => {
       expect(logSpy).toHaveBeenCalledWith("update outcome: updated-in-place");
     });
 
+    it("issues UpdateRegistryCommand with cleared autoApprovalRules when AutoApproval changes from true to false, returning the same physical id", async () => {
+      sdkMock.on(GetRegistryCommand).resolves({ status: "READY" } as never);
+      sdkMock.on(UpdateRegistryCommand).resolves({} as never);
+
+      const event = baseEvent({
+        RequestType: "Update",
+        PhysicalResourceId:
+          "arn:aws:agent-registry:us-east-1:123:registry/reg-live",
+        ResourceProperties: {
+          ServiceToken: "arn:aws:lambda:us-east-1:123:function:provisioner",
+          RegistryName: "citadel-registry-dev",
+          AutoApproval: "false",
+        },
+        OldResourceProperties: {
+          ServiceToken: "arn:aws:lambda:us-east-1:123:function:provisioner",
+          RegistryName: "citadel-registry-dev",
+          AutoApproval: "true",
+        },
+      } as Partial<CloudFormationCustomResourceEvent>);
+      await handler(event);
+
+      const calls = sdkMock.commandCalls(UpdateRegistryCommand);
+      expect(calls).toHaveLength(1);
+      expect(calls[0].args[0].input.approvalConfiguration).toEqual({
+        optionalValue: { autoApprovalRules: undefined },
+      });
+      expect(sdkMock.commandCalls(CreateRegistryCommand)).toHaveLength(0);
+
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+      expect(body.Status).toBe("SUCCESS");
+      expect(body.Data.RegistryId).toBe("reg-live");
+    });
+
     it("does not call UpdateRegistryCommand when Description and AutoApproval are unchanged", async () => {
       sdkMock.on(GetRegistryCommand).resolves({ status: "READY" } as never);
       const logSpy = jest.spyOn(console, "log");

@@ -504,7 +504,13 @@ export class BackendStack extends cdk.Stack {
 
     // --- AgentCore Registry (Custom Resource — no CloudFormation type yet) ---
     const registryAutoApproval =
-      this.node.tryGetContext("registryAutoApproval") ?? "true";
+      this.node.tryGetContext("registryAutoApproval") ?? "false";
+    if (String(registryAutoApproval) === "true") {
+      cdk.Annotations.of(this).addWarning(
+        "registryAutoApproval is enabled — every registry submission will be auto-approved. " +
+          "Set -c registryAutoApproval=false (the default) for manual review.",
+      );
+    }
 
     const registryProvisionerFunction = new lambda.Function(
       this,
@@ -3286,15 +3292,12 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    executionLambdaDataSource.createResolver(
-      "ListAwaitingApprovalsResolver",
-      {
-        typeName: "Query",
-        fieldName: "listAwaitingApprovals",
-        requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-        responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-      },
-    );
+    executionLambdaDataSource.createResolver("ListAwaitingApprovalsResolver", {
+      typeName: "Query",
+      fieldName: "listAwaitingApprovals",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
 
     // publishWorkflowProgress — IAM-only mutation called by fan-out Lambda
     executionLambdaDataSource.createResolver(
