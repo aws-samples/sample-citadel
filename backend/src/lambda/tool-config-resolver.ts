@@ -39,6 +39,55 @@ const TOOLS_CONFIG_TABLE = process.env.TOOLS_CONFIG_TABLE!;
 const DECISION_STATUSES = new Set(["APPROVED", "REJECTED"]);
 
 // ---------------------------------------------------------------------------
+// Decision-metadata helpers (approval-cache pattern)
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetches persisted decision metadata (decidedBy/decidedAt/statusReason)
+ * from the DynamoDB side record written by the approval/rejection path.
+ * Returns null when no decision record exists (tool was never decided).
+ */
+async function getToolDecision(toolId: string): Promise<{
+  decidedBy?: string;
+  decidedAt?: string;
+  statusReason?: string;
+} | null> {
+  try {
+    const result = await docClient.send(
+      new GetCommand({
+        TableName: TOOLS_CONFIG_TABLE,
+        Key: { toolId: `decision#${toolId}` },
+      }),
+    );
+    if (!result.Item) return null;
+    return {
+      decidedBy: result.Item.decidedBy,
+      decidedAt: result.Item.decidedAt,
+      statusReason: result.Item.statusReason,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Enriches a mapped ToolConfig with decision metadata from DynamoDB when
+ * the fields are not already present from customMetadata (legacy records
+ * that were decided before this fix will still have them in customMetadata).
+ */
+async function enrichWithDecision(config: ToolConfig): Promise<ToolConfig> {
+  if (config.decidedBy) return config; // already has decision data
+  const decision = await getToolDecision(config.toolId);
+  if (!decision) return config;
+  return {
+    ...config,
+    ...(decision.decidedBy ? { decidedBy: decision.decidedBy } : {}),
+    ...(decision.decidedAt ? { decidedAt: decision.decidedAt } : {}),
+    ...(decision.statusReason ? { statusReason: decision.statusReason } : {}),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Feature flag + Registry Service initialization (task 7.1)
 // ---------------------------------------------------------------------------
 
@@ -468,7 +517,9 @@ export async function listToolConfigsRegistry(
     return !n || !registryNames.has(n);
   });
 
-  return [...registryConfigs, ...legacyOnly];
+  return Promise.all(
+    [...registryConfigs, ...legacyOnly].map(enrichWithDecision),
+  );
 }
 
 /**
@@ -501,7 +552,7 @@ export async function getToolConfigRegistry(
     if (!admin && (!mapped.orgId || mapped.orgId !== callerOrgId)) {
       return null;
     }
-    return mapped;
+    return enrichWithDecision(mapped);
   }
   // Fallback to DynamoDB for legacy records
   const legacy = await getToolConfig(toolId);
@@ -749,31 +800,12 @@ export async function updateToolConfigRegistry(
     const decidedAt = new Date().toISOString();
     const decidedStatusReason = (input.statusReason ?? "").trim();
 
-    // Write decision metadata via updateResource
-    const decisionMeta = registryService.serializeCustomMetadata({
-      categories: existingMeta.categories ?? [],
-      icon: existingMeta.icon ?? "",
-      state: existingMeta.state ?? "active",
-      integrationBindings: existingMeta.integrationBindings || undefined,
-      dataStoreBindings: existingMeta.dataStoreBindings || undefined,
-      appId: existingMeta.appId,
-      config: existingMeta.config ?? existing.description ?? "",
-      createdBy: existingMeta.createdBy ?? userId,
-      orgId: preservedOrgId,
-      decidedBy,
-      decidedAt,
-      statusReason: decidedStatusReason || null,
-    } as ToolCustomMetadata);
-
-    await registryService.updateResource("tool", input.toolId, {
-      name: existing.name,
-      // Omit description when not present on the existing record — the
-      // registry rejects an empty optionalValue (length < 1).
-      ...(existing.description ? { description: existing.description } : {}),
-      customMetadata: decisionMeta,
-    });
-
-    // Transition status
+    // Transition status ONLY — no updateResource call. The registry treats
+    // any UpdateRegistryRecord on a non-DRAFT record as a content edit and
+    // demotes it back to DRAFT, which then makes the subsequent status
+    // transition fail (DRAFT → APPROVED is not a valid transition). Decision
+    // metadata (decidedBy/decidedAt/statusReason) is persisted to DynamoDB
+    // instead, mirroring the approval-cache pattern used for agent records.
     const finalRecord = await registryService.updateResourceStatus(
       "tool",
       input.toolId,
@@ -782,9 +814,35 @@ export async function updateToolConfigRegistry(
       currentStatus,
     );
 
+    // Persist decision metadata to DynamoDB (approval-cache pattern). This
+    // is a side record keyed by toolId — the same table legacy tool configs
+    // use — so getToolConfig/listToolConfigs can merge it at read time.
+    try {
+      await docClient.send(
+        new PutCommand({
+          TableName: TOOLS_CONFIG_TABLE,
+          Item: {
+            toolId: `decision#${input.toolId}`,
+            decidedBy,
+            decidedAt,
+            statusReason: decidedStatusReason || undefined,
+            status: input.status,
+          },
+        }),
+      );
+    } catch (err) {
+      console.error("Failed to persist tool decision metadata", err);
+    }
+
     // Re-fetch for consistent return
     const refreshed = await registryService.getResource("tool", input.toolId);
-    return registryService.mapToToolConfig(refreshed ?? finalRecord);
+    const mapped = registryService.mapToToolConfig(refreshed ?? finalRecord);
+    // Overlay decision fields from the DDB write above (the registry record's
+    // customMetadata was NOT updated, so mapToToolConfig won't have them).
+    mapped.decidedBy = decidedBy;
+    mapped.decidedAt = decidedAt;
+    if (decidedStatusReason) mapped.statusReason = decidedStatusReason;
+    return mapped;
   }
 
   // Submit path: DRAFT -> PENDING_APPROVAL when input.status is
