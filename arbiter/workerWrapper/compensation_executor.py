@@ -184,7 +184,7 @@ class _RegisteredAgentTool:
         return {}
 
     async def stream(self, tool_use: Any, invocation_state: dict[str, Any], **kwargs: Any):
-        from strands.types._events import ToolResultEvent
+        from strands_compat import ToolResultEvent
 
         tool_use_id = str(tool_use.get("toolUseId", "")) if hasattr(tool_use, "get") else ""
         tool_input = tool_use.get("input", {}) if hasattr(tool_use, "get") else {}
