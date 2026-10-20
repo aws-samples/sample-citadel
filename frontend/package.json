@@ -58,7 +58,7 @@
             "react-resizable-panels": "^2.1.9",
             "react-router-dom": "^7.18.2",
             "reactflow": "^11.11.4",
-            "recharts": "^2.15.2",
+            "recharts": "^3.10.1",
             "remark-gfm": "^4.0.1",
             "sonner": "^2.0.3",
             "tailwind-merge": "3.7.0",
