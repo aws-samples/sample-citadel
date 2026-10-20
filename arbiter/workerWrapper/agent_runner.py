@@ -16,6 +16,8 @@ import os
 import time
 import importlib.util
 
+logger = logging.getLogger(__name__)
+
 # Valid stdlib logging level names accepted from AGENT_LOG_LEVEL. Restricted to
 # the standard named levels (never a bare numeric string) so an operator typo
 # fails closed to the default rather than silently no-op'ing logging.
@@ -746,6 +748,7 @@ def _install_tool_call_hooks():
 
         def __init__(self, *args, **kwargs):
             existing = kwargs.get('hooks')
+            caller_hook_count = len(existing) if isinstance(existing, list) else 0
             if existing is None:
                 kwargs['hooks'] = [composed]
             elif isinstance(existing, list):
@@ -753,6 +756,27 @@ def _install_tool_call_hooks():
             # A non-list caller hooks value is left untouched — strands
             # validates it; we never overwrite caller intent.
             super().__init__(*args, **kwargs)
+
+            # Structured INFO log — same shape as other WorkerWrapper action
+            # lines — emitted ONCE per Agent construction so operators can
+            # confirm which governance hooks are active on each dispatch.
+            hook_names = [
+                type(p).__name__
+                for p in (composed._governance, composed._idempotency, composed._breaker)
+                if p is not None
+            ]
+            log_entry: dict = {
+                'level': 'INFO',
+                'component': 'WorkerWrapper',
+                'action': 'governance_hooks_attached',
+                'hookNames': hook_names,
+                'callerHooksMerged': caller_hook_count,
+            }
+            if execution_id:
+                log_entry['executionId'] = execution_id
+            if node_id:
+                log_entry['nodeId'] = node_id
+            logger.info(json.dumps(log_entry))
 
     strands.Agent = _GovernedAgent
     return True
