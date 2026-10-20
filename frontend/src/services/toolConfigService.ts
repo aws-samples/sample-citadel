@@ -164,15 +164,28 @@ function safeParseConfig(raw: unknown): unknown {
 export const toolConfigService = {
   async listToolConfigs(): Promise<ToolConfig[]> {
     try {
-      const response = await serverService.query<{ listToolConfigs: ToolConfig[] }>(
+      const response = await serverService.query<{ listToolConfigs: (ToolConfig | null)[] }>(
         listToolConfigsQuery
       );
       
-      return (response.listToolConfigs || []).map((tool: any) => ({
-        ...tool,
-        config: safeParseConfig(tool.config),
-        tags: typeof tool.tags === 'string' ? JSON.parse(tool.tags) : tool.tags,
-      }));
+      const raw = response.listToolConfigs || [];
+      // Defensive: AppSync may null individual elements when a non-nullable
+      // field (e.g. config: AWSJSON!) is absent on a row. Filter them out
+      // rather than crashing downstream (#342).
+      const nullCount = raw.filter((t) => t == null).length;
+      if (nullCount > 0) {
+        console.warn(
+          `listToolConfigs: dropped ${nullCount} null element(s) from response`,
+        );
+      }
+
+      return raw
+        .filter((tool): tool is ToolConfig => tool != null)
+        .map((tool: any) => ({
+          ...tool,
+          config: safeParseConfig(tool.config),
+          tags: typeof tool.tags === 'string' ? JSON.parse(tool.tags) : tool.tags,
+        }));
     } catch (error) {
       console.error('Error listing tool configs:', error);
       throw error;
