@@ -243,7 +243,7 @@ class _IdempotentToolWrapper(AgentTool):  # type: ignore[misc]
         return self._inner.get_display_properties()
 
     async def stream(self, tool_use: Any, invocation_state: dict[str, Any], **kwargs: Any):  # pragma: no cover — requires strands runtime
-        from strands.types._events import ToolResultEvent  # local import; strands-only
+        from strands_compat import ToolResultEvent  # local import; strands-only
 
         tool_use_id = str(tool_use.get("toolUseId", "")) if hasattr(tool_use, "get") else ""
 
@@ -582,7 +582,7 @@ class _KeyDerivationFailedTool(AgentTool):  # type: ignore[misc]
         return self._inner.tool_type
 
     async def stream(self, tool_use: Any, invocation_state: dict[str, Any], **kwargs: Any):  # pragma: no cover
-        from strands.types._events import ToolResultEvent
+        from strands_compat import ToolResultEvent
 
         tool_use_id = str(tool_use.get("toolUseId", "")) if hasattr(tool_use, "get") else ""
         yield ToolResultEvent(_error_result(

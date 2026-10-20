@@ -139,7 +139,7 @@ class _GovernanceDeniedTool(AgentTool):  # type: ignore[misc]
         return self._inner.get_display_properties()
 
     async def stream(self, tool_use: Any, invocation_state: dict[str, Any], **kwargs: Any):  # pragma: no cover — requires strands runtime
-        from strands.types._events import ToolResultEvent  # local import; strands-only
+        from strands_compat import ToolResultEvent  # local import; strands-only
 
         yield ToolResultEvent(self._error_result)
 
