@@ -168,6 +168,7 @@ type PendingApproval {
   submittedAt: AWSDateTime
   createdBy: String
   status: String!
+  version: Int
 }
 
 type PendingApprovalConnection {

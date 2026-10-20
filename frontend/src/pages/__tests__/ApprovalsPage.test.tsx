@@ -63,6 +63,7 @@ function makeRecord(overrides: Partial<any> = {}) {
     submittedAt: '2026-10-01T10:00:00Z',
     createdBy: 'alice',
     status: 'PENDING_APPROVAL',
+    version: 2,
     ...overrides,
   };
 }
@@ -125,6 +126,7 @@ describe('ApprovalsPage', () => {
       expect.objectContaining({
         recordId: 'r1',
         decision: 'APPROVED',
+        version: 2,
       }),
     );
     expect(toast.success).toHaveBeenCalled();
@@ -215,5 +217,42 @@ describe('ApprovalsPage', () => {
     await waitFor(() => {
       expect(toast.error).toHaveBeenCalledWith('Forbidden');
     });
+  });
+
+  it('omits version from decideApproval when record has no version', async () => {
+    const record = makeRecord({ recordId: 'r1', version: undefined });
+    mockList.mockResolvedValue({ items: [record], nextToken: null });
+    mockDecide.mockResolvedValue(undefined);
+
+    await act(async () => { render(React.createElement(ApprovalsPage)); });
+    fireEvent.click(screen.getByTestId('approve-r1'));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('dialog-confirm'));
+    });
+
+    const call = mockDecide.mock.calls[0][0];
+    expect(call).not.toHaveProperty('version');
+  });
+
+  it('refetches and shows conflict toast on version conflict error', async () => {
+    const record = makeRecord({ recordId: 'r1' });
+    mockList.mockResolvedValue({ items: [record], nextToken: null });
+    mockDecide.mockRejectedValue(new Error('Conflict: app was modified concurrently. Please retry.'));
+
+    await act(async () => { render(React.createElement(ApprovalsPage)); });
+
+    fireEvent.click(screen.getByTestId('approve-r1'));
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('dialog-confirm'));
+    });
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('This record changed; please review again');
+    });
+    // Dialog should be closed
+    expect(screen.queryByTestId('decision-dialog')).toBeNull();
+    // Should have re-fetched the list (initial + refresh)
+    expect(mockList).toHaveBeenCalledTimes(2);
   });
 });

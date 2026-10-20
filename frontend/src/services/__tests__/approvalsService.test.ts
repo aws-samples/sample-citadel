@@ -50,6 +50,7 @@ describe('approvalsService', () => {
       expect(queryDoc).toContain('recordId');
       expect(queryDoc).toContain('recordType');
       expect(queryDoc).toContain('displayName');
+      expect(queryDoc).toContain('version');
       expect(vars).toEqual({ limit: 10, nextToken: 'prev' });
       expect(result).toEqual(fakeConnection);
     });
@@ -100,6 +101,24 @@ describe('approvalsService', () => {
         version: 1,
         status: 'REJECTED',
         statusReason: 'Not ready',
+      });
+    });
+
+    it('omits version from updateApp when version is undefined', async () => {
+      mockUpdateApp.mockResolvedValue({});
+
+      await approvalsService.decideApproval({
+        recordId: 'app3',
+        recordType: 'agent',
+        decision: 'APPROVED',
+      });
+
+      const call = mockUpdateApp.mock.calls[0][0];
+      expect(call).not.toHaveProperty('version');
+      expect(call).toEqual({
+        appId: 'app3',
+        status: 'APPROVED',
+        statusReason: undefined,
       });
     });
 

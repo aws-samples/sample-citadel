@@ -18,6 +18,7 @@ export interface PendingApprovalItem {
   submittedAt: string;
   createdBy: string;
   status: string;
+  version?: number;
 }
 
 export interface PendingApprovalConnection {
@@ -48,6 +49,7 @@ const LIST_PENDING_APPROVALS = `
         submittedAt
         createdBy
         status
+        version
       }
       nextToken
     }
@@ -82,7 +84,7 @@ export const approvalsService = {
     recordId: string;
     recordType: string;
     decision: ApprovalDecision;
-    version: number;
+    version?: number;
     statusReason?: string;
   }): Promise<void> {
     if (input.recordType === 'tool') {
@@ -96,9 +98,9 @@ export const approvalsService = {
 
     await appApiService.updateApp({
       appId: input.recordId,
-      version: input.version,
+      ...(input.version !== undefined ? { version: input.version } : {}),
       status: input.decision,
       statusReason: input.statusReason,
-    });
+    } as Parameters<typeof appApiService.updateApp>[0]);
   },
 };

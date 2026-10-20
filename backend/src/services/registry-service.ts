@@ -568,6 +568,7 @@ export interface PendingApproval {
   submittedAt: string | undefined;
   createdBy: string | undefined;
   status: string;
+  version: number | undefined;
 }
 
 export interface ListPendingApprovalsOptions {
@@ -1424,6 +1425,9 @@ export class RegistryService {
             submittedAt: detail.updatedAt?.toISOString(),
             createdBy: meta.createdBy,
             status: detail.status ?? rec.status ?? "",
+            version: hasManifest
+              ? (meta.manifest?.version ?? undefined)
+              : undefined,
           };
         } catch (err) {
           console.warn("listPendingApprovals: detail GET failed, skipping", {
