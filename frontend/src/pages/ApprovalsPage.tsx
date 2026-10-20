@@ -72,7 +72,7 @@ export function ApprovalsPage() {
         recordId: dialogRecord.recordId,
         recordType: dialogRecord.recordType,
         decision: dialogDecision,
-        version: 1,
+        ...(dialogRecord.version !== undefined ? { version: dialogRecord.version } : {}),
         statusReason,
       });
       toast.success(
@@ -83,7 +83,14 @@ export function ApprovalsPage() {
       // Refresh sidebar count by re-fetching first page
       fetchPage();
     } catch (err: any) {
-      toast.error(err.message ?? 'Decision failed');
+      const msg: string = err.message ?? 'Decision failed';
+      if (msg.toLowerCase().includes('conflict')) {
+        toast.error('This record changed; please review again');
+        setDialogRecord(null);
+        fetchPage();
+      } else {
+        toast.error(msg);
+      }
     }
   };
 
