@@ -56,6 +56,10 @@ jest.mock("../../services/registry-service", () => ({
     REJECTED: "REJECTED",
     DEPRECATED: "DEPRECATED",
   },
+  decideRecord: jest.requireActual("../../services/registry-service")
+    .decideRecord,
+  DECISION_STATUSES: jest.requireActual("../../services/registry-service")
+    .DECISION_STATUSES,
 }));
 
 import {

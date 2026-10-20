@@ -75,6 +75,8 @@ import {
   type RegistryRecord,
   type RegistryRecordStatusValue,
   type AgentCustomMetadata,
+  decideRecord,
+  DECISION_STATUSES,
 } from "../services/registry-service";
 import { LifecycleManager, REGISTRY_TRANSITIONS } from "../adapters/lifecycle";
 import {
@@ -310,8 +312,7 @@ const USER_POOL_ID = process.env.USER_POOL_ID || "";
  */
 const registryLifecycle = new LifecycleManager(REGISTRY_TRANSITIONS);
 
-/** Statuses that represent an authorized approve/reject decision, not a submit/resubmit/deprecate action. */
-const DECISION_STATUSES = new Set(["APPROVED", "REJECTED"]);
+// DECISION_STATUSES imported from ../services/registry-service
 
 /**
  * Lazy DynamoDBDocumentClient singleton. Constructed on first call — keeps the
@@ -1738,13 +1739,21 @@ async function updateApp(
   // Pending-immutability: while a record is PENDING_APPROVAL, content
   // updates (name/description/routingConfig/sourceProjectId) are rejected.
   // Status-only decisions (approve/reject) are exempt — this is what lets
-  // the approval workflow itself proceed.
+  // the approval workflow itself proceed. When content fields are combined
+  // with a decision status, the decision short-circuit below gives a more
+  // specific error ("decisions are status-only").
   const isContentChange =
     input.name !== undefined ||
     input.description !== undefined ||
     input.routingConfig !== undefined ||
     input.sourceProjectId !== undefined;
-  if (currentStatus === "PENDING_APPROVAL" && isContentChange) {
+  const isPotentialDecision =
+    isStatusChange && DECISION_STATUSES.has(input.status!);
+  if (
+    currentStatus === "PENDING_APPROVAL" &&
+    isContentChange &&
+    !isPotentialDecision
+  ) {
     throw new RegistryLifecycleError(
       `App ${input.appId} is PENDING_APPROVAL and cannot be modified until an authorized decision is recorded`,
       "RECORD_IMMUTABLE",
@@ -1800,16 +1809,115 @@ async function updateApp(
     }
   }
 
-  // decidedBy/decidedAt/statusReason bookkeeping for the manifest. Only
-  // stamped on an actual approve/reject decision — submit (DRAFT ->
-  // PENDING_APPROVAL) and deprecate leave the prior decision fields
-  // untouched. There is no resubmit (REJECTED -> DRAFT) path any more: a
-  // rejected record's only status-update target is DEPRECATED.
+  // ─── Decision short-circuit: APPROVED / REJECTED ─────────────────────
+  //
+  // Decisions are status-only: they call updateResourceStatus and persist
+  // decision metadata to the manifest + AppsTable mirror, but NEVER call
+  // updateResource. The registry treats any UpdateRegistryRecord on a
+  // non-DRAFT record as a content edit and demotes it back to DRAFT, which
+  // defeats the approval (the root cause of the approval-status-first
+  // defect that tool-config-resolver and agent-config-resolver already
+  // fixed locally).
+  //
+  // A request that carries both content fields AND a decision status is
+  // rejected outright — decisions are status-only by design.
   const isDecision = isStatusChange && DECISION_STATUSES.has(input.status!);
-  const decidedBy = isDecision ? getUserId(event.identity) : undefined;
-  const decidedStatusReason = isDecision
-    ? (input.statusReason ?? "").trim()
-    : undefined;
+
+  if (isDecision) {
+    if (isContentChange) {
+      throw new Error(
+        "ValidationError: approve/reject is a status-only operation — " +
+          "content fields (name, description, routingConfig, sourceProjectId) " +
+          "cannot be changed in the same request",
+      );
+    }
+
+    const callerUserId = getUserId(event.identity);
+
+    const result = await decideRecord(getRegistryService(), {
+      recordType: "agent",
+      recordId: input.appId,
+      decision: input.status! as "APPROVED" | "REJECTED",
+      reason: input.statusReason,
+      decidedBy: callerUserId,
+      expectedStatus: currentStatus,
+    });
+
+    // Persist decision metadata into the manifest (customDescriptorContent)
+    // via a targeted mutation that touches ONLY the decision fields — no
+    // name/description/routingConfig, so the registry cannot interpret it
+    // as a content edit and demote the status.
+    // NOTE: we do NOT call updateResource here; instead we write decision
+    // fields to the DDB AppsTable mirror only. The manifest in the registry
+    // is intentionally NOT updated on a decision — any updateResource call
+    // would demote the status. Decision metadata is served from the
+    // AppsTable #META mirror at read time.
+    const existingProjection = projectAgentApp(existing);
+    const metaPartial: Partial<
+      Omit<AppMetaRow, "appId" | "createdAt" | "createdBy">
+    > = {
+      status: input.status,
+      updatedAt: result.decidedAt,
+    };
+    // Version is NOT bumped on a decision-only request — the DDB version
+    // tracks content edits. A failed decision (e.g. registry rejects the
+    // transition) leaves no partial version drift.
+    await updateAppMetaFields(APPS_TABLE, input.appId, metaPartial);
+
+    // Re-fetch so the returned projection carries the post-transition status.
+    const refreshed = await getRegistryService().getResource(
+      "agent",
+      input.appId,
+    );
+    const finalRecord = refreshed ?? result.record;
+
+    // Emit events
+    await emitEvent("app.updated", {
+      appId: input.appId,
+      userId,
+      changes: input,
+    });
+
+    const previousStatus = String(
+      existingProjection.status || "",
+    ).toLowerCase();
+    const newStatus = String(input.status).toLowerCase();
+    const timestamp = result.decidedAt;
+    const correlationId = uuidv4();
+
+    await emitEvent(`app.status.${previousStatus}_to_${newStatus}`, {
+      appId: input.appId,
+      orgId: existingProjection.orgId,
+      previousStatus: existingProjection.status,
+      newStatus: input.status,
+      userId,
+      timestamp,
+      correlationId,
+    });
+
+    try {
+      await publishAppStatusSubscription({
+        appId: input.appId,
+        previousStatus: existingProjection.status,
+        newStatus: input.status!,
+        timestamp,
+      });
+    } catch (err) {
+      console.error("Failed to publish AppSync status event (non-fatal):", err);
+    }
+
+    // Overlay decision fields onto the projection so the response includes
+    // them even before a subsequent read hydrates them from DDB.
+    const projected = projectAgentAppNormalized(finalRecord);
+    (projected as unknown as Record<string, unknown>).decidedBy =
+      result.decidedBy;
+    (projected as unknown as Record<string, unknown>).statusReason =
+      result.statusReason || null;
+    return projected;
+  }
+
+  // Past this point, isDecision is always false — the decision path returned
+  // above. Non-decision paths (submit, deprecate, content-only edits) follow.
 
   // Merge the input fields over the existing AgentApp projection, then run
   // through the factory so the Registry write goes through the canonical
@@ -1848,10 +1956,6 @@ async function updateApp(
     }
     manifest.orgId = mergedAgentApp.orgId;
     manifest.version = mergedAgentApp.version;
-    if (isDecision) {
-      manifest.decidedBy = decidedBy;
-      manifest.statusReason = decidedStatusReason || null;
-    }
   });
 
   const record = await getRegistryService().updateResource(
@@ -1898,14 +2002,15 @@ async function updateApp(
     } else if (input.status !== "PUBLISHED") {
       // Propagate to Registry record status so the lifecycle state is authoritative
       // there, not just in the local manifest. Accepts Registry-native status values
-      // (APPROVED, REJECTED, DEPRECATED — never DRAFT/PENDING_APPROVAL, see
-      // REGISTRY_TRANSITIONS) plus the app-specific PUBLISHED which is
-      // stored in manifest only.
+      // (DEPRECATED — never DRAFT/PENDING_APPROVAL, and never APPROVED/REJECTED
+      // which are handled by the decision short-circuit above) plus the
+      // app-specific PUBLISHED which is stored in manifest only.
       finalRecord = await getRegistryService().updateResourceStatus(
         "agent",
         input.appId,
         input.status as RegistryRecordStatusValue,
-        decidedStatusReason || "Status update via registry service",
+        (input.statusReason ?? "").trim() ||
+          "Status update via registry service",
         currentStatus,
       );
       // The mock/real updateResourceStatus response often omits fields

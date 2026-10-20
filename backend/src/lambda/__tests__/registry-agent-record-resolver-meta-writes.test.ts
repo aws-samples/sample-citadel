@@ -53,6 +53,8 @@ jest.mock("../../services/registry-service", () => {
     isRegistryEnabled: jest.fn(() => true),
     TypeMismatchError: actual.TypeMismatchError,
     RegistryLifecycleError: actual.RegistryLifecycleError,
+    decideRecord: actual.decideRecord,
+    DECISION_STATUSES: actual.DECISION_STATUSES,
   };
 });
 
@@ -303,7 +305,9 @@ describe("registry-agent-record-resolver — AppsTable #META mirror writes", () 
       const values = metaUpdate!.args[0].input
         .ExpressionAttributeValues as Record<string, unknown>;
       expect(values[":v_status"]).toBe("APPROVED");
-      expect(values[":v_version"]).toBe(2);
+      // Decision-only requests do not bump version — version tracks content
+      // edits, not status transitions.
+      expect(values[":v_version"]).toBeUndefined();
     });
   });
 

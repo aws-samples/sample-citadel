@@ -10,10 +10,10 @@ import { getOperations } from "../utils/operations-registry";
 import {
   RegistryService,
   RegistryRecordStatusValues,
-  RegistryLifecycleError,
   type ToolCustomMetadata,
   type ListResourcesOptions,
-  type RegistryRecordStatusValue,
+  decideRecord,
+  DECISION_STATUSES,
 } from "../services/registry-service";
 import {
   extractOrgFromEvent,
@@ -22,7 +22,7 @@ import {
   canCallerSeeRow,
 } from "../utils/auth-event";
 import { getUserId } from "../utils/appsync";
-import { LifecycleManager, REGISTRY_TRANSITIONS } from "../adapters/lifecycle";
+import { REGISTRY_TRANSITIONS } from "../adapters/lifecycle";
 import { isRecordVisible, viewerFromEvent } from "../utils/record-visibility";
 import { normaliseTags } from "../utils/tag-policy";
 import { enforceTagPolicy } from "./tag-policy-check";
@@ -32,11 +32,7 @@ const docClient = DynamoDBDocumentClient.from(client);
 
 const TOOLS_CONFIG_TABLE = process.env.TOOLS_CONFIG_TABLE!;
 
-/**
- * Registry statuses that represent an admin decision (approve/reject).
- * Mirrors DECISION_STATUSES in registry-agent-record-resolver.ts.
- */
-const DECISION_STATUSES = new Set(["APPROVED", "REJECTED"]);
+// DECISION_STATUSES imported from ../services/registry-service
 
 // ---------------------------------------------------------------------------
 // Decision-metadata helpers (approval-cache pattern)
@@ -768,51 +764,27 @@ export async function updateToolConfigRegistry(
     input.status !== undefined && input.status !== currentStatus;
 
   if (isStatusChange && DECISION_STATUSES.has(input.status!)) {
-    // Lifecycle gate via REGISTRY_TRANSITIONS
-    const lifecycleManager = new LifecycleManager(REGISTRY_TRANSITIONS);
-    if (!lifecycleManager.isValidTransition(currentStatus, input.status!)) {
-      const valid = REGISTRY_TRANSITIONS.transitions[currentStatus] || [];
-      throw new RegistryLifecycleError(
-        `Invalid status transition: ${currentStatus} → ${input.status}. ` +
-          `Valid transitions from ${currentStatus}: ${valid.join(", ") || "none"}`,
-        "INVALID_TRANSITION",
-      );
-    }
-
-    // Admin gate
+    // Admin gate (caller needs the raw event, so this stays in the resolver)
     if (!isAdminFromEvent(event!)) {
       throw new Error(
         `UnauthorizedError: admin role required to ${input.status === "APPROVED" ? "approve" : "reject"} tool ${input.toolId}`,
       );
     }
 
-    // Rejection requires a reason
-    if (input.status === "REJECTED" && !(input.statusReason ?? "").trim()) {
-      throw new Error(
-        "ValidationError: statusReason is required to reject a tool",
-      );
-    }
-
-    // Stamp decision fields
     const decidedBy = getUserId(
       event!.identity as Parameters<typeof getUserId>[0],
     );
-    const decidedAt = new Date().toISOString();
-    const decidedStatusReason = (input.statusReason ?? "").trim();
 
-    // Transition status ONLY — no updateResource call. The registry treats
-    // any UpdateRegistryRecord on a non-DRAFT record as a content edit and
-    // demotes it back to DRAFT, which then makes the subsequent status
-    // transition fail (DRAFT → APPROVED is not a valid transition). Decision
-    // metadata (decidedBy/decidedAt/statusReason) is persisted to DynamoDB
-    // instead, mirroring the approval-cache pattern used for agent records.
-    const finalRecord = await registryService.updateResourceStatus(
-      "tool",
-      input.toolId,
-      input.status as RegistryRecordStatusValue,
-      decidedStatusReason || "Status update via registry service",
-      currentStatus,
-    );
+    // Shared status-only helper — lifecycle validation, rejection-reason
+    // check, and updateResourceStatus are all handled inside.
+    const result = await decideRecord(registryService, {
+      recordType: "tool",
+      recordId: input.toolId,
+      decision: input.status! as "APPROVED" | "REJECTED",
+      reason: input.statusReason,
+      decidedBy,
+      expectedStatus: currentStatus,
+    });
 
     // Persist decision metadata to DynamoDB (approval-cache pattern). This
     // is a side record keyed by toolId — the same table legacy tool configs
@@ -823,9 +795,9 @@ export async function updateToolConfigRegistry(
           TableName: TOOLS_CONFIG_TABLE,
           Item: {
             toolId: `decision#${input.toolId}`,
-            decidedBy,
-            decidedAt,
-            statusReason: decidedStatusReason || undefined,
+            decidedBy: result.decidedBy,
+            decidedAt: result.decidedAt,
+            statusReason: result.statusReason || undefined,
             status: input.status,
           },
         }),
@@ -836,12 +808,12 @@ export async function updateToolConfigRegistry(
 
     // Re-fetch for consistent return
     const refreshed = await registryService.getResource("tool", input.toolId);
-    const mapped = registryService.mapToToolConfig(refreshed ?? finalRecord);
+    const mapped = registryService.mapToToolConfig(refreshed ?? result.record);
     // Overlay decision fields from the DDB write above (the registry record's
     // customMetadata was NOT updated, so mapToToolConfig won't have them).
-    mapped.decidedBy = decidedBy;
-    mapped.decidedAt = decidedAt;
-    if (decidedStatusReason) mapped.statusReason = decidedStatusReason;
+    mapped.decidedBy = result.decidedBy;
+    mapped.decidedAt = result.decidedAt;
+    if (result.statusReason) mapped.statusReason = result.statusReason;
     return mapped;
   }
 

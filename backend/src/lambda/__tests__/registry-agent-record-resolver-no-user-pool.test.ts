@@ -53,6 +53,10 @@ jest.mock("../../services/registry-service", () => {
     getRegistryService: jest.fn(() => getMockRegistryService()),
     _resetRegistryService: jest.fn(),
     isRegistryEnabled: jest.fn(() => true),
+    decideRecord: jest.requireActual("../../services/registry-service")
+      .decideRecord,
+    DECISION_STATUSES: jest.requireActual("../../services/registry-service")
+      .DECISION_STATUSES,
   };
 });
 

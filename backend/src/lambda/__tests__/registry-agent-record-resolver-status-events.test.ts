@@ -46,6 +46,8 @@ jest.mock("../../services/registry-service", () => {
     isRegistryEnabled: jest.fn(() => true),
     TypeMismatchError: actual.TypeMismatchError,
     RegistryLifecycleError: actual.RegistryLifecycleError,
+    decideRecord: actual.decideRecord,
+    DECISION_STATUSES: actual.DECISION_STATUSES,
   };
 });
 

@@ -91,6 +91,10 @@ jest.mock("../../services/registry-service", () => ({
     toInternalState: mockToInternalState,
     mapToToolConfig: mockMapToToolConfig,
   })),
+  decideRecord: jest.requireActual("../../services/registry-service")
+    .decideRecord,
+  DECISION_STATUSES: jest.requireActual("../../services/registry-service")
+    .DECISION_STATUSES,
 }));
 
 const ORG_A = "org-a";

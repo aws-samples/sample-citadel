@@ -2199,3 +2199,102 @@ export class RegistryService {
     };
   }
 }
+
+// ---------------------------------------------------------------------------
+// decideRecord — shared status-only approve/reject helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Decision outcomes that `decideRecord` accepts.
+ */
+export type RecordDecision = "APPROVED" | "REJECTED";
+
+/** Set of statuses that represent an admin decision. */
+export const DECISION_STATUSES = new Set<string>(["APPROVED", "REJECTED"]);
+
+/**
+ * Input to `decideRecord`.
+ *
+ * `expectedStatus` is the record's current status; the helper validates the
+ * transition against REGISTRY_TRANSITIONS before touching the registry.
+ */
+export interface DecideRecordInput {
+  recordType: ResourceType;
+  recordId: string;
+  decision: RecordDecision;
+  reason?: string;
+  decidedBy: string;
+  expectedStatus: string;
+}
+
+/**
+ * Output from `decideRecord` — the post-transition registry record plus the
+ * decision audit fields the caller should persist to its own data store.
+ */
+export interface DecideRecordResult {
+  record: RegistryRecord;
+  decidedBy: string;
+  decidedAt: string;
+  statusReason: string;
+}
+
+/**
+ * Performs a **status-only** approve or reject on a registry record.
+ *
+ * This helper is the single canonical path for every resolver
+ * (registry-agent-record-resolver, tool-config-resolver,
+ * agent-config-resolver) to approve or reject a record. It:
+ *   1. Validates the transition via REGISTRY_TRANSITIONS.
+ *   2. Requires a non-empty reason when rejecting.
+ *   3. Calls `updateResourceStatus` — never `updateResource` — so the
+ *      registry does not demote the record back to DRAFT (the root cause of
+ *      the approval-status-first defect).
+ *   4. Returns the decision audit fields; callers persist them to their own
+ *      DDB/manifest store.
+ *
+ * The caller is responsible for the admin-role gate (it needs the raw
+ * AppSync event, which this service-layer helper intentionally does not
+ * depend on) and for persisting decision metadata after a successful return.
+ */
+export async function decideRecord(
+  registryService: RegistryService,
+  input: DecideRecordInput,
+): Promise<DecideRecordResult> {
+  // Lifecycle validation
+  const lifecycle = new LifecycleManager(REGISTRY_TRANSITIONS);
+  if (!lifecycle.isValidTransition(input.expectedStatus, input.decision)) {
+    const valid = REGISTRY_TRANSITIONS.transitions[input.expectedStatus] || [];
+    throw new RegistryLifecycleError(
+      `Invalid status transition: ${input.expectedStatus} → ${input.decision}. ` +
+        `Valid transitions from ${input.expectedStatus}: ${valid.join(", ") || "none"}`,
+      "INVALID_TRANSITION",
+    );
+  }
+
+  // Rejection requires a reason
+  if (input.decision === "REJECTED" && !(input.reason ?? "").trim()) {
+    throw new Error(
+      "ValidationError: statusReason is required to reject a record",
+    );
+  }
+
+  const decidedAt = new Date().toISOString();
+  const statusReason = (input.reason ?? "").trim();
+
+  // Status-only transition — no content write, so the registry cannot
+  // demote the record back to DRAFT.
+  const record = await registryService.updateResourceStatus(
+    input.recordType,
+    input.recordId,
+    input.decision as RegistryRecordStatusValue,
+    statusReason || "Status update via registry service",
+    input.expectedStatus,
+  );
+
+  return {
+    record,
+    decidedBy: input.decidedBy,
+    decidedAt,
+    statusReason,
+  };
+}

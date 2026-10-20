@@ -96,6 +96,10 @@ jest.mock("../../services/registry-service", () => ({
       this.code = code;
     }
   },
+  decideRecord: jest.requireActual("../../services/registry-service")
+    .decideRecord,
+  DECISION_STATUSES: jest.requireActual("../../services/registry-service")
+    .DECISION_STATUSES,
 }));
 
 // ── mocks: auth helpers ────────────────────────────────────────────────
