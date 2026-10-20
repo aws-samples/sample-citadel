@@ -710,19 +710,51 @@ def _install_tool_call_hooks():
         breaker=_build_tool_breaker(execution_id, node_id),
     )
 
-    original_init = strands.Agent.__init__
+    # ── Public-API hook injection via subclass (replaces __init__ monkeypatch) ──
+    #
+    # Customer/fabricated agent code calls ``strands.Agent(...)`` directly,
+    # without our governance hooks. We cannot modify that code, so we need an
+    # interception point. The SDK (1.59+) accepts ``hooks=`` as a public
+    # keyword argument — a list of HookProvider instances registered on the
+    # agent's HookRegistry at construction.
+    #
+    # Rather than patching ``Agent.__init__`` (which couples to the
+    # constructor's parameter list and is fragile across SDK versions), we
+    # define a thin subclass that APPENDS our ComposedToolHook to whatever
+    # ``hooks`` the caller passes, then delegates to ``super().__init__()``.
+    # The subclass is swapped into ``strands.Agent`` before the agent module
+    # is exec'd, so every ``Agent(...)`` call in the loaded module
+    # transparently picks up the governance/idempotency/breaker hooks.
+    #
+    # Contract:
+    #   - ``hooks=None`` (most common) → our hook is the sole hook.
+    #   - ``hooks=[caller_hook, ...]`` → caller hooks preserved, ours appended.
+    #   - Non-list hooks value → left untouched (strands validates it).
+    #   - ``super().__init__()`` is the only call into the SDK → no signature
+    #     coupling beyond the documented ``hooks`` kwarg.
+    #
+    # The subclass is module-scoped (not leaked outside this subprocess) and
+    # is a proper ``isinstance(obj, strands.Agent)`` match because Python's
+    # MRO makes the original Agent a base class.
 
-    def _hooked_init(self, *args, **kwargs):
-        existing = kwargs.get('hooks')
-        if existing is None:
-            kwargs['hooks'] = [composed]
-        elif isinstance(existing, list):
-            kwargs['hooks'] = [*existing, composed]
-        # A non-list caller hooks value is left untouched — strands validates
-        # it; we never overwrite caller intent.
-        return original_init(self, *args, **kwargs)
+    _OriginalAgent = strands.Agent
 
-    strands.Agent.__init__ = _hooked_init
+    class _GovernedAgent(_OriginalAgent):
+        """Thin Agent subclass that injects governance hooks via the public
+        ``hooks`` kwarg. See ``_install_tool_call_hooks`` docstring for the
+        full design rationale."""
+
+        def __init__(self, *args, **kwargs):
+            existing = kwargs.get('hooks')
+            if existing is None:
+                kwargs['hooks'] = [composed]
+            elif isinstance(existing, list):
+                kwargs['hooks'] = [*existing, composed]
+            # A non-list caller hooks value is left untouched — strands
+            # validates it; we never overwrite caller intent.
+            super().__init__(*args, **kwargs)
+
+    strands.Agent = _GovernedAgent
     return True
 
 
