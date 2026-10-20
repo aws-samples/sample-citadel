@@ -41,7 +41,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "esbuild": "0.25.11"
+    "esbuild": "^0.28.2"
   },
   "overrides": {
     "dompurify": "^3.4.12",
@@ -71,8 +71,5 @@
     },
     "basic-ftp": ">=6.2.1 <7",
     "handlebars": ">=4.7.10 <5"
-  },
-  "peerDependencies": {
-    "aws-cdk-lib": "2.264.0"
   }
 }
