@@ -137,6 +137,10 @@ jest.mock("../../services/registry-service", () => {
     isRegistryEnabled: jest.fn(() => true),
     TypeMismatchError,
     RegistryLifecycleError,
+    decideRecord: jest.requireActual("../../services/registry-service")
+      .decideRecord,
+    DECISION_STATUSES: jest.requireActual("../../services/registry-service")
+      .DECISION_STATUSES,
     __seed: (type: string, id: string, rec: MockRegistryRecord) =>
       records.set(`${type}:${id}`, rec),
     __get: (type: string, id: string) => records.get(`${type}:${id}`),

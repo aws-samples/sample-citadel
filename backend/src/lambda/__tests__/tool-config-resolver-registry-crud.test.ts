@@ -135,6 +135,10 @@ jest.mock("../../services/registry-service", () => ({
     CREATE_FAILED: "CREATE_FAILED",
     UPDATE_FAILED: "UPDATE_FAILED",
   },
+  decideRecord: jest.requireActual("../../services/registry-service")
+    .decideRecord,
+  DECISION_STATUSES: jest.requireActual("../../services/registry-service")
+    .DECISION_STATUSES,
 }));
 
 // Mock DynamoDB for fallback paths

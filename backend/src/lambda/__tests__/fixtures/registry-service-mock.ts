@@ -35,6 +35,7 @@ export function resetMockRegistry(): void {
   listResourceSummariesCallCount = 0;
   getResourceCallCounts.clear();
   updateResourceCallCount = 0;
+  updateResourceStatusCallCount = 0;
   deleteResourceCallCount = 0;
 }
 
@@ -63,6 +64,16 @@ export function getGetResourceCallCount(
 let updateResourceCallCount = 0;
 export function getUpdateResourceCallCount(): number {
   return updateResourceCallCount;
+}
+
+/**
+ * Test-visible call counter: total updateResourceStatus() invocations across
+ * all records, this test run. Used by the decision-paths guard test to
+ * assert exactly one status-only call on approve/reject.
+ */
+let updateResourceStatusCallCount = 0;
+export function getUpdateResourceStatusCallCount(): number {
+  return updateResourceStatusCallCount;
 }
 
 /**
@@ -230,6 +241,7 @@ export function getMockRegistryService() {
       status: RegistryRecordStatusValue,
       _statusReason?: string,
     ): Promise<RegistryRecord> {
+      updateResourceStatusCallCount += 1;
       const existing = records.get(`${type}:${id}`);
       if (!existing) throw new Error(`Record not found: ${type}:${id}`);
       const updated = { ...existing, status, updatedAt: new Date() };
