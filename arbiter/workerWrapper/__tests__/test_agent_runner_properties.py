@@ -170,17 +170,18 @@ class TestAgentRunnerMain:
 # ---------------------------------------------------------------------------
 # US-ARB-012a — GovernedToolHandler subprocess wiring (follow-up #9).
 #
-# agent_runner.main() MUST inject a GovernedToolHandler into every Strands
-# Agent constructed inside the loaded module when CITADEL_AGENT_ID is set
-# in the subprocess env. The injection is a monkey-patch of
-# ``strands.Agent.__init__`` installed BEFORE exec_module so every Agent()
-# call inside the generated code picks it up.
+# agent_runner.main() MUST inject governance/idempotency/breaker hooks into
+# every Strands Agent constructed inside the loaded module when
+# CITADEL_AGENT_ID is set in the subprocess env. The injection uses the
+# SDK's public ``hooks`` kwarg: a _GovernedAgent subclass is swapped into
+# ``strands.Agent`` BEFORE exec_module so every ``Agent(...)`` call in the
+# loaded code transparently receives the composed hook via ``super().__init__``.
 #
 # AC mapping:
-#   - env var CITADEL_AGENT_ID set    -> patch installed, handler injected
-#   - env var CITADEL_AGENT_ID unset  -> no patch, no injection (back-compat)
-#   - strands import fails            -> WARN-log, continue execution
-#   - Agent() explicit tool_handler   -> caller wins, no override
+#   - env var CITADEL_AGENT_ID set    -> subclass installed, hooks injected
+#   - env var CITADEL_AGENT_ID unset  -> no subclass, no injection (back-compat)
+#   - strands import fails            -> RAISE (fail-loud in envelope)
+#   - Agent() explicit hooks=         -> caller hooks preserved, ours appended
 #   - DENIED_TOOLS env var            -> flows through to handler.denied_tools
 #   - CITADEL_WORKFLOW_ID env var     -> flows through to handler.workflow_id
 # ---------------------------------------------------------------------------
@@ -200,12 +201,12 @@ class _FakeStrandsAgent:
 
 
 def _install_fake_strands(monkeypatch):
-    """Install a fake ``strands`` module so agent_runner can patch Agent.__init__.
+    """Install a fake ``strands`` module so agent_runner can swap ``Agent``.
 
-    A FRESH ``Agent`` subclass is handed out per call so the ``Agent.__init__``
-    monkeypatch installed by ``_install_tool_call_hooks`` (which mutates the
-    class object, not something monkeypatch auto-restores) never accumulates
-    across tests within this reused worker process."""
+    A FRESH ``Agent`` subclass is handed out per call so the ``Agent`` class
+    swap performed by ``_install_tool_call_hooks`` (which replaces
+    ``strands.Agent`` with a subclass) never accumulates across tests within
+    this reused worker process."""
     import types
 
     class _FreshAgent(_FakeStrandsAgent):
@@ -251,7 +252,7 @@ class TestAgentRunnerGovernanceInjection:
     """US-ARB-012a subprocess wiring — injection contract at agent_runner level."""
 
     def test_no_injection_when_citadel_agent_id_unset(self, monkeypatch):
-        """Backward-compat: with no CITADEL_AGENT_ID in env, no patch installed."""
+        """Backward-compat: with no CITADEL_AGENT_ID in env, no subclass installed."""
         monkeypatch.delenv("CITADEL_AGENT_ID", raising=False)
         monkeypatch.delenv("CITADEL_WORKFLOW_ID", raising=False)
         monkeypatch.delenv("DENIED_TOOLS", raising=False)
@@ -261,14 +262,14 @@ class TestAgentRunnerGovernanceInjection:
             "from strands import Agent\n"
             "def handler(**kwargs):\n"
             "    a = Agent(tools=[])\n"
-            "    return 'tool_handler=' + repr(a.tool_handler)\n"
+            "    return 'hooks=' + repr(a.kwargs.get('hooks'))\n"
         )
         captured = []
         _run_runner_with_module(module_src, {"x": "y"}, captured)
 
         assert len(captured) == 1
         parsed = json.loads(captured[0])
-        assert parsed["response"] == "tool_handler=None"
+        assert parsed["response"] == "hooks=None"
 
     def test_injection_when_citadel_agent_id_set(self, monkeypatch):
         """CITADEL_AGENT_ID set -> every Agent() in the loaded module gets the
@@ -516,11 +517,11 @@ class TestComposedInstallFailsLoud:
 
 
 class TestGovernanceInstallsOnHooksSeam:
-    def test_installs_via_hooks_on_seamless_agent(self, monkeypatch):
-        """strands 1.30.0's Agent.__init__ accepts ``hooks`` but NOT
-        ``tool_handler``. The re-ported installer must INSTALL (patch
-        Agent.__init__ to append the composed hook) — the opposite of the old
-        best-effort skip that left layer-2 inert (finding 027c4a89)."""
+    def test_installs_via_subclass_on_seamless_agent(self, monkeypatch):
+        """strands 1.30.0+'s Agent.__init__ accepts ``hooks``. The installer
+        must swap ``strands.Agent`` with a _GovernedAgent subclass that
+        appends the composed hook via the public ``hooks`` kwarg (finding
+        027c4a89). The original class's __init__ is untouched."""
         monkeypatch.setenv("CITADEL_AGENT_ID", "agent-1")
         monkeypatch.delenv("CITADEL_EXECUTION_ID", raising=False)
         monkeypatch.delenv("CITADEL_NODE_ID", raising=False)
@@ -536,11 +537,12 @@ class TestGovernanceInstallsOnHooksSeam:
         monkeypatch.setitem(sys.modules, "strands", fake_strands)
 
         agent_runner = _fresh_agent_runner()
-        original_init = _FakeAgent.__init__
         assert agent_runner._install_tool_call_hooks() is True
-        # The installer MUST have patched Agent.__init__.
-        assert _FakeAgent.__init__ is not original_init
-        # And the composed hook is appended to every constructed Agent.
-        a = _FakeAgent(tools=[])
+        # The installer MUST have swapped strands.Agent with a subclass.
+        assert fake_strands.Agent is not _FakeAgent
+        assert issubclass(fake_strands.Agent, _FakeAgent)
+        # And the composed hook is appended to every constructed Agent via
+        # the public hooks kwarg.
+        a = fake_strands.Agent(tools=[])
         assert isinstance(a.hooks, list) and len(a.hooks) == 1
         assert type(a.hooks[0]).__name__ == "ComposedToolHook"
