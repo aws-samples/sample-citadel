@@ -142,10 +142,18 @@ export function Tools() {
   const handleSubmitForReview = async (tool: ToolConfig) => {
     try {
       setError(null);
-      await toolConfigService.updateToolConfig({ toolId: tool.toolId, status: 'PENDING_APPROVAL' });
+      const result = await toolConfigService.updateToolConfig({ toolId: tool.toolId, status: 'PENDING_APPROVAL' });
+      // Optimistically update local state from the mutation result so the
+      // card renders "Awaiting approval" without requiring a full refresh.
+      setTools((prev) =>
+        prev.map((t) =>
+          t.toolId === tool.toolId
+            ? { ...t, registryStatus: result.registryStatus ?? 'PENDING_APPROVAL' }
+            : t,
+        ),
+      );
       setSubmitSuccessToolIds((prev) => new Set(prev).add(tool.toolId));
       toast.success('Submitted for review');
-      await loadTools();
     } catch (err: any) {
       toast.error(err.message || 'Failed to submit for review');
     }

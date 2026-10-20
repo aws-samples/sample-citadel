@@ -24,7 +24,7 @@ import { extractBindingBadges } from './tool-card-badge-helpers';
 import { ToolTestingSandbox } from './ToolTestingSandbox';
 import { ErrorBoundary } from './ErrorBoundary';
 import { useOrganization } from '../contexts/OrganizationContext';
-import { registryStatusLabel } from './registry-status-label';
+import { registryStatusLabel, TRANSIENT_STATUSES } from './registry-status-label';
 
 interface ToolCardProps {
   tool: ToolConfig;
@@ -102,6 +102,26 @@ export function ToolCard({ tool, onToggleState, onConfigure: _onConfigure, onSub
   // action can move them anywhere. Legacy 'inactive' stays reversible
   // (Activate). Mirrors AgentCard's isTerminalDeprecated.
   const isTerminalDeprecated = registryBacked && tool.state === 'inactive';
+
+  /**
+   * Transient statuses (UPDATING, CREATING) indicate the backend is
+   * performing an async operation. Controls must be disabled, and the
+   * parent page should short-poll until settled.
+   */
+  const isTransient = registryBacked && TRANSIENT_STATUSES.has(tool.registryStatus ?? '');
+
+  /**
+   * A status is "known" if registryStatusLabel maps it to a recognised
+   * human label that differs from the raw value (i.e. it is in the
+   * REGISTRY_STATUS_LABELS table). Unknown statuses get a neutral badge
+   * showing the raw value, with no lifecycle actions.
+   */
+  const KNOWN_STATUSES = new Set([
+    'DRAFT', 'PENDING_APPROVAL', 'PENDING_REVIEW', 'APPROVED',
+    'REJECTED', 'DEPRECATED', 'CREATING', 'UPDATING',
+    'CREATE_FAILED', 'UPDATE_FAILED', 'PUBLISHED',
+  ]);
+  const isUnknownStatus = registryBacked && !KNOWN_STATUSES.has(tool.registryStatus ?? '');
 
   const handleDeprecateConfirm = () => {
     setShowDeprecateConfirm(false);
@@ -245,7 +265,23 @@ export function ToolCard({ tool, onToggleState, onConfigure: _onConfigure, onSub
         
         <div className="flex gap-2 pt-2">
           {/* Lifecycle-aware action controls: render by registryStatus */}
-          {registryBacked && tool.registryStatus === 'DRAFT' ? (
+          {isTransient ? (
+            /* Transient (UPDATING / CREATING) → disabled indicator */
+            <Button
+              variant="outline"
+              size="sm"
+              className="flex-1 bg-transparent border-border text-muted-foreground"
+              disabled
+              data-testid="updating-button"
+            >
+              Updating…
+            </Button>
+          ) : isUnknownStatus ? (
+            /* Unknown status → neutral badge with raw value, no actions */
+            <Badge className="bg-muted/20 text-muted-foreground border-0" data-testid="unknown-status-badge">
+              {tool.registryStatus}
+            </Badge>
+          ) : registryBacked && tool.registryStatus === 'DRAFT' ? (
             /* DRAFT → Submit for review */
             submitSuccess ? (
               <Badge className="flex-1 bg-chart-2/20 text-chart-2 border-0 justify-center py-1.5">

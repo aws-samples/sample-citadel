@@ -1007,20 +1007,45 @@ export async function updateAgentConfigRegistry(
     }
 
     // Status transition succeeded — now write metadata, then re-fetch so the
-    // returned state reflects the post-SubmitForApproval record
-    // (PENDING_APPROVAL or APPROVED) rather than the stale DRAFT/UPDATING
-    // snapshot from updateResource.
-    const record = await registryService.updateResource(
-      "agent",
-      input.agentId,
-      {
-        name: (parsedNewConfig.name as string | undefined) || existing.name,
-        description: newConfig,
-        customMetadata: updatedMeta,
-      },
-    );
+    // returned state reflects the post-transition record.
+    //
+    // Exception: after submitForApproval (APPROVED path) with NO content fields
+    // in the input AND no governance attestation to persist, skip the
+    // UpdateRegistryRecord. The registry treats any content write as an edit
+    // and demotes PENDING_APPROVAL → DRAFT, defeating the submit. Non-submit
+    // transitions (e.g. DEPRECATED via updateResourceStatus) are safe because
+    // those statuses are not demoted by a content write.
+    const wasSubmit =
+      desiredRegistryStatus === RegistryRecordStatusValues.APPROVED;
+    const hasContentFields =
+      input.config !== undefined ||
+      input.categories !== undefined ||
+      input.icon !== undefined ||
+      input.appId !== undefined ||
+      input.tags !== undefined;
+    const hasPendingAttestation = importAttestationToPersist !== undefined;
+
+    if (!wasSubmit || hasContentFields || hasPendingAttestation) {
+      const record = await registryService.updateResource(
+        "agent",
+        input.agentId,
+        {
+          name: (parsedNewConfig.name as string | undefined) || existing.name,
+          description: newConfig,
+          customMetadata: updatedMeta,
+        },
+      );
+      const refreshed = await registryService.getResource(
+        "agent",
+        input.agentId,
+      );
+      return registryService.mapToAgentConfig(refreshed ?? record);
+    }
+
+    // Submit-only (no content, no attestation): re-fetch the post-submit
+    // record directly.
     const refreshed = await registryService.getResource("agent", input.agentId);
-    return registryService.mapToAgentConfig(refreshed ?? record);
+    return registryService.mapToAgentConfig(refreshed ?? existing);
   }
 
   const record = await registryService.updateResource("agent", input.agentId, {
