@@ -27,7 +27,7 @@ module.exports = {
     "<rootDir>/node_modules/",
   ],
   transform: {
-    "^.+\\.ts$": [
+    "^.+\\.(ts|js|mjs)$": [
       "ts-jest",
       {
         tsconfig: {
@@ -39,6 +39,8 @@ module.exports = {
       },
     ],
   },
+  // uuid v14 is ESM-only; allow ts-jest to transform it (same pattern as frontend)
+  transformIgnorePatterns: ["node_modules/(?!(uuid)[^/]*/)"],
   collectCoverageFrom: [
     "src/**/*.ts",
     "!src/**/*.d.ts",
