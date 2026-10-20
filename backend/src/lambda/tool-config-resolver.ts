@@ -1213,24 +1213,48 @@ async function listToolConfigs(event?: OrgScopedEvent): Promise<ToolConfig[]> {
   const result = await docClient.send(
     new ScanCommand({
       TableName: TOOLS_CONFIG_TABLE,
+      FilterExpression: "NOT begins_with(toolId, :p)",
+      ExpressionAttributeValues: { ":p": "decision#" },
     }),
   );
 
-  const items = (result.Items || []).map((item) => ({
-    toolId: item.toolId,
-    orgId: item.orgId || "",
-    // AWSJSON type expects a JSON string, so ensure it's stringified
-    config:
-      typeof item.config === "string"
-        ? item.config
-        : JSON.stringify(item.config),
-    state: item.state || "active",
-    categories: item.categories || [],
-    integrationBindings: sanitizeIntegrationBindings(item.integrationBindings),
-    dataStoreBindings: sanitizeDataStoreBindings(item.dataStoreBindings),
-    createdAt: item.createdAt,
-    updatedAt: item.updatedAt,
-  }));
+  const items: ToolConfig[] = [];
+  for (const item of result.Items || []) {
+    // Defensive: drop rows whose config cannot produce a valid AWSJSON
+    // string. Decision rows (toolId 'decision#<id>') are already excluded
+    // by the FilterExpression above, but other corrupt legacy rows may
+    // still lack a parsable config. Returning them with config=undefined
+    // would cause AppSync to null the element (config: AWSJSON! is
+    // non-nullable), crashing the Agent Tools page (#342).
+    let configStr: string;
+    try {
+      configStr =
+        typeof item.config === "string"
+          ? item.config
+          : JSON.stringify(item.config);
+      if (configStr === undefined || configStr === "undefined") {
+        throw new Error("undefined config");
+      }
+    } catch {
+      console.warn(
+        `listToolConfigs: dropping row with unparsable config, toolId=${item.toolId}`,
+      );
+      continue;
+    }
+    items.push({
+      toolId: item.toolId,
+      orgId: item.orgId || "",
+      config: configStr,
+      state: item.state || "active",
+      categories: item.categories || [],
+      integrationBindings: sanitizeIntegrationBindings(
+        item.integrationBindings,
+      ),
+      dataStoreBindings: sanitizeDataStoreBindings(item.dataStoreBindings),
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt,
+    });
+  }
 
   if (event === undefined) return items;
 
@@ -1259,6 +1283,11 @@ async function getToolConfig(
   toolId: string,
   event?: OrgScopedEvent,
 ): Promise<ToolConfig | null> {
+  // Reject decision-prefix lookups — these are side records, not tool configs.
+  if (toolId.startsWith("decision#")) {
+    return null;
+  }
+
   const result = await docClient.send(
     new GetCommand({
       TableName: TOOLS_CONFIG_TABLE,
