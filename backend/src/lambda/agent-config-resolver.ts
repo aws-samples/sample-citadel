@@ -500,6 +500,7 @@ export async function createAgentConfigRegistry(
       : JSON.stringify(parsedConfig);
 
   const customMetadata = registryService.serializeCustomMetadata({
+    citadelKind: "agent" as const,
     categories: input.categories || [],
     icon: input.icon || "",
     state: input.state || "active",

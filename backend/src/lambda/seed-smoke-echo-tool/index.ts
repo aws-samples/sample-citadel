@@ -307,6 +307,7 @@ async function upsertRegistryRecord(context: Context): Promise<RegistryResult> {
   // Create the record — include codeKey so the sandbox can resolve code by
   // the original upload key rather than the registry-assigned recordId.
   const metadata = JSON.stringify({
+    citadelKind: "tool" as const,
     toolId: TOOL_ID,
     orgId: ORG_ID,
     inputSchema: INPUT_SCHEMA,

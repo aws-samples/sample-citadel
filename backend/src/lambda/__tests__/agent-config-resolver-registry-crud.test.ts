@@ -167,6 +167,7 @@ describe("Registry-backed CRUD functions (task 6.4)", () => {
       );
 
       expect(mockSerializeCustomMetadata).toHaveBeenCalledWith({
+        citadelKind: "agent",
         categories: ["cat1"],
         icon: "icon.png",
         state: "active",

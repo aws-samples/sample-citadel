@@ -299,6 +299,7 @@ const SYSTEM_IMPORT_ADR_AUTHOR: AuthContext = {
 
 /** Imported-agent metadata: standard agent metadata plus the importer identity. */
 interface ImportedAgentMetadata extends AgentCustomMetadata {
+  citadelKind?: "agent" | "app" | "tool";
   createdBy: string;
 }
 
@@ -2809,6 +2810,7 @@ function buildImportedMetadata(args: {
   tags?: Record<string, string>;
 }): ImportedAgentMetadata {
   const meta: ImportedAgentMetadata = {
+    citadelKind: "agent" as const,
     categories: args.categories,
     icon: "",
     state: "inactive",

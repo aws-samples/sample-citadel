@@ -608,6 +608,7 @@ export async function createToolConfigRegistry(
     typeof input.config === "string" ? JSON.parse(input.config) : input.config;
 
   const customMetadata = registryService.serializeCustomMetadata({
+    citadelKind: "tool" as const,
     categories: input.categories || [],
     icon: input.icon || "",
     state: input.state || "active",
