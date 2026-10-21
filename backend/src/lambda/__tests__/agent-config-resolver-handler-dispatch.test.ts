@@ -133,7 +133,10 @@ const sampleRegistryRecord = {
   name: "RegistryAgent",
   description: '{"name":"RegistryAgent"}',
   status: "APPROVED",
-  customDescriptorContent: JSON.stringify({ orgId: "test-org-a" }),
+  customDescriptorContent: JSON.stringify({
+    orgId: "test-org-a",
+    citadelKind: "agent",
+  }),
   createdAt: new Date("2025-01-01T00:00:00Z"),
   updatedAt: new Date("2025-01-01T00:00:00Z"),
 };
@@ -429,6 +432,7 @@ describe("handler switch dispatch (task 6.5)", () => {
         ...sampleRegistryRecord,
         customDescriptorContent: JSON.stringify({
           orgId: "original-owner-org",
+          citadelKind: "agent",
         }),
       };
       mockGetResource.mockResolvedValue(ownedBySomeoneElse);
@@ -452,6 +456,7 @@ describe("handler switch dispatch (task 6.5)", () => {
         ...sampleRegistryRecord,
         customDescriptorContent: JSON.stringify({
           orgId: "original-owner-org",
+          citadelKind: "agent",
         }),
       };
       mockGetResource.mockResolvedValue(ownedBySomeoneElse);
@@ -474,12 +479,18 @@ describe("handler switch dispatch (task 6.5)", () => {
       const ourOrg = {
         ...sampleRegistryRecord,
         recordId: "agent-a",
-        customDescriptorContent: JSON.stringify({ orgId: "test-org-a" }),
+        customDescriptorContent: JSON.stringify({
+          orgId: "test-org-a",
+          citadelKind: "agent",
+        }),
       };
       const otherOrg = {
         ...sampleRegistryRecord,
         recordId: "agent-b",
-        customDescriptorContent: JSON.stringify({ orgId: "other-org" }),
+        customDescriptorContent: JSON.stringify({
+          orgId: "other-org",
+          citadelKind: "agent",
+        }),
       };
       mockListResources.mockResolvedValue([ourOrg, otherOrg]);
       dynamoMock.on(ScanCommand).resolves({ Items: [] });
@@ -495,12 +506,18 @@ describe("handler switch dispatch (task 6.5)", () => {
       const ourOrg = {
         ...sampleRegistryRecord,
         recordId: "agent-a",
-        customDescriptorContent: JSON.stringify({ orgId: "test-org-a" }),
+        customDescriptorContent: JSON.stringify({
+          orgId: "test-org-a",
+          citadelKind: "agent",
+        }),
       };
       const otherOrg = {
         ...sampleRegistryRecord,
         recordId: "agent-b",
-        customDescriptorContent: JSON.stringify({ orgId: "other-org" }),
+        customDescriptorContent: JSON.stringify({
+          orgId: "other-org",
+          citadelKind: "agent",
+        }),
       };
       mockListResources.mockResolvedValue([ourOrg, otherOrg]);
       dynamoMock.on(ScanCommand).resolves({ Items: [] });
@@ -527,7 +544,10 @@ describe("handler switch dispatch (task 6.5)", () => {
     test("(e) get: cross-org resource surfaces as Not found (null)", async () => {
       const otherOrgRecord = {
         ...sampleRegistryRecord,
-        customDescriptorContent: JSON.stringify({ orgId: "other-org" }),
+        customDescriptorContent: JSON.stringify({
+          orgId: "other-org",
+          citadelKind: "agent",
+        }),
       };
       mockGetResource.mockResolvedValue(otherOrgRecord);
       // DDB fallback should not matter because the Registry record is present.
@@ -544,7 +564,10 @@ describe("handler switch dispatch (task 6.5)", () => {
     test("(e) get: admin bypass returns cross-org resource", async () => {
       const otherOrgRecord = {
         ...sampleRegistryRecord,
-        customDescriptorContent: JSON.stringify({ orgId: "other-org" }),
+        customDescriptorContent: JSON.stringify({
+          orgId: "other-org",
+          citadelKind: "agent",
+        }),
       };
       mockGetResource.mockResolvedValue(otherOrgRecord);
 

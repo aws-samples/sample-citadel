@@ -101,7 +101,11 @@ const registryRecord = (
   name,
   status,
   description: JSON.stringify({ name }),
-  customDescriptorContent: JSON.stringify({ orgId, createdBy }),
+  customDescriptorContent: JSON.stringify({
+    orgId,
+    createdBy,
+    citadelKind: "agent",
+  }),
 });
 
 /** Event for a non-admin user with a specific role. */
@@ -310,6 +314,7 @@ describe("CIT-043 agent config visibility scoping", () => {
       customDescriptorContent: JSON.stringify({
         orgId: ORG_A,
         createdBy: USER_A,
+        citadelKind: "agent",
       }),
     });
 

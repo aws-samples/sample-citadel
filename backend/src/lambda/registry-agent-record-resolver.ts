@@ -108,6 +108,7 @@ import {
   APP_META_SORT_VALUE,
   type AppMetaRow,
 } from "../utils/apps-table-meta";
+import { resolveKind } from "../utils/citadel-kind";
 
 // ---------------------------------------------------------------------------
 // AgentApp-shape projection helpers (inlined from the deleted
@@ -1312,6 +1313,11 @@ async function getApp(
   if (!record) {
     return null;
   }
+  // Kind guard: only app records are returned by getApp.
+  const kind = resolveKind(record);
+  if (kind !== "app") {
+    return null;
+  }
   const projected = projectAgentApp(record);
 
   // Tenant gate — MUST run before any Cognito/agent-name enrichment (both of
@@ -2384,6 +2390,11 @@ export async function updateAgentBinding(
   userId: string,
   event?: unknown,
 ): Promise<unknown> {
+  // Guard 1: an app cannot be bound as its own agent.
+  if (input.agentId === input.appId) {
+    throw new Error("ValidationError: an app cannot be bound as its own agent");
+  }
+
   const record = await getRegistryService().getResource("agent", input.appId);
   if (!record) {
     throw new Error("App not found");
@@ -2391,6 +2402,28 @@ export async function updateAgentBinding(
   if (event !== undefined) {
     await assertManifestAccess(input.appId, record, event, "editor");
   }
+
+  // Guard 2: bound agent must actually be an agent record, not an app/tool.
+  let agentRecord: RegistryRecord | null = null;
+  try {
+    const targetRecordId = await getRegistryService().resolveRecordId(
+      "agent",
+      input.agentId,
+    );
+    agentRecord = await getRegistryService().getResource(
+      "agent",
+      targetRecordId,
+    );
+  } catch {
+    // Resolution failure — fall through; the kind check below handles it
+    // gracefully (null agentRecord → agentKind defaults to 'agent' from
+    // resolveKind(null), which is permissive for legacy/unresolvable agents).
+  }
+  const agentKind = resolveKind(agentRecord);
+  if (agentKind !== "agent") {
+    throw new Error("ValidationError: only agents can be bound to an app");
+  }
+
   const manifest = readManifest(record);
   const bindings = manifest.agentBindings || [];
   const idx = bindings.findIndex((b) => b.agentId === input.agentId);

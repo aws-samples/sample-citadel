@@ -167,7 +167,10 @@ function seedTargetAgent(
     // APPROVED maps to internal state 'active' — the READY gate derives the
     // agent's state from record.status (authoritative), not the descriptor.
     status: opts.status ?? "APPROVED",
-    customDescriptorContent: JSON.stringify({ state: opts.state ?? "active" }),
+    customDescriptorContent: JSON.stringify({
+      state: opts.state ?? "active",
+      citadelKind: "agent",
+    }),
   });
 }
 

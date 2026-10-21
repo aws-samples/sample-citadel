@@ -27,7 +27,8 @@ import { LifecycleManager, REGISTRY_TRANSITIONS } from "../adapters/lifecycle";
 import { ConnectorError } from "../adapters/errors";
 import type { Viewer } from "../utils/record-visibility";
 import { isRecordVisible } from "../utils/record-visibility";
-import { inferKindFromParsed } from "../utils/citadel-kind";
+import { resolveKind, inferKindFromParsed } from "../utils/citadel-kind";
+import type { CitadelKind } from "../utils/citadel-kind";
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -562,7 +563,7 @@ export interface ToolConfig {
  */
 export interface PendingApproval {
   recordId: string;
-  recordType: "agent" | "tool";
+  recordType: "agent" | "tool" | "app";
   name: string;
   displayName: string;
   orgId: string;
@@ -1417,19 +1418,20 @@ export class RegistryService {
           );
           const descriptorContent = detail.descriptors?.custom?.data;
           const meta = descriptorContent ? JSON.parse(descriptorContent) : {};
-          const inferredKind = inferKindFromParsed(meta);
-          const isAgentOrApp =
-            inferredKind === "agent" || inferredKind === "app";
+          const recordType = resolveKind({
+            customDescriptorContent: descriptorContent,
+            recordId: recId,
+          });
           outcomes[i] = {
             recordId: detail.recordId ?? recId,
-            recordType: isAgentOrApp ? "agent" : "tool",
+            recordType,
             name: detail.name ?? rec.name ?? "",
             displayName: detail.displayName ?? detail.name ?? rec.name ?? "",
             orgId: meta.orgId ?? "",
             submittedAt: detail.updatedAt?.toISOString(),
             createdBy: meta.createdBy,
             status: detail.status ?? rec.status ?? "",
-            version: isAgentOrApp
+            version: recordType !== "tool"
               ? (meta.manifest?.version ?? undefined)
               : undefined,
           };
@@ -2235,6 +2237,8 @@ export interface DecideRecordInput {
   reason?: string;
   decidedBy: string;
   expectedStatus: string;
+  /** Optional audit-trail discriminator so the decision row distinguishes agent/app/tool. */
+  citadelKind?: CitadelKind;
 }
 
 /**
@@ -2246,6 +2250,8 @@ export interface DecideRecordResult {
   decidedBy: string;
   decidedAt: string;
   statusReason: string;
+  /** Optional audit-trail discriminator persisted on the decision row. */
+  citadelKind?: CitadelKind;
 }
 
 /**
@@ -2306,5 +2312,6 @@ export async function decideRecord(
     decidedBy: input.decidedBy,
     decidedAt,
     statusReason,
+    ...(input.citadelKind ? { citadelKind: input.citadelKind } : {}),
   };
 }

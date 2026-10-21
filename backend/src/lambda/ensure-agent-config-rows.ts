@@ -28,6 +28,7 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import { buildAgentCacheRecord, toInternalState } from "./registry-sync";
 import { getRegistryService } from "./agent-config-resolver";
+import { resolveKind } from "../utils/citadel-kind";
 
 const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -147,6 +148,17 @@ export async function ensureAgentConfigRows(
         console.warn(
           `ensureAgentConfigRows: no registry record for "${agentId}"`,
         );
+        result.failed.push(agentId);
+        continue;
+      }
+      // Kind guard: only agent records should be materialised as agent
+      // cache rows. App/tool records are skipped with a WARN.
+      const kind = resolveKind(record);
+      if (kind !== "agent") {
+        console.warn(`ensureAgentConfigRows: skipping non-agent record`, {
+          agentId,
+          kind,
+        });
         result.failed.push(agentId);
         continue;
       }
