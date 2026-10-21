@@ -41,7 +41,12 @@ import type { AppSyncResolverHandler } from "aws-lambda";
 import { ORGLESS_CALLER_ORG as SENTINEL_ORGLESS_CALLER_ORG } from "./utils/org-sentinel";
 import { getGovernanceEnforce } from "../utils/governance-flag";
 import { assertRecordApprovedForAction } from "./record-approval-check";
-import { REGISTRY_STATUS_FIELD } from "./approval-cache-fields";
+import {
+  REGISTRY_STATUS_FIELD,
+  REGISTRY_RECORD_ID_FIELD,
+  STATUS_UPDATED_AT_FIELD,
+} from "./approval-cache-fields";
+import { syncNameKeyedRow } from "./registry-sync";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
@@ -49,6 +54,7 @@ import {
   BatchGetCommand,
   QueryCommand,
   ScanCommand,
+  UpdateCommand,
   type NativeAttributeValue,
   type QueryCommandOutput,
   type ScanCommandOutput,
@@ -1863,6 +1869,63 @@ async function updateApp(
     // tracks content edits. A failed decision (e.g. registry rejects the
     // transition) leaves no partial version drift.
     await updateAppMetaFields(APPS_TABLE, input.appId, metaPartial);
+
+    // Belt-and-braces: write the approval-cache fields directly to the
+    // agents table for BOTH the recordId-keyed row and the name-keyed row,
+    // so the dispatch gate sees the decision immediately without waiting
+    // for the EventBridge GA event to propagate through registry-sync.
+    if (AGENT_CONFIG_TABLE) {
+      const cacheNow = new Date().toISOString();
+      const cacheNames: Record<string, string> = {
+        "#agentId": "agentId",
+        "#registryStatus": REGISTRY_STATUS_FIELD,
+        "#statusUpdatedAt": STATUS_UPDATED_AT_FIELD,
+        "#registryRecordId": REGISTRY_RECORD_ID_FIELD,
+      };
+      const cacheValues: Record<string, unknown> = {
+        ":registryStatus": input.status,
+        ":statusUpdatedAt": cacheNow,
+        ":registryRecordId": input.appId,
+      };
+      const cacheExpr =
+        "SET #registryStatus = :registryStatus, #statusUpdatedAt = :statusUpdatedAt, #registryRecordId = :registryRecordId";
+
+      // Update the recordId-keyed row (conditional on existence).
+      try {
+        await getDocClient().send(
+          new UpdateCommand({
+            TableName: AGENT_CONFIG_TABLE,
+            Key: { agentId: input.appId },
+            ConditionExpression: "attribute_exists(#agentId)",
+            UpdateExpression: cacheExpr,
+            ExpressionAttributeNames: cacheNames,
+            ExpressionAttributeValues: cacheValues,
+          }),
+        );
+      } catch (err: unknown) {
+        if (!(
+          err instanceof Error && err.name === "ConditionalCheckFailedException"
+        )) {
+          console.error(
+            "decideRecord: failed to update recordId-keyed approval cache row:",
+            err,
+          );
+        }
+      }
+
+      // Update the name-keyed row via the shared helper.
+      const recordName = result.record.name ?? existingProjection.name;
+      await syncNameKeyedRow(
+        AGENT_CONFIG_TABLE,
+        input.appId,
+        {
+          name: typeof recordName === "string" ? recordName : undefined,
+          status: input.status,
+          recordId: input.appId,
+        },
+        callerUserId,
+      );
+    }
 
     // Re-fetch so the returned projection carries the post-transition status.
     const refreshed = await getRegistryService().getResource(

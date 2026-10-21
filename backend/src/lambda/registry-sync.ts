@@ -11,6 +11,7 @@ import {
   PutCommand,
   DeleteCommand,
   UpdateCommand,
+  GetCommand,
 } from "@aws-sdk/lib-dynamodb";
 import type {
   PutCommandInput,
@@ -732,6 +733,102 @@ function buildGaMergeFields(
   return fields;
 }
 
+// ---------------------------------------------------------------------------
+// Name-keyed row sync (approval-cache dual-key fix)
+// ---------------------------------------------------------------------------
+
+/**
+ * If a name-keyed agent row exists in the agents cache table AND differs
+ * from the registryRecordId, copies the registryStatus / statusUpdatedAt /
+ * decidedBy fields onto it so the dispatch gate — which reads by agent NAME
+ * — sees the current approval state rather than a stale DRAFT.
+ *
+ * Conditional on existence: NEVER creates a new name-keyed row. The row
+ * must already have been created during agent registration for this update
+ * to land.
+ */
+export async function syncNameKeyedRow(
+  tableName: string,
+  registryRecordId: string,
+  record: { name?: string; status?: string; recordId?: string },
+  decidedBy?: string,
+): Promise<void> {
+  const nameKey =
+    typeof record.name === "string" && record.name !== ""
+      ? record.name
+      : undefined;
+  if (!nameKey || nameKey === registryRecordId) return;
+
+  // Check if the name-keyed row exists
+  let existing: Record<string, unknown> | undefined;
+  try {
+    const result = await docClient.send(
+      new GetCommand({
+        TableName: tableName,
+        Key: { agentId: nameKey },
+        ProjectionExpression: "agentId",
+      }),
+    );
+    existing = result.Item as Record<string, unknown> | undefined;
+  } catch (err) {
+    console.error(
+      `syncNameKeyedRow: GetItem for name-key "${nameKey}" failed:`,
+      err,
+    );
+    return;
+  }
+  if (!existing) return;
+
+  const now = new Date().toISOString();
+  const names: Record<string, string> = {
+    "#agentId": "agentId",
+    "#registryStatus": "registryStatus",
+    "#statusUpdatedAt": "statusUpdatedAt",
+    "#registryRecordId": "registryRecordId",
+  };
+  const values: Record<string, unknown> = {
+    ":registryStatus": record.status,
+    ":statusUpdatedAt": now,
+    ":registryRecordId": registryRecordId,
+  };
+  let updateExpr =
+    "SET #registryStatus = :registryStatus, #statusUpdatedAt = :statusUpdatedAt, #registryRecordId = :registryRecordId";
+
+  if (decidedBy !== undefined) {
+    names["#decidedBy"] = "decidedBy";
+    values[":decidedBy"] = decidedBy;
+    updateExpr += ", #decidedBy = :decidedBy";
+  }
+
+  try {
+    await docClient.send(
+      new UpdateCommand({
+        TableName: tableName,
+        Key: { agentId: nameKey },
+        ConditionExpression: "attribute_exists(#agentId)",
+        UpdateExpression: updateExpr,
+        ExpressionAttributeNames: names,
+        ExpressionAttributeValues: values,
+      }),
+    );
+    console.log(
+      `syncNameKeyedRow: updated name-key "${nameKey}" with registryStatus=${record.status} from recordId="${registryRecordId}"`,
+    );
+  } catch (err: unknown) {
+    if (
+      err instanceof Error &&
+      err.name === "ConditionalCheckFailedException"
+    ) {
+      // Row was deleted between Get and Update — benign race.
+      return;
+    }
+    console.error(
+      `syncNameKeyedRow: UpdateItem for name-key "${nameKey}" failed:`,
+      err,
+    );
+  }
+}
+
 /**
  * GA upsert — MERGE semantics via UpdateCommand. Only SETs fields derived
  * from the hydrated record; never REMOVEs or overwrites attributes with no
@@ -1128,6 +1225,13 @@ async function handleGaEvent(event: RegistryEvent): Promise<void> {
     console.log(
       `Cache merge-upsert for ${resourceType} "${registryRecordId}" in ${tableName} (GA event)`,
     );
+
+    // Dual-key fix: if an agent's name differs from its registryRecordId
+    // and a name-keyed row exists, propagate approval fields to it so the
+    // dispatch gate (which reads by name) sees the current status.
+    if (resourceType === "agent") {
+      await syncNameKeyedRow(tableName, registryRecordId, record);
+    }
   } catch (err: unknown) {
     if (
       err instanceof Error &&
