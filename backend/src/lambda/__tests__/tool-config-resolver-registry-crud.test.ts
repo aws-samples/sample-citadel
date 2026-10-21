@@ -360,6 +360,7 @@ describe("Registry-backed CRUD functions (tasks 7.2–7.6)", () => {
       // createdBy (defaulted to 'unknown' when no caller id is threaded) and
       // orgId sourced from the JWT claim.
       expect(mockSerializeCustomMetadata).toHaveBeenCalledWith({
+        citadelKind: "tool",
         categories: ["cat1"],
         icon: "icon.png",
         state: "active",

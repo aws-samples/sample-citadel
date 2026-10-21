@@ -669,6 +669,7 @@ interface AgentAppManifest {
 }
 
 interface CustomDescriptor extends AgentAppManifest {
+  citadelKind?: "agent" | "app" | "tool";
   manifest?: AgentAppManifest;
   appId?: string;
   categories?: string[];
@@ -1671,6 +1672,7 @@ export async function createApp(
     }),
   };
   const descriptor: CustomDescriptor = {
+    citadelKind: "app" as const,
     ...(skeleton.customDescriptorContent
       ? (JSON.parse(skeleton.customDescriptorContent) as CustomDescriptor)
       : {}),
