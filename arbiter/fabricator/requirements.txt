@@ -1,4 +1,7 @@
 strands-agents==1.61.1
 strands-agents-tools==0.8.9
+# Security floors for transitive dependencies; remove when strands-agents / strands-agents-tools require them directly.
+mcp==1.30.0  # CVE-2026-59951 — SSRF via MCP, patched in 1.30.0 (strands-agents caps mcp<2.0.0)
+pillow==12.3.0  # Security floor — best available within strands-agents-tools<13.0.0 cap; 8 CVEs (CVE-2026-1128xx) remain upstream-blocked until cap lifts
 boto3==1.43.116
 aws-xray-sdk==2.15.0
