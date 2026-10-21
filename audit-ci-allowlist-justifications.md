@@ -177,3 +177,33 @@ features used in the project). No 0.5.x release of `@tailwindcss/typography` shi
 **Recommended follow-ups:**
 1. Check for `@tailwindcss/typography` releases with `postcss-selector-parser >=7.1.6`.
 2. When available, bump `@tailwindcss/typography` and remove this allowlist entry.
+
+## Python — pillow 12.3.0 (8 CVEs capped by strands-agents-tools <13)
+
+**Added: 2026-10-21** | **revisitBy: 2026-11-21**
+
+**Affected IDs:**
+
+| CVE | Package | Installed | Fix | Severity |
+|-----|---------|-----------|-----|----------|
+| CVE-2026-112395 | pillow | 12.3.0 | 13.0.0 | — |
+| CVE-2026-112397 | pillow | 12.3.0 | 13.0.0 | — |
+| CVE-2026-112400 | pillow | 12.3.0 | 13.0.0 | — |
+| CVE-2026-112404 | pillow | 12.3.0 | 13.0.0 | — |
+| CVE-2026-112895 | pillow | 12.3.0 | 13.0.0 | — |
+| CVE-2026-112896 | pillow | 12.3.0 | 13.0.0 | — |
+| CVE-2026-112897 | pillow | 12.3.0 | 13.0.0 | — |
+| CVE-2026-112899 | pillow | 12.3.0 | 13.0.0 | — |
+
+**Upstream constraint:** `strands-agents-tools==0.8.9` declares `pillow<13.0.0`. Pillow 12.3.0 is the highest version satisfying that cap. All 8 CVEs are fixed in Pillow 13.0.0, which is unreachable until the upstream cap lifts.
+
+**Affected requirements files:** `arbiter/workerWrapper/requirements.txt`, `arbiter/fabricator/requirements.txt`. (Removed from `arbiter/stepRunner/requirements.txt` and `arbiter/activator/requirements.txt` — those lambdas never import `strands-agents-tools`.)
+
+**Exposure:** Pillow is not imported by any Citadel code. It is only pulled in as a transitive dependency of `strands-agents-tools`. It would only be loaded at runtime if a fabricated or uploaded agent uses an image-processing tool from the strands tools library. No Citadel-authored agent exercises image tools.
+
+**Risk acceptance:** The pillow CVEs are not exploitable in the current deployment because the library is never loaded. Even if a fabricated agent triggered an image tool, the Lambda execution environment is sandboxed with scoped IAM credentials.
+
+**Recommended follow-ups:**
+1. Check for a `strands-agents-tools` release that raises the pillow cap to `>=13.0.0`.
+2. When available, bump pillow and remove the `--ignore-vuln` flags from `.github/workflows/advisory-scan.yml`.
+3. Re-run `pip-audit` to confirm all 8 CVEs clear.
