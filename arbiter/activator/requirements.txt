@@ -3,4 +3,4 @@ aws-xray-sdk==2.15.0
 strands-agents==1.59.0
 strands-agents-tools==0.8.9
 # CVE-2026-59951 security floor for transitive dep; remove when strands requires >=1.30
-mcp==1.30.0
+mcp==2.3.0
