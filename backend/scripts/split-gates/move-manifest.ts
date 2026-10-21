@@ -2245,6 +2245,49 @@ export const ALLOWED_SATELLITE_ADDED_STATEMENTS: Record<
       ],
       conditionKeys: [],
     },
+    // PR-349 approval-cache write fix: grantReadWriteData on agentConfigTable
+    // (was grantReadData) so the decideRecord belt-and-braces path can write
+    // approval-cache fields. CDK merges the three grantReadWriteData calls
+    // (apps + workflows + agentConfig) into one statement with the union of
+    // their ARNs; the baseline had agentConfig as read-only, so the merged
+    // R/W statement is not covered. Confirmed via `cdk synth + npm run
+    // split:gates`, not hand-typed.
+    {
+      effect: "Allow",
+      actions: [
+        "dynamodb:BatchGetItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable",
+        "dynamodb:GetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:PutItem",
+        "dynamodb:Query",
+        "dynamodb:Scan",
+        "dynamodb:UpdateItem",
+      ],
+      resources: [
+        "GETATT:AgentConfigTableE9BDF3BA:Arn",
+        "GETATT:AppsTable172E1E77:Arn",
+        "GETATT:WorkflowsTable4E215008:Arn",
+        "JOIN::GETATT:AppsTable172E1E77:Arn/index/*",
+        "JOIN::GETATT:WorkflowsTable4E215008:Arn/index/*",
+      ],
+      conditionKeys: [],
+    },
+    // PR-349 ApprovalCacheWriteFailed metric: cloudwatch:PutMetricData scoped
+    // to the Citadel/Registry namespace via condition key. CDK emits the
+    // condition as part of the statement but rail 6 normalizes conditions
+    // away (conditionKeys: []), so the wildcard resource + action is what
+    // needs covering here.
+    {
+      effect: "Allow",
+      actions: ["cloudwatch:PutMetricData"],
+      resources: ["*"],
+      conditionKeys: [],
+    },
   ],
   RegistrySyncLambdaC145524B: [
     {
