@@ -79,10 +79,26 @@ jobs:
       - name: Audit arbiter requirements files
         run: |
           set -euo pipefail
+
+          # Pillow 12.3.0 is the highest version within strands-agents-tools' <13
+          # cap.  All 8 CVEs are fixed in Pillow 13.0.0, which is unreachable until
+          # the upstream cap lifts.  See audit-ci-allowlist-justifications.md
+          # (Python / pillow section) for full justification and revisitBy date.
+          PILLOW_IGNORES=(
+            --ignore-vuln CVE-2026-112395
+            --ignore-vuln CVE-2026-112397
+            --ignore-vuln CVE-2026-112400
+            --ignore-vuln CVE-2026-112404
+            --ignore-vuln CVE-2026-112895
+            --ignore-vuln CVE-2026-112896
+            --ignore-vuln CVE-2026-112897
+            --ignore-vuln CVE-2026-112899
+          )
+
           failed=0
           while IFS= read -r -d '' f; do
             echo "::group::pip-audit $f"
-            pip-audit -r "$f" --no-deps || failed=1
+            pip-audit -r "$f" --no-deps "${PILLOW_IGNORES[@]}" || failed=1
             echo "::endgroup::"
           done < <(find arbiter -name 'requirements*.txt' -not -path '*/.hypothesis/*' -print0)
           exit $failed
