@@ -64,6 +64,10 @@ import {
   PutEventsCommand,
 } from "@aws-sdk/client-eventbridge";
 import {
+  CloudWatchClient,
+  PutMetricDataCommand,
+} from "@aws-sdk/client-cloudwatch";
+import {
   CognitoIdentityProviderClient,
   AdminGetUserCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
@@ -409,6 +413,41 @@ function getCognitoClient(): CognitoIdentityProviderClient {
     _cognitoClient = new CognitoIdentityProviderClient({});
   }
   return _cognitoClient;
+}
+
+let _cloudwatchClient: CloudWatchClient | undefined;
+function getCloudWatchClient(): CloudWatchClient {
+  if (!_cloudwatchClient) {
+    _cloudwatchClient = new CloudWatchClient({});
+  }
+  return _cloudwatchClient;
+}
+
+/**
+ * Emit the ApprovalCacheWriteFailed CloudWatch metric. Best-effort; a metric
+ * emission failure is logged but never throws — the registry decision already
+ * succeeded and must not be disrupted by an observability side-effect.
+ */
+async function emitCacheWriteFailedMetric(): Promise<void> {
+  try {
+    await getCloudWatchClient().send(
+      new PutMetricDataCommand({
+        Namespace: "Citadel/Registry",
+        MetricData: [
+          {
+            MetricName: "ApprovalCacheWriteFailed",
+            Value: 1,
+            Unit: "Count",
+            Timestamp: new Date(),
+          },
+        ],
+      }),
+    );
+  } catch (metricErr) {
+    console.error("emitCacheWriteFailedMetric: PutMetricData failed", {
+      error: metricErr instanceof Error ? metricErr.message : String(metricErr),
+    });
+  }
 }
 
 /**
@@ -1874,6 +1913,7 @@ async function updateApp(
     // agents table for BOTH the recordId-keyed row and the name-keyed row,
     // so the dispatch gate sees the decision immediately without waiting
     // for the EventBridge GA event to propagate through registry-sync.
+    let approvalCacheWriteFailed = false;
     if (AGENT_CONFIG_TABLE) {
       const cacheNow = new Date().toISOString();
       const cacheNames: Record<string, string> = {
@@ -1903,28 +1943,52 @@ async function updateApp(
           }),
         );
       } catch (err: unknown) {
-        if (!(
-          err instanceof Error && err.name === "ConditionalCheckFailedException"
-        )) {
+        if (
+          err instanceof Error &&
+          err.name === "ConditionalCheckFailedException"
+        ) {
+          // Row doesn't exist yet — expected for newly-created records; not
+          // an error. The EventBridge GA event path will create it.
+        } else {
+          approvalCacheWriteFailed = true;
           console.error(
-            "decideRecord: failed to update recordId-keyed approval cache row:",
-            err,
+            "decideRecord: failed to update recordId-keyed approval cache row",
+            {
+              appId: input.appId,
+              table: AGENT_CONFIG_TABLE,
+              error: err instanceof Error ? err.message : String(err),
+              errorName: err instanceof Error ? err.name : undefined,
+            },
           );
+          await emitCacheWriteFailedMetric();
         }
       }
 
       // Update the name-keyed row via the shared helper.
-      const recordName = result.record.name ?? existingProjection.name;
-      await syncNameKeyedRow(
-        AGENT_CONFIG_TABLE,
-        input.appId,
-        {
-          name: typeof recordName === "string" ? recordName : undefined,
-          status: input.status,
-          recordId: input.appId,
-        },
-        callerUserId,
-      );
+      try {
+        const recordName = result.record.name ?? existingProjection.name;
+        await syncNameKeyedRow(
+          AGENT_CONFIG_TABLE,
+          input.appId,
+          {
+            name: typeof recordName === "string" ? recordName : undefined,
+            status: input.status,
+            recordId: input.appId,
+          },
+          callerUserId,
+        );
+      } catch (nameErr: unknown) {
+        approvalCacheWriteFailed = true;
+        console.error(
+          "decideRecord: failed to update name-keyed approval cache row",
+          {
+            appId: input.appId,
+            table: AGENT_CONFIG_TABLE,
+            error: nameErr instanceof Error ? nameErr.message : String(nameErr),
+          },
+        );
+        await emitCacheWriteFailedMetric();
+      }
     }
 
     // Re-fetch so the returned projection carries the post-transition status.
@@ -1976,6 +2040,12 @@ async function updateApp(
       result.decidedBy;
     (projected as unknown as Record<string, unknown>).statusReason =
       result.statusReason || null;
+    if (approvalCacheWriteFailed) {
+      (
+        projected as unknown as Record<string, unknown>
+      ).approvalCacheWriteWarning =
+        "Approval cache update failed; dispatch gate may see stale status until the EventBridge sync propagates.";
+    }
     return projected;
   }
 

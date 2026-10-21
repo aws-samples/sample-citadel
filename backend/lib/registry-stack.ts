@@ -1070,7 +1070,12 @@ export class RegistryStack extends cdk.Stack {
     props.workflowsTable.grantReadWriteData(
       registryAgentRecordResolverFunction,
     );
-    props.agentConfigTable.grantReadData(registryAgentRecordResolverFunction);
+    // grantReadWriteData: the decideRecord belt-and-braces path writes
+    // approval-cache fields (registryStatus, statusUpdatedAt) to the agents
+    // table via UpdateCommand. grantReadData alone caused silent failures.
+    props.agentConfigTable.grantReadWriteData(
+      registryAgentRecordResolverFunction,
+    );
     props.modelCatalogTable.grantReadData(registryAgentRecordResolverFunction);
     props.agentEventBus.grantPutEventsTo(registryAgentRecordResolverFunction);
     registryAgentRecordResolverFunction.addToRolePolicy(
@@ -1139,6 +1144,20 @@ export class RegistryStack extends cdk.Stack {
           "agent-registry:ListRegistryRecords",
         ],
         resources: [registryArn, `${registryArn}/*`],
+      }),
+    );
+    // ApprovalCacheWriteFailed metric emission from the decideRecord
+    // belt-and-braces path.
+    registryAgentRecordResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["cloudwatch:PutMetricData"],
+        resources: ["*"],
+        conditions: {
+          StringEquals: {
+            "cloudwatch:namespace": "Citadel/Registry",
+          },
+        },
       }),
     );
 
