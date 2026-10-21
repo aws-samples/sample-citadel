@@ -1,4 +1,4 @@
-strands-agents==1.59.0
+strands-agents==1.61.1
 strands-agents-tools==0.8.9
 # boto3 and aws-xray-sdk are intentionally NOT listed here — they are provided
 # by the shared common layer (arbiter/layers/common/requirements.txt) at
