@@ -725,6 +725,8 @@ input UpdateModelConfigInput {
 type AgentConfig {
   agentId: String!
   name: String
+  # Human-readable description surfaced from the Registry record.
+  description: String
   orgId: String!
   config: AWSJSON!
   state: AgentState!

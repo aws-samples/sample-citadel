@@ -157,14 +157,24 @@ function budgetOptionsFrom(
 
 interface AgentConfig {
   agentId: string;
+  /** Human-readable agent name (Registry top-level or legacy config.name). */
+  name?: string;
   orgId: string;
   config: string | Record<string, unknown>;
+  /** Human-readable description surfaced from the Registry record. */
+  description?: string;
   state: "active" | "inactive" | "maintenance" | "pending" | string;
   categories?: string[] | string;
   createdAt?: string;
   updatedAt?: string;
   /** Raw Registry status (CIT-043 visibility filtering). */
   registryStatus?: string;
+  /**
+   * Back-pointer to the Registry recordId carried on DynamoDB cache rows
+   * that mirror a registry record (set by syncNameKeyedRow). Absent on
+   * true legacy rows and on registry-mapped rows.
+   */
+  registryRecordId?: string;
   /** AppSync caller identity who created this record (CIT-043 ownership). */
   createdBy?: string;
   /** Admin who approved/rejected this record. Absent on legacy records. */
@@ -439,12 +449,13 @@ export async function listAgentConfigsRegistry(
     });
   });
 
-  // 3. Build set of names from Registry (Registry wins on duplicates).
-  //    Post-420d0ae, registryConfigs[].agentId is a 12-char recordId while
-  //    dynamoConfigs[].agentId is still the legacy name. Dedupe by the
-  //    `name` field inside the config payload — the stable human
-  //    identifier shared by both representations. Guard against
-  //    unparseable/missing names so we don't over-filter.
+  // 3. Build dedup sets from Registry so the merge step can identify
+  //    DynamoDB cache rows that duplicate registry records. Three signals:
+  //    (a) config-payload name (the stable human identifier shared by both
+  //        representations), (b) registry recordId (12-char IDs that may
+  //        appear as agentId on cache rows written by registry-sync), and
+  //    (c) registryRecordId back-pointer on name-keyed cache rows written
+  //        by syncNameKeyedRow.
   const extractName = (c: AgentConfig): string | undefined => {
     if (!c.config) return undefined;
     try {
@@ -461,11 +472,33 @@ export async function listAgentConfigsRegistry(
       .map(extractName)
       .filter((n): n is string => typeof n === "string" && n.length > 0),
   );
+  const registryRecordIds = new Set(registryConfigs.map((c) => c.agentId));
 
-  // 4. Filter DynamoDB records to exclude duplicates
+  // 4. Filter DynamoDB records to genuinely-legacy rows only.
+  //    A cache row is NOT legacy if:
+  //    - its agentId equals a registry recordId (recordId-keyed mirror), OR
+  //    - it carries a registryRecordId back-pointer (name-keyed mirror), OR
+  //    - its config-payload name matches a registry agent's name.
+  //    Dedup by agentId AND by name to prevent any remaining duplicates.
+  const seenAgentIds = new Set<string>();
+  const seenNames = new Set<string>();
   const legacyOnly = dynamoConfigs.filter((c) => {
+    // Skip recordId-keyed mirror rows.
+    if (registryRecordIds.has(c.agentId)) return false;
+    // Skip name-keyed rows that back-point to a registry record.
+    if (c.registryRecordId) return false;
+    // Skip rows whose config name matches a registry agent.
     const n = extractName(c);
-    return !n || !registryNames.has(n);
+    if (n && registryNames.has(n)) return false;
+    // Dedup within legacy results by agentId.
+    if (seenAgentIds.has(c.agentId)) return false;
+    seenAgentIds.add(c.agentId);
+    // Dedup within legacy results by name.
+    if (n) {
+      if (seenNames.has(n)) return false;
+      seenNames.add(n);
+    }
+    return true;
   });
 
   // 5. Return merged list
@@ -1442,12 +1475,21 @@ async function listAgentConfigs(): Promise<AgentConfig[]> {
 
   return (result.Items || []).map((item) => ({
     agentId: item.agentId,
+    name: typeof item.name === "string" ? item.name : undefined,
     orgId: item.orgId || "",
     config: toAwsJsonConfig(item.config, item.agentId),
     state: item.state || "active",
     categories: item.categories || [],
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
+    // Surface registry back-pointer so the merge step can detect cache
+    // rows that mirror a registry record (set by syncNameKeyedRow).
+    registryRecordId:
+      typeof item.registryRecordId === "string"
+        ? item.registryRecordId
+        : undefined,
+    registryStatus:
+      typeof item.registryStatus === "string" ? item.registryStatus : undefined,
   }));
 }
 
