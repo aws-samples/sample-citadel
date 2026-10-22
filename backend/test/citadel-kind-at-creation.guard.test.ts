@@ -18,6 +18,7 @@ import * as path from "path";
 import {
   extractCitadelKind,
   inferKindFromShape,
+  inferKindFromParsed,
   resolveKind,
 } from "../src/utils/citadel-kind";
 import {
@@ -184,31 +185,107 @@ describe("citadel-kind-at-creation guard", () => {
     });
 
     describe("inferKindFromShape", () => {
-      it("infers app when manifest is present", () => {
+      // ---------------------------------------------------------------
+      // Real-shape fixtures matching live descriptor structures
+      // ---------------------------------------------------------------
+
+      /** APP: top-level appId, manifest with agentBindings/access/workflowIds */
+      const APP_DESCRIPTOR = {
+        appId: "app-001",
+        manifest: {
+          agentBindings: [{ agentId: "a1", role: "worker" }],
+          access: { public: false },
+          workflowIds: ["wf-1"],
+          permissions: ["read", "write"],
+          routingConfig: { default: "a1" },
+        },
+        orgId: "org-1",
+      };
+
+      /** AGENT: top-level config + sourceProjectId, manifest with name/description/version/tools */
+      const AGENT_DESCRIPTOR = {
+        config: { runtime: "python3.12", handler: "index.handler" },
+        sourceProjectId: "proj-42",
+        manifest: {
+          name: "my-agent",
+          description: "Does stuff",
+          version: 3,
+          tools: ["tool-a", "tool-b"],
+        },
+        orgId: "org-1",
+      };
+
+      /** TOOL: no manifest at all */
+      const TOOL_DESCRIPTOR = {
+        categories: ["nlp"],
+        config: "{}",
+      };
+
+      /** AGENT with decision/governance fields — still an agent, not an app */
+      const AGENT_WITH_DECISIONS_DESCRIPTOR = {
+        config: { runtime: "nodejs22.x" },
+        sourceProjectId: "proj-99",
+        manifest: {
+          name: "governance-agent",
+          description: "Runs governance checks",
+          version: 1,
+          tools: ["checker"],
+        },
+        decisions: [{ adrId: "ADR-001", status: "accepted" }],
+        orgId: "org-1",
+      };
+
+      it("classifies real-shape app descriptor as app", () => {
         expect(
           inferKindFromShape({
-            customDescriptorContent: JSON.stringify({
-              manifest: { version: 1 },
-            }),
+            customDescriptorContent: JSON.stringify(APP_DESCRIPTOR),
           }),
         ).toBe("app");
       });
 
-      it("infers agent when no manifest", () => {
+      it("classifies real-shape agent descriptor as agent (NOT app)", () => {
+        const result = inferKindFromShape({
+          customDescriptorContent: JSON.stringify(AGENT_DESCRIPTOR),
+        });
+        expect(result).toBe("agent");
+        // Explicitly verify the old rule would have misclassified this:
+        // the old rule was: has manifest → app. Agent has a manifest.
+        expect(AGENT_DESCRIPTOR.manifest).toBeDefined();
+      });
+
+      it("classifies real-shape tool descriptor as tool via resourceType", () => {
+        expect(
+          inferKindFromShape(
+            { customDescriptorContent: JSON.stringify(TOOL_DESCRIPTOR) },
+            "tool",
+          ),
+        ).toBe("tool");
+      });
+
+      it("classifies agent-with-decisions descriptor as agent", () => {
         expect(
           inferKindFromShape({
-            customDescriptorContent: JSON.stringify({ categories: [] }),
+            customDescriptorContent: JSON.stringify(
+              AGENT_WITH_DECISIONS_DESCRIPTOR,
+            ),
           }),
         ).toBe("agent");
       });
 
-      it("infers tool when resourceType is tool", () => {
+      it("old manifest-only rule would misclassify agent as app", () => {
+        // This test documents the bug we're fixing: the old rule treated
+        // any record with a manifest as an app.
+        const parsed = AGENT_DESCRIPTOR;
+        const oldRule =
+          "manifest" in parsed && parsed.manifest !== undefined
+            ? "app"
+            : "agent";
+        expect(oldRule).toBe("app"); // old rule: WRONG
         expect(
-          inferKindFromShape(
-            { customDescriptorContent: JSON.stringify({}) },
-            "tool",
-          ),
-        ).toBe("tool");
+          inferKindFromShape({
+            customDescriptorContent: JSON.stringify(parsed),
+          }),
+        ).toBe("agent"); // new rule: CORRECT
       });
 
       it("returns agent for malformed JSON", () => {
@@ -221,6 +298,49 @@ describe("citadel-kind-at-creation guard", () => {
         expect(inferKindFromShape({ customDescriptorContent: null })).toBe(
           "agent",
         );
+      });
+    });
+
+    describe("inferKindFromParsed", () => {
+      it("returns app when manifest has agentBindings", () => {
+        expect(
+          inferKindFromParsed({
+            manifest: { agentBindings: [] },
+          }),
+        ).toBe("app");
+      });
+
+      it("returns app when appId is present", () => {
+        expect(
+          inferKindFromParsed({
+            appId: "app-1",
+            manifest: { name: "x" },
+          }),
+        ).toBe("app");
+      });
+
+      it("returns app when manifest has access", () => {
+        expect(
+          inferKindFromParsed({
+            manifest: { access: { public: true } },
+          }),
+        ).toBe("app");
+      });
+
+      it("returns agent when manifest has only name/description/version/tools", () => {
+        expect(
+          inferKindFromParsed({
+            manifest: { name: "a", description: "b", version: 1, tools: [] },
+          }),
+        ).toBe("agent");
+      });
+
+      it("returns tool when no manifest and no appId", () => {
+        expect(inferKindFromParsed({ categories: [] })).toBe("tool");
+      });
+
+      it("returns tool when manifest is null", () => {
+        expect(inferKindFromParsed({ manifest: null })).toBe("tool");
       });
     });
 
@@ -242,7 +362,8 @@ describe("citadel-kind-at-creation guard", () => {
         const warnSpy = jest.spyOn(console, "warn").mockImplementation();
         const result = resolveKind({
           customDescriptorContent: JSON.stringify({
-            manifest: { version: 1 },
+            appId: "app-1",
+            manifest: { agentBindings: [], version: 1 },
           }),
           recordId: "r2",
         });
@@ -372,7 +493,15 @@ describe("citadel-kind-at-creation guard", () => {
         recordId: "agent-1",
         name: "Agent",
         status: "DRAFT",
-        customDescriptorContent: JSON.stringify({ categories: [] }),
+        customDescriptorContent: JSON.stringify({
+          config: { runtime: "python3.12" },
+          manifest: {
+            name: "my-agent",
+            description: "desc",
+            version: 1,
+            tools: [],
+          },
+        }),
       };
       await processRecord(record, "agent", fakeRegistry, true, summary);
       expect(summary.tagged).toBe(1);
@@ -388,7 +517,8 @@ describe("citadel-kind-at-creation guard", () => {
         name: "App",
         status: "DRAFT",
         customDescriptorContent: JSON.stringify({
-          manifest: { version: 1 },
+          appId: "app-1",
+          manifest: { agentBindings: [], version: 1 },
         }),
       };
       await processRecord(record, "agent", fakeRegistry, true, summary);
@@ -417,7 +547,15 @@ describe("citadel-kind-at-creation guard", () => {
         recordId: "approved-1",
         name: "Approved Agent",
         status: "APPROVED",
-        customDescriptorContent: JSON.stringify({ categories: [] }),
+        customDescriptorContent: JSON.stringify({
+          config: { runtime: "python3.12" },
+          manifest: {
+            name: "approved-agent",
+            description: "desc",
+            version: 1,
+            tools: [],
+          },
+        }),
       };
       await processRecord(record, "agent", fakeRegistry, true, summary);
       expect(summary.skippedNonDraft).toBe(1);
@@ -435,7 +573,8 @@ describe("citadel-kind-at-creation guard", () => {
         name: "Pending App",
         status: "PENDING_APPROVAL",
         customDescriptorContent: JSON.stringify({
-          manifest: { version: 1 },
+          appId: "pending-app",
+          manifest: { agentBindings: [], version: 1 },
         }),
       };
       await processRecord(record, "agent", fakeRegistry, true, summary);

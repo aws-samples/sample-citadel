@@ -27,6 +27,7 @@ import { LifecycleManager, REGISTRY_TRANSITIONS } from "../adapters/lifecycle";
 import { ConnectorError } from "../adapters/errors";
 import type { Viewer } from "../utils/record-visibility";
 import { isRecordVisible } from "../utils/record-visibility";
+import { inferKindFromParsed } from "../utils/citadel-kind";
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -893,13 +894,14 @@ export class RegistryService {
       const meta = customDescriptorContent
         ? JSON.parse(customDescriptorContent)
         : {};
-      const hasManifest = meta.manifest !== undefined;
-      if (type === "agent" && !hasManifest) {
+      const inferredKind = inferKindFromParsed(meta);
+      const isAgentOrApp = inferredKind === "agent" || inferredKind === "app";
+      if (type === "agent" && !isAgentOrApp) {
         throw new TypeMismatchError(
           `Record ${recordId} exists but is not an agent (no manifest)`,
         );
       }
-      if (type === "tool" && hasManifest) {
+      if (type === "tool" && isAgentOrApp) {
         throw new TypeMismatchError(
           `Record ${recordId} exists but is not a tool (has manifest)`,
         );
@@ -1415,17 +1417,19 @@ export class RegistryService {
           );
           const descriptorContent = detail.descriptors?.custom?.data;
           const meta = descriptorContent ? JSON.parse(descriptorContent) : {};
-          const hasManifest = meta.manifest !== undefined;
+          const inferredKind = inferKindFromParsed(meta);
+          const isAgentOrApp =
+            inferredKind === "agent" || inferredKind === "app";
           outcomes[i] = {
             recordId: detail.recordId ?? recId,
-            recordType: hasManifest ? "agent" : "tool",
+            recordType: isAgentOrApp ? "agent" : "tool",
             name: detail.name ?? rec.name ?? "",
             displayName: detail.displayName ?? detail.name ?? rec.name ?? "",
             orgId: meta.orgId ?? "",
             submittedAt: detail.updatedAt?.toISOString(),
             createdBy: meta.createdBy,
             status: detail.status ?? rec.status ?? "",
-            version: hasManifest
+            version: isAgentOrApp
               ? (meta.manifest?.version ?? undefined)
               : undefined,
           };
@@ -1671,16 +1675,18 @@ export class RegistryService {
               createdAt: detail.createdAt,
               updatedAt: detail.updatedAt,
             };
-            // Filter by type using authoritative manifest-presence check:
-            // agents always carry a `manifest` in customDescriptorContent;
-            // tools store their config in the `description` field and have
-            // no manifest. (A malformed inlineContent throws here and falls
-            // back to the summary shape — the pre-parallel behavior.)
+            // Filter by type using authoritative kind inference:
+            // agents and apps both carry a `manifest` in
+            // customDescriptorContent; tools do not. The shared
+            // inferKindFromParsed helper applies the canonical decision
+            // tree (app-only fields vs agent-only shape).
             const meta = full.customDescriptorContent
               ? JSON.parse(full.customDescriptorContent)
               : {};
-            const hasManifest = meta.manifest !== undefined;
-            const typeMatches = type === "agent" ? hasManifest : !hasManifest;
+            const inferredKind = inferKindFromParsed(meta);
+            const isAgentOrApp =
+              inferredKind === "agent" || inferredKind === "app";
+            const typeMatches = type === "agent" ? isAgentOrApp : !isAgentOrApp;
             outcomes[i] = typeMatches
               ? { kind: "full", record: full }
               : { kind: "filtered" };

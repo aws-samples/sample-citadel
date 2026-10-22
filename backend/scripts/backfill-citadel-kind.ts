@@ -34,6 +34,7 @@ import {
 import {
   extractCitadelKind,
   inferKindFromShape,
+  inferKindFromParsed,
   type CitadelKind,
 } from "../src/utils/citadel-kind";
 
@@ -259,13 +260,14 @@ export async function hydrateRecord(
     updatedAt: result.updatedAt,
   };
 
-  // Classify by manifest presence
+  // Classify using the shared kind-inference helper
   let resourceType: ResourceType;
   try {
     const meta = customDescriptorContent
       ? JSON.parse(customDescriptorContent)
       : {};
-    resourceType = meta.manifest !== undefined ? "agent" : "tool";
+    const kind = inferKindFromParsed(meta);
+    resourceType = kind === "tool" ? "tool" : "agent";
   } catch {
     resourceType = "agent"; // default on parse failure
   }
