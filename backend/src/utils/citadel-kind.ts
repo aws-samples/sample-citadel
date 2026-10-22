@@ -67,9 +67,19 @@ export function extractCitadelKind(
 // ---------------------------------------------------------------------------
 
 /**
- * Infers the kind from the *shape* of `customDescriptorContent`:
- *   - Has a `manifest` key  → `'app'`
- *   - Otherwise             → `'agent'` (default for agent-type records)
+ * Infers the kind from the *shape* of `customDescriptorContent`.
+ *
+ * Both agents AND apps carry a `manifest`, so manifest presence alone is
+ * not sufficient to distinguish them. App descriptors are identified by
+ * app-only fields:
+ *   - Top-level `appId`
+ *   - `manifest.agentBindings`
+ *   - `manifest.access`
+ *
+ * Decision tree:
+ *   1. `resourceType === 'tool'`                              → `'tool'`
+ *   2. `manifest.agentBindings` OR `appId` OR `manifest.access` → `'app'`
+ *   3. Otherwise                                               → `'agent'`
  *
  * Tool records are never ambiguous because their registry resource type is
  * `'tool'`; pass `resourceType` to disambiguate when available.
@@ -80,19 +90,47 @@ export function inferKindFromShape(
 ): CitadelKind {
   if (resourceType === "tool") return "tool";
   try {
-    const parsed = JSON.parse(record.customDescriptorContent ?? "{}");
-    if (
-      typeof parsed === "object" &&
-      parsed !== null &&
-      "manifest" in parsed &&
-      parsed.manifest !== undefined
-    ) {
-      return "app";
-    }
-    return "agent";
+    const raw = record.customDescriptorContent;
+    if (!raw) return "agent"; // null/undefined/empty → default agent
+    const parsed = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) return "agent";
+    return inferKindFromParsed(parsed);
   } catch {
     return "agent";
   }
+}
+
+/**
+ * Infers kind from an already-parsed descriptor object. Useful for call
+ * sites that have already parsed the JSON (e.g. registry-service list
+ * methods, backfill hydration).
+ *
+ * Decision tree:
+ *   1. `manifest.agentBindings` OR `appId` OR `manifest.access` → `'app'`
+ *   2. `manifest` present (non-null object)                      → `'agent'`
+ *   3. Otherwise                                                 → `'tool'`
+ */
+export function inferKindFromParsed(
+  parsed: Record<string, unknown>,
+): CitadelKind {
+  const manifest =
+    typeof parsed.manifest === "object" && parsed.manifest !== null
+      ? (parsed.manifest as Record<string, unknown>)
+      : undefined;
+
+  if (
+    manifest?.agentBindings !== undefined ||
+    "appId" in parsed ||
+    manifest?.access !== undefined
+  ) {
+    return "app";
+  }
+
+  if (manifest !== undefined) {
+    return "agent";
+  }
+
+  return "tool";
 }
 
 // ---------------------------------------------------------------------------
