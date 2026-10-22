@@ -3,26 +3,29 @@
  * records that predate the explicit discriminator (CIT-247 PR 1).
  *
  * Algorithm:
- *   1. listResources('agent') — paginate all agent-type records.
- *   2. listResources('tool')  — paginate all tool-type records.
- *   3. For each record, parse customDescriptorContent:
- *      - Already has citadelKind → skip (idempotent).
- *      - manifest present        → kind = 'app'.
- *      - Registry type 'tool'    → kind = 'tool'.
- *      - Agent type, no manifest → kind = 'agent'.
- *      - Ambiguous (manifest === null vs absent) → log as ambiguous, skip.
+ *   1. listResourceSummaries() — paginate all CUSTOM records (cheap, no
+ *      per-record GETs).
+ *   2. For each summary, SEQUENTIALLY fetch the full record via
+ *      GetRegistryRecord with a configurable inter-call delay.
+ *   3. Classify by manifest presence (agent vs tool) and infer citadelKind.
  *   4. ONLY DRAFT records are tagged via updateResource.
  *      Non-DRAFT records are reported as "inferred (status X, not rewritten)"
  *      because rewriting customDescriptorContent on a non-DRAFT record is a
  *      content edit that demotes it to DRAFT (observed live three times —
  *      decision df5c0472).
  *
+ * Throttle-safe: records are read STRICTLY sequentially (one GetRegistryRecord
+ * at a time) with a configurable inter-call delay (`--delay-ms`, default 250).
+ * Retries use exponential backoff with jitter (base 1 s, max 6 attempts) and
+ * honour 'Request rate exceeded' as retryable.
+ *
  * Usage:
  *   ts-node --project tsconfig.scripts.json scripts/backfill-citadel-kind.ts \
- *     --registry-id <id> [--apply]
+ *     --registry-id <id> [--apply] [--delay-ms 250] [--limit 50]
  *
  * By default, dry-run mode. Pass --apply to write.
  */
+import { GetRegistryRecordCommand } from "@aws-sdk/client-agent-registry-control";
 import {
   RegistryService,
   type RegistryRecord,
@@ -84,11 +87,15 @@ function log(level: "info" | "warn" | "error", message: string): void {
 export interface ParsedArgs {
   registryId: string;
   apply: boolean;
+  delayMs: number;
+  limit: number;
 }
 
 export function parseArgs(argv: string[]): ParsedArgs {
   let registryId: string | undefined;
   let apply = false;
+  let delayMs = 250;
+  let limit = Infinity;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -96,11 +103,21 @@ export function parseArgs(argv: string[]): ParsedArgs {
       registryId = argv[++i];
     } else if (arg === "--apply") {
       apply = true;
+    } else if (arg === "--delay-ms") {
+      delayMs = parseInt(argv[++i], 10);
+      if (!Number.isFinite(delayMs) || delayMs < 0) {
+        throw new Error("--delay-ms must be a non-negative integer");
+      }
+    } else if (arg === "--limit") {
+      limit = parseInt(argv[++i], 10);
+      if (!Number.isFinite(limit) || limit < 1) {
+        throw new Error("--limit must be a positive integer");
+      }
     }
   }
 
   if (!registryId) throw new Error("--registry-id <id> is required");
-  return { registryId, apply };
+  return { registryId, apply, delayMs, limit };
 }
 
 // ---------------------------------------------------------------------------
@@ -116,12 +133,144 @@ export function detectAmbiguity(
   resourceType: ResourceType,
 ): string | undefined {
   if (resourceType === "tool") return undefined; // tool type is unambiguous
-  // A `manifest` key that is explicitly null is ambiguous — was it an app
-  // whose manifest was cleared, or an agent with a stray null field?
   if ("manifest" in parsed && parsed.manifest === null) {
     return "manifest key is null (app with cleared manifest? or stray field?)";
   }
   return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Retry with exponential backoff + jitter
+// ---------------------------------------------------------------------------
+
+/** Default: base delay 1 000 ms, max 6 attempts. */
+export const RETRY_BASE_MS = 1000;
+export const RETRY_MAX_ATTEMPTS = 6;
+
+export function isThrottleError(err: unknown): boolean {
+  if (err instanceof Error) {
+    const msg = err.message ?? "";
+    const name = (err as { name?: string }).name ?? "";
+    if (
+      msg.includes("Request rate exceeded") ||
+      msg.includes("ThrottlingException") ||
+      msg.includes("TooManyRequestsException") ||
+      name === "ThrottlingException" ||
+      name === "TooManyRequestsException"
+    ) {
+      return true;
+    }
+  }
+  const statusCode = (err as { $metadata?: { httpStatusCode?: number } })
+    ?.$metadata?.httpStatusCode;
+  if (statusCode === 429 || (statusCode !== undefined && statusCode >= 500)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Computes the backoff schedule: delay[i] = base * 2^i (before jitter).
+ * Exported for unit tests.
+ */
+export function backoffDelay(attempt: number, baseMs: number): number {
+  return baseMs * Math.pow(2, attempt);
+}
+
+export async function withBackoff<T>(
+  fn: () => Promise<T>,
+  maxAttempts: number = RETRY_MAX_ATTEMPTS,
+  baseMs: number = RETRY_BASE_MS,
+  sleepFn: (ms: number) => Promise<void> = defaultSleep,
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err: unknown) {
+      lastError = err;
+      if (!isThrottleError(err) || attempt === maxAttempts - 1) {
+        throw err;
+      }
+      const delay = backoffDelay(attempt, baseMs);
+      const jitter = Math.floor(Math.random() * delay);
+      const totalDelay = delay + jitter;
+      log(
+        "warn",
+        `Throttled (attempt ${attempt + 1}/${maxAttempts}), retrying in ${totalDelay}ms`,
+      );
+      await sleepFn(totalDelay);
+    }
+  }
+  throw lastError;
+}
+
+// ---------------------------------------------------------------------------
+// Sleep helper (injectable for tests)
+// ---------------------------------------------------------------------------
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ---------------------------------------------------------------------------
+// Record hydration — type-agnostic GET
+// ---------------------------------------------------------------------------
+
+/**
+ * A hydrated record with the resourceType determined from descriptor shape.
+ */
+export interface HydratedRecord {
+  record: RegistryRecord;
+  resourceType: ResourceType;
+}
+
+/**
+ * Fetches the full registry record using the SDK client directly, bypassing
+ * the type-specific getResource() to avoid TypeMismatchError. Classifies
+ * the record as agent or tool based on manifest presence in the descriptor.
+ */
+export async function hydrateRecord(
+  registry: RegistryService,
+  recordId: string,
+  sleepFn: (ms: number) => Promise<void> = defaultSleep,
+): Promise<HydratedRecord | null> {
+  const result = await withBackoff(
+    async () =>
+      registry.getClient().send(
+        new GetRegistryRecordCommand({
+          registryId: registry.getRegistryId(),
+          recordId,
+        }),
+      ),
+    RETRY_MAX_ATTEMPTS,
+    RETRY_BASE_MS,
+    sleepFn,
+  );
+
+  const customDescriptorContent = result.descriptors?.custom?.data;
+  const record: RegistryRecord = {
+    recordId: result.recordId ?? recordId,
+    name: result.name ?? "",
+    description: result.description,
+    status: result.status ?? "",
+    customDescriptorContent,
+    createdAt: result.createdAt,
+    updatedAt: result.updatedAt,
+  };
+
+  // Classify by manifest presence
+  let resourceType: ResourceType;
+  try {
+    const meta = customDescriptorContent
+      ? JSON.parse(customDescriptorContent)
+      : {};
+    resourceType = meta.manifest !== undefined ? "agent" : "tool";
+  } catch {
+    resourceType = "agent"; // default on parse failure
+  }
+
+  return { record, resourceType };
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +283,7 @@ export async function processRecord(
   registry: RegistryService,
   apply: boolean,
   summary: BackfillSummary,
+  sleepFn: (ms: number) => Promise<void> = defaultSleep,
 ): Promise<void> {
   summary.scanned++;
   const status = record.status ?? "UNKNOWN";
@@ -176,8 +326,7 @@ export async function processRecord(
   const inferred = inferKindFromShape(record, resourceType);
   summary.byKind[inferred]++;
 
-  // NON-DRAFT records: report inferred kind but do NOT write (decision
-  // df5c0472 — rewriting customDescriptorContent demotes to DRAFT).
+  // NON-DRAFT records: report inferred kind but do NOT write.
   if (status !== "DRAFT") {
     summary.skippedNonDraft++;
     summary.nonDraftInferred.push({
@@ -204,9 +353,15 @@ export async function processRecord(
 
   try {
     parsed.citadelKind = inferred;
-    await registry.updateResource(resourceType, record.recordId, {
-      customMetadata: JSON.stringify(parsed),
-    });
+    await withBackoff(
+      () =>
+        registry.updateResource(resourceType, record.recordId, {
+          customMetadata: JSON.stringify(parsed),
+        }),
+      RETRY_MAX_ATTEMPTS,
+      RETRY_BASE_MS,
+      sleepFn,
+    );
     summary.tagged++;
     log(
       "info",
@@ -225,35 +380,108 @@ export async function processRecord(
 // Main
 // ---------------------------------------------------------------------------
 
+export interface RunBackfillOptions {
+  delayMs: number;
+  limit: number;
+  sleepFn?: (ms: number) => Promise<void>;
+}
+
 export async function runBackfill(
   registryId: string,
   apply: boolean,
   registry: RegistryService,
+  options: RunBackfillOptions,
 ): Promise<BackfillSummary> {
   const summary = emptySummary();
+  const { sleepFn = defaultSleep } = options;
+
   log("info", `Mode: ${apply ? "APPLY" : "DRY-RUN"} registryId=${registryId}`);
+  if (options.limit !== Infinity) {
+    log("info", `Limit: ${options.limit} records`);
+  }
+  log("info", `Inter-call delay: ${options.delayMs}ms`);
 
-  for (const resourceType of ["agent", "tool"] as ResourceType[]) {
-    let records: RegistryRecord[];
+  // Step 1: cheap paginated list (no per-record GETs).
+  let allSummaries: Array<{ recordId: string }>;
+  try {
+    allSummaries = (await registry.listResourceSummaries()).filter(
+      (s): s is typeof s & { recordId: string } => !!s.recordId,
+    );
+  } catch (err) {
+    log("error", `listResourceSummaries() failed: ${String(err)}`);
+    summary.errors++;
+    return summary;
+  }
+
+  const total = Math.min(allSummaries.length, options.limit);
+  log("info", `Total summaries: ${allSummaries.length}, processing: ${total}`);
+
+  // Step 2: hydrate each summary STRICTLY sequentially, one GET at a time.
+  const agentRecords: RegistryRecord[] = [];
+  const toolRecords: RegistryRecord[] = [];
+
+  for (let i = 0; i < total; i++) {
+    const { recordId } = allSummaries[i];
     try {
-      records = await registry.listResources(resourceType);
+      const hydrated = await hydrateRecord(registry, recordId!, sleepFn);
+      if (hydrated) {
+        if (hydrated.resourceType === "agent") {
+          agentRecords.push(hydrated.record);
+        } else {
+          toolRecords.push(hydrated.record);
+        }
+      }
     } catch (err) {
-      log("error", `listResources('${resourceType}') failed: ${String(err)}`);
-      summary.errors++;
-      continue;
+      log("error", `recordId=${recordId} detail GET failed: ${String(err)}`);
     }
 
-    log("info", `${resourceType} records found: ${records.length}`);
-    for (const record of records) {
-      await processRecord(record, resourceType, registry, apply, summary);
+    // Progress every 20 records
+    if ((i + 1) % 20 === 0 || i + 1 === total) {
+      log(
+        "info",
+        `fetch progress: ${i + 1}/${total} (agents=${agentRecords.length}, tools=${toolRecords.length})`,
+      );
     }
+
+    // Inter-call delay (skip after last)
+    if (options.delayMs > 0 && i < total - 1) {
+      await sleepFn(options.delayMs);
+    }
+  }
+
+  // Step 3: process agent records, then tool records.
+  log("info", `agent records: ${agentRecords.length}`);
+  for (const record of agentRecords) {
+    await processRecord(record, "agent", registry, apply, summary, sleepFn);
+    logProgress(summary);
+  }
+
+  log("info", `tool records: ${toolRecords.length}`);
+  for (const record of toolRecords) {
+    await processRecord(record, "tool", registry, apply, summary, sleepFn);
+    logProgress(summary);
   }
 
   return summary;
 }
 
+function logProgress(summary: BackfillSummary): void {
+  if (summary.scanned % 20 === 0) {
+    const kindCounts = Object.entries(summary.byKind)
+      .filter(([, v]) => v > 0)
+      .map(([k, v]) => `${k}=${v}`)
+      .join(", ");
+    log(
+      "info",
+      `processed: ${summary.scanned} — kinds so far: ${kindCounts || "none"}`,
+    );
+  }
+}
+
 export async function main(): Promise<void> {
-  const { registryId, apply } = parseArgs(process.argv.slice(2));
+  const { registryId, apply, delayMs, limit } = parseArgs(
+    process.argv.slice(2),
+  );
   const region = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION;
   if (!region) {
     throw new Error(
@@ -262,7 +490,10 @@ export async function main(): Promise<void> {
   }
   const registry = new RegistryService({ registryId, region });
 
-  const summary = await runBackfill(registryId, apply, registry);
+  const summary = await runBackfill(registryId, apply, registry, {
+    delayMs,
+    limit,
+  });
 
   log("info", "--- Backfill summary ---");
   console.log(JSON.stringify(summary, null, 2));
