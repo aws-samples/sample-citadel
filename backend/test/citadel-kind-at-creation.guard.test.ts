@@ -487,7 +487,12 @@ describe("citadel-kind-at-creation guard", () => {
     describe("parseArgs", () => {
       it("parses --registry-id and --apply", () => {
         const result = parseArgs(["--registry-id", "reg-1", "--apply"]);
-        expect(result).toEqual({ registryId: "reg-1", apply: true });
+        expect(result).toEqual({
+          registryId: "reg-1",
+          apply: true,
+          delayMs: 250,
+          limit: Infinity,
+        });
       });
 
       it("defaults to dry-run", () => {
