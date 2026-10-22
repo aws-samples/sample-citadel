@@ -64,6 +64,7 @@ function registryRecord(
     description: "Billing agent",
     status: "APPROVED",
     customDescriptorContent: JSON.stringify({
+      citadelKind: "agent",
       categories: ["fabricated"],
       icon: "",
       state: "active",
@@ -273,5 +274,62 @@ describe("ensureAgentConfigRows", () => {
 
     expect(result).toEqual({ ensured: [], existing: [], failed: [] });
     expect(ddbMock.commandCalls(BatchGetCommand)).toHaveLength(0);
+  });
+
+  it("skips non-agent records (app kind) with a WARN and reports as failed", async () => {
+    mockBatchGetExisting([]);
+    // An app record: has citadelKind='app' and a manifest.
+    mockRegistry({
+      "rec-app": {
+        recordId: "rec-app",
+        name: "my-app-v1",
+        description: "An app",
+        status: "APPROVED",
+        customDescriptorContent: JSON.stringify({
+          citadelKind: "app",
+          manifest: { name: "my-app-v1", version: "1.0.0" },
+        }),
+        createdAt: new Date("2026-07-20T00:00:00.000Z"),
+        updatedAt: new Date("2026-07-20T01:00:00.000Z"),
+      },
+    });
+
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+    const result = await ensureAgentConfigRows(["rec-app"]);
+
+    expect(result.failed).toEqual(["rec-app"]);
+    expect(result.ensured).toEqual([]);
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(warnSpy).toHaveBeenCalledWith(
+      "ensureAgentConfigRows: skipping non-agent record",
+      expect.objectContaining({ agentId: "rec-app", kind: "app" }),
+    );
+    warnSpy.mockRestore();
+  });
+
+  it("skips inferred-app records (manifest.agentBindings present, no citadelKind) and reports as failed", async () => {
+    mockBatchGetExisting([]);
+    // Pre-backfill app record: has manifest.agentBindings but no citadelKind.
+    mockRegistry({
+      "rec-old-app": {
+        recordId: "rec-old-app",
+        name: "old-app-v1",
+        description: "Old app",
+        status: "APPROVED",
+        customDescriptorContent: JSON.stringify({
+          manifest: { name: "old-app-v1", agentBindings: [{ agentId: "a1" }] },
+        }),
+        createdAt: new Date("2026-07-20T00:00:00.000Z"),
+        updatedAt: new Date("2026-07-20T01:00:00.000Z"),
+      },
+    });
+
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+    const result = await ensureAgentConfigRows(["rec-old-app"]);
+
+    expect(result.failed).toEqual(["rec-old-app"]);
+    expect(result.ensured).toEqual([]);
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    warnSpy.mockRestore();
   });
 });

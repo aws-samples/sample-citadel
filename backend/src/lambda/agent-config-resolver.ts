@@ -38,6 +38,7 @@ import {
   isCrossAccountRoleArn,
   assumeAnalysisRoleClient,
 } from "../utils/trust-path";
+import { resolveKind } from "../utils/citadel-kind";
 
 /** Trust-path summary persisted into governanceAttestation by the activation path. */
 interface TrustPathAttestationSummary {
@@ -340,6 +341,11 @@ export async function getAgentConfigRegistry(
   try {
     const record = await registryService.getResource("agent", agentId);
     if (record) {
+      // Kind guard: non-agent records (apps, tools) are not agent configs.
+      const kind = resolveKind(record);
+      if (kind !== "agent") {
+        return null;
+      }
       const mapped = registryService.mapToAgentConfig(record);
       // Cross-org access is reported as not-found (404-style, not 403) so we
       // don't leak existence to other orgs. Admins bypass.
@@ -402,7 +408,12 @@ export async function listAgentConfigsRegistry(
   const registryRecords = budgetOptions
     ? await registryService.listResources("agent", budgetOptions)
     : await registryService.listResources("agent");
-  const allRegistryConfigs = registryRecords.map((record) =>
+  // Kind gate: exclude app and tool records from the agent-config list.
+  const agentOnlyRecords = registryRecords.filter((r) => {
+    const kind = resolveKind(r);
+    return kind === "agent";
+  });
+  const allRegistryConfigs = agentOnlyRecords.map((record) =>
     registryService.mapToAgentConfig(record),
   );
   // Org filter (existing) + status/ownership visibility (CIT-043).

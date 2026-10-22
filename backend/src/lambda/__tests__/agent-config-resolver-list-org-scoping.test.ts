@@ -76,7 +76,7 @@ const registryRecord = (
   name,
   status: "APPROVED",
   description: JSON.stringify({ name }),
-  customDescriptorContent: JSON.stringify({ orgId }),
+  customDescriptorContent: JSON.stringify({ orgId, citadelKind: "agent" }),
 });
 
 // Registry records: one own-org, one system-shared (orgId ''), one other-org.

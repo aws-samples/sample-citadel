@@ -20,20 +20,23 @@
  *    consumes for publish.
  */
 
-process.env.REGISTRY_ID = 'test-registry-id';
-process.env.APPS_TABLE = 'citadel-apps-test';
-process.env.WORKFLOWS_TABLE = 'citadel-workflows-test';
-process.env.AGENT_CONFIG_TABLE = 'citadel-agents-test';
-process.env.EVENT_BUS_NAME = 'citadel-agents-test';
-process.env.USER_POOL_ID = 'us-east-1_test';
-process.env.AUTHORITY_UNITS_TABLE = 'test-authority-units';
-process.env.AWS_REGION = 'us-east-1';
+process.env.REGISTRY_ID = "test-registry-id";
+process.env.APPS_TABLE = "citadel-apps-test";
+process.env.WORKFLOWS_TABLE = "citadel-workflows-test";
+process.env.AGENT_CONFIG_TABLE = "citadel-agents-test";
+process.env.EVENT_BUS_NAME = "citadel-agents-test";
+process.env.USER_POOL_ID = "us-east-1_test";
+process.env.AUTHORITY_UNITS_TABLE = "test-authority-units";
+process.env.AWS_REGION = "us-east-1";
 // No model catalog wired — bindings here never carry a modelOverride, so the
 // catalog validator must not be reached at all.
 delete process.env.MODEL_CATALOG_TABLE;
 
-import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
-import { mockClient } from 'aws-sdk-client-mock';
+import {
+  EventBridgeClient,
+  PutEventsCommand,
+} from "@aws-sdk/client-eventbridge";
+import { mockClient } from "aws-sdk-client-mock";
 
 const ebMock = mockClient(EventBridgeClient);
 
@@ -58,25 +61,25 @@ const store = new Map<string, StoredRecord>();
 let updateFailureQueue: Error[] = [];
 let updateResourceCalls = 0;
 
-function seed(recordId: string, record: Omit<StoredRecord, 'recordId'>): void {
+function seed(recordId: string, record: Omit<StoredRecord, "recordId">): void {
   store.set(recordId, { recordId, ...record });
 }
 
-jest.mock('../../services/registry-service', () => {
-  const actual = jest.requireActual('../../services/registry-service');
+jest.mock("../../services/registry-service", () => {
+  const actual = jest.requireActual("../../services/registry-service");
   // Mirrors RegistryService.toInternalState (service semantics:
   // PENDING_APPROVAL → 'active'), NOT registry-sync's cache-facing mirror.
   const toInternalState = (status: string | undefined): string => {
     switch (status) {
-      case 'APPROVED':
-      case 'UPDATING':
-      case 'PENDING_APPROVAL':
-        return 'active';
-      case 'DRAFT':
-      case 'CREATING':
-        return 'maintenance';
+      case "APPROVED":
+      case "UPDATING":
+      case "PENDING_APPROVAL":
+        return "active";
+      case "DRAFT":
+      case "CREATING":
+        return "maintenance";
       default:
-        return 'inactive';
+        return "inactive";
     }
   };
   const service = {
@@ -120,32 +123,32 @@ jest.mock('../../services/registry-service', () => {
   };
 });
 
-jest.mock('../../utils/appsync', () => ({
-  getUserId: jest.fn().mockReturnValue('user-123'),
+jest.mock("../../utils/appsync", () => ({
+  getUserId: jest.fn().mockReturnValue("user-123"),
 }));
 
-jest.mock('../../utils/appsync-publish', () => ({
+jest.mock("../../utils/appsync-publish", () => ({
   publishAppStatusEvent: jest.fn().mockResolvedValue(undefined),
 }));
 
-import { ensureAppAgentBindings } from '../registry-agent-record-resolver';
+import { ensureAppAgentBindings } from "../registry-agent-record-resolver";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
-const APP_ID = 'app000000001';
+const APP_ID = "app000000001";
 
 function seedApp(agentBindings: Array<Record<string, unknown>> = []): void {
   seed(APP_ID, {
-    name: 'Intake App',
-    description: 'Test',
-    status: 'DRAFT',
+    name: "Intake App",
+    description: "Test",
+    status: "DRAFT",
     customDescriptorContent: JSON.stringify({
       appId: APP_ID,
       manifest: {
-        orgId: 'org-1',
+        orgId: "org-1",
         version: 1,
-        status: 'DRAFT',
-        createdBy: 'user-123',
+        status: "DRAFT",
+        createdBy: "user-123",
         workflowIds: [],
         agentBindings,
         permissions: [],
@@ -168,13 +171,14 @@ function seedApp(agentBindings: Array<Record<string, unknown>> = []): void {
 function seedFabricatedActiveAgent(recordId: string): void {
   seed(recordId, {
     name: `fabricated_${recordId}`,
-    status: 'APPROVED',
+    status: "APPROVED",
     customDescriptorContent: JSON.stringify({
-      categories: ['worker'],
-      icon: '',
-      state: 'inactive',
+      citadelKind: "agent",
+      categories: ["worker"],
+      icon: "",
+      state: "inactive",
       manifest: { name: recordId, tools: [] },
-      sourceProjectId: 'sess-1111',
+      sourceProjectId: "sess-1111",
     }),
   });
 }
@@ -183,31 +187,36 @@ function seedFabricatedActiveAgent(recordId: string): void {
 function seedFabricatedDraftAgent(recordId: string): void {
   seed(recordId, {
     name: `fabricated_${recordId}`,
-    status: 'DRAFT',
+    status: "DRAFT",
     customDescriptorContent: JSON.stringify({
-      categories: ['worker'],
-      state: 'inactive',
+      citadelKind: "agent",
+      categories: ["worker"],
+      state: "inactive",
       manifest: { name: recordId, tools: [] },
-      sourceProjectId: 'sess-1111',
+      sourceProjectId: "sess-1111",
     }),
   });
 }
 
-function appBindings(): Array<{ agentId: string; status: string; addedAt: string }> {
+function appBindings(): Array<{
+  agentId: string;
+  status: string;
+  addedAt: string;
+}> {
   const record = store.get(APP_ID)!;
-  const descriptor = JSON.parse(record.customDescriptorContent ?? '{}');
+  const descriptor = JSON.parse(record.customDescriptorContent ?? "{}");
   return descriptor.manifest?.agentBindings ?? [];
 }
 
 function conflictError(): Error {
-  const err = new Error('Registry record is in UPDATING state');
-  err.name = 'ConflictException';
+  const err = new Error("Registry record is in UPDATING state");
+  err.name = "ConflictException";
   return err;
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
-describe('ensureAppAgentBindings', () => {
+describe("ensureAppAgentBindings", () => {
   beforeEach(() => {
     store.clear();
     updateFailureQueue = [];
@@ -216,18 +225,18 @@ describe('ensureAppAgentBindings', () => {
     ebMock.on(PutEventsCommand).resolves({});
   });
 
-  test('binds missing fabricated agents and promotes them to READY (stale inactive descriptor, APPROVED status)', async () => {
+  test("binds missing fabricated agents and promotes them to READY (stale inactive descriptor, APPROVED status)", async () => {
     seedApp();
-    seedFabricatedActiveAgent('agt000000001');
-    seedFabricatedActiveAgent('agt000000002');
+    seedFabricatedActiveAgent("agt000000001");
+    seedFabricatedActiveAgent("agt000000002");
 
     const result = await ensureAppAgentBindings(
       APP_ID,
-      ['agt000000001', 'agt000000002'],
-      'user-123',
+      ["agt000000001", "agt000000002"],
+      "user-123",
     );
 
-    expect(result.bound).toEqual(['agt000000001', 'agt000000002']);
+    expect(result.bound).toEqual(["agt000000001", "agt000000002"]);
     expect(result.failed).toEqual([]);
     expect(result.alreadyBound).toEqual([]);
 
@@ -235,150 +244,187 @@ describe('ensureAppAgentBindings', () => {
     expect(bindings).toHaveLength(2);
     // The publish-precondition evidence: AppDetailView buildPreconditions
     // passes "All agents are READY" iff bindings.length > 0 and none DESIGN.
-    expect(bindings.every((b) => b.status === 'READY')).toBe(true);
+    expect(bindings.every((b) => b.status === "READY")).toBe(true);
     expect(bindings.map((b) => b.agentId).sort()).toEqual([
-      'agt000000001',
-      'agt000000002',
+      "agt000000001",
+      "agt000000002",
     ]);
   });
 
-  test('returns the final app projection with READY bindings for the mutation response', async () => {
+  test("returns the final app projection with READY bindings for the mutation response", async () => {
     seedApp();
-    seedFabricatedActiveAgent('agt000000001');
-
-    const result = await ensureAppAgentBindings(APP_ID, ['agt000000001'], 'user-123');
-
-    const projected = result.finalApp as { agentBindings?: Array<{ status: string }> } | null;
-    expect(projected).not.toBeNull();
-    expect(projected!.agentBindings).toHaveLength(1);
-    expect(projected!.agentBindings![0].status).toBe('READY');
-  });
-
-  test('leaves existing READY bindings untouched — no duplicate, no reset, addedAt preserved', async () => {
-    seedApp([
-      { agentId: 'agt000000001', status: 'READY', addedAt: '2026-01-01T00:00:00Z' },
-    ]);
-    seedFabricatedActiveAgent('agt000000001');
-    seedFabricatedActiveAgent('agt000000002');
+    seedFabricatedActiveAgent("agt000000001");
 
     const result = await ensureAppAgentBindings(
       APP_ID,
-      ['agt000000001', 'agt000000002'],
-      'user-123',
+      ["agt000000001"],
+      "user-123",
     );
 
-    expect(result.alreadyBound).toEqual(['agt000000001']);
-    expect(result.bound).toEqual(['agt000000002']);
+    const projected = result.finalApp as {
+      agentBindings?: Array<{ status: string }>;
+    } | null;
+    expect(projected).not.toBeNull();
+    expect(projected!.agentBindings).toHaveLength(1);
+    expect(projected!.agentBindings![0].status).toBe("READY");
+  });
+
+  test("leaves existing READY bindings untouched — no duplicate, no reset, addedAt preserved", async () => {
+    seedApp([
+      {
+        agentId: "agt000000001",
+        status: "READY",
+        addedAt: "2026-01-01T00:00:00Z",
+      },
+    ]);
+    seedFabricatedActiveAgent("agt000000001");
+    seedFabricatedActiveAgent("agt000000002");
+
+    const result = await ensureAppAgentBindings(
+      APP_ID,
+      ["agt000000001", "agt000000002"],
+      "user-123",
+    );
+
+    expect(result.alreadyBound).toEqual(["agt000000001"]);
+    expect(result.bound).toEqual(["agt000000002"]);
 
     const bindings = appBindings();
     expect(bindings).toHaveLength(2);
-    const existing = bindings.find((b) => b.agentId === 'agt000000001')!;
-    expect(existing.status).toBe('READY');
-    expect(existing.addedAt).toBe('2026-01-01T00:00:00Z');
+    const existing = bindings.find((b) => b.agentId === "agt000000001")!;
+    expect(existing.status).toBe("READY");
+    expect(existing.addedAt).toBe("2026-01-01T00:00:00Z");
   });
 
-  test('is idempotent: a second identical call performs no registry writes', async () => {
+  test("is idempotent: a second identical call performs no registry writes", async () => {
     seedApp();
-    seedFabricatedActiveAgent('agt000000001');
-    await ensureAppAgentBindings(APP_ID, ['agt000000001'], 'user-123');
+    seedFabricatedActiveAgent("agt000000001");
+    await ensureAppAgentBindings(APP_ID, ["agt000000001"], "user-123");
 
     const writesAfterFirst = updateResourceCalls;
-    const second = await ensureAppAgentBindings(APP_ID, ['agt000000001'], 'user-123');
+    const second = await ensureAppAgentBindings(
+      APP_ID,
+      ["agt000000001"],
+      "user-123",
+    );
 
-    expect(second.alreadyBound).toEqual(['agt000000001']);
+    expect(second.alreadyBound).toEqual(["agt000000001"]);
     expect(second.bound).toEqual([]);
     expect(updateResourceCalls).toBe(writesAfterFirst);
     expect(appBindings()).toHaveLength(1);
   });
 
-  test('promotes an existing DESIGN binding to READY without re-adding it (heals strays)', async () => {
+  test("promotes an existing DESIGN binding to READY without re-adding it (heals strays)", async () => {
     seedApp([
-      { agentId: 'agt000000001', status: 'DESIGN', addedAt: '2026-01-01T00:00:00Z' },
+      {
+        agentId: "agt000000001",
+        status: "DESIGN",
+        addedAt: "2026-01-01T00:00:00Z",
+      },
     ]);
-    seedFabricatedActiveAgent('agt000000001');
-
-    const result = await ensureAppAgentBindings(APP_ID, ['agt000000001'], 'user-123');
-
-    expect(result.bound).toEqual(['agt000000001']);
-    const bindings = appBindings();
-    expect(bindings).toHaveLength(1);
-    expect(bindings[0].status).toBe('READY');
-    expect(bindings[0].addedAt).toBe('2026-01-01T00:00:00Z');
-  });
-
-  test('itemizes a per-agent failure without aborting the rest', async () => {
-    seedApp();
-    seedFabricatedDraftAgent('agt000000001'); // READY gate must reject: not active
-    seedFabricatedActiveAgent('agt000000002');
+    seedFabricatedActiveAgent("agt000000001");
 
     const result = await ensureAppAgentBindings(
       APP_ID,
-      ['agt000000001', 'agt000000002'],
-      'user-123',
+      ["agt000000001"],
+      "user-123",
     );
 
-    expect(result.bound).toEqual(['agt000000002']);
+    expect(result.bound).toEqual(["agt000000001"]);
+    const bindings = appBindings();
+    expect(bindings).toHaveLength(1);
+    expect(bindings[0].status).toBe("READY");
+    expect(bindings[0].addedAt).toBe("2026-01-01T00:00:00Z");
+  });
+
+  test("itemizes a per-agent failure without aborting the rest", async () => {
+    seedApp();
+    seedFabricatedDraftAgent("agt000000001"); // READY gate must reject: not active
+    seedFabricatedActiveAgent("agt000000002");
+
+    const result = await ensureAppAgentBindings(
+      APP_ID,
+      ["agt000000001", "agt000000002"],
+      "user-123",
+    );
+
+    expect(result.bound).toEqual(["agt000000002"]);
     expect(result.failed).toHaveLength(1);
-    expect(result.failed[0].agentId).toBe('agt000000001');
+    expect(result.failed[0].agentId).toBe("agt000000001");
     expect(result.failed[0].error).toMatch(/active/i);
 
-    const ready = appBindings().filter((b) => b.status === 'READY');
-    expect(ready.map((b) => b.agentId)).toEqual(['agt000000002']);
+    const ready = appBindings().filter((b) => b.status === "READY");
+    expect(ready.map((b) => b.agentId)).toEqual(["agt000000002"]);
   });
 
-  test('retries a transient registry conflict with a bounded budget and still lands the binding', async () => {
+  test("retries a transient registry conflict with a bounded budget and still lands the binding", async () => {
     seedApp();
-    seedFabricatedActiveAgent('agt000000001');
+    seedFabricatedActiveAgent("agt000000001");
     updateFailureQueue = [conflictError()]; // first write attempt conflicts
 
-    const result = await ensureAppAgentBindings(APP_ID, ['agt000000001'], 'user-123');
+    const result = await ensureAppAgentBindings(
+      APP_ID,
+      ["agt000000001"],
+      "user-123",
+    );
 
-    expect(result.bound).toEqual(['agt000000001']);
+    expect(result.bound).toEqual(["agt000000001"]);
     expect(result.failed).toEqual([]);
-    expect(appBindings()[0].status).toBe('READY');
+    expect(appBindings()[0].status).toBe("READY");
   });
 
-  test('gives up after the bounded retry budget and itemizes the failure', async () => {
+  test("gives up after the bounded retry budget and itemizes the failure", async () => {
     seedApp();
-    seedFabricatedActiveAgent('agt000000001');
+    seedFabricatedActiveAgent("agt000000001");
     // More consecutive conflicts than the retry budget allows.
-    updateFailureQueue = [conflictError(), conflictError(), conflictError(), conflictError(), conflictError(), conflictError()];
+    updateFailureQueue = [
+      conflictError(),
+      conflictError(),
+      conflictError(),
+      conflictError(),
+      conflictError(),
+      conflictError(),
+    ];
 
-    const result = await ensureAppAgentBindings(APP_ID, ['agt000000001'], 'user-123');
+    const result = await ensureAppAgentBindings(
+      APP_ID,
+      ["agt000000001"],
+      "user-123",
+    );
 
     expect(result.bound).toEqual([]);
     expect(result.failed).toHaveLength(1);
-    expect(result.failed[0].agentId).toBe('agt000000001');
+    expect(result.failed[0].agentId).toBe("agt000000001");
   });
 
-  test('is a no-op for an empty agentId list', async () => {
+  test("is a no-op for an empty agentId list", async () => {
     seedApp();
 
-    const result = await ensureAppAgentBindings(APP_ID, [], 'user-123');
+    const result = await ensureAppAgentBindings(APP_ID, [], "user-123");
 
     expect(result).toMatchObject({ bound: [], alreadyBound: [], failed: [] });
     expect(updateResourceCalls).toBe(0);
   });
 
-  test('deduplicates repeated agentIds in the input', async () => {
+  test("deduplicates repeated agentIds in the input", async () => {
     seedApp();
-    seedFabricatedActiveAgent('agt000000001');
+    seedFabricatedActiveAgent("agt000000001");
 
     const result = await ensureAppAgentBindings(
       APP_ID,
-      ['agt000000001', 'agt000000001'],
-      'user-123',
+      ["agt000000001", "agt000000001"],
+      "user-123",
     );
 
-    expect(result.bound).toEqual(['agt000000001']);
+    expect(result.bound).toEqual(["agt000000001"]);
     expect(appBindings()).toHaveLength(1);
   });
 
-  test('throws when the app record does not exist (caller decides severity)', async () => {
-    seedFabricatedActiveAgent('agt000000001');
+  test("throws when the app record does not exist (caller decides severity)", async () => {
+    seedFabricatedActiveAgent("agt000000001");
 
     await expect(
-      ensureAppAgentBindings('app-missing-1', ['agt000000001'], 'user-123'),
-    ).rejects.toThrow('App not found');
+      ensureAppAgentBindings("app-missing-1", ["agt000000001"], "user-123"),
+    ).rejects.toThrow("App not found");
   });
 });

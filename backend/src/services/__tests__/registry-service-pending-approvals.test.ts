@@ -39,6 +39,7 @@ describe("RegistryService.listPendingApprovals", () => {
   });
 
   const agentDescriptor = JSON.stringify({
+    citadelKind: "agent",
     manifest: { name: "My Agent" },
     orgId: "org-1",
     createdBy: "user-alice",
@@ -48,6 +49,7 @@ describe("RegistryService.listPendingApprovals", () => {
   });
 
   const toolDescriptor = JSON.stringify({
+    citadelKind: "tool",
     config: '{"name":"My Tool"}',
     orgId: "org-2",
     createdBy: "user-bob",
