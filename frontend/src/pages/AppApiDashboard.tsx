@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, type ReactNode } from 'react';
 import {
   ArrowLeft,
   Eye,
@@ -104,7 +104,18 @@ function formatDate(dateStr: string): string {
   }
 }
 
-function formatTimestamp(ts: string): string {
+function formatTimestamp(ts: ReactNode): ReactNode {
+  try {
+    return new Date(String(ts)).toLocaleTimeString(undefined, {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return ts;
+  }
+}
+
+function formatTimestampTick(ts: string): string {
   try {
     return new Date(ts).toLocaleTimeString(undefined, {
       hour: '2-digit',
@@ -675,7 +686,7 @@ export function AppApiDashboard({ appId, onBack, onNavigate: _onNavigate }: AppA
                         <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
                         <XAxis
                           dataKey="timestamp"
-                          tickFormatter={formatTimestamp}
+                          tickFormatter={formatTimestampTick}
                           stroke="#6B7280"
                           tick={{ fontSize: 11 }}
                         />
@@ -697,7 +708,7 @@ export function AppApiDashboard({ appId, onBack, onNavigate: _onNavigate }: AppA
                         <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
                         <XAxis
                           dataKey="timestamp"
-                          tickFormatter={formatTimestamp}
+                          tickFormatter={formatTimestampTick}
                           stroke="#6B7280"
                           tick={{ fontSize: 11 }}
                         />
@@ -719,7 +730,7 @@ export function AppApiDashboard({ appId, onBack, onNavigate: _onNavigate }: AppA
                         <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
                         <XAxis
                           dataKey="timestamp"
-                          tickFormatter={formatTimestamp}
+                          tickFormatter={formatTimestampTick}
                           stroke="#6B7280"
                           tick={{ fontSize: 11 }}
                         />

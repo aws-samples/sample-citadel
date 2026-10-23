@@ -80,7 +80,7 @@ export function CostOverTimeChart({
               <YAxis stroke={CHART_AXIS_STROKE} style={{ fontSize: '12px' }} />
               <Tooltip
                 contentStyle={CHART_TOOLTIP_STYLE}
-                formatter={(value: number) => formatCost(value * 1_000_000, data?.currency ?? null)}
+                formatter={(value) => value != null ? formatCost(Number(value) * 1_000_000, data?.currency ?? null) : ''}
               />
               <Area type="monotone" dataKey="cost" stroke={cssVar('--chart-1')} strokeWidth={2} fillOpacity={1} fill="url(#colorCost)" />
             </AreaChart>

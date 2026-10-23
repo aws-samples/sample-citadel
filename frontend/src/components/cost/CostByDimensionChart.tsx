@@ -78,7 +78,7 @@ export function CostByDimensionChart({
               <YAxis stroke={CHART_AXIS_STROKE} style={{ fontSize: '12px' }} />
               <Tooltip
                 contentStyle={CHART_TOOLTIP_STYLE}
-                formatter={(value: number) => formatCost(value * 1_000_000, data?.currency ?? null)}
+                formatter={(value) => value != null ? formatCost(Number(value) * 1_000_000, data?.currency ?? null) : ''}
               />
               <Bar dataKey="cost" fill={cssVar('--chart-2')} radius={[4, 4, 0, 0]} />
             </BarChart>
