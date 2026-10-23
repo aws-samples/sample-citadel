@@ -288,8 +288,8 @@ function TrendSparkline({ series }: TrendSparklineProps) {
           />
           <YAxis allowDecimals={false} className="text-[10px]" width={28} />
           <RTooltip
-            labelFormatter={(ts: number) => formatIso(ts)}
-            formatter={(value: number) => [value, 'Alarm fires']}
+            labelFormatter={(ts) => formatIso(Number(ts))}
+            formatter={(value) => value != null ? [Number(value), 'Alarm fires'] : ''}
           />
           <Area
             type="monotone"
