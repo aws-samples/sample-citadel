@@ -14,9 +14,10 @@ jest.mock('../server', () => ({
 
 import serverService from '../server';
 import { agentConfigService } from '../agentConfigService';
+import { clearAll as clearQueryCache } from '../queryCache';
 
 describe('agentConfigService.searchAgentConfigs', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => { jest.clearAllMocks(); clearQueryCache(); });
 
   it('calls the searchAgentConfigs GraphQL query and parses config JSON', async () => {
     const raw = [
@@ -142,7 +143,7 @@ describe('agentConfigService.searchAgentConfigs', () => {
 });
 
 describe('parseAgentConfig (via listAgentConfigs)', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => { jest.clearAllMocks(); clearQueryCache(); });
 
   it('parses a JSON string config into an object', async () => {
     const raw = [
@@ -213,7 +214,7 @@ describe('parseAgentConfig (via listAgentConfigs)', () => {
 });
 
 describe('top-level description field propagation', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => { jest.clearAllMocks(); clearQueryCache(); });
 
   it('preserves the top-level description from the GraphQL response', async () => {
     const raw = [

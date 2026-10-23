@@ -1,4 +1,5 @@
 import serverService from './server';
+import { cached, invalidate } from './queryCache';
 
 export interface AgentConfig {
   agentId: string;
@@ -196,20 +197,22 @@ function parseAgentConfig(raw: unknown): Record<string, unknown> {
 
 export const agentConfigService = {
   async listAgentConfigs(): Promise<AgentConfig[]> {
-    try {
-      const response = await serverService.query<{ listAgentConfigs: AgentConfig[] }>(
-        listAgentConfigsQuery
-      );
-      
-      return (response.listAgentConfigs || []).map((agent: any) => ({
-        ...agent,
-        config: parseAgentConfig(agent.config),
-        tags: typeof agent.tags === 'string' ? JSON.parse(agent.tags) : agent.tags,
-      }));
-    } catch (error) {
-      console.error('Error listing agent configs:', error);
-      throw error;
-    }
+    return cached('agentConfigs:list', async () => {
+      try {
+        const response = await serverService.query<{ listAgentConfigs: AgentConfig[] }>(
+          listAgentConfigsQuery
+        );
+        
+        return (response.listAgentConfigs || []).map((agent: any) => ({
+          ...agent,
+          config: parseAgentConfig(agent.config),
+          tags: typeof agent.tags === 'string' ? JSON.parse(agent.tags) : agent.tags,
+        }));
+      } catch (error) {
+        console.error('Error listing agent configs:', error);
+        throw error;
+      }
+    });
   },
 
   async getAgentConfig(agentId: string): Promise<AgentConfig | null> {
@@ -286,6 +289,7 @@ export const agentConfigService = {
       );
       
       const agent = response.createAgentConfig;
+      invalidate('agentConfigs:');
       return {
         ...agent,
         config: parseAgentConfig(agent.config),
@@ -317,6 +321,7 @@ export const agentConfigService = {
       );
       
       const agent = response.updateAgentConfig;
+      invalidate('agentConfigs:');
       return {
         ...agent,
         config: parseAgentConfig(agent.config),
@@ -335,6 +340,7 @@ export const agentConfigService = {
         { agentId }
       );
       
+      invalidate('agentConfigs:');
       return response.deleteAgentConfig;
     } catch (error) {
       console.error('Error deleting agent config:', error);
@@ -355,6 +361,7 @@ export const agentConfigService = {
         { projectId }
       );
 
+      invalidate('agentConfigs:');
       return response.activateProjectAgents;
     } catch (error) {
       console.error('Error activating project agents:', error);

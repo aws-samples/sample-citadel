@@ -2,6 +2,7 @@ import { approvalsService } from '../approvalsService';
 import serverService from '../server';
 import { appApiService } from '../appApiService';
 import { toolConfigService } from '../toolConfigService';
+import { clearAll as clearQueryCache } from '../queryCache';
 
 jest.mock('../server', () => ({
   __esModule: true,
@@ -21,7 +22,7 @@ const mockUpdateApp = appApiService.updateApp as jest.Mock;
 const mockUpdateToolConfig = toolConfigService.updateToolConfig as jest.Mock;
 
 describe('approvalsService', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => { jest.clearAllMocks(); clearQueryCache(); });
 
   describe('listPendingApprovals', () => {
     it('sends the correct query document and variables', async () => {

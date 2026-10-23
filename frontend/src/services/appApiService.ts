@@ -4,6 +4,7 @@
  */
 
 import serverService from './server';
+import { invalidate } from './queryCache';
 
 // --- Exported Types ---
 
@@ -539,6 +540,7 @@ class AppApiService {
       UPDATE_AGENT_BINDING,
       { input }
     );
+    invalidate('agentConfigs:');
     return response.updateAgentBinding;
   }
 

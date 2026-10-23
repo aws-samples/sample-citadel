@@ -17,9 +17,10 @@ jest.mock('../server', () => ({
 
 import serverService from '../server';
 import { toolConfigService } from '../toolConfigService';
+import { clearAll as clearQueryCache } from '../queryCache';
 
 describe('toolConfigService.listToolConfigs null-element filtering (#342)', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => { jest.clearAllMocks(); clearQueryCache(); });
 
   it('filters out null elements from listToolConfigs response', async () => {
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});

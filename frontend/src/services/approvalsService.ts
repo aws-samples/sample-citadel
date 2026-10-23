@@ -6,6 +6,7 @@
 import serverService from './server';
 import { appApiService } from './appApiService';
 import { toolConfigService } from './toolConfigService';
+import { invalidate } from './queryCache';
 
 // --- Types ---
 
@@ -93,6 +94,7 @@ export const approvalsService = {
         status: input.decision,
         statusReason: input.statusReason,
       });
+      invalidate('toolConfigs:');
       return;
     }
 
@@ -102,5 +104,6 @@ export const approvalsService = {
       status: input.decision,
       statusReason: input.statusReason,
     } as Parameters<typeof appApiService.updateApp>[0]);
+    invalidate('agentConfigs:');
   },
 };

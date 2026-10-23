@@ -18,6 +18,7 @@ import {
   confirmResetPassword,
 } from "aws-amplify/auth";
 import type { ResetPasswordOutput } from "aws-amplify/auth";
+import { clearAll as clearQueryCache } from './queryCache';
 
 interface AmplifyConfig {
   region: string;
@@ -293,6 +294,8 @@ class ServerService {
     try {
       const { username, password } = params;
       const result = await signIn({ username, password });
+      // Clear stale cache from any previous session on successful sign-in.
+      clearQueryCache();
       return result;
     } catch (error) {
       console.error("Sign in failed:", error);
@@ -319,6 +322,8 @@ class ServerService {
   async signOut() {
     try {
       await signOut();
+      // Clear query cache so the next session starts fresh.
+      clearQueryCache();
     } catch (error) {
       console.error("Sign out failed:", error);
       throw error;
