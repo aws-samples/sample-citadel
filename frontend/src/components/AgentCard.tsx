@@ -120,7 +120,7 @@ export function AgentCard({ agent, onToggleState, onConfigure, userRole }: Agent
       
       <CardContent className="flex flex-col gap-4">
         <CardDescription className="text-muted-foreground">
-          {config?.description || 'No description available'}
+          {agent.description || config?.description || 'No description available'}
         </CardDescription>
 
         <div className="grid grid-cols-2 gap-4 text-sm">
