@@ -480,6 +480,8 @@ export interface RegistryRecord {
 export interface AgentConfig {
   agentId: string;
   name?: string;
+  /** Human-readable description surfaced from the Registry record. */
+  description?: string;
   orgId: string;
   config: string;
   state: string;
@@ -1431,9 +1433,10 @@ export class RegistryService {
             submittedAt: detail.updatedAt?.toISOString(),
             createdBy: meta.createdBy,
             status: detail.status ?? rec.status ?? "",
-            version: recordType !== "tool"
-              ? (meta.manifest?.version ?? undefined)
-              : undefined,
+            version:
+              recordType !== "tool"
+                ? (meta.manifest?.version ?? undefined)
+                : undefined,
           };
         } catch (err) {
           console.warn("listPendingApprovals: detail GET failed, skipping", {
@@ -2112,6 +2115,38 @@ export class RegistryService {
   }
 
   /**
+   * Inject `description` into a config JSON string when it is missing or empty.
+   * This ensures the frontend picker (which reads config.description) displays
+   * the agent's description without a frontend-side code change.
+   */
+  private static ensureConfigDescription(
+    configJson: string,
+    description: string | undefined,
+  ): string {
+    if (!description) return configJson;
+    try {
+      const parsed = JSON.parse(configJson);
+      if (
+        typeof parsed === "object" &&
+        parsed !== null &&
+        !Array.isArray(parsed)
+      ) {
+        if (
+          !parsed.description ||
+          (typeof parsed.description === "string" &&
+            parsed.description.trim() === "")
+        ) {
+          parsed.description = description;
+          return JSON.stringify(parsed);
+        }
+      }
+    } catch {
+      return JSON.stringify({ description });
+    }
+    return configJson;
+  }
+
+  /**
    * Maps a Registry record to the AgentConfig GraphQL response shape.
    */
   mapToAgentConfig(record: RegistryRecord): AgentConfig {
@@ -2120,13 +2155,42 @@ export class RegistryService {
       RegistryService.AGENT_METADATA_DEFAULTS,
     );
 
+    // Resolve best description: record-level > manifest-level > config-level.
+    const configJson = RegistryService.toValidConfigJson(record.description);
+    let configDescription: string | undefined;
+    try {
+      const parsed = JSON.parse(configJson);
+      if (typeof parsed?.description === "string" && parsed.description) {
+        configDescription = parsed.description;
+      }
+    } catch {
+      // ignore
+    }
+    const manifestDescription =
+      typeof (meta.manifest as Record<string, unknown> | undefined)
+        ?.description === "string"
+        ? ((meta.manifest as Record<string, unknown>).description as string)
+        : undefined;
+    const description =
+      record.description && !record.description.startsWith("{")
+        ? record.description
+        : (manifestDescription ?? configDescription ?? undefined);
+
+    // Inject description into the config JSON so the frontend picker
+    // (which reads config.description) displays it without a frontend change.
+    const enrichedConfig = RegistryService.ensureConfigDescription(
+      configJson,
+      description,
+    );
+
     return {
       agentId: record.recordId,
       name: record.name ?? "",
+      description,
       orgId: meta.orgId ?? "",
       // AWSJSON contract: config must be a JSON object — a plain-text
       // description falls back to '{}' (see toValidConfigJson).
-      config: RegistryService.toValidConfigJson(record.description),
+      config: enrichedConfig,
       state: this.toInternalState(record.status),
       categories: meta.categories,
       createdAt: record.createdAt?.toISOString(),

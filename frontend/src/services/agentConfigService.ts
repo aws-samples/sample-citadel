@@ -41,6 +41,7 @@ const listAgentConfigsQuery = `
     listAgentConfigs {
       agentId
       name
+      description
       config
       state
       categories
@@ -60,6 +61,7 @@ const getAgentConfigQuery = `
     getAgentConfig(agentId: $agentId) {
       agentId
       name
+      description
       config
       state
       categories
@@ -79,6 +81,7 @@ const searchAgentConfigsQuery = `
     searchAgentConfigs(query: $query) {
       agentId
       name
+      description
       config
       state
       categories

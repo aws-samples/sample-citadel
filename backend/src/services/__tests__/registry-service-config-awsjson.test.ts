@@ -75,11 +75,13 @@ describe("RegistryService — AWSJSON config field invariant", () => {
       expect(JSON.parse(result.config)).toEqual({ name: "WeatherTool" });
     });
 
-    it("mapToAgentConfig projects {} when description is plain text", () => {
+    it("mapToAgentConfig projects description into config when description is plain text", () => {
       const record = agentRecord({ description: "Answers weather questions" });
       const result = service.mapToAgentConfig(record);
-      expect(result.config).toBe("{}");
-      expect(JSON.parse(result.config)).toEqual({});
+      expect(JSON.parse(result.config)).toEqual({
+        description: "Answers weather questions",
+      });
+      expect(result.description).toBe("Answers weather questions");
     });
 
     it("end-to-end: summary-fallback row (detail GET fails) projects config {} — the incident path", async () => {
