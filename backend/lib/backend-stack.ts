@@ -1059,6 +1059,7 @@ export class BackendStack extends cdk.Stack {
           // Tag-policy enforcement: reads the caller's organisation policy row.
           ORGANIZATIONS_TABLE: organisationTable.tableName,
         },
+        memorySize: 512,
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, "AgentConfigResolverFunctionLogs", {
           retention: logs.RetentionDays.ONE_WEEK,
@@ -1123,6 +1124,7 @@ export class BackendStack extends cdk.Stack {
           ORGANIZATIONS_TABLE: organisationTable.tableName,
           ENVIRONMENT: props.environment,
         },
+        memorySize: 512,
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, "ToolConfigResolverFunctionLogs", {
           retention: logs.RetentionDays.ONE_WEEK,
