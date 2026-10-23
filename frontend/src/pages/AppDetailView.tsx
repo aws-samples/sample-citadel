@@ -838,7 +838,10 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
               agentId: c.agentId,
               // Prefer Registry top-level name, then legacy config.name, then agentId.
               name: c.name || config.name || c.agentId,
-              description: typeof config.description === 'string' ? config.description : '',
+              // Prefer top-level description (record field), then config.description (legacy).
+              description:
+                (typeof c.description === 'string' && c.description) ||
+                (typeof config.description === 'string' ? config.description : ''),
             };
           }),
       );

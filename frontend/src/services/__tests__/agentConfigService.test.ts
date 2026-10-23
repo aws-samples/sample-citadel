@@ -140,3 +140,110 @@ describe('agentConfigService.searchAgentConfigs', () => {
     expect(result).toHaveLength(2);
   });
 });
+
+describe('parseAgentConfig (via listAgentConfigs)', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('parses a JSON string config into an object', async () => {
+    const raw = [
+      {
+        agentId: 'json-str',
+        config: JSON.stringify({ name: 'JsonAgent', description: 'from json string' }),
+        state: 'active',
+        categories: [],
+      },
+    ];
+    (serverService.query as jest.Mock).mockResolvedValue({ listAgentConfigs: raw });
+
+    const result = await agentConfigService.listAgentConfigs();
+    expect(result[0].config).toEqual({ name: 'JsonAgent', description: 'from json string' });
+  });
+
+  it('passes through an already-parsed object config as-is', async () => {
+    const raw = [
+      {
+        agentId: 'pre-parsed',
+        config: { name: 'PreParsed', description: 'already an object' },
+        state: 'active',
+        categories: [],
+      },
+    ];
+    (serverService.query as jest.Mock).mockResolvedValue({ listAgentConfigs: raw });
+
+    const result = await agentConfigService.listAgentConfigs();
+    expect(result[0].config).toEqual({ name: 'PreParsed', description: 'already an object' });
+  });
+
+  it('falls back to {} for a non-JSON string config', async () => {
+    const raw = [
+      {
+        agentId: 'freetext',
+        config: 'This is a plain text description, not JSON',
+        state: 'active',
+        categories: [],
+      },
+    ];
+    (serverService.query as jest.Mock).mockResolvedValue({ listAgentConfigs: raw });
+
+    const result = await agentConfigService.listAgentConfigs();
+    expect(result[0].config).toEqual({});
+  });
+
+  it('falls back to {} for null/undefined config', async () => {
+    const raw = [
+      { agentId: 'null-cfg', config: null, state: 'active', categories: [] },
+      { agentId: 'undef-cfg', state: 'active', categories: [] },
+    ];
+    (serverService.query as jest.Mock).mockResolvedValue({ listAgentConfigs: raw });
+
+    const result = await agentConfigService.listAgentConfigs();
+    expect(result[0].config).toEqual({});
+    expect(result[1].config).toEqual({});
+  });
+
+  it('falls back to {} for a JSON primitive string (e.g. "42")', async () => {
+    const raw = [
+      { agentId: 'prim', config: '42', state: 'active', categories: [] },
+    ];
+    (serverService.query as jest.Mock).mockResolvedValue({ listAgentConfigs: raw });
+
+    const result = await agentConfigService.listAgentConfigs();
+    expect(result[0].config).toEqual({});
+  });
+});
+
+describe('top-level description field propagation', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('preserves the top-level description from the GraphQL response', async () => {
+    const raw = [
+      {
+        agentId: 'desc-agent',
+        name: 'Described',
+        description: 'Top-level description from resolver',
+        config: JSON.stringify({ name: 'Described', description: 'config-level desc' }),
+        state: 'active',
+        categories: [],
+      },
+    ];
+    (serverService.query as jest.Mock).mockResolvedValue({ listAgentConfigs: raw });
+
+    const result = await agentConfigService.listAgentConfigs();
+    expect(result[0].description).toBe('Top-level description from resolver');
+  });
+
+  it('preserves description as undefined when not present in the response', async () => {
+    const raw = [
+      {
+        agentId: 'no-desc',
+        config: { name: 'NoDesc' },
+        state: 'active',
+        categories: [],
+      },
+    ];
+    (serverService.query as jest.Mock).mockResolvedValue({ listAgentConfigs: raw });
+
+    const result = await agentConfigService.listAgentConfigs();
+    expect(result[0].description).toBeUndefined();
+  });
+});

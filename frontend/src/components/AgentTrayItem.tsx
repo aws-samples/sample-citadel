@@ -10,7 +10,7 @@ interface AgentTrayItemProps {
 
 export const AgentTrayItem = memo(function AgentTrayItem({ agent, onDragStart }: AgentTrayItemProps) {
   const agentName = (agent as any).name || agent.config?.name || agent.agentId;
-  const agentDescription = agent.config?.description || 'No description available';
+  const agentDescription = agent.description || agent.config?.description || 'No description available';
   const agentIcon = agent.config?.icon;
   const category = agent.categories?.[0] || 'Uncategorized';
 

@@ -135,13 +135,16 @@ export function AppBuilderWizard({ onComplete, prefill }: AppBuilderWizardProps)
       setAvailableAgents(
         configs
           .filter((c: { state: string }) => c.state === 'active')
-          .map((c: { agentId: string; name?: string; config: { name?: string; description?: string } | string }) => {
+          .map((c: { agentId: string; name?: string; description?: string; config: { name?: string; description?: string } | string }) => {
             // Prefer the top-level Registry name, then config.name (legacy
             // DynamoDB rows nested it inside config), and only fall back to
             // the opaque recordId when neither is available. Registry recordIds
             // are 12-char alphanumerics that aren't user-friendly to render.
             const config = typeof c.config === 'object' && c.config !== null ? c.config : {};
-            const description = typeof config.description === 'string' ? config.description : '';
+            // Prefer top-level description (record field), then config.description (legacy).
+            const description =
+              (typeof c.description === 'string' && c.description) ||
+              (typeof config.description === 'string' ? config.description : '');
             return {
               agentId: c.agentId,
               name: c.name || config.name || c.agentId,

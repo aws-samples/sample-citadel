@@ -6,6 +6,11 @@ export interface AgentConfig {
    * preferred over agentId for UI labels. May be absent on legacy DynamoDB
    * rows where the name was stored inside config.name instead. */
   name?: string;
+  /** Top-level description returned by the resolver. Preferred over
+   * config.description for display — config.description is the legacy
+   * fallback for rows where the description was nested inside the AWSJSON
+   * config blob. */
+  description?: string;
   config: any;
   state: 'active' | 'inactive' | 'maintenance';
   categories?: string[];
@@ -165,18 +170,27 @@ const updateAgentCodeMutation = `
 /**
  * Parse an agent's `config` field returned by the resolver.
  *
- * The resolver returns `config` as a string. Most agents store JSON there,
- * but some legacy/registry-backed records carry a free-text description
- * instead (e.g. seeded fabricator/orchestrator agents). When parsing fails
- * we keep the raw value so the UI can still render it as a string instead
- * of crashing the whole flow with a JSON.parse error.
+ * The wire value can arrive in three shapes:
+ *   1. A JSON string — the normal resolver path.  → JSON.parse it.
+ *   2. An already-parsed object — Amplify may pre-parse AWSJSON scalars
+ *      before the response reaches service code.  → Use as-is.
+ *   3. A non-JSON string (legacy free-text description, or garbage)
+ *      → Fall back to an empty object so callers can always dot-access
+ *        config properties without guarding against a string.
+ *
+ * The function never throws.
  */
-function parseAgentConfig(raw: unknown): unknown {
-  if (typeof raw !== 'string') return raw;
+function parseAgentConfig(raw: unknown): Record<string, unknown> {
+  if (typeof raw === 'object' && raw !== null) return raw as Record<string, unknown>;
+  if (typeof raw !== 'string') return {};
   try {
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    // JSON.parse('42') or JSON.parse('"hello"') are valid JSON but not
+    // useful as config objects — treat them the same as non-JSON strings.
+    if (typeof parsed === 'object' && parsed !== null) return parsed;
+    return {};
   } catch {
-    return raw;
+    return {};
   }
 }
 
