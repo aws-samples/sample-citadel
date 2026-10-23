@@ -14,9 +14,10 @@ jest.mock('../server', () => ({
 
 import serverService from '../server';
 import { toolConfigService } from '../toolConfigService';
+import { clearAll as clearQueryCache } from '../queryCache';
 
 describe('toolConfigService.searchToolConfigs', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => { jest.clearAllMocks(); clearQueryCache(); });
 
   it('calls the searchToolConfigs GraphQL query and parses config JSON', async () => {
     const raw = [

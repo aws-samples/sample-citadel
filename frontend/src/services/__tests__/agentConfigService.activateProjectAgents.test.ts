@@ -19,9 +19,10 @@ jest.mock('../server', () => ({
 
 import serverService from '../server';
 import { agentConfigService } from '../agentConfigService';
+import { clearAll as clearQueryCache } from '../queryCache';
 
 describe('agentConfigService.activateProjectAgents', () => {
-  beforeEach(() => jest.clearAllMocks());
+  beforeEach(() => { jest.clearAllMocks(); clearQueryCache(); });
 
   it('passes projectId as a variable and returns the parsed result', async () => {
     const result = {

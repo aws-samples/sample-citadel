@@ -1,4 +1,5 @@
 import serverService from './server';
+import { cached, invalidate } from './queryCache';
 
 export type BindingDirection = 'INPUT' | 'OUTPUT' | 'BIDIRECTIONAL';
 
@@ -163,33 +164,35 @@ function safeParseConfig(raw: unknown): unknown {
 
 export const toolConfigService = {
   async listToolConfigs(): Promise<ToolConfig[]> {
-    try {
-      const response = await serverService.query<{ listToolConfigs: (ToolConfig | null)[] }>(
-        listToolConfigsQuery
-      );
-      
-      const raw = response.listToolConfigs || [];
-      // Defensive: AppSync may null individual elements when a non-nullable
-      // field (e.g. config: AWSJSON!) is absent on a row. Filter them out
-      // rather than crashing downstream (#342).
-      const nullCount = raw.filter((t) => t == null).length;
-      if (nullCount > 0) {
-        console.warn(
-          `listToolConfigs: dropped ${nullCount} null element(s) from response`,
+    return cached('toolConfigs:list', async () => {
+      try {
+        const response = await serverService.query<{ listToolConfigs: (ToolConfig | null)[] }>(
+          listToolConfigsQuery
         );
-      }
+        
+        const raw = response.listToolConfigs || [];
+        // Defensive: AppSync may null individual elements when a non-nullable
+        // field (e.g. config: AWSJSON!) is absent on a row. Filter them out
+        // rather than crashing downstream (#342).
+        const nullCount = raw.filter((t) => t == null).length;
+        if (nullCount > 0) {
+          console.warn(
+            `listToolConfigs: dropped ${nullCount} null element(s) from response`,
+          );
+        }
 
-      return raw
-        .filter((tool): tool is ToolConfig => tool != null)
-        .map((tool: any) => ({
-          ...tool,
-          config: safeParseConfig(tool.config),
-          tags: typeof tool.tags === 'string' ? JSON.parse(tool.tags) : tool.tags,
-        }));
-    } catch (error) {
-      console.error('Error listing tool configs:', error);
-      throw error;
-    }
+        return raw
+          .filter((tool): tool is ToolConfig => tool != null)
+          .map((tool: any) => ({
+            ...tool,
+            config: safeParseConfig(tool.config),
+            tags: typeof tool.tags === 'string' ? JSON.parse(tool.tags) : tool.tags,
+          }));
+      } catch (error) {
+        console.error('Error listing tool configs:', error);
+        throw error;
+      }
+    });
   },
 
   async getToolConfig(toolId: string): Promise<ToolConfig | null> {
@@ -268,6 +271,7 @@ export const toolConfigService = {
       );
       
       const tool = response.createToolConfig;
+      invalidate('toolConfigs:');
       return {
         ...tool,
         config: safeParseConfig(tool.config),
@@ -303,6 +307,7 @@ export const toolConfigService = {
       );
       
       const tool = response.updateToolConfig;
+      invalidate('toolConfigs:');
       return {
         ...tool,
         config: safeParseConfig(tool.config),
@@ -321,6 +326,7 @@ export const toolConfigService = {
         { toolId }
       );
       
+      invalidate('toolConfigs:');
       return response.deleteToolConfig;
     } catch (error) {
       console.error('Error deleting tool config:', error);
