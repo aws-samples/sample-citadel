@@ -26,6 +26,10 @@ import { REGISTRY_TRANSITIONS } from "../adapters/lifecycle";
 import { isRecordVisible, viewerFromEvent } from "../utils/record-visibility";
 import { normaliseTags } from "../utils/tag-policy";
 import { enforceTagPolicy } from "./tag-policy-check";
+import {
+  CloudWatchClient,
+  PutMetricDataCommand,
+} from "@aws-sdk/client-cloudwatch";
 
 const client = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(client);
@@ -94,6 +98,20 @@ async function enrichWithDecision(config: ToolConfig): Promise<ToolConfig> {
 export function isRegistryEnabled(): boolean {
   try {
     return process.env.REGISTRY_ENABLED === "true";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Returns true when the list-from-projection optimisation is enabled.
+ * When enabled, listToolConfigsRegistry reads from the DynamoDB cache
+ * table's projection rows instead of the N+1 Registry path, falling back
+ * to the Registry when the projection is empty.
+ */
+export function isListFromProjection(): boolean {
+  try {
+    return process.env.LIST_FROM_PROJECTION === "true";
   } catch {
     return false;
   }
@@ -431,6 +449,229 @@ export const handler = async (
 // Registry-backed implementations (tasks 7.2–7.4, 7.6)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Projection read helpers (CIT-244 PR3)
+// ---------------------------------------------------------------------------
+
+const cwClient = new CloudWatchClient({});
+
+/** Projection version — must stay in sync with registry-sync.ts PROJECTION_VERSION. */
+const PROJECTION_VERSION = 1;
+
+/**
+ * Best-effort: writes a projection row for the given tool after a registry
+ * mutation so the list-from-projection path is immediately consistent.
+ * Failures are logged and swallowed — the EventBridge → registry-sync path
+ * is the durable write; this is an optimistic fast-path.
+ */
+async function writeToolProjectionRow(
+  registryService: RegistryService,
+  toolId: string,
+  decisionOverlay?: {
+    decidedBy?: string;
+    decidedAt?: string;
+    statusReason?: string;
+  },
+): Promise<void> {
+  try {
+    const record = await registryService.getResource("tool", toolId);
+    if (!record) return;
+    const meta = registryService.deserializeCustomMetadata<{
+      categories?: string[];
+      icon?: string;
+      state?: string;
+      integrationBindings?: unknown[];
+      dataStoreBindings?: unknown[];
+      appId?: string;
+      orgId?: string;
+      createdBy?: string;
+      decidedBy?: string;
+      decidedAt?: string;
+      statusReason?: string;
+      tags?: Record<string, string>;
+    }>(record.customDescriptorContent ?? null, {
+      categories: [],
+      icon: "",
+      state: "active",
+      integrationBindings: undefined,
+      dataStoreBindings: undefined,
+      appId: undefined,
+      orgId: undefined,
+      createdBy: undefined,
+      decidedBy: undefined,
+      decidedAt: undefined,
+      statusReason: undefined,
+      tags: undefined,
+    });
+    const mapped = registryService.mapToToolConfig(record);
+    const now = new Date().toISOString();
+    await docClient.send(
+      new PutCommand({
+        TableName: TOOLS_CONFIG_TABLE,
+        Item: {
+          toolId: record.recordId,
+          config: mapped.config,
+          state: mapped.state,
+          categories: mapped.categories || [],
+          integrationBindings: meta.integrationBindings,
+          dataStoreBindings: meta.dataStoreBindings,
+          icon: meta.icon ?? "",
+          appId: meta.appId,
+          createdAt: record.createdAt?.toISOString() ?? now,
+          updatedAt: record.updatedAt?.toISOString() ?? now,
+          tags: meta.tags,
+          citadelKind: "tool",
+          projectionVersion: PROJECTION_VERSION,
+          projectedAt: now,
+          orgId: meta.orgId,
+          createdBy: meta.createdBy,
+          registryStatus: record.status,
+          decidedBy: decisionOverlay?.decidedBy ?? meta.decidedBy,
+          decidedAt: decisionOverlay?.decidedAt ?? meta.decidedAt,
+          statusReason: decisionOverlay?.statusReason ?? meta.statusReason,
+        },
+      }),
+    );
+  } catch (err) {
+    console.error(
+      `writeToolProjectionRow: best-effort projection write for tool "${toolId}" failed:`,
+      err,
+    );
+  }
+}
+
+/**
+ * Extracts the config-payload `name` from a ToolConfig's config field.
+ * Shared by both the projection and registry list paths for dedup.
+ */
+function extractToolName(c: ToolConfig): string | undefined {
+  if (!c.config) return undefined;
+  try {
+    const parsed =
+      typeof c.config === "string" ? JSON.parse(c.config) : c.config;
+    const name = parsed?.name;
+    return typeof name === "string" && name.length > 0 ? name : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Emits a ListSource metric to CloudWatch for observability. Best-effort.
+ */
+function emitToolListSourceMetric(
+  source: "projection" | "registry",
+  count: number,
+): void {
+  cwClient
+    .send(
+      new PutMetricDataCommand({
+        Namespace: "Citadel/Resolvers",
+        MetricData: [
+          {
+            MetricName: "ListSource",
+            Dimensions: [
+              { Name: "Kind", Value: "tool" },
+              { Name: "Source", Value: source },
+            ],
+            Value: count,
+            Unit: "Count",
+            Timestamp: new Date(),
+          },
+        ],
+      }),
+    )
+    .catch((err) => {
+      console.error(
+        "emitToolListSourceMetric: best-effort metric failed:",
+        err,
+      );
+    });
+  console.info(
+    JSON.stringify({ msg: "list_source", kind: "tool", source, count }),
+  );
+}
+
+/**
+ * Scans the tools cache table for projection rows (attribute_exists(projectionVersion)
+ * AND citadelKind = 'tool'), applies org + visibility filters, and maps
+ * to the ToolConfig API shape. Returns an empty array when no projection
+ * rows exist.
+ */
+async function listToolConfigsFromProjection(
+  callerOrgId: string | null,
+  admin: boolean,
+  viewer: {
+    isAdmin: boolean;
+    roles: string[];
+    orgId: string | null;
+    userId: string | null;
+  },
+): Promise<ToolConfig[]> {
+  try {
+    const result = await docClient.send(
+      new ScanCommand({
+        TableName: TOOLS_CONFIG_TABLE,
+        FilterExpression: "attribute_exists(#pv) AND #ck = :ck",
+        ExpressionAttributeNames: {
+          "#pv": "projectionVersion",
+          "#ck": "citadelKind",
+        },
+        ExpressionAttributeValues: {
+          ":ck": "tool",
+        },
+      }),
+    );
+    const items = result.Items || [];
+    if (items.length === 0) return [];
+
+    const configs: ToolConfig[] = items.map((item) => ({
+      toolId: item.toolId,
+      orgId: item.orgId ?? "",
+      config:
+        typeof item.config === "string"
+          ? item.config
+          : JSON.stringify(item.config ?? {}),
+      state: item.state || "active",
+      categories: item.categories || [],
+      integrationBindings: sanitizeIntegrationBindings(
+        item.integrationBindings,
+      ),
+      dataStoreBindings: sanitizeDataStoreBindings(item.dataStoreBindings),
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt,
+      registryStatus:
+        typeof item.registryStatus === "string"
+          ? item.registryStatus
+          : undefined,
+      createdBy:
+        typeof item.createdBy === "string" ? item.createdBy : undefined,
+      decidedBy:
+        typeof item.decidedBy === "string" ? item.decidedBy : undefined,
+      decidedAt:
+        typeof item.decidedAt === "string" ? item.decidedAt : undefined,
+      statusReason:
+        typeof item.statusReason === "string" ? item.statusReason : undefined,
+      tags: item.tags ?? undefined,
+    }));
+
+    return configs.filter((t) => {
+      if (!admin && t.orgId !== callerOrgId) return false;
+      return isRecordVisible(viewer, {
+        status: t.registryStatus ?? undefined,
+        orgId: t.orgId,
+        createdBy: t.createdBy,
+      });
+    });
+  } catch (err) {
+    console.error(
+      "listToolConfigsFromProjection: scan failed, will fall back to registry:",
+      err,
+    );
+    return [];
+  }
+}
+
 /**
  * Dual-source list: fetches tool configs from both Registry and DynamoDB,
  * merges them with Registry records taking precedence on duplicate toolIds.
@@ -460,6 +701,45 @@ export async function listToolConfigsRegistry(
       ? await viewerFromEvent(event)
       : { isAdmin: false, roles: [], orgId: null, userId: null };
 
+  // ─── Projection read path (CIT-244) ────────────────────────────────────
+  if (isListFromProjection()) {
+    const projectionConfigs = await listToolConfigsFromProjection(
+      callerOrgId,
+      admin,
+      viewer,
+    );
+    if (projectionConfigs.length > 0) {
+      // Merge genuinely-legacy rows (no registryRecordId / not in projection)
+      const allDynamoConfigs = await listToolConfigs();
+      const dynamoConfigs = allDynamoConfigs.filter((t) => {
+        if (!admin && t.orgId !== callerOrgId) return false;
+        return isRecordVisible(viewer, {
+          status: t.registryStatus,
+          orgId: t.orgId,
+          createdBy: t.createdBy,
+        });
+      });
+
+      const projectionNames = new Set(
+        projectionConfigs
+          .map(extractToolName)
+          .filter((n): n is string => typeof n === "string" && n.length > 0),
+      );
+      const legacyOnly = dynamoConfigs.filter((c) => {
+        const n = extractToolName(c);
+        return !n || !projectionNames.has(n);
+      });
+
+      const result = await Promise.all(
+        [...projectionConfigs, ...legacyOnly].map(enrichWithDecision),
+      );
+      emitToolListSourceMetric("projection", result.length);
+      return result;
+    }
+    // Projection returned 0 rows → fall through to registry path
+  }
+
+  // ─── Registry N+1 read path (original) ─────────────────────────────────
   const registryService = getRegistryService();
   const budgetOptions = budgetOptionsFrom(context);
   const registryRecords = budgetOptions
@@ -492,30 +772,21 @@ export async function listToolConfigsRegistry(
   // Dedupe by the `name` field inside the config payload — the stable human
   // identifier shared by both representations. Guard against unparseable/
   // missing names.
-  const extractName = (c: ToolConfig): string | undefined => {
-    if (!c.config) return undefined;
-    try {
-      const parsed =
-        typeof c.config === "string" ? JSON.parse(c.config) : c.config;
-      const name = parsed?.name;
-      return typeof name === "string" && name.length > 0 ? name : undefined;
-    } catch {
-      return undefined;
-    }
-  };
   const registryNames = new Set(
     registryConfigs
-      .map(extractName)
+      .map(extractToolName)
       .filter((n): n is string => typeof n === "string" && n.length > 0),
   );
   const legacyOnly = dynamoConfigs.filter((c) => {
-    const n = extractName(c);
+    const n = extractToolName(c);
     return !n || !registryNames.has(n);
   });
 
-  return Promise.all(
+  const mergedResult = await Promise.all(
     [...registryConfigs, ...legacyOnly].map(enrichWithDecision),
   );
+  emitToolListSourceMetric("registry", mergedResult.length);
+  return mergedResult;
 }
 
 /**
@@ -651,9 +922,13 @@ export async function createToolConfigRegistry(
     // rather than the stale DRAFT snapshot from createResource above. Matches
     // the fix in agent-config-resolver (0715f73).
     const refreshed = await registryService.getResource("tool", input.toolId);
+    // Write projection row (CIT-244)
+    await writeToolProjectionRow(registryService, input.toolId);
     return registryService.mapToToolConfig(refreshed ?? record);
   }
 
+  // Write projection row (CIT-244)
+  await writeToolProjectionRow(registryService, input.toolId);
   return registryService.mapToToolConfig(record);
 }
 
@@ -806,6 +1081,14 @@ export async function updateToolConfigRegistry(
     } catch (err) {
       console.error("Failed to persist tool decision metadata", err);
     }
+
+    // Write projection row so the list-from-projection path has immediate
+    // decision data (CIT-244).
+    await writeToolProjectionRow(registryService, input.toolId, {
+      decidedBy: result.decidedBy,
+      decidedAt: result.decidedAt,
+      statusReason: result.statusReason || undefined,
+    });
 
     // Re-fetch for consistent return
     const refreshed = await registryService.getResource("tool", input.toolId);
@@ -1038,6 +1321,8 @@ export async function updateToolConfigRegistry(
     // rather than the stale snapshot from updateResource above. Matches the
     // fix in agent-config-resolver (0715f73).
     const refreshed = await registryService.getResource("tool", input.toolId);
+    // Write projection row (CIT-244)
+    await writeToolProjectionRow(registryService, input.toolId);
     return registryService.mapToToolConfig(refreshed ?? record);
   }
 
@@ -1074,6 +1359,8 @@ export async function updateToolConfigRegistry(
     );
   }
 
+  // Write projection row (CIT-244)
+  await writeToolProjectionRow(registryService, input.toolId);
   return registryService.mapToToolConfig(record);
 }
 
