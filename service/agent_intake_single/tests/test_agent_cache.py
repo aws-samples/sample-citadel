@@ -1,3 +1,4 @@
+import request_context
 """Tests for agent cache LRU eviction and invalidation."""
 import sys
 import types

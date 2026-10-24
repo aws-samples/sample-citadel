@@ -140,6 +140,15 @@ function createFixture(app: cdk.App) {
     topicName: "citadel-alarms-test",
   });
 
+  const userOrgMembershipTable = new dynamodb.Table(
+    backendStack,
+    "UserOrgMembershipTable",
+    {
+      tableName: "citadel-user-org-membership-test",
+      partitionKey: { name: "sub", type: dynamodb.AttributeType.STRING },
+    },
+  );
+
   return {
     appSyncApi,
     agentEventBus,
@@ -153,6 +162,7 @@ function createFixture(app: cdk.App) {
     agentDesignAssessmentsTable,
     userPool,
     alarmTopic,
+    userOrgMembershipTable,
   };
 }
 
@@ -178,16 +188,16 @@ describe("ProjectsStack — backend-stack-split phase 1", () => {
   });
 
   // --- Resolver count ---
-  test("defines exactly 26 AppSync resolvers (matching the move manifest + updateAgentStatus, finding 0018a6d7, + wave-2a OnChatterSubscriptionAuthorizerResolver, finding 87a171ad, + OnDesignProgressSubscriptionAuthorizerResolver, finding 195b2a58)", () => {
+  test("defines exactly 27 AppSync resolvers (matching the move manifest + updateAgentStatus, finding 0018a6d7, + wave-2a OnChatterSubscriptionAuthorizerResolver, finding 87a171ad, + OnDesignProgressSubscriptionAuthorizerResolver, finding 195b2a58, + RecordIntakeConsentResolver)", () => {
     const resolvers = template.findResources("AWS::AppSync::Resolver");
-    expect(Object.keys(resolvers)).toHaveLength(26);
+    expect(Object.keys(resolvers)).toHaveLength(27);
   });
 
-  test("defines exactly 12 AppSync Lambda data sources", () => {
+  test("defines exactly 13 AppSync Lambda data sources", () => {
     const dataSources = template.findResources("AWS::AppSync::DataSource", {
       Properties: Match.objectLike({ Type: "AWS_LAMBDA" }),
     });
-    expect(Object.keys(dataSources)).toHaveLength(12);
+    expect(Object.keys(dataSources)).toHaveLength(13);
   });
 
   const expectedFields: Array<[string, string]> = [
@@ -213,6 +223,7 @@ describe("ProjectsStack — backend-stack-split phase 1", () => {
     ["Mutation", "publishChatter"],
     ["Mutation", "publishAssessmentCompletion"],
     ["Query", "getAssessmentProgress"],
+    ["Mutation", "recordIntakeConsent"],
     ["Mutation", "publishDesignProgress"],
     ["Subscription", "onDesignProgress"],
     ["Query", "generateReportDownloadUrl"],
@@ -355,9 +366,9 @@ describe("ProjectsStack — backend-stack-split phase 1", () => {
   });
 
   // --- moved constructs present ---
-  test("defines exactly 16 Lambda functions (the moved set + DesignProgressSubscriptionAuthorizerFunction, finding 195b2a58)", () => {
+  test("defines exactly 17 Lambda functions (the moved set + DesignProgressSubscriptionAuthorizerFunction, finding 195b2a58, + IntakeConsentResolverFunction)", () => {
     const fns = template.findResources("AWS::Lambda::Function");
-    expect(Object.keys(fns)).toHaveLength(16);
+    expect(Object.keys(fns)).toHaveLength(17);
   });
 
   test("defines exactly 2 CloudWatch alarms (ProjectResolver error + throttle)", () => {
@@ -403,8 +414,8 @@ describe("ProjectsStack — backend-stack-split phase 1", () => {
         }),
       }),
     });
-    // 12 Lambda data sources -> 12 appsync-assumable roles.
-    expect(Object.keys(roles)).toHaveLength(12);
+    // 13 Lambda data sources -> 13 appsync-assumable roles.
+    expect(Object.keys(roles)).toHaveLength(13);
   });
 });
 

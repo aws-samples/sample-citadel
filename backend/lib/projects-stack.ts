@@ -76,6 +76,8 @@ export interface ProjectsStackProps extends cdk.StackProps {
    * action did not follow until now.
    */
   alarmTopic: sns.ITopic;
+  /** Owner-org fallback for the intake consent resolver's org derivation. */
+  userOrgMembershipTable: dynamodb.ITable;
 }
 
 export class ProjectsStack extends cdk.Stack {
@@ -848,6 +850,67 @@ export class ProjectsStack extends cdk.Stack {
       "Query",
       "getAssessmentProgress",
       assessmentProgressLambdaDataSource,
+    );
+
+    // ============================================================
+    // Intake Consent Gate Resolver
+    // ============================================================
+
+    const intakeConsentResolverFunction = new lambda.Function(
+      this,
+      "IntakeConsentResolverFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "intake-consent-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          SESSION_MEMORY_TABLE: sessionMemoryTableName,
+          PROJECTS_TABLE: `citadel-projects-${props.environment}`,
+          CONVERSATIONS_TABLE: `citadel-conversations-${props.environment}`,
+          USER_ORG_MEMBERSHIP_TABLE: props.userOrgMembershipTable.tableName,
+        },
+        timeout: cdk.Duration.seconds(10),
+        logGroup: new logs.LogGroup(this, "IntakeConsentResolverFunctionLogs", {
+          retention: logs.RetentionDays.ONE_WEEK,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        }),
+      },
+    );
+
+    // PutItem on session-memory table for writing consent records.
+    intakeConsentResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:PutItem"],
+        resources: [sessionMemoryTableArn],
+      }),
+    );
+
+    // GetItem + Scan on projects and conversations for org derivation.
+    intakeConsentResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:GetItem", "dynamodb:Scan"],
+        resources: [
+          `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-projects-${props.environment}`,
+          `arn:aws:dynamodb:${this.region}:${this.account}:table/citadel-conversations-${props.environment}`,
+        ],
+      }),
+    );
+
+    // Owner-org fallback (same pattern as intake-orchestration-resolver).
+    props.userOrgMembershipTable.grantReadData(intakeConsentResolverFunction);
+
+    const intakeConsentDataSource = makeLambdaDataSource(
+      "IntakeConsent",
+      intakeConsentResolverFunction,
+    );
+
+    makeResolver(
+      "RecordIntakeConsentResolver",
+      "Mutation",
+      "recordIntakeConsent",
+      intakeConsentDataSource,
     );
 
     // ============================================================
