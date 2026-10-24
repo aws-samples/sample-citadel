@@ -36,21 +36,51 @@ def parse_decimals(data: Any) -> Any:
     else:
         return data
 
-def load_config_from_dynamodb():
+def load_config_from_dynamodb(org_id: str = ""):
+    """Load active tool configs, filtered to the caller's organisation.
+
+    Scoping (§2.2-C/D): when ``org_id`` is non-empty the raw scan results
+    are passed through ``filter_by_org`` (from ``common.tenant_guard``) with
+    ``allow_system=False`` and ``component='fabricator_tools'``.  This
+    ensures the Fabricator's tool catalogue never leaks tools registered by a
+    different organisation.  The ``orgId`` field on each DynamoDB item is
+    stamped by ``store_tool_config_registry`` at creation time (Phase 2b).
+
+    Fail-closed: if ``org_id`` is empty the function returns an empty tools
+    list — the upstream ``process_event`` already refuses empty org_id, so
+    this is a defence-in-depth backstop.
+    """
     if CONFIG_TABLE is None:
         print("Warning: TOOL_CONFIG_TABLE environment variable not set, returning empty tools list")
+        return {'tools': []}
+
+    if not org_id:
+        print("Warning: org_id empty in load_config_from_dynamodb; returning empty tools (fail-closed)")
         return {'tools': []}
 
     print(f"Loading tools from table: {CONFIG_TABLE}")
     table = _get_dynamodb().Table(CONFIG_TABLE)
     response = table.scan()
     items = response['Items']
+
+    # Org-scoped filtering (§2.2-C): only include items whose orgId matches
+    # the caller's org. System records (orgId=='') are excluded here because
+    # fabricator tools are always org-owned (allow_system=False).
+    try:
+        from common.tenant_guard import filter_by_org
+    except ImportError:
+        # Deployed bundle may flatten the path — try the relative import.
+        from tenant_guard import filter_by_org  # type: ignore[no-redef]
+    items = filter_by_org(
+        items, org_id, allow_system=False, component="fabricator_tools",
+    )
+
     configs = []
     for item in items:
         # Only load agents with state 'active'
         if item.get('state') == 'active':
             configs.append(item['config'])
-    print(f"Loaded {len(configs)} active tools")
+    print(f"Loaded {len(configs)} active tools for org_id={org_id}")
     print(configs)
     return {'tools': configs}
 

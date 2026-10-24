@@ -138,7 +138,9 @@ def _end_registration_run() -> None:
     _registration_run_state = None
 
 
-def _find_existing_record_id(registry_id: str, agent_id: str) -> str | None:
+def _find_existing_record_id(
+    registry_id: str, agent_id: str, org_id: str = ""
+) -> str | None:
     """Return the recordId of an existing Registry record named ``agent_id``.
 
     Idempotency support for ``store_agent_config_registry``: SQS redeliveries
@@ -148,6 +150,13 @@ def _find_existing_record_id(registry_id: str, agent_id: str) -> str | None:
     match on the record name. Uses the server-side ``name`` filter to bound
     the result set, then verifies an EXACT name match (the filter may be a
     prefix / substring match) and paginates via ``nextToken``.
+
+    Org-scoped idempotency (§2.2-C): when ``org_id`` is non-empty, a
+    candidate record is only considered a match when its custom_metadata
+    ``orgId`` equals ``org_id``.  This allows same-named records across
+    different organisations — org-A's "SalesBot" is invisible to org-B's
+    idempotency lookup.  If the registry returns multiple same-name records,
+    we pick the one whose ``orgId`` matches the caller.
 
     Returns the matched recordId, or ``None`` when no record with that exact
     name exists. Defensive ``isinstance`` guards keep the loop bounded if the
@@ -180,12 +189,43 @@ def _find_existing_record_id(registry_id: str, agent_id: str) -> str | None:
         if summaries is None:
             summaries = response.get("records", [])
         for summary in summaries:
-            if isinstance(summary, dict) and summary.get("displayName") == agent_id:
-                return summary.get("recordId")
+            if not isinstance(summary, dict):
+                continue
+            if summary.get("displayName") != agent_id:
+                continue
+            # Org-scoped idempotency (§2.2-C): read the orgId from the
+            # record's custom descriptor metadata and compare with the
+            # caller's org. A record belonging to a different org is
+            # NOT FOUND from this caller's perspective.
+            if org_id:
+                record_org = _extract_org_from_summary(summary)
+                if record_org != org_id:
+                    continue
+            return summary.get("recordId")
         next_token = response.get("nextToken")
         if not isinstance(next_token, str) or not next_token:
             break
     return None
+
+
+def _extract_org_from_summary(summary: dict) -> str:
+    """Best-effort extraction of orgId from a registry record summary.
+
+    The orgId lives inside ``descriptors.custom.data`` (a JSON string) under
+    the key ``orgId``.  ListRegistryRecords MAY return the descriptors on the
+    summary or may not — when absent, return ``""`` (the system/shared
+    convention) so the caller degrades gracefully.
+    """
+    try:
+        descriptors = summary.get("descriptors") or {}
+        custom = descriptors.get("custom") or {}
+        data_str = custom.get("data", "")
+        if data_str and isinstance(data_str, str):
+            data = json.loads(data_str)
+            return data.get("orgId", "")
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        pass
+    return ""
 
 
 def _write_app_meta_row(
@@ -666,9 +706,9 @@ def get_tool_fabricator_prompt():
     """
     return TOOL_FABRICATOR_PROMPT
 
-def get_agent_fabricator_prompt():
+def get_agent_fabricator_prompt(org_id: str = ""):
     """System prompt for the Agent Fabricator agent"""
-    tool_configs = load_config_from_dynamodb()
+    tool_configs = load_config_from_dynamodb(org_id=org_id)
     worker_tools_list = '\n'.join(create_tool_desc(tool_configs))
 
     AGENT_FABRICATOR_PROMPT = f"""
@@ -1120,8 +1160,20 @@ def publish_intake_progress(session_id: str, agent_index: int, total_agents: int
     # summary embeds the event-derived agent name; log only the numeric pct.
     print(f"Published intake progress: {pct}%")
 
-def upload_to_s3(file_path, folder):
-    """Upload a file to S3"""
+def upload_to_s3(file_path, folder, record_id=None):
+    """Upload a file to S3 under a record-scoped key.
+
+    Key layout (§2.2-D / scanner C1):
+        ``{folder}/{record_id}/{basename}``   when record_id is provided
+        ``{folder}/{basename}``               legacy fallback (record_id=None)
+
+    The scoped layout isolates fabricated code per-record and aligns with the
+    worker's new key derivation introduced in PR1.  The legacy flat key is
+    NO LONGER written — the worker falls back to the flat key on read during
+    migration, so continuing to write it would leave stale artefacts. A
+    SHA-256 digest of the file content is returned so callers can stamp
+    ``codeSha256`` into custom_metadata for integrity verification.
+    """
     # Check env var FIRST so missing-bucket is a pure failure with zero
     # AWS calls (QB-013-1). Constructing boto3.client('s3') triggers
     # credential resolution, which fails in credential-less test envs.
@@ -1131,17 +1183,32 @@ def upload_to_s3(file_path, folder):
     s3 = boto3.client('s3')
     print(f"storing {file_path}")
     filename = file_path.split("/")[-1]
-    s3.upload_file(file_path, bucket_name, f"{folder}/{filename}")
+
+    # Compute SHA-256 digest of the file content.
+    import hashlib
+    sha256 = hashlib.sha256()
+    with open(file_path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(8192), b""):
+            sha256.update(chunk)
+    code_sha256 = sha256.hexdigest()
+
+    # Scoped key layout: {folder}/{record_id}/{basename}
+    if record_id:
+        s3_key = f"{folder}/{record_id}/{filename}"
+    else:
+        s3_key = f"{folder}/{filename}"
+    s3.upload_file(file_path, bucket_name, s3_key)
+    return code_sha256
 
 @tool
-def upload_agent_to_s3(file_path):
+def upload_agent_to_s3(file_path, record_id=None):
     """Upload a agent file to S3"""
-    upload_to_s3(file_path, "agents")
+    return upload_to_s3(file_path, "agents", record_id=record_id)
 
 @tool
-def upload_tool_to_s3(file_path):
+def upload_tool_to_s3(file_path, record_id=None):
     """Upload a tool file to S3"""
-    upload_to_s3(file_path, "tools")
+    return upload_to_s3(file_path, "tools", record_id=record_id)
 
 @tool
 def get_worker_tool(tool_name: str) -> str:
@@ -1540,7 +1607,7 @@ def store_agent_config_registry(
         # record already exists we SKIP CreateRegistryRecord, still refresh the
         # AppsTable #META mirror for that existing record, and return True so
         # the re-trigger is a no-op rather than a duplicate fabrication.
-        existing_record_id = _find_existing_record_id(registry_id, agent_id)
+        existing_record_id = _find_existing_record_id(registry_id, agent_id, org_id=org_id)
         if existing_record_id is not None:
             print(
                 f"[store_agent_config_registry] Record with name '{agent_id}' "
@@ -2055,7 +2122,7 @@ def create_custom_tool(
     print(f"Tool Fabricator response: {result}")
     return result
 
-def create_agent_fabricator(complete_task, store_agent_tool=None):
+def create_agent_fabricator(complete_task, store_agent_tool=None, org_id: str = ""):
     """Create and return the Agent Fabricator agent.
 
     Args:
@@ -2066,6 +2133,8 @@ def create_agent_fabricator(complete_task, store_agent_tool=None):
             (see ``process_event``). Defaults to the module-level
             ``store_agent_config_registry`` which uses the legacy
             ``"fabricator"`` default.
+        org_id: The caller's organisation id, threaded to the prompt builder
+            so the tool catalogue is scoped.
     """
     if store_agent_tool is None:
         store_agent_tool = store_agent_config_registry
@@ -2085,7 +2154,7 @@ def create_agent_fabricator(complete_task, store_agent_tool=None):
         bedrock_model,
         tools=[file_write, http_request, shell, get_worker_tool, create_custom_tool,
             upload_agent_to_s3, store_agent_tool, complete_task],
-        system_prompt=get_agent_fabricator_prompt()
+        system_prompt=get_agent_fabricator_prompt(org_id=org_id)
     )
     
     return agent_fabricator
@@ -2395,6 +2464,7 @@ def process_event(event, context, request_type=None):
             agent_fabricator = create_agent_fabricator(
                 complete_task,
                 store_agent_tool=store_agent_config_registry_bound,
+                org_id=org_id,
             )
             # Bounded transient retry — same contract as the tool-creation
             # path above: transient Bedrock faults only, ≤3 total attempts,
