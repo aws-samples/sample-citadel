@@ -313,12 +313,51 @@ def _registry_state_from_status(status: str) -> str:
 
 
 
+def _extract_org_from_summary(summary: dict) -> str:
+    """Best-effort extraction of orgId from a registry record summary.
+
+    Mirrors arbiter/fabricator/index.py _extract_org_from_summary.  The orgId
+    lives inside ``descriptors.custom.data`` (a JSON string) under the key
+    ``orgId``.  ListRegistryRecords MAY include descriptors on the summary —
+    when absent, return ``""`` (the system/shared convention) so the caller
+    treats the record as visible to every tenant.
+
+    This is the CHEAPEST correct path for org filtering (C23 fix):
+    - Summaries carry descriptors → parse in-line, zero extra API calls.
+    - Summaries omit descriptors  → orgId resolves to "" (system record),
+      kept visible.  A per-record GET would recover the real orgId but would
+      reintroduce the N+1 sequential-call budget blow-up that the summary-
+      only refactor eliminated.  The accepted tradeoff is that records whose
+      summaries lack descriptors appear as system records — the fabricator
+      ALWAYS stamps orgId into custom_metadata, so in practice every
+      fabricated record carries it.
+    """
+    try:
+        descriptors = summary.get("descriptors") or {}
+        custom = descriptors.get("custom") or {}
+        data_str = custom.get("data", "")
+        if data_str and isinstance(data_str, str):
+            data = json.loads(data_str)
+            return data.get("orgId", "")
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        pass
+    return ""
+
+
 def _get_existing_agents() -> dict[str, dict]:
     """Return factory records from the AgentCore Registry, keyed by record name.
 
     Fabricated agents are persisted to the AgentCore Registry (via the arbiter's
     store_agent_config_registry), NEVER to a DynamoDB agent-config table — so
     the intake catalog must read the registry to see ap-*-agent-v1 agents.
+
+    **Org-scoped** (C23 fix): only records belonging to the session's
+    organisation (from ``request_context``) or system records (orgId ``""``)
+    are returned.  This prevents one tenant's agents from leaking into
+    another tenant's fabrication prompt or being bound by another tenant's
+    session.  The session org_id is REQUIRED — if the session has no org,
+    the function fails closed (returns ``{}``) instead of exposing the full
+    unscoped registry.
 
     Built from LIST-PAGE SUMMARIES ONLY — no per-record GetRegistryRecord
     calls. The previous implementation issued one GET per record to read the
@@ -353,6 +392,16 @@ def _get_existing_agents() -> dict[str, dict]:
         logger.info("REGISTRY_ID unset; cannot list factory agents from registry")
         return {}
 
+    # C23 fix: resolve the session's org and fail closed when absent.
+    try:
+        session_org = request_context.current_session().org_id
+    except RuntimeError:
+        logger.warning("_get_existing_agents called outside request scope; returning empty")
+        return {}
+    if not session_org:
+        logger.warning("session has no org_id; returning empty to avoid cross-tenant leak")
+        return {}
+
     try:
         client = _get_registry_client()
     except Exception as e:  # noqa: BLE001 — client build must not raise
@@ -381,6 +430,11 @@ def _get_existing_agents() -> dict[str, dict]:
                 name = summary.get("name")
                 record_id = summary.get("recordId")
                 if not name or not record_id:
+                    continue
+                # C23 org-scope filter: keep own-org + system (orgId "")
+                # records; drop everything else.
+                record_org = _extract_org_from_summary(summary)
+                if record_org != "" and record_org != session_org:
                     continue
                 agents[name] = {
                     "name": name,
