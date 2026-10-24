@@ -25,6 +25,7 @@ import {
 } from '../services/documentService';
 import { diffLines, type Change } from 'diff';
 import { FabricationStatusPanel } from './FabricationStatusPanel';
+import { consentActionForLabel, recordIntakeConsent } from '../services/intakeConsentService';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -753,10 +754,18 @@ export function ProjectWorkspace({ project, onBack }: ProjectWorkspaceProps) {
                                 size="sm"
                                 className="h-7 text-xs"
                                 disabled={sending || !isLastAssistant}
-                                onClick={() => {
+                                onClick={async () => {
                                   setInput('');
                                   setSending(true);
-                                  sendMessageToAgent(project.id, 'agent_intake_single', action.value).catch(() => setSending(false));
+                                  try {
+                                    const consentAction = consentActionForLabel(action.label);
+                                    if (consentAction) {
+                                      await recordIntakeConsent(project.id, consentAction);
+                                    }
+                                    await sendMessageToAgent(project.id, 'agent_intake_single', action.value);
+                                  } catch {
+                                    setSending(false);
+                                  }
                                 }}
                               >
                                 {action.label}

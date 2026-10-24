@@ -1,3 +1,4 @@
+import request_context
 """QW-D: Langfuse span export must be batched, not synchronous per-span.
 
 ``agent.py`` wires an OTLP exporter to Langfuse when LANGFUSE_PUBLIC_KEY and

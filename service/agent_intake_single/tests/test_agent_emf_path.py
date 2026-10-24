@@ -1,3 +1,4 @@
+import request_context
 """Agent-path tests for Wave 0 EMF instrumentation (agent.invoke).
 
 Asserts that a completed turn through ``agent.invoke`` emits exactly ONE
