@@ -528,9 +528,33 @@ def assert_tool_spec_binding(tool_config: dict, spec_id: str | None) -> None:
             "and requires a bound spec_id referencing an APPROVED ExecutionSpecification."
         )
 
-def load_file_from_s3_into_tmp(bucket_name, file_name):
+def load_file_from_s3_into_tmp(bucket_name, file_name, record_id=None, expected_sha256=None):
+    """Download agent code, validating key derivation and optional digest.
+
+    Key derivation: S3 key is ``agents/{record_id}/{basename}`` when
+    *record_id* is supplied, falling back to ``agents/{basename}`` for
+    legacy records.  Basename enforcement strips traversal components.
+
+    When *expected_sha256* is supplied, the downloaded file's SHA-256
+    is verified.  A mismatch raises ``ValueError`` and REMOVES the file.
+    """
+    import hashlib
     s3 = boto3.client('s3')
-    s3.download_file(bucket_name, f"agents/{file_name}", "/tmp/loaded_module.py")
+    basename = os.path.basename(file_name)  # strip traversal
+    if record_id:
+        s3_key = f"agents/{record_id}/{basename}"
+    else:
+        s3_key = f"agents/{basename}"  # legacy fallback
+    s3.download_file(bucket_name, s3_key, "/tmp/loaded_module.py")
+    if expected_sha256:
+        with open("/tmp/loaded_module.py", "rb") as f:
+            actual = hashlib.sha256(f.read()).hexdigest()
+        if actual != expected_sha256:
+            os.remove("/tmp/loaded_module.py")
+            raise ValueError(
+                f"S3 artifact digest mismatch: expected={expected_sha256}, "
+                f"actual={actual}, key={s3_key}"
+            )
 
 def load_config_from_dynamodb(agent_name: str):
     print(CONFIG_TABLE)
@@ -1542,6 +1566,17 @@ def _process_workflow_node(event, message_attributes=None):
 
             agent = load_config_from_dynamodb(msg.agent_id)
             config = agent['config']
+            # Tenant isolation: verify agent record belongs to execution's org
+            _wf_exec_org = _resolve_execution_org_id(msg.execution_id)
+            if _wf_exec_org:
+                from common.tenant_guard import require_same_org
+                require_same_org(
+                    agent, _wf_exec_org,
+                    record_id_field="agentId",
+                    org_field="orgId",
+                    component="worker",
+                    allow_system=True,
+                )
             # Second layer (defence in depth), CIT-041 PR2: re-check registry
             # approval on the SAME already-fetched item, beside the exec-spec
             # gate below. Raises before any further dispatch work on refusal.
@@ -1562,7 +1597,12 @@ def _process_workflow_node(event, message_attributes=None):
             )
 
             fileName = config['filename']
-            load_file_from_s3_into_tmp(os.environ["AGENT_BUCKET_NAME"], fileName)
+            load_file_from_s3_into_tmp(
+                os.environ["AGENT_BUCKET_NAME"],
+                fileName,
+                record_id=agent.get('agentId'),
+                expected_sha256=agent.get('codeSha256'),
+            )
 
             # Layer-2 governance parity with the supervisor task path: build the
             # same governance-carrying subprocess env so the subprocess layer-2
@@ -1747,6 +1787,16 @@ def process_event(event, context, message_attributes=None):
 
     agent = load_config_from_dynamodb(agent_name)
     config = agent['config']
+    # Tenant isolation: verify agent record belongs to execution's org
+    if org_id:
+        from common.tenant_guard import require_same_org
+        require_same_org(
+            agent, org_id,
+            record_id_field="agentId",
+            org_field="orgId",
+            component="worker",
+            allow_system=True,
+        )
     # Second layer (defence in depth), CIT-041 PR2: re-check registry
     # approval on the SAME already-fetched item, beside the exec-spec gate
     # below. Raises before any further dispatch work on refusal.
@@ -1876,7 +1926,12 @@ def process_event(event, context, message_attributes=None):
 
     fileName = config['filename']
     print("loading file from s3...")
-    load_file_from_s3_into_tmp(os.environ["AGENT_BUCKET_NAME"], fileName)
+    load_file_from_s3_into_tmp(
+        os.environ["AGENT_BUCKET_NAME"],
+        fileName,
+        record_id=agent.get('agentId'),
+        expected_sha256=agent.get('codeSha256'),
+    )
 
     # Build extra env vars for governance and config overrides
     max_iterations = step_constraints.get('maxIterations') if step_constraints else None

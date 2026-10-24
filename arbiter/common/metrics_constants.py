@@ -122,3 +122,8 @@ METRIC_APPROVAL_DISPATCH_REFUSED = 'ApprovalDispatchRefused'
 # the node pending for retry rather than dispatching it, so this metric is the
 # signal that a frontier pass was intentionally held back.
 METRIC_APPROVAL_PARK_FAILED = 'ApprovalParkFailed'
+
+# Supervisor tenant-guard: emitted when the orchestration row's orgId
+# disagrees with the event detail's orgId (decision 512b2f58). Fail-closed
+# — the dispatch is refused. Dimensions: Component (always 'Supervisor').
+METRIC_SUPERVISOR_ORG_SOURCE_MISMATCH = 'SupervisorOrgSourceMismatch'

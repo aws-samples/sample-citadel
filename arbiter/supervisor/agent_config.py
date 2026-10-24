@@ -43,7 +43,7 @@ def _with_approval_fields(config: dict, item: dict) -> dict:
     return config
 
 
-def load_config_from_dynamodb():
+def load_config_from_dynamodb(org_id: str | None = None):
     print(CONFIG_TABLE)
     table = dynamodb.Table(CONFIG_TABLE)
     response = table.scan()
@@ -53,6 +53,19 @@ def load_config_from_dynamodb():
         # Only load agents with state 'active'
         if item.get('state') == 'active':
             configs.append(_with_approval_fields(item['config'], item))
+
+    # Tenant isolation: filter catalogue to bound org + system records
+    if org_id:
+        from common.tenant_guard import filter_by_org
+
+        configs = filter_by_org(
+            configs,
+            org_id,
+            org_field="orgId",
+            allow_system=True,
+            component="supervisor",
+        )
+
     print(f"Loaded {len(configs)} active agents")
     return {'agents': configs}
 
