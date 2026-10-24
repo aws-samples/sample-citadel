@@ -4,6 +4,7 @@ import os
 import time
 from strands.tools import tool
 from tools.kb import kb_query, load_json_from_s3, save_json_to_s3, s3_get, s3_put
+from tools.fence import validate_resource_name
 from tools.converse_utils import extract_text, capture_converse_usage
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import bedrock, get_agent_model_id
@@ -588,6 +589,7 @@ def get_design_section(section_id: str) -> str:
         Current markdown content of the section.
     """
     session_id = request_context.current_session_id()
+    validate_resource_name(section_id, "section_id")
     content = s3_get(SECTION_KEY.format(session_id=session_id, section_id=section_id))
     if not content:
         return f"Section {section_id} has not been generated yet."
@@ -607,6 +609,7 @@ def update_design_section(section_id: str, edit_instruction: str) -> str:
         Confirmation with word count of updated section.
     """
     session_id = request_context.current_session_id()
+    validate_resource_name(section_id, "section_id")
     template = _load_template()
     section = next((s for s in template['sections'] if s['id'] == section_id), None)
     if not section:

@@ -2,6 +2,7 @@
 import json
 from dataclasses import dataclass
 from config import bedrock_agent, s3, KNOWLEDGE_BASE_ID, SESSION_BUCKET
+from tools.fence import fence_untrusted
 
 
 @dataclass(frozen=True)
@@ -53,8 +54,12 @@ def kb_query(query: str, session_id: str, n: int = 3) -> str:
     """Back-compat wrapper: returns retrieved content, or '' on empty/error.
 
     Never returns error text as content (see kb_retrieve).
+    Content is fenced for safe model-context injection.
     """
-    return kb_retrieve(query, session_id, n).content
+    result = kb_retrieve(query, session_id, n)
+    if not result.content:
+        return ""
+    return fence_untrusted(result.content, source="knowledge_base")
 
 
 def s3_get(key: str) -> str | None:

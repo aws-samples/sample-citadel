@@ -4,6 +4,7 @@ import os
 import time
 from strands.tools import tool
 from tools.kb import s3_get, s3_put, load_json_from_s3, save_json_to_s3
+from tools.fence import validate_resource_name
 from tools.converse_utils import extract_text, capture_converse_usage
 from tools.design import SECTION_KEY, RESOURCING_KEY, RESOURCING_INPUTS_KEY, SYSTEM_PROMPT, _assessment_summary, _rolling_summary
 from config import bedrock, get_agent_model_id
@@ -160,6 +161,7 @@ def get_planning_doc(doc_type: str) -> str:
         Current markdown content of the document.
     """
     session_id = request_context.current_session_id()
+    validate_resource_name(doc_type, "doc_type")
     key_map = {'business': BUSINESS_PLAN_KEY, 'commercial': COMMERCIAL_PLAN_KEY}
     key = key_map.get(doc_type)
     if not key:
@@ -180,6 +182,7 @@ def update_planning_doc(doc_type: str, edit_instruction: str) -> str:
         Confirmation with updated word count.
     """
     session_id = request_context.current_session_id()
+    validate_resource_name(doc_type, "doc_type")
     key_map = {'business': BUSINESS_PLAN_KEY, 'commercial': COMMERCIAL_PLAN_KEY}
     tmpl_map = {'business': 'business_plan_template.json', 'commercial': 'commercial_plan_template.json'}
     key = key_map.get(doc_type)
