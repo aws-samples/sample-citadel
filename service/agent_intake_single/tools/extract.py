@@ -10,6 +10,7 @@ from tools.converse_utils import extract_text, capture_converse_usage
 from config import bedrock, AWS_REGION
 from region import cross_region_prefix
 from model_config_loader import load_extraction_model_id
+import request_context
 
 logger = logging.getLogger(__name__)
 
@@ -184,18 +185,16 @@ JSON only, no explanation."""
     return value
 
 @tool
-def extract_information(session_id: str) -> str:
+def extract_information() -> str:
     """Extract assessment information from uploaded documents.
     Queries the KB for each field and uses an LLM to extract clean values.
     Each extraction call includes a scorecard of completed and pending fields for context.
     Safe to call multiple times — skips already-filled fields.
 
-    Args:
-        session_id: The session ID
-
     Returns:
         JSON with completion stats and remaining gaps.
     """
+    session_id = request_context.current_session_id()
     _init_if_needed(session_id)
 
     # Load all pillar data once into memory
@@ -308,15 +307,13 @@ def extract_information(session_id: str) -> str:
     })
 
 @tool
-def get_assessment_summary(session_id: str) -> str:
+def get_assessment_summary() -> str:
     """Get a compact summary of all filled assessment fields for the go/no-go decision.
-
-    Args:
-        session_id: The session ID
 
     Returns:
         Markdown summary of assessment data.
     """
+    session_id = request_context.current_session_id()
     lines = []
     for pillar in PILLARS:
         data = load_json_from_s3(_assessment_key(session_id, pillar))
@@ -332,16 +329,14 @@ def get_assessment_summary(session_id: str) -> str:
     return '\n'.join(lines) if lines else "No assessment data found."
 
 @tool
-def get_next_assessment_question(session_id: str) -> str:
+def get_next_assessment_question() -> str:
     """Get the next unanswered required assessment field to ask the user about.
     Returns one field at a time. Returns 'complete' when all required fields are filled.
-
-    Args:
-        session_id: The session ID
 
     Returns:
         JSON with pillar, section, field, label, completion_pct — or 'complete'.
     """
+    session_id = request_context.current_session_id()
     _init_if_needed(session_id)
     for pillar in PILLARS:
         data = load_json_from_s3(_assessment_key(session_id, pillar))
@@ -362,11 +357,10 @@ def get_next_assessment_question(session_id: str) -> str:
     return 'complete'
 
 @tool
-def update_assessment_field(session_id: str, pillar: str, section: str, field: str, value: str) -> str:
+def update_assessment_field(pillar: str, section: str, field: str, value: str) -> str:
     """Save a single assessment field value provided by the user in conversation.
 
     Args:
-        session_id: The session ID
         pillar: business, technical, governance, or dimensions
         section: Section key within the pillar
         field: Field key within the section
@@ -375,6 +369,7 @@ def update_assessment_field(session_id: str, pillar: str, section: str, field: s
     Returns:
         Confirmation with updated completion percentage.
     """
+    session_id = request_context.current_session_id()
     key = _assessment_key(session_id, pillar)
     data = load_json_from_s3(key)
     if data is None:

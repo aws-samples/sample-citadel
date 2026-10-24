@@ -22,6 +22,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import request_context
+
 os.environ.setdefault("APPSYNC_GRAPHQL_URL", "https://test.example/graphql")
 
 import tools.postfab as postfab
@@ -71,7 +73,7 @@ def _contract(result):
 def test_full_success_reports_and_asks_app_creation(execute, marker_store):
     execute.return_value = _activation(activated=["A", "B"])
 
-    result = json.loads(postfab.activate_agents(session_id="sess-1"))
+    result = json.loads(postfab.activate_agents())
 
     assert result["ok"] is True
     assert "2" in result["summary"] and "active" in result["summary"]
@@ -89,7 +91,7 @@ def test_full_success_reports_and_asks_app_creation(execute, marker_store):
 def test_already_active_itemized(execute, marker_store):
     execute.return_value = _activation(activated=["A"], already=["B"])
 
-    result = json.loads(postfab.activate_agents(session_id="sess-1"))
+    result = json.loads(postfab.activate_agents())
 
     assert result["ok"] is True
     assert "already active" in result["summary"]
@@ -99,7 +101,7 @@ def test_already_active_itemized(execute, marker_store):
 def test_partial_failure_itemized_with_plain_reason(execute, marker_store):
     execute.return_value = _activation(activated=["A", "B"], failed=["C"])
 
-    result = json.loads(postfab.activate_agents(session_id="sess-1"))
+    result = json.loads(postfab.activate_agents())
 
     assert result["ok"] is True
     assert "2 of 3" in result["summary"]
@@ -113,7 +115,7 @@ def test_partial_failure_itemized_with_plain_reason(execute, marker_store):
 def test_zero_matched_returns_approved_explanation(execute, marker_store):
     execute.return_value = _activation(matched_by=None)
 
-    result = json.loads(postfab.activate_agents(session_id="sess-1"))
+    result = json.loads(postfab.activate_agents())
 
     assert result["status"] == "zero_matched"
     assert "couldn't match" in result["summary"].lower()
@@ -126,8 +128,8 @@ def test_zero_matched_returns_approved_explanation(execute, marker_store):
 def test_idempotent_second_call_makes_no_mutation(execute, marker_store):
     execute.return_value = _activation(activated=["A"])
 
-    first = json.loads(postfab.activate_agents(session_id="sess-1"))
-    second = json.loads(postfab.activate_agents(session_id="sess-1"))
+    first = json.loads(postfab.activate_agents())
+    second = json.loads(postfab.activate_agents())
 
     assert execute.call_count == 1
     assert first["ok"] is True
@@ -140,7 +142,7 @@ def test_idempotent_second_call_makes_no_mutation(execute, marker_store):
 def test_appsync_error_returns_nothing_changed_copy(execute, marker_store):
     execute.side_effect = AppSyncError("boom internal detail XYZZY", retryable=True)
 
-    result = json.loads(postfab.activate_agents(session_id="sess-1"))
+    result = json.loads(postfab.activate_agents())
 
     assert result["ok"] is False
     assert result["retryable"] is True

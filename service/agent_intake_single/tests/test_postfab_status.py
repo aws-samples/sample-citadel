@@ -24,6 +24,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import request_context
+
 os.environ.setdefault("APPSYNC_GRAPHQL_URL", "https://test.example/graphql")
 os.environ.setdefault("FABRICATION_JOBS_TABLE", "jobs-test")
 
@@ -75,7 +77,7 @@ def jobs_table(monkeypatch):
 
 def _run(jobs_table, items, marker_store):
     jobs_table.query.return_value = {"Items": items}
-    return json.loads(postfab.check_fabrication_status(session_id="sess-1"))
+    return json.loads(postfab.check_fabrication_status())
 
 
 def _assert_conversational_contract(result):
@@ -160,7 +162,7 @@ def test_no_rows_returns_none_status(jobs_table, marker_store):
 
 def test_table_unset_returns_unavailable(monkeypatch, marker_store):
     monkeypatch.setattr(postfab, "FABRICATION_JOBS_TABLE", "")
-    result = json.loads(postfab.check_fabrication_status(session_id="sess-1"))
+    result = json.loads(postfab.check_fabrication_status())
 
     assert result["status"] == "unavailable"
     _assert_conversational_contract(result)

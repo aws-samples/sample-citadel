@@ -23,6 +23,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import request_context
+
 os.environ.setdefault("FABRICATOR_QUEUE_URL", "https://sqs.fake/queue")
 
 import tools.fabricate as fab
@@ -99,7 +101,7 @@ def test_retry_failed_fabrication_body_carries_org_id(fab_env, monkeypatch):
         ],
     }
 
-    result = json.loads(fab.retry_failed_fabrication(session_id="sess-4"))
+    result = json.loads(fab.retry_failed_fabrication())
 
     assert result["ok"] is True
     fab.sqs.send_message.assert_called_once()

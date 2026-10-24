@@ -7,6 +7,7 @@ from tools.kb import s3_get, s3_put, load_json_from_s3, save_json_to_s3
 from tools.converse_utils import extract_text, capture_converse_usage
 from tools.design import SECTION_KEY, RESOURCING_KEY, RESOURCING_INPUTS_KEY, SYSTEM_PROMPT, _assessment_summary, _rolling_summary
 from config import bedrock, get_agent_model_id
+import request_context
 
 TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), '..', 'templates')
 
@@ -89,16 +90,14 @@ def _commercial_extra(config: dict) -> str:
 
 
 @tool
-def generate_business_plan(session_id: str) -> str:
+def generate_business_plan() -> str:
     """Generate the Business Plan document (strategic context, stakeholders, risks, recommendation & build path).
     Saves to {session_id}/planning/business_plan.md.
-
-    Args:
-        session_id: The session ID
 
     Returns:
         Confirmation with word count.
     """
+    session_id = request_context.current_session_id()
     template = _load_planning_template('business_plan_template.json')
     section2 = s3_get(SECTION_KEY.format(session_id=session_id, section_id='2')) or ''
     extra = f"--- Agent definitions (for build path classification) ---\n{section2}"
@@ -112,17 +111,17 @@ def generate_business_plan(session_id: str) -> str:
 
 
 @tool
-def generate_commercial_plan(session_id: str, day_rate: int = 0) -> str:
+def generate_commercial_plan(day_rate: int = 0) -> str:
     """Generate the Commercial Plan document (resourcing, budget, ROI).
     Saves to {session_id}/planning/commercial_plan.md. Persists day_rate and infra cost for future edits.
 
     Args:
-        session_id: The session ID
         day_rate: Developer day rate in USD (0 = use template default)
 
     Returns:
         Confirmation with word count.
     """
+    session_id = request_context.current_session_id()
     tmpl = _load_planning_template('commercial_plan_template.json')
     resourcing_inputs = load_json_from_s3(RESOURCING_INPUTS_KEY.format(session_id=session_id)) or {}
     agents = resourcing_inputs.get('agents', [])
@@ -151,16 +150,16 @@ def generate_commercial_plan(session_id: str, day_rate: int = 0) -> str:
 
 
 @tool
-def get_planning_doc(session_id: str, doc_type: str) -> str:
+def get_planning_doc(doc_type: str) -> str:
     """Read the current content of a planning document.
 
     Args:
-        session_id: The session ID
         doc_type: 'business' or 'commercial'
 
     Returns:
         Current markdown content of the document.
     """
+    session_id = request_context.current_session_id()
     key_map = {'business': BUSINESS_PLAN_KEY, 'commercial': COMMERCIAL_PLAN_KEY}
     key = key_map.get(doc_type)
     if not key:
@@ -170,17 +169,17 @@ def get_planning_doc(session_id: str, doc_type: str) -> str:
 
 
 @tool
-def update_planning_doc(session_id: str, doc_type: str, edit_instruction: str) -> str:
+def update_planning_doc(doc_type: str, edit_instruction: str) -> str:
     """Edit a planning document. For the commercial plan, also handles changes to day rate or infra cost.
 
     Args:
-        session_id: The session ID
         doc_type: 'business' or 'commercial'
         edit_instruction: Plain-language description of what to change (e.g. "change day rate to 1500")
 
     Returns:
         Confirmation with updated word count.
     """
+    session_id = request_context.current_session_id()
     key_map = {'business': BUSINESS_PLAN_KEY, 'commercial': COMMERCIAL_PLAN_KEY}
     tmpl_map = {'business': 'business_plan_template.json', 'commercial': 'commercial_plan_template.json'}
     key = key_map.get(doc_type)

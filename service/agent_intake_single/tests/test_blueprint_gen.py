@@ -27,6 +27,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import request_context
+
 os.environ.setdefault("APPSYNC_GRAPHQL_URL", "https://test.example/graphql")
 
 import tools.postfab as postfab
@@ -91,7 +93,7 @@ def _captured_definition(execute):
 
 
 def test_envelope_is_canonical(deps, marker_store):
-    result = json.loads(postfab.generate_process_blueprint(session_id="sess-1"))
+    result = json.loads(postfab.generate_process_blueprint())
 
     assert result["ok"] is True
     definition = _captured_definition(deps)
@@ -119,7 +121,7 @@ def test_nodes_carry_display_names_from_step_mapping(deps, marker_store):
     chain (agentConfig.name || config.name || agentId) surfaced raw registry
     recordIds on catalog miss. Each node must carry the human-readable
     step/agent name used to compose the workflow."""
-    postfab.generate_process_blueprint(session_id="sess-1")
+    postfab.generate_process_blueprint()
 
     definition = _captured_definition(deps)
     names_by_id = {n["id"]: n["name"] for n in definition["nodes"]}
@@ -184,7 +186,7 @@ def snake_deps(monkeypatch):
 
 
 def test_node_names_are_design_doc_labels_not_snake_ids(snake_deps, marker_store):
-    postfab.generate_process_blueprint(session_id="sess-1")
+    postfab.generate_process_blueprint()
 
     definition = _captured_definition(snake_deps)
     names_by_id = {n["id"]: n["name"] for n in definition["nodes"]}
@@ -195,7 +197,7 @@ def test_node_names_are_design_doc_labels_not_snake_ids(snake_deps, marker_store
 def test_node_name_fallback_humanizes_snake_case(snake_deps, marker_store):
     """No design label matches 'unmapped_reporting_agent' — the fallback
     humanizes the registry name: underscores -> spaces, Title Case."""
-    postfab.generate_process_blueprint(session_id="sess-1")
+    postfab.generate_process_blueprint()
 
     definition = _captured_definition(snake_deps)
     names_by_id = {n["id"]: n["name"] for n in definition["nodes"]}
@@ -203,7 +205,7 @@ def test_node_name_fallback_humanizes_snake_case(snake_deps, marker_store):
 
 
 def test_node_names_never_contain_underscores(snake_deps, marker_store):
-    postfab.generate_process_blueprint(session_id="sess-1")
+    postfab.generate_process_blueprint()
 
     definition = _captured_definition(snake_deps)
     for node in definition["nodes"]:
@@ -216,7 +218,7 @@ def test_node_names_never_contain_underscores(snake_deps, marker_store):
 def test_steps_payload_uses_the_same_human_labels(snake_deps, marker_store):
     """The 'Show me the steps first' path reads result['steps'] — raw
     snake_case ids must never reach the conversation (copy rules)."""
-    result = json.loads(postfab.generate_process_blueprint(session_id="sess-1"))
+    result = json.loads(postfab.generate_process_blueprint())
 
     assert result["steps"] == [
         "Invoice Intake Classifier Agent",
@@ -226,7 +228,7 @@ def test_steps_payload_uses_the_same_human_labels(snake_deps, marker_store):
 
 
 def test_nodes_never_use_placeholders_or_names(deps, marker_store):
-    postfab.generate_process_blueprint(session_id="sess-1")
+    postfab.generate_process_blueprint()
 
     definition = _captured_definition(deps)
     for node in definition["nodes"]:
@@ -235,7 +237,7 @@ def test_nodes_never_use_placeholders_or_names(deps, marker_store):
 
 
 def test_positions_follow_layout_rule(deps, marker_store):
-    postfab.generate_process_blueprint(session_id="sess-1")
+    postfab.generate_process_blueprint()
 
     definition = _captured_definition(deps)
     by_id = {n["id"]: n["position"] for n in definition["nodes"]}
@@ -244,14 +246,14 @@ def test_positions_follow_layout_rule(deps, marker_store):
 
 
 def test_unresolved_agents_excluded_and_surfaced(deps, marker_store):
-    result = json.loads(postfab.generate_process_blueprint(session_id="sess-1"))
+    result = json.loads(postfab.generate_process_blueprint())
 
     assert "ExternalX" in result["excluded"]
     assert "ExternalX" in result["summary"]
 
 
 def test_published_updates_marker_and_asks_import(deps, marker_store):
-    result = json.loads(postfab.generate_process_blueprint(session_id="sess-1"))
+    result = json.loads(postfab.generate_process_blueprint())
 
     assert result["status"] == "published"
     assert result["blueprint_id"] == "bp-1"
@@ -267,7 +269,7 @@ def test_agents_syncing_is_retryable_with_approved_copy(deps, marker_store):
         "nodeCount": None, "missing": ["rec-b"], "errors": None,
     }}
 
-    result = json.loads(postfab.generate_process_blueprint(session_id="sess-1"))
+    result = json.loads(postfab.generate_process_blueprint())
 
     assert result["ok"] is False
     assert result["retryable"] is True
@@ -285,7 +287,7 @@ def test_validation_failed_nonretryable(deps, marker_store):
         "nodeCount": None, "missing": None, "errors": ["cycle detected"],
     }}
 
-    result = json.loads(postfab.generate_process_blueprint(session_id="sess-1"))
+    result = json.loads(postfab.generate_process_blueprint())
 
     assert result["ok"] is False
     assert result["retryable"] is False
@@ -296,7 +298,7 @@ def test_validation_failed_nonretryable(deps, marker_store):
 def test_requires_app_first(deps, marker_store):
     marker_store["sess-1"] = {"stage": "activated"}
 
-    result = json.loads(postfab.generate_process_blueprint(session_id="sess-1"))
+    result = json.loads(postfab.generate_process_blueprint())
 
     assert result["ok"] is False
     assert result["status"] == "app_required"
@@ -307,7 +309,7 @@ def test_requires_app_first(deps, marker_store):
 def test_missing_td2_fails_plainly(deps, marker_store, monkeypatch):
     monkeypatch.setattr(postfab, "s3_get", lambda key: None)
 
-    result = json.loads(postfab.generate_process_blueprint(session_id="sess-1"))
+    result = json.loads(postfab.generate_process_blueprint())
 
     assert result["ok"] is False
     deps.assert_not_called()
@@ -320,7 +322,7 @@ def test_cycle_falls_back_to_linear_chain(deps, marker_store, monkeypatch):
         {"agent": "AgentB", "depends_on": ["AgentA"]},
     ])))
 
-    result = json.loads(postfab.generate_process_blueprint(session_id="sess-1"))
+    result = json.loads(postfab.generate_process_blueprint())
 
     assert result["ok"] is True
     definition = _captured_definition(deps)
@@ -333,7 +335,7 @@ def test_cycle_falls_back_to_linear_chain(deps, marker_store, monkeypatch):
 def test_llm_garbage_fails_plainly_without_mutation(deps, marker_store, monkeypatch):
     monkeypatch.setattr(postfab, "_llm", mock.MagicMock(return_value="not json at all"))
 
-    result = json.loads(postfab.generate_process_blueprint(session_id="sess-1"))
+    result = json.loads(postfab.generate_process_blueprint())
 
     assert result["ok"] is False
     deps.assert_not_called()
@@ -343,7 +345,7 @@ def test_llm_garbage_fails_plainly_without_mutation(deps, marker_store, monkeypa
 def test_idempotent_when_blueprint_already_published(deps, marker_store):
     marker_store["sess-1"].update({"stage": "blueprint_created", "blueprintId": "bp-1"})
 
-    result = json.loads(postfab.generate_process_blueprint(session_id="sess-1"))
+    result = json.loads(postfab.generate_process_blueprint())
 
     deps.assert_not_called()
     assert result["status"] == "already_done"
@@ -356,7 +358,7 @@ def test_idempotent_when_blueprint_already_published(deps, marker_store):
 def test_already_done_offers_regenerate_action(deps, marker_store):
     marker_store["sess-1"].update({"stage": "blueprint_created", "blueprintId": "bp-1"})
 
-    result = json.loads(postfab.generate_process_blueprint(session_id="sess-1"))
+    result = json.loads(postfab.generate_process_blueprint())
 
     deps.assert_not_called()
     labels = [a["label"] for a in result["actions"]]
@@ -376,7 +378,7 @@ def test_regenerate_publishes_a_fresh_blueprint_and_reopens_import_gate(deps, ma
     }}
 
     result = json.loads(
-        postfab.generate_process_blueprint(session_id="sess-1", regenerate=True)
+        postfab.generate_process_blueprint(regenerate=True)
     )
 
     deps.assert_called_once()
@@ -403,7 +405,7 @@ def test_regenerate_mentions_old_workflow_remains_until_removed(deps, marker_sto
     }}
 
     result = json.loads(
-        postfab.generate_process_blueprint(session_id="sess-1", regenerate=True)
+        postfab.generate_process_blueprint(regenerate=True)
     )
 
     # Copy rules: mention the previously imported workflow stays in the app
@@ -422,7 +424,7 @@ def test_regenerate_without_prior_import_does_not_mention_old_workflow(deps, mar
     }}
 
     result = json.loads(
-        postfab.generate_process_blueprint(session_id="sess-1", regenerate=True)
+        postfab.generate_process_blueprint(regenerate=True)
     )
 
     assert result["status"] == "published"
@@ -434,7 +436,7 @@ def test_regenerate_flag_ignored_when_nothing_published_yet(deps, marker_store):
     """regenerate=True on a fresh session is just a normal generation —
     never an error."""
     result = json.loads(
-        postfab.generate_process_blueprint(session_id="sess-1", regenerate=True)
+        postfab.generate_process_blueprint(regenerate=True)
     )
 
     deps.assert_called_once()
@@ -448,7 +450,7 @@ def test_no_agents_result_offers_retry_actions_and_stands_alone(deps, marker_sto
     IS the retry), and its copy must stand alone as a complete reply."""
     monkeypatch.setattr(postfab, "_get_existing_agents", lambda: {})
 
-    result = json.loads(postfab.generate_process_blueprint(session_id="sess-1"))
+    result = json.loads(postfab.generate_process_blueprint())
 
     assert result["ok"] is False
     assert result["status"] == "no_agents"

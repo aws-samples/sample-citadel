@@ -10,6 +10,7 @@ from strands.tools import tool
 from tools.kb import s3_get, s3_put
 from tools.converse_utils import extract_text, capture_converse_usage
 from config import bedrock, get_agent_model_id
+import request_context
 
 logger = logging.getLogger(__name__)
 
@@ -439,17 +440,15 @@ def _send_to_fabricator(session_id: str, agent: dict, agent_index: int = 0, tota
 
 
 @tool
-def plan_fabrication(session_id: str) -> str:
+def plan_fabrication() -> str:
     """Analyse the technical design and existing factory agents to produce a fabrication plan.
     Returns a JSON plan classifying each agent as: build, reuse, or external.
     Present this to the user for confirmation before proceeding.
 
-    Args:
-        session_id: The current session ID
-
     Returns:
         JSON string with the fabrication plan for each agent.
     """
+    session_id = request_context.current_session_id()
     td2 = s3_get(SECTION_KEY.format(session_id=session_id))
     if not td2:
         return "Error: Agent Definitions (td_2.md) not found. Generate the technical design first."
@@ -485,17 +484,17 @@ def plan_fabrication(session_id: str) -> str:
 
 
 @tool
-def confirm_fabrication_plan(session_id: str, plan_json: str) -> str:
+def confirm_fabrication_plan(plan_json: str) -> str:
     """Save the confirmed fabrication plan to S3 and queue 'build' agents for fabrication.
     Call this after the user has confirmed the plan from plan_fabrication.
 
     Args:
-        session_id: The current session ID
         plan_json: The confirmed plan JSON (may be modified by user confirmation)
 
     Returns:
         Summary of what was saved and queued.
     """
+    session_id = request_context.current_session_id()
     if not FABRICATOR_QUEUE_URL:
         return "Error: FABRICATOR_QUEUE_URL not set."
 
@@ -549,7 +548,7 @@ def confirm_fabrication_plan(session_id: str, plan_json: str) -> str:
 
 
 @tool
-def retry_failed_fabrication(session_id: str, agent_names: str = "") -> str:
+def retry_failed_fabrication(agent_names: str = "") -> str:
     """Re-queue fabrication for agents whose build failed or stalled.
 
     Each agent builds independently: this retries ONLY the requested (or all
@@ -560,7 +559,6 @@ def retry_failed_fabrication(session_id: str, agent_names: str = "") -> str:
     fresh waiting state, so an immediate second call skips it.
 
     Args:
-        session_id: The current session ID
         agent_names: Optional comma-separated agent names to retry. Leave
             empty to retry every agent that failed or stalled.
 
@@ -569,6 +567,7 @@ def retry_failed_fabrication(session_id: str, agent_names: str = "") -> str:
         reasons), a conversational summary, and the consent question for
         the next step.
     """
+    session_id = request_context.current_session_id()
     if not FABRICATOR_QUEUE_URL or not FABRICATION_JOBS_TABLE:
         return _retry_result(
             False, "unavailable",
