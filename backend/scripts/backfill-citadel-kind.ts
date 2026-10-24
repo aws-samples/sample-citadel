@@ -25,7 +25,6 @@
  *
  * By default, dry-run mode. Pass --apply to write.
  */
-import { GetRegistryRecordCommand } from "@aws-sdk/client-agent-registry-control";
 import {
   RegistryService,
   type RegistryRecord,
@@ -34,9 +33,14 @@ import {
 import {
   extractCitadelKind,
   inferKindFromShape,
-  inferKindFromParsed,
   type CitadelKind,
 } from "../src/utils/citadel-kind";
+import {
+  readRegistrySequentially,
+  withBackoff,
+  RETRY_BASE_MS,
+  RETRY_MAX_ATTEMPTS,
+} from "./lib/registry-sequential-reader";
 
 // ---------------------------------------------------------------------------
 // Pure logic helpers (exported for unit tests)
@@ -141,138 +145,25 @@ export function detectAmbiguity(
 }
 
 // ---------------------------------------------------------------------------
-// Retry with exponential backoff + jitter
+// Retry helpers re-exported from shared module for test compatibility
 // ---------------------------------------------------------------------------
 
-/** Default: base delay 1 000 ms, max 6 attempts. */
-export const RETRY_BASE_MS = 1000;
-export const RETRY_MAX_ATTEMPTS = 6;
-
-export function isThrottleError(err: unknown): boolean {
-  if (err instanceof Error) {
-    const msg = err.message ?? "";
-    const name = (err as { name?: string }).name ?? "";
-    if (
-      msg.includes("Request rate exceeded") ||
-      msg.includes("ThrottlingException") ||
-      msg.includes("TooManyRequestsException") ||
-      name === "ThrottlingException" ||
-      name === "TooManyRequestsException"
-    ) {
-      return true;
-    }
-  }
-  const statusCode = (err as { $metadata?: { httpStatusCode?: number } })
-    ?.$metadata?.httpStatusCode;
-  if (statusCode === 429 || (statusCode !== undefined && statusCode >= 500)) {
-    return true;
-  }
-  return false;
-}
-
-/**
- * Computes the backoff schedule: delay[i] = base * 2^i (before jitter).
- * Exported for unit tests.
- */
-export function backoffDelay(attempt: number, baseMs: number): number {
-  return baseMs * Math.pow(2, attempt);
-}
-
-export async function withBackoff<T>(
-  fn: () => Promise<T>,
-  maxAttempts: number = RETRY_MAX_ATTEMPTS,
-  baseMs: number = RETRY_BASE_MS,
-  sleepFn: (ms: number) => Promise<void> = defaultSleep,
-): Promise<T> {
-  let lastError: unknown;
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    try {
-      return await fn();
-    } catch (err: unknown) {
-      lastError = err;
-      if (!isThrottleError(err) || attempt === maxAttempts - 1) {
-        throw err;
-      }
-      const delay = backoffDelay(attempt, baseMs);
-      const jitter = Math.floor(Math.random() * delay);
-      const totalDelay = delay + jitter;
-      log(
-        "warn",
-        `Throttled (attempt ${attempt + 1}/${maxAttempts}), retrying in ${totalDelay}ms`,
-      );
-      await sleepFn(totalDelay);
-    }
-  }
-  throw lastError;
-}
+export {
+  isThrottleError,
+  backoffDelay,
+  withBackoff,
+  hydrateRecord,
+  RETRY_BASE_MS,
+  RETRY_MAX_ATTEMPTS,
+} from "./lib/registry-sequential-reader";
+export type { HydratedRecord } from "./lib/registry-sequential-reader";
 
 // ---------------------------------------------------------------------------
-// Sleep helper (injectable for tests)
+// Sleep helper (local — used as default in processRecord)
 // ---------------------------------------------------------------------------
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// ---------------------------------------------------------------------------
-// Record hydration — type-agnostic GET
-// ---------------------------------------------------------------------------
-
-/**
- * A hydrated record with the resourceType determined from descriptor shape.
- */
-export interface HydratedRecord {
-  record: RegistryRecord;
-  resourceType: ResourceType;
-}
-
-/**
- * Fetches the full registry record using the SDK client directly, bypassing
- * the type-specific getResource() to avoid TypeMismatchError. Classifies
- * the record as agent or tool based on manifest presence in the descriptor.
- */
-export async function hydrateRecord(
-  registry: RegistryService,
-  recordId: string,
-  sleepFn: (ms: number) => Promise<void> = defaultSleep,
-): Promise<HydratedRecord | null> {
-  const result = await withBackoff(
-    async () =>
-      registry.getClient().send(
-        new GetRegistryRecordCommand({
-          registryId: registry.getRegistryId(),
-          recordId,
-        }),
-      ),
-    RETRY_MAX_ATTEMPTS,
-    RETRY_BASE_MS,
-    sleepFn,
-  );
-
-  const customDescriptorContent = result.descriptors?.custom?.data;
-  const record: RegistryRecord = {
-    recordId: result.recordId ?? recordId,
-    name: result.name ?? "",
-    description: result.description,
-    status: result.status ?? "",
-    customDescriptorContent,
-    createdAt: result.createdAt,
-    updatedAt: result.updatedAt,
-  };
-
-  // Classify using the shared kind-inference helper
-  let resourceType: ResourceType;
-  try {
-    const meta = customDescriptorContent
-      ? JSON.parse(customDescriptorContent)
-      : {};
-    const kind = inferKindFromParsed(meta);
-    resourceType = kind === "tool" ? "tool" : "agent";
-  } catch {
-    resourceType = "agent"; // default on parse failure
-  }
-
-  return { record, resourceType };
 }
 
 // ---------------------------------------------------------------------------
@@ -403,53 +294,17 @@ export async function runBackfill(
   }
   log("info", `Inter-call delay: ${options.delayMs}ms`);
 
-  // Step 1: cheap paginated list (no per-record GETs).
-  let allSummaries: Array<{ recordId: string }>;
-  try {
-    allSummaries = (await registry.listResourceSummaries()).filter(
-      (s): s is typeof s & { recordId: string } => !!s.recordId,
-    );
-  } catch (err) {
-    log("error", `listResourceSummaries() failed: ${String(err)}`);
-    summary.errors++;
-    return summary;
-  }
-
-  const total = Math.min(allSummaries.length, options.limit);
-  log("info", `Total summaries: ${allSummaries.length}, processing: ${total}`);
-
-  // Step 2: hydrate each summary STRICTLY sequentially, one GET at a time.
-  const agentRecords: RegistryRecord[] = [];
-  const toolRecords: RegistryRecord[] = [];
-
-  for (let i = 0; i < total; i++) {
-    const { recordId } = allSummaries[i];
-    try {
-      const hydrated = await hydrateRecord(registry, recordId!, sleepFn);
-      if (hydrated) {
-        if (hydrated.resourceType === "agent") {
-          agentRecords.push(hydrated.record);
-        } else {
-          toolRecords.push(hydrated.record);
-        }
-      }
-    } catch (err) {
-      log("error", `recordId=${recordId} detail GET failed: ${String(err)}`);
-    }
-
-    // Progress every 20 records
-    if ((i + 1) % 20 === 0 || i + 1 === total) {
-      log(
-        "info",
-        `fetch progress: ${i + 1}/${total} (agents=${agentRecords.length}, tools=${toolRecords.length})`,
-      );
-    }
-
-    // Inter-call delay (skip after last)
-    if (options.delayMs > 0 && i < total - 1) {
-      await sleepFn(options.delayMs);
-    }
-  }
+  // Delegate the sequential list-then-hydrate to the shared reader.
+  const {
+    agents: agentRecords,
+    tools: toolRecords,
+    errors: fetchErrors,
+  } = await readRegistrySequentially(registry, {
+    delayMs: options.delayMs,
+    limit: options.limit,
+    sleepFn,
+  });
+  summary.errors += fetchErrors;
 
   // Step 3: process agent records, then tool records.
   log("info", `agent records: ${agentRecords.length}`);
