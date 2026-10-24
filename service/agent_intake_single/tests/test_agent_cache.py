@@ -27,6 +27,8 @@ if 'bedrock_agentcore' not in sys.modules:
     sys.modules['bedrock_agentcore'] = stub
 from unittest.mock import patch, MagicMock
 
+import request_context
+
 
 class TestLRUCache:
     def test_evicts_oldest_when_exceeding_maxsize(self):
@@ -62,12 +64,13 @@ class TestCacheInvalidation:
         mock_table.return_value = MagicMock()
         mock_table.return_value.update_item = MagicMock()
 
+        request_context.bind_request({'session_id': 'test-session', 'sessionAttributes': {'userId': 'u1', 'org': 'o1'}})
+
         # Pre-populate cache
         agent._agent_cache['test-session'] = MagicMock()
         assert 'test-session' in agent._agent_cache
 
         update_intake_progress(
-            session_id='test-session',
             phase='assessment',
             progress=50,
             change_summary='test'
@@ -93,6 +96,8 @@ class TestCacheInvalidationFailure:
         mock_table.return_value = MagicMock()
         mock_table.return_value.update_item = MagicMock()
 
+        request_context.bind_request({'session_id': 'test-session', 'sessionAttributes': {'userId': 'u1', 'org': 'o1'}})
+
         # Replace the cache with one that explodes on membership test.
         bad_cache = MagicMock()
         bad_cache.__contains__ = MagicMock(side_effect=AttributeError('boom'))
@@ -100,7 +105,6 @@ class TestCacheInvalidationFailure:
         with patch.object(agent, '_agent_cache', bad_cache):
             with caplog.at_level(logging.WARNING, logger='tools.state'):
                 result = update_intake_progress(
-                    session_id='test-session',
                     phase='assessment',
                     progress=50,
                     change_summary='test',
@@ -129,6 +133,8 @@ class TestCacheInvalidationFailure:
         mock_table.return_value = MagicMock()
         mock_table.return_value.update_item = MagicMock()
 
+        request_context.bind_request({'session_id': 'test-session', 'sessionAttributes': {'userId': 'u1', 'org': 'o1'}})
+
         bad_cache = MagicMock()
         bad_cache.__contains__ = MagicMock(return_value=True)
         bad_cache.__delitem__ = MagicMock(side_effect=KeyError('test-session'))
@@ -136,7 +142,6 @@ class TestCacheInvalidationFailure:
         with patch.object(agent, '_agent_cache', bad_cache):
             with caplog.at_level(logging.WARNING, logger='tools.state'):
                 result = update_intake_progress(
-                    session_id='test-session',
                     phase='assessment',
                     progress=50,
                     change_summary='test',

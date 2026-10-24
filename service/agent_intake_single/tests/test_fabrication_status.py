@@ -20,6 +20,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import request_context
+
 os.environ.setdefault("FABRICATOR_QUEUE_URL", "https://sqs.fake/queue")
 
 import tools.fabricate as fab
@@ -57,7 +59,7 @@ def test_writes_pending_row_per_build_agent(monkeypatch):
     table = mock.MagicMock()
     monkeypatch.setattr(fab.dynamodb, "Table", mock.MagicMock(return_value=table))
 
-    fab.confirm_fabrication_plan("sess-1", _plan())
+    fab.confirm_fabrication_plan(_plan())
 
     # One PutItem per BUILD agent (2), not for reuse.
     assert table.put_item.call_count == 2
@@ -81,7 +83,7 @@ def test_status_write_failure_does_not_break_enqueue(monkeypatch):
     monkeypatch.setattr(fab.dynamodb, "Table", mock.MagicMock(return_value=table))
 
     # Should not raise; SQS sends still happen for both build agents.
-    result = fab.confirm_fabrication_plan("sess-1", _plan())
+    result = fab.confirm_fabrication_plan(_plan())
     assert fab.sqs.send_message.call_count == 2
     assert "AgentA" in result and "AgentB" in result
 
@@ -91,7 +93,7 @@ def test_skips_status_write_when_table_unset(monkeypatch):
     table = mock.MagicMock()
     monkeypatch.setattr(fab.dynamodb, "Table", mock.MagicMock(return_value=table))
 
-    fab.confirm_fabrication_plan("sess-1", _plan())
+    fab.confirm_fabrication_plan(_plan())
 
     assert fab.sqs.send_message.call_count == 2
     table.put_item.assert_not_called()
@@ -107,7 +109,7 @@ def test_enqueue_refuses_when_organisation_unresolved(monkeypatch):
     monkeypatch.setattr(fab.dynamodb, "Table", mock.MagicMock(return_value=table))
 
     with pytest.raises(Exception, match=r"cannot fabricate: no organisation resolved"):
-        fab.confirm_fabrication_plan("sess-1", _plan())
+        fab.confirm_fabrication_plan(_plan())
 
     fab.sqs.send_message.assert_not_called()
     table.put_item.assert_not_called()

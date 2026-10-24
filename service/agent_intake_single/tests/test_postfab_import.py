@@ -27,6 +27,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import request_context
+
 os.environ.setdefault("APPSYNC_GRAPHQL_URL", "https://test.example/graphql")
 
 import tools.postfab as postfab
@@ -72,7 +74,7 @@ def _contract(result):
 
 
 def test_import_success_says_where_to_see_it(execute, marker_store):
-    result = json.loads(postfab.import_blueprint_to_app(session_id="sess-1"))
+    result = json.loads(postfab.import_blueprint_to_app())
 
     assert result["ok"] is True
     assert "Workflows tab of 'Acme Claims'" in result["summary"]
@@ -85,7 +87,7 @@ def test_import_success_says_where_to_see_it(execute, marker_store):
 
 
 def test_marker_updated_with_workflow_id(execute, marker_store):
-    result = json.loads(postfab.import_blueprint_to_app(session_id="sess-1"))
+    result = json.loads(postfab.import_blueprint_to_app())
 
     assert result["workflow_id"] == "wf-1"
     assert marker_store["sess-1"]["stage"] == "workflow_imported"
@@ -98,8 +100,8 @@ def test_idempotent_second_call_heals_via_backend_without_duplicating(execute, m
     # re-ensures the app's agent bindings — this is what heals a live app
     # whose workflow was imported before bindings existed, when the user
     # re-triggers the import conversationally.
-    first = json.loads(postfab.import_blueprint_to_app(session_id="sess-1"))
-    second = json.loads(postfab.import_blueprint_to_app(session_id="sess-1"))
+    first = json.loads(postfab.import_blueprint_to_app())
+    second = json.loads(postfab.import_blueprint_to_app())
 
     assert execute.call_count == 2
     variables = execute.call_args.args[1]
@@ -119,7 +121,7 @@ def test_already_done_still_returns_when_heal_call_fails(execute, marker_store):
     marker_store["sess-1"].update({"stage": "workflow_imported", "workflowId": "wf-1"})
     execute.side_effect = AppSyncError("raw internal FROBOZZ", retryable=True)
 
-    result = json.loads(postfab.import_blueprint_to_app(session_id="sess-1"))
+    result = json.loads(postfab.import_blueprint_to_app())
 
     assert result["ok"] is True
     assert result["status"] == "already_done"
@@ -131,7 +133,7 @@ def test_already_done_still_returns_when_heal_call_fails(execute, marker_store):
 def test_requires_blueprint_first(execute, marker_store):
     marker_store["sess-1"] = {"stage": "app_created", "appId": "app-9", "appName": "Acme Claims"}
 
-    result = json.loads(postfab.import_blueprint_to_app(session_id="sess-1"))
+    result = json.loads(postfab.import_blueprint_to_app())
 
     assert result["ok"] is False
     execute.assert_not_called()
@@ -142,7 +144,7 @@ def test_requires_blueprint_first(execute, marker_store):
 def test_error_returns_nothing_changed_copy(execute, marker_store):
     execute.side_effect = AppSyncError("raw internal FROBOZZ", retryable=True)
 
-    result = json.loads(postfab.import_blueprint_to_app(session_id="sess-1"))
+    result = json.loads(postfab.import_blueprint_to_app())
 
     assert result["ok"] is False
     assert result["retryable"] is True
@@ -161,7 +163,7 @@ def _step_index(steps, needle):
 
 
 def test_success_carries_ordered_next_steps_to_published(execute, marker_store):
-    result = json.loads(postfab.import_blueprint_to_app(session_id="sess-1"))
+    result = json.loads(postfab.import_blueprint_to_app())
 
     steps = result["next_steps"]
     assert isinstance(steps, list) and all(isinstance(s, str) and s for s in steps)
@@ -173,7 +175,7 @@ def test_success_carries_ordered_next_steps_to_published(execute, marker_store):
 
 
 def test_success_next_steps_warn_api_key_shown_only_once(execute, marker_store):
-    result = json.loads(postfab.import_blueprint_to_app(session_id="sess-1"))
+    result = json.loads(postfab.import_blueprint_to_app())
 
     joined = " ".join(result["next_steps"]).lower()
     assert "api key" in joined
@@ -181,7 +183,7 @@ def test_success_next_steps_warn_api_key_shown_only_once(execute, marker_store):
 
 
 def test_final_gate_offers_publish_guidance_not_unbacked_publish(execute, marker_store):
-    result = json.loads(postfab.import_blueprint_to_app(session_id="sess-1"))
+    result = json.loads(postfab.import_blueprint_to_app())
 
     labels = [a["label"] for a in result["actions"]]
     assert "Show me how to publish" in labels
@@ -192,8 +194,8 @@ def test_final_gate_offers_publish_guidance_not_unbacked_publish(execute, marker
 
 
 def test_already_done_carries_same_next_steps(execute, marker_store):
-    first = json.loads(postfab.import_blueprint_to_app(session_id="sess-1"))
-    second = json.loads(postfab.import_blueprint_to_app(session_id="sess-1"))
+    first = json.loads(postfab.import_blueprint_to_app())
+    second = json.loads(postfab.import_blueprint_to_app())
 
     assert second["status"] == "already_done"
     assert second["next_steps"] == first["next_steps"]
@@ -201,7 +203,7 @@ def test_already_done_carries_same_next_steps(execute, marker_store):
 
 
 def test_summary_points_at_publish_steps_and_recap_mentions_endpoint_key(execute, marker_store):
-    result = json.loads(postfab.import_blueprint_to_app(session_id="sess-1"))
+    result = json.loads(postfab.import_blueprint_to_app())
 
     # keep the existing where-to-see-it sentence
     assert "Workflows tab of 'Acme Claims'" in result["summary"]

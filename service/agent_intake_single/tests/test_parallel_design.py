@@ -1,3 +1,4 @@
+import request_context
 """Tests for parallel design generation."""
 import time
 from unittest.mock import patch, MagicMock
@@ -39,7 +40,7 @@ class TestParallelDesignGeneration:
 
         with patch('tools.design._generate_section', side_effect=slow_generate):
             from tools.design import generate_technical_design
-            generate_technical_design(session_id='test-parallel-design')
+            generate_technical_design()
 
         # Independent sections (1-4) should overlap in time
         independent_times = [t for t in call_times if t[0] in ('1', '2', '3', '4')]
@@ -69,7 +70,7 @@ class TestParallelDesignGeneration:
 
         with patch('tools.design._generate_section', side_effect=track_generate):
             from tools.design import generate_technical_design
-            generate_technical_design(session_id='test-dep-order')
+            generate_technical_design()
 
         # Dependent sections (5, 6) must come after their dependencies (2, 4)
         assert order.index('5') > order.index('2')

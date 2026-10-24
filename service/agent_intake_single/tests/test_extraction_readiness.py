@@ -24,6 +24,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import request_context
+
 
 # ---------------------------------------------------------------------------
 # tools.kb return contract
@@ -114,7 +116,7 @@ def _run_extraction(kb_side_effects, pillar_loader=None):
          patch.object(extract, "load_json_from_s3", side_effect=load), \
          patch.object(extract, "_init_if_needed"), \
          patch.object(extract, "_probe_sleep", side_effect=sleeps.append):
-        result = json.loads(extract.extract_information(session_id="sess-1"))
+        result = json.loads(extract.extract_information())
     return result, kb_mock, llm, sleeps
 
 

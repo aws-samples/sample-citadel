@@ -17,6 +17,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import request_context
+
 import tools.state as state
 
 
@@ -34,7 +36,7 @@ def test_get_intake_state_reads_actual_written_fields(monkeypatch):
     }
     monkeypatch.setattr(state, "_table", lambda: table)
 
-    result = json.loads(state.get_intake_state(session_id="s1"))
+    result = json.loads(state.get_intake_state())
 
     assert result["phase"] == "planning"
     assert result["assessment_progress"] == 100
@@ -113,7 +115,7 @@ def test_get_intake_state_defaults_when_no_item(monkeypatch):
     table.get_item.return_value = {}
     monkeypatch.setattr(state, "_table", lambda: table)
 
-    result = json.loads(state.get_intake_state(session_id="s1"))
+    result = json.loads(state.get_intake_state())
 
     assert result["phase"] == "assessment"
     assert result["assessment_progress"] == 0
