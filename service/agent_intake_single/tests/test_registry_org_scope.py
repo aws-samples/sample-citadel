@@ -159,9 +159,10 @@ class TestSystemRecordsVisible:
 
         assert set(result.keys()) == {"system-agent", "own-agent"}
 
-    def test_record_without_descriptors_treated_as_system(self, monkeypatch):
+    def test_record_without_descriptors_excluded(self, monkeypatch):
         """When the list summary omits descriptors entirely, orgId resolves
-        to '' — the record is treated as system/shared (visible)."""
+        to None — the record is EXCLUDED (not treated as system).  Live-
+        verified: ListRegistryRecords summaries omit descriptors."""
         monkeypatch.setattr(fab, "REGISTRY_ID", "reg-1")
         records = [
             {"name": "no-desc-agent", "recordId": "rnd", "status": "APPROVED",
@@ -171,7 +172,7 @@ class TestSystemRecordsVisible:
 
         result = fab._get_existing_agents()
 
-        assert "no-desc-agent" in result
+        assert "no-desc-agent" not in result
 
 
 # ── Session without org fails closed ───────────────────────────────────
@@ -223,16 +224,21 @@ class TestExtractOrgFromSummary:
         assert fab._extract_org_from_summary(summary) == "org-42"
 
     def test_missing_descriptors(self):
-        assert fab._extract_org_from_summary({"name": "a"}) == ""
+        assert fab._extract_org_from_summary({"name": "a"}) is None
 
     def test_empty_data(self):
         summary = {"descriptors": {"custom": {"data": ""}}}
-        assert fab._extract_org_from_summary(summary) == ""
+        assert fab._extract_org_from_summary(summary) is None
 
     def test_malformed_json(self):
         summary = {"descriptors": {"custom": {"data": "not-json"}}}
-        assert fab._extract_org_from_summary(summary) == ""
+        assert fab._extract_org_from_summary(summary) is None
 
     def test_no_orgId_key_in_data(self):
         summary = {"descriptors": {"custom": {"data": json.dumps({"other": "val"})}}}
+        assert fab._extract_org_from_summary(summary) == ""
+
+    def test_system_record_explicit_empty_org(self):
+        """A descriptor with explicit orgId '' is system — returns ''."""
+        summary = _summary("sys", "rs", org_id="")
         assert fab._extract_org_from_summary(summary) == ""

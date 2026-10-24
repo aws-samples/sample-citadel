@@ -313,35 +313,38 @@ def _registry_state_from_status(status: str) -> str:
 
 
 
-def _extract_org_from_summary(summary: dict) -> str:
-    """Best-effort extraction of orgId from a registry record summary.
+def _extract_org_from_summary(summary: dict) -> str | None:
+    """Extract orgId from a registry record summary.
 
-    Mirrors arbiter/fabricator/index.py _extract_org_from_summary.  The orgId
-    lives inside ``descriptors.custom.data`` (a JSON string) under the key
-    ``orgId``.  ListRegistryRecords MAY include descriptors on the summary —
-    when absent, return ``""`` (the system/shared convention) so the caller
-    treats the record as visible to every tenant.
+    The orgId lives inside ``descriptors.custom.data`` (a JSON string) under
+    the key ``orgId``.  Returns:
 
-    This is the CHEAPEST correct path for org filtering (C23 fix):
-    - Summaries carry descriptors → parse in-line, zero extra API calls.
-    - Summaries omit descriptors  → orgId resolves to "" (system record),
-      kept visible.  A per-record GET would recover the real orgId but would
-      reintroduce the N+1 sequential-call budget blow-up that the summary-
-      only refactor eliminated.  The accepted tradeoff is that records whose
-      summaries lack descriptors appear as system records — the fabricator
-      ALWAYS stamps orgId into custom_metadata, so in practice every
-      fabricated record carries it.
+    - The orgId string (possibly ``""``) when descriptors are present and
+      parseable.  ``""`` means system/shared — visible to every tenant.
+    - ``None`` when descriptors are absent or unparseable — the caller MUST
+      treat this as "org undeterminable" and EXCLUDE the record.
+
+    Live verification (2026-10-24): ListRegistryRecords summaries do NOT
+    include ``descriptors`` — only id/name/status/description/timestamps.
+    Returning ``None`` (not ``""``) for absent descriptors prevents a false
+    "system" classification that would let every record through the filter.
+    Records whose org cannot be determined from the summary are excluded;
+    a system record is identified ONLY by an explicit ``orgId == ""`` in the
+    detailed record's custom descriptor data.
     """
     try:
-        descriptors = summary.get("descriptors") or {}
+        descriptors = summary.get("descriptors")
+        if descriptors is None:
+            return None
         custom = descriptors.get("custom") or {}
         data_str = custom.get("data", "")
-        if data_str and isinstance(data_str, str):
-            data = json.loads(data_str)
-            return data.get("orgId", "")
+        if not data_str or not isinstance(data_str, str):
+            return None
+        data = json.loads(data_str)
+        return data.get("orgId", "")
     except (json.JSONDecodeError, AttributeError, TypeError):
         pass
-    return ""
+    return None
 
 
 def _get_existing_agents() -> dict[str, dict]:
@@ -358,6 +361,17 @@ def _get_existing_agents() -> dict[str, dict]:
     session.  The session org_id is REQUIRED — if the session has no org,
     the function fails closed (returns ``{}``) instead of exposing the full
     unscoped registry.
+
+    **Live-verified (2026-10-24):** ListRegistryRecords summaries do NOT
+    include ``descriptors`` — they carry only id/name/status/description/
+    timestamps.  Since orgId lives inside descriptors.custom.data, it is
+    NOT derivable from summaries.  Records whose org is undeterminable
+    (descriptors absent) are EXCLUDED — never treated as system.  This
+    means the summary-only path currently returns an empty dict (no records
+    pass the filter) until the API starts returning descriptors on summaries
+    or we add per-record detail fetches.  This is the CORRECT fail-closed
+    behaviour: exposing zero agents is safe; exposing other tenants' agents
+    is not.
 
     Built from LIST-PAGE SUMMARIES ONLY — no per-record GetRegistryRecord
     calls. The previous implementation issued one GET per record to read the
@@ -432,9 +446,12 @@ def _get_existing_agents() -> dict[str, dict]:
                 if not name or not record_id:
                     continue
                 # C23 org-scope filter: keep own-org + system (orgId "")
-                # records; drop everything else.
+                # records; drop everything else.  When org is None the
+                # summary lacked descriptors entirely — exclude rather
+                # than assuming system (live-verified: summaries omit
+                # descriptors).
                 record_org = _extract_org_from_summary(summary)
-                if record_org != "" and record_org != session_org:
+                if record_org is None or (record_org != "" and record_org != session_org):
                     continue
                 agents[name] = {
                     "name": name,
