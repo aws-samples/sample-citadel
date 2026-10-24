@@ -823,6 +823,7 @@ async function enforceImportActivationGate(
   registryService: RegistryService,
   agentId: string,
   customDescriptorContent: string | undefined,
+  orgId?: string,
 ): Promise<void> {
   const meta = registryService.deserializeCustomMetadata<{
     governanceAttestation?: { status: "pending" | "attested" };
@@ -856,6 +857,7 @@ async function enforceImportActivationGate(
         wouldBlock: true,
       },
       timestamp: new Date().toISOString(),
+      ...(orgId ? { orgId } : {}),
     });
   } catch (err) {
     console.error(
@@ -1206,6 +1208,7 @@ export async function updateAgentConfigRegistry(
         registryService,
         input.agentId,
         gateContentOverride ?? existing.customDescriptorContent ?? undefined,
+        preservedOrgId,
       );
     }
 
@@ -1612,10 +1615,14 @@ export async function activateProjectAgents(
       // agents BEFORE the status write. The throw is caught below so a blocked
       // agent lands in `failed` without aborting activation of the rest of the
       // batch; shadow/permissive emits telemetry and proceeds as before.
+      const recordMeta = registryService.deserializeCustomMetadata<{
+        orgId?: string;
+      }>(record.customDescriptorContent ?? null, { orgId: undefined });
       await enforceImportActivationGate(
         registryService,
         record.recordId,
         record.customDescriptorContent ?? undefined,
+        recordMeta.orgId ?? undefined,
       );
       // Activation must go through SubmitRegistryRecordForApproval, never a
       // direct UpdateRegistryRecordStatus(APPROVED) — the AWS registry

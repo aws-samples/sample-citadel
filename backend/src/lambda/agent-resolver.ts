@@ -209,6 +209,7 @@ async function updateAgentStatus(
     agentId,
     status: agentStatus,
     userId: _userId,
+    orgId: projectResult.Item.organization,
   });
 
   return agentStatus;
