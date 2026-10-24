@@ -148,11 +148,20 @@ class TestUploadToS3:
     @settings(max_examples=50)
     def test_s3_key_uses_folder_prefix(self, filename, folder):
         """Uploaded S3 key always starts with the folder prefix."""
-        mock_s3 = MagicMock()
+        import tempfile as _tf
 
-        with patch("index.boto3") as mock_boto3:
-            mock_boto3.client.return_value = mock_s3
-            upload_to_s3(filename, folder)
+        mock_s3 = MagicMock()
+        # upload_to_s3 now reads the file for SHA-256; write a real temp file.
+        basename = filename.split("/")[-1]
+        with _tf.NamedTemporaryFile(suffix=".py", delete=False) as fh:
+            fh.write(b"pass")
+            real_path = fh.name
+        try:
+            with patch("index.boto3") as mock_boto3:
+                mock_boto3.client.return_value = mock_s3
+                upload_to_s3(real_path, folder)
+        finally:
+            os.unlink(real_path)
 
         call_args = mock_s3.upload_file.call_args
         s3_key = call_args[0][2]
@@ -167,16 +176,25 @@ class TestUploadToS3:
     @settings(max_examples=50)
     def test_s3_key_contains_only_basename(self, filename, folder):
         """S3 key uses only the basename, not the full path."""
-        mock_s3 = MagicMock()
+        import tempfile as _tf
 
-        with patch("index.boto3") as mock_boto3:
-            mock_boto3.client.return_value = mock_s3
-            upload_to_s3(filename, folder)
+        mock_s3 = MagicMock()
+        basename = filename.split("/")[-1]
+        # upload_to_s3 now reads the file for SHA-256; write a real temp file.
+        with _tf.NamedTemporaryFile(suffix=".py", delete=False) as fh:
+            fh.write(b"pass")
+            real_path = fh.name
+        try:
+            with patch("index.boto3") as mock_boto3:
+                mock_boto3.client.return_value = mock_s3
+                upload_to_s3(real_path, folder)
+        finally:
+            os.unlink(real_path)
 
         call_args = mock_s3.upload_file.call_args
         s3_key = call_args[0][2]
-        basename = filename.split("/")[-1]
-        assert s3_key == f"{folder}/{basename}"
+        real_basename = real_path.split("/")[-1]
+        assert s3_key == f"{folder}/{real_basename}"
 
     def test_missing_bucket_raises(self):
         """Raises ValueError when AGENT_BUCKET_NAME is not set."""
