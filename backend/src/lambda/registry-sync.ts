@@ -293,6 +293,10 @@ const AGENT_METADATA_DEFAULTS = {
   createdBy: undefined as string | undefined,
   sourceProjectId: undefined as string | undefined,
   tags: undefined as Record<string, string> | undefined,
+  // Decision audit fields (CIT-244 projection completeness)
+  decidedBy: undefined as string | undefined,
+  decidedAt: undefined as string | undefined,
+  statusReason: undefined as string | undefined,
 };
 
 const TOOL_METADATA_DEFAULTS = {
@@ -533,6 +537,112 @@ export function buildAgentCacheRecord(
     statusUpdatedAt:
       rawStatus !== undefined ? new Date().toISOString() : undefined,
     tags: meta.tags,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Projection row builders — full denormalized rows for the list-from-
+// projection read path (CIT-244 PR3). Each carries `projectionVersion: 1`
+// and `projectedAt` so the read path can distinguish projection rows from
+// legacy/name-keyed rows via a FilterExpression.
+// ---------------------------------------------------------------------------
+
+export const PROJECTION_VERSION = 1;
+
+export interface AgentProjectionRow extends AgentCacheRecord {
+  /** Explicit citadelKind discriminator for the Scan FilterExpression. */
+  citadelKind: "agent";
+  /** Projection format version — 1 for this initial shape. */
+  projectionVersion: number;
+  /** ISO timestamp of the last projection write. */
+  projectedAt: string;
+  /** Decision audit fields denormalized from the registry record. */
+  decidedBy?: string;
+  decidedAt?: string;
+  statusReason?: string;
+}
+
+export interface ToolProjectionRow extends ToolCacheRecord {
+  /** Explicit citadelKind discriminator for the Scan FilterExpression. */
+  citadelKind: "tool";
+  /** Projection format version — 1 for this initial shape. */
+  projectionVersion: number;
+  /** ISO timestamp of the last projection write. */
+  projectedAt: string;
+  /** orgId denormalized for list filtering. */
+  orgId?: string;
+  /** AppSync caller identity who created this record. */
+  createdBy?: string;
+  /** Registry status denormalized for visibility filtering. */
+  registryStatus?: string;
+  /** Decision audit fields denormalized from the registry record. */
+  decidedBy?: string;
+  decidedAt?: string;
+  statusReason?: string;
+}
+
+/**
+ * Builds a full projection row for an agent, suitable for list-from-projection
+ * reads. Includes everything `mapToAgentConfig` returns so the read path can
+ * skip the N+1 registry fetch entirely.
+ */
+export function buildAgentProjectionRow(
+  record: RegistryRecord,
+): AgentProjectionRow {
+  const payload = recordToResourcePayload(record);
+  const base = buildAgentCacheRecord(record.recordId, payload);
+  const meta = deserializeCustomMetadata(
+    record.customDescriptorContent ?? null,
+    AGENT_METADATA_DEFAULTS,
+  );
+  const now = new Date().toISOString();
+  return {
+    ...base,
+    // Override fields that buildAgentCacheRecord cannot set from the legacy path
+    registryRecordId: record.recordId,
+    registryStatus: record.status,
+    statusUpdatedAt: record.status ? now : base.statusUpdatedAt,
+    citadelKind: "agent",
+    projectionVersion: PROJECTION_VERSION,
+    projectedAt: now,
+    decidedBy: meta.decidedBy as string | undefined,
+    decidedAt: meta.decidedAt as string | undefined,
+    statusReason: meta.statusReason as string | undefined,
+  };
+}
+
+/**
+ * Builds a full projection row for a tool, suitable for list-from-projection
+ * reads.
+ */
+export function buildToolProjectionRow(
+  record: RegistryRecord,
+): ToolProjectionRow {
+  const payload = recordToResourcePayload(record);
+  const base = buildToolCacheRecord(record.recordId, payload);
+  const meta = deserializeCustomMetadata(
+    record.customDescriptorContent ?? null,
+    {
+      ...TOOL_METADATA_DEFAULTS,
+      orgId: undefined as string | undefined,
+      createdBy: undefined as string | undefined,
+      decidedBy: undefined as string | undefined,
+      decidedAt: undefined as string | undefined,
+      statusReason: undefined as string | undefined,
+    },
+  );
+  const now = new Date().toISOString();
+  return {
+    ...base,
+    citadelKind: "tool",
+    projectionVersion: PROJECTION_VERSION,
+    projectedAt: now,
+    orgId: meta.orgId,
+    createdBy: meta.createdBy,
+    registryStatus: record.status,
+    decidedBy: meta.decidedBy,
+    decidedAt: meta.decidedAt,
+    statusReason: meta.statusReason,
   };
 }
 
@@ -877,6 +987,31 @@ export async function handleGaUpsert(
   };
 
   await docClient.send(new UpdateCommand(params));
+
+  // Write the full projection row (PutItem, keyed by recordId) so the
+  // list-from-projection path has a complete, self-contained row for this
+  // resource. This is in addition to the merge-upsert above (which keeps
+  // legacy/name-keyed rows current). The projection row is a superset of
+  // the merge fields and carries projectionVersion + projectedAt.
+  const projectionRow =
+    resourceType === "agent"
+      ? buildAgentProjectionRow(record)
+      : buildToolProjectionRow(record);
+  try {
+    await docClient.send(
+      new PutCommand({
+        TableName: tableName,
+        Item: projectionRow,
+      }),
+    );
+  } catch (err) {
+    // Best-effort: projection write failures must not break the existing
+    // merge-upsert path. Log and continue.
+    console.error(
+      `handleGaUpsert: projection row write failed for ${resourceType} "${resourceId}" (best-effort):`,
+      err,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------

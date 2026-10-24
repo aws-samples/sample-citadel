@@ -834,8 +834,10 @@ describe("Registry-backed CRUD functions (tasks 7.2–7.6)", () => {
         updatedAt: new Date("2025-01-03"),
       };
       // First getResource → existing (for merge); Second getResource → refreshed (after status change).
+      // Third getResource → for projection row write (CIT-244).
       mockGetResource
         .mockResolvedValueOnce(existingRecord)
+        .mockResolvedValueOnce(refreshedRecord)
         .mockResolvedValueOnce(refreshedRecord);
       mockUpdateResource.mockResolvedValue(updatedRecord);
 
@@ -845,8 +847,9 @@ describe("Registry-backed CRUD functions (tasks 7.2–7.6)", () => {
         eventWithOrg,
       );
 
-      // getResource must be called twice: once before updateResource, once AFTER updateResourceStatus.
-      expect(mockGetResource).toHaveBeenCalledTimes(2);
+      // getResource must be called three times: once before updateResource,
+      // once AFTER updateResourceStatus, once for projection row (CIT-244).
+      expect(mockGetResource).toHaveBeenCalledTimes(3);
       expect(mockUpdateResourceStatus).toHaveBeenCalledWith(
         "tool",
         "tool-1",

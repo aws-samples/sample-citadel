@@ -39,6 +39,10 @@ import {
   assumeAnalysisRoleClient,
 } from "../utils/trust-path";
 import { resolveKind } from "../utils/citadel-kind";
+import {
+  CloudWatchClient,
+  PutMetricDataCommand,
+} from "@aws-sdk/client-cloudwatch";
 
 /** Trust-path summary persisted into governanceAttestation by the activation path. */
 interface TrustPathAttestationSummary {
@@ -94,6 +98,20 @@ const REQUIRED_WRITE_ROLE = "architect";
 export function isRegistryEnabled(): boolean {
   try {
     return process.env.REGISTRY_ENABLED === "true";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Returns true when the list-from-projection optimisation is enabled.
+ * When enabled, listAgentConfigsRegistry reads from the DynamoDB cache
+ * table's projection rows instead of the N+1 Registry path, falling back
+ * to the Registry when the projection is empty.
+ */
+export function isListFromProjection(): boolean {
+  try {
+    return process.env.LIST_FROM_PROJECTION === "true";
   } catch {
     return false;
   }
@@ -379,6 +397,144 @@ export async function getAgentConfigRegistry(
   return legacy;
 }
 
+// ---------------------------------------------------------------------------
+// Projection read helpers (CIT-244 PR3)
+// ---------------------------------------------------------------------------
+
+const cwClient = new CloudWatchClient({});
+
+/**
+ * Extracts the config-payload `name` from an AgentConfig's config field.
+ * Shared by both the projection and registry list paths for dedup.
+ */
+function extractAgentName(c: AgentConfig): string | undefined {
+  if (!c.config) return undefined;
+  try {
+    const parsed =
+      typeof c.config === "string" ? JSON.parse(c.config) : c.config;
+    const name = parsed?.name;
+    return typeof name === "string" && name.length > 0 ? name : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Emits a ListSource metric to CloudWatch for observability. Best-effort:
+ * metric failures never propagate to the caller.
+ */
+function emitListSourceMetric(
+  source: "projection" | "registry",
+  count: number,
+): void {
+  cwClient
+    .send(
+      new PutMetricDataCommand({
+        Namespace: "Citadel/Resolvers",
+        MetricData: [
+          {
+            MetricName: "ListSource",
+            Dimensions: [
+              { Name: "Kind", Value: "agent" },
+              { Name: "Source", Value: source },
+            ],
+            Value: count,
+            Unit: "Count",
+            Timestamp: new Date(),
+          },
+        ],
+      }),
+    )
+    .catch((err) => {
+      console.error("emitListSourceMetric: best-effort metric failed:", err);
+    });
+  console.info(
+    JSON.stringify({ msg: "list_source", kind: "agent", source, count }),
+  );
+}
+
+/**
+ * Scans the agents cache table for projection rows (attribute_exists(projectionVersion)
+ * AND citadelKind = 'agent'), applies org + visibility filters, and maps
+ * to the AgentConfig API shape. Returns an empty array when no projection
+ * rows exist.
+ */
+async function listAgentConfigsFromProjection(
+  callerOrgId: string | null,
+  admin: boolean,
+  viewer: {
+    isAdmin: boolean;
+    roles: string[];
+    orgId: string | null;
+    userId: string | null;
+  },
+): Promise<AgentConfig[]> {
+  try {
+    const result = await docClient.send(
+      new ScanCommand({
+        TableName: AGENT_CONFIG_TABLE,
+        FilterExpression: "attribute_exists(#pv) AND #ck = :ck",
+        ExpressionAttributeNames: {
+          "#pv": "projectionVersion",
+          "#ck": "citadelKind",
+        },
+        ExpressionAttributeValues: {
+          ":ck": "agent",
+        },
+      }),
+    );
+    const items = result.Items || [];
+    if (items.length === 0) return [];
+
+    // Map DynamoDB items to AgentConfig shape and apply the same filters
+    // as the registry path.
+    const configs: AgentConfig[] = items.map((item) => ({
+      agentId: item.agentId,
+      name: typeof item.name === "string" ? item.name : undefined,
+      orgId: item.orgId ?? "",
+      config: toAwsJsonConfig(item.config, item.agentId),
+      description:
+        typeof item.description === "string" ? item.description : undefined,
+      state: item.state || "active",
+      categories: item.categories || [],
+      createdAt: item.createdAt,
+      updatedAt: item.updatedAt,
+      registryStatus:
+        typeof item.registryStatus === "string"
+          ? item.registryStatus
+          : undefined,
+      registryRecordId:
+        typeof item.registryRecordId === "string"
+          ? item.registryRecordId
+          : undefined,
+      createdBy:
+        typeof item.createdBy === "string" ? item.createdBy : undefined,
+      decidedBy:
+        typeof item.decidedBy === "string" ? item.decidedBy : undefined,
+      decidedAt:
+        typeof item.decidedAt === "string" ? item.decidedAt : undefined,
+      statusReason:
+        typeof item.statusReason === "string" ? item.statusReason : undefined,
+      tags: item.tags ?? undefined,
+    }));
+
+    return configs.filter((a) => {
+      if (!admin && a.orgId !== callerOrgId && a.orgId !== "") return false;
+      return isRecordVisible(viewer, {
+        status: a.registryStatus ?? undefined,
+        orgId: a.orgId,
+        createdBy: a.createdBy,
+      });
+    });
+  } catch (err) {
+    console.error(
+      "listAgentConfigsFromProjection: scan failed, will fall back to registry:",
+      err,
+    );
+    return [];
+  }
+}
+
 /**
  * Dual-source list: fetches agent configs from both Registry and DynamoDB,
  * merges them with Registry records taking precedence on duplicate agentIds.
@@ -411,6 +567,52 @@ export async function listAgentConfigsRegistry(
     event !== undefined
       ? await viewerFromEvent(event)
       : { isAdmin: false, roles: [], orgId: null, userId: null };
+
+  // ─── Projection read path (CIT-244) ────────────────────────────────────
+  // When the LIST_FROM_PROJECTION flag is on, scan the cache table for
+  // projection rows (those with projectionVersion set and citadelKind='agent')
+  // instead of issuing N+1 Registry GetRegistryRecord calls.
+  if (isListFromProjection()) {
+    const projectionConfigs = await listAgentConfigsFromProjection(
+      callerOrgId,
+      admin,
+      viewer,
+    );
+    if (projectionConfigs.length > 0) {
+      // Merge legacy rows that have no registryRecordId (genuinely local-only)
+      const allDynamoConfigs = await listAgentConfigs();
+      const dynamoConfigs = allDynamoConfigs.filter((a) => {
+        if (!admin && a.orgId !== callerOrgId && a.orgId !== "") return false;
+        return isRecordVisible(viewer, {
+          status: a.registryStatus,
+          orgId: a.orgId,
+          createdBy: a.createdBy,
+        });
+      });
+
+      const projectionIds = new Set(projectionConfigs.map((c) => c.agentId));
+      const projectionNames = new Set(
+        projectionConfigs
+          .map(extractAgentName)
+          .filter((n): n is string => typeof n === "string" && n.length > 0),
+      );
+
+      const legacyOnly = dynamoConfigs.filter((c) => {
+        if (projectionIds.has(c.agentId)) return false;
+        if (c.registryRecordId) return false;
+        const n = extractAgentName(c);
+        if (n && projectionNames.has(n)) return false;
+        return true;
+      });
+
+      const result = [...projectionConfigs, ...legacyOnly];
+      emitListSourceMetric("projection", result.length);
+      return result;
+    }
+    // Projection returned 0 rows → fall through to registry path
+  }
+
+  // ─── Registry N+1 read path (original) ─────────────────────────────────
 
   // 1. Fetch Registry records and map to AgentConfig
   const registryService = getRegistryService();
@@ -456,20 +658,9 @@ export async function listAgentConfigsRegistry(
   //        appear as agentId on cache rows written by registry-sync), and
   //    (c) registryRecordId back-pointer on name-keyed cache rows written
   //        by syncNameKeyedRow.
-  const extractName = (c: AgentConfig): string | undefined => {
-    if (!c.config) return undefined;
-    try {
-      const parsed =
-        typeof c.config === "string" ? JSON.parse(c.config) : c.config;
-      const name = parsed?.name;
-      return typeof name === "string" && name.length > 0 ? name : undefined;
-    } catch {
-      return undefined;
-    }
-  };
   const registryNames = new Set(
     registryConfigs
-      .map(extractName)
+      .map(extractAgentName)
       .filter((n): n is string => typeof n === "string" && n.length > 0),
   );
   const registryRecordIds = new Set(registryConfigs.map((c) => c.agentId));
@@ -488,7 +679,7 @@ export async function listAgentConfigsRegistry(
     // Skip name-keyed rows that back-point to a registry record.
     if (c.registryRecordId) return false;
     // Skip rows whose config name matches a registry agent.
-    const n = extractName(c);
+    const n = extractAgentName(c);
     if (n && registryNames.has(n)) return false;
     // Dedup within legacy results by agentId.
     if (seenAgentIds.has(c.agentId)) return false;
@@ -502,7 +693,9 @@ export async function listAgentConfigsRegistry(
   });
 
   // 5. Return merged list
-  return [...registryConfigs, ...legacyOnly];
+  const merged = [...registryConfigs, ...legacyOnly];
+  emitListSourceMetric("registry", merged.length);
+  return merged;
 }
 
 /**

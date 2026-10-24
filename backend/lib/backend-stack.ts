@@ -1044,6 +1044,7 @@ export class BackendStack extends cdk.Stack {
           REGISTRY_ENABLED: "true",
           REGISTRY_ID: registryId,
           REGISTRY_GENERATION,
+          LIST_FROM_PROJECTION: "true",
           // Governance activation gate (US-IMP): ENVIRONMENT selects the
           // governance rollout SSM parameter path (getGovernanceEnforce);
           // EVENT_BUS_NAME targets the shared bus for best-effort gate
@@ -1119,6 +1120,7 @@ export class BackendStack extends cdk.Stack {
           REGISTRY_ENABLED: "true",
           REGISTRY_ID: registryId,
           REGISTRY_GENERATION,
+          LIST_FROM_PROJECTION: "true",
           // Tag-policy enforcement: reads the caller's organisation policy row
           // and the governance enforcement mode.
           ORGANIZATIONS_TABLE: organisationTable.tableName,
@@ -1225,6 +1227,30 @@ export class BackendStack extends cdk.Stack {
     // getGovernanceEnforce defaults to 'shadow' internally, so a missing
     // parameter or denied read can never hard-fail an activation.
     this.agentEventBus.grantPutEventsTo(agentConfigResolverFunction);
+
+    // CIT-244: ListSource metric emission (best-effort, no resource scoping).
+    agentConfigResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["cloudwatch:PutMetricData"],
+        resources: ["*"],
+      }),
+    );
+    NagSuppressions.addResourceSuppressions(
+      agentConfigResolverFunction.role!,
+      [
+        {
+          id: "AwsSolutions-IAM5",
+          reason:
+            "cloudwatch:PutMetricData has no resource-level scoping; the " +
+            "resolver narrows the call to the Citadel/Resolvers namespace " +
+            "(ListSource metric, CIT-244).",
+          appliesTo: ["Resource::*"],
+        },
+      ],
+      true,
+    );
+
     agentConfigResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
@@ -1328,6 +1354,30 @@ export class BackendStack extends cdk.Stack {
 
     // Tag-policy enforcement: read-only access to the organisations table.
     organisationTable.grantReadData(toolConfigResolverFunction);
+
+    // CIT-244: ListSource metric emission (best-effort, no resource scoping).
+    toolConfigResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["cloudwatch:PutMetricData"],
+        resources: ["*"],
+      }),
+    );
+    NagSuppressions.addResourceSuppressions(
+      toolConfigResolverFunction.role!,
+      [
+        {
+          id: "AwsSolutions-IAM5",
+          reason:
+            "cloudwatch:PutMetricData has no resource-level scoping; the " +
+            "resolver narrows the call to the Citadel/Resolvers namespace " +
+            "(ListSource metric, CIT-244).",
+          appliesTo: ["Resource::*"],
+        },
+      ],
+      true,
+    );
+
     // Tag-policy enforcement: governance enforcement mode (same SSM grant
     // shape as agent-config-resolver / app-publish-handler).
     toolConfigResolverFunction.addToRolePolicy(
