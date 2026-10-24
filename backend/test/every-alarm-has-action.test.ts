@@ -84,6 +84,7 @@ describe("every CloudWatch alarm has at least one action (muted-alarm regression
       agentDesignAssessmentsTable: backend.agentDesignAssessmentsTable,
       userPool: backend.userPool,
       alarmTopic: backend.alarmTopic,
+      userOrgMembershipTable: backend.userOrgMembershipTable,
     });
 
     const arbiter = new ArbiterStack(app, "citadel-arbiter-test", {

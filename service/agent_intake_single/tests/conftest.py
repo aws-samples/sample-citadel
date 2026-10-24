@@ -21,3 +21,15 @@ def _bind_default_session():
     })
     yield
     request_context.clear()
+
+
+@pytest.fixture(autouse=True)
+def _bypass_consent(monkeypatch):
+    """Auto-bypass the consent check for existing postfab tests.
+
+    Tests that explicitly test the consent gate (test_consent.py) provide
+    their own mocks. This fixture ensures all other postfab tests continue
+    to work without needing consent records in DynamoDB.
+    """
+    import tools.postfab as postfab
+    monkeypatch.setattr(postfab, "require_consent", lambda session_id, action: None)

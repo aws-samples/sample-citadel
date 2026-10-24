@@ -35,6 +35,8 @@ from tools.state import get_postfab_marker, set_postfab_marker, _internal_update
 from tools.registry_name import sanitize_registry_name
 import request_context
 
+from tools.consent import require_consent, ConsentRequired
+
 logger = logging.getLogger(__name__)
 
 AWS_REGION = os.environ.get("AWS_REGION", "ap-southeast-2")
@@ -193,6 +195,17 @@ def _error_return(session_id: str, err: AppSyncError, step: str) -> str:
         "Want to try again?",
         [_action("Try again", "Yes, try again"), _action("Stop here", "Stop here")],
         retryable=bool(err.retryable),
+    )
+
+
+def _consent_refusal(action: str, consent_question: str, actions: list[dict]) -> str:
+    """Returned when a privileged tool is called without a valid consent
+    record. The model must ask the user via the UI confirmation button."""
+    return _result(
+        False, "consent_required",
+        "I need your confirmation before I can do that. "
+        "Please use the button above to confirm.",
+        consent_question, actions,
     )
 
 
@@ -579,6 +592,16 @@ def activate_agents() -> str:
         )
 
     try:
+        require_consent(session_id, "activate_agents")
+    except ConsentRequired:
+        return _consent_refusal(
+            "activate_agents",
+            "Want me to activate them so they're ready to use?",
+            [_action("Activate the agents", "Yes, activate the agents"),
+             _action("Not now", "Not now")],
+        )
+
+    try:
         data = appsync_client.execute(_ACTIVATE_MUTATION, {"sessionId": session_id}, session_id)
     except AppSyncError as err:
         return _error_return(session_id, err, "activating the agents")
@@ -688,6 +711,12 @@ def create_agent_app(confirmed_name: str = "") -> str:
         )
 
     name = confirmed_name.strip()
+    try:
+        require_consent(session_id, "create_agent_app")
+    except ConsentRequired:
+        question, actions = _app_gate(session_id, marker)
+        return _consent_refusal("create_agent_app", question, actions)
+
     try:
         data = appsync_client.execute(
             _CREATE_APP_MUTATION,
@@ -960,6 +989,12 @@ def generate_process_blueprint(regenerate: bool = False) -> str:
             question, actions,
         )
 
+    try:
+        require_consent(session_id, "generate_process_blueprint")
+    except ConsentRequired:
+        question, actions = _blueprint_gate()
+        return _consent_refusal("generate_process_blueprint", question, actions)
+
     td2 = s3_get(SECTION_KEY.format(session_id=session_id))
     if not td2:
         return _result(
@@ -1155,6 +1190,12 @@ def import_blueprint_to_app() -> str:
             "We'll need the app in place before I can import a workflow into it.",
             question, actions,
         )
+
+    try:
+        require_consent(session_id, "import_blueprint_to_app")
+    except ConsentRequired:
+        question, actions = _import_gate(app_name)
+        return _consent_refusal("import_blueprint_to_app", question, actions)
 
     try:
         data = appsync_client.execute(

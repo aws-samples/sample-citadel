@@ -124,6 +124,15 @@ const DOCUMENTED_EXEMPTIONS: ReadonlyMap<string, string> = new Map([
       "in services-stack-test-tool-resolver.test.ts and " +
       "tool-sandbox-org-scoping.test.ts respectively.",
   ],
+  [
+    "intake-consent-resolver",
+    "Single-handler Lambda (no dispatch switch to enumerate): " +
+      "Mutation.recordIntakeConsent is the only field, " +
+      "@aws_cognito_user_pools-only in the schema, with server-side org " +
+      "reconciliation mirroring the intake-orchestration-resolver pattern. " +
+      "Org-guard and TTL assertions are covered in " +
+      "intake-consent-resolver.test.ts.",
+  ],
 ]);
 
 /** Mutations whose IAM-only schema directive an exemption reason relies on. */
