@@ -436,6 +436,52 @@ def load_orchestration(orchestration_id=None):
         return response['Item']
 
 
+def _resolve_orchestration_org_id(orchestration_id: str) -> str:
+    """Resolve an orchestration's ``orgId`` SERVER-SIDE from the orchestration row.
+
+    Decision 512b2f58: the ORCHESTRATIONS table row (written by the
+    supervisor itself after the resolver-side tenancy gate) is the trusted
+    source for the bound org in the supervisor execution path, NOT the
+    EventBridge event detail.
+
+    Returns the non-empty orgId string when found, or ``''`` when the
+    row/attribute is missing or the read fails.  Never raises — org
+    resolution must not crash the handler.
+    """
+    table_name = ORCHESTRATION_TABLE
+    if table_name and orchestration_id:
+        try:
+            table = dynamodb.Table(table_name)
+            resp = table.get_item(Key={'orchestrationId': orchestration_id})
+            org_id = (resp.get('Item') or {}).get('orgId')
+            if isinstance(org_id, str) and org_id:
+                return org_id
+        except Exception as exc:  # noqa: BLE001 — org resolution is best-effort
+            logger.warning(
+                "supervisor: orchestration org resolve failed "
+                "orchestrationId=%s error=%s",
+                orchestration_id, exc,
+            )
+    return ''
+
+
+def _emit_org_source_mismatch_metric() -> None:
+    """Best-effort CloudWatch metric for row/event org disagreement."""
+    try:
+        events_client_cw = boto3.client('cloudwatch')
+        events_client_cw.put_metric_data(
+            Namespace='Citadel/Arbiter',
+            MetricData=[{
+                'MetricName': 'SupervisorOrgSourceMismatch',
+                'Dimensions': [{'Name': 'Component', 'Value': 'Supervisor'}],
+                'Value': 1,
+                'Unit': 'Count',
+            }],
+        )
+    except Exception:  # noqa: BLE001 — metrics are best-effort
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Governance control surface (US-ARB-008)
 # ---------------------------------------------------------------------------
@@ -1484,7 +1530,9 @@ def orchestrate(initial_message=None, orchestration=None, callback=None, app_id=
     if app_id is not None:
         agent_configs = load_app_scoped_agents(app_id)
     else:
-        agent_configs = load_config_from_dynamodb()
+        agent_configs = load_config_from_dynamodb(
+            org_id=orchestration.get('orgId') if orchestration else None,
+        )
     print(f"Agent configs loaded: {json.dumps(agent_configs, default=str)}")
 
     # Check if there are any active agents
@@ -1704,6 +1752,25 @@ def handler(event, lambda_context):
         except Exception as e:
             print(f"Error loading orchestration: {e}")
             return
+
+        # Decision 512b2f58: the orchestration row's orgId is the trusted
+        # source.  task.completion events do NOT carry orgId today (the
+        # worker's post_task_complete stamps orchestration_id/node/usage
+        # only), so the row is the sole authority — no cross-check needed.
+        row_org = orchestration.get('orgId') if orchestration else None
+        if not isinstance(row_org, str) or not row_org:
+            logger.error(
+                "task.completion refused: orchestration %r has no orgId "
+                "on row — no tenancy; refusing to continue.",
+                orchestration_id,
+            )
+            return
+        logger.info(
+            "task.completion org resolved from orchestration row: "
+            "orgId=%r orchestrationId=%r",
+            row_org, orchestration_id,
+        )
+
         request_id = orchestration['request_id']
         print(f"request id: {request_id}")
         node = event['detail']['node']
@@ -1735,24 +1802,46 @@ def handler(event, lambda_context):
         # detail shape) must not raise or change behavior.
         run_id = event['detail'].get('runId')
 
-        # Tenancy gate (finding 87a171ad, high). Unlike run_id/appId/
-        # callback above, orgId is NOT optional: every task.request MUST
-        # carry a server-derived organisation (stamped by the resolver
-        # side, e.g. task-runner-resolver.ts submitTask's `requireOrgId`)
-        # or dispatch is refused outright — no orchestrate() call, no
-        # orchestration row created. This is the consumer-side half of
-        # the fix; the producer-side half (the resolver) never accepts an
-        # orgId from client input, so a caller cannot forge this by
-        # crafting its own detail.orgId either — it can only be missing
-        # (an unfixed/legacy producer) or genuinely server-derived.
-        org_id = event['detail'].get('orgId')
-        if not isinstance(org_id, str) or not org_id:
+        # Tenancy gate (decision 512b2f58, finding 87a171ad).
+        # Trusted source: the ORCHESTRATIONS row's orgId (written by this
+        # supervisor after the resolver-side tenancy gate).  For a brand-new
+        # task.request the row does not exist yet, so we FALL BACK to
+        # detail.orgId (server-stamped by task-runner-resolver.ts
+        # submitTask's requireOrgId).  When an orchestration row IS found
+        # (retry / duplicate delivery), it is the authority; if the event
+        # also carries orgId, the two must agree — mismatch fails closed.
+        event_org_id = event['detail'].get('orgId')
+        event_orch_id = event['detail'].get('orchestrationId')
+        row_org_id = _resolve_orchestration_org_id(event_orch_id) if event_orch_id else ''
+
+        if row_org_id and event_org_id and row_org_id != event_org_id:
             logger.error(
-                "task.request refused: missing/empty detail.orgId — no "
-                "tenancy on this dispatch. task=%r appId=%r runId=%r. "
-                "Every task.request producer must stamp a server-derived "
-                "organisation before publishing (see "
-                "task-runner-resolver.ts submitTask's requireOrgId).",
+                "task.request refused: orchestration row orgId=%r "
+                "disagrees with detail.orgId=%r "
+                "(orchestrationId=%r) — fail closed.",
+                row_org_id, event_org_id, event_orch_id,
+            )
+            _emit_org_source_mismatch_metric()
+            return
+
+        if row_org_id:
+            org_id = row_org_id
+            logger.info(
+                "task.request org resolved from orchestration row: "
+                "orgId=%r orchestrationId=%r",
+                org_id, event_orch_id,
+            )
+        elif isinstance(event_org_id, str) and event_org_id:
+            org_id = event_org_id
+            logger.info(
+                "task.request org resolved from event detail (no row): "
+                "orgId=%r", org_id,
+            )
+        else:
+            logger.error(
+                "task.request refused: no orgId from orchestration row "
+                "or event detail — no tenancy on this dispatch. "
+                "task=%r appId=%r runId=%r.",
                 task_details[:200] if isinstance(task_details, str) else task_details,
                 app_id,
                 run_id,

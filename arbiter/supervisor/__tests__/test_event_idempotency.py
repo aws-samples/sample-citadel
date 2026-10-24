@@ -136,7 +136,7 @@ class TestSupervisorTaskCompletionDedupe:
             "detail": {"orchestration_id": "orch-1", "node": "worker-a"},
             "id": "evt-completion-first",
         }
-        fake_orchestration = {"request_id": "req-1"}
+        fake_orchestration = {"request_id": "req-1", "orgId": "org-1"}
         with patch("index._claim_event_id", return_value=True) as claim, \
                 patch("index.load_orchestration", return_value=fake_orchestration), \
                 patch("index.update_workflow_tracking", return_value=(True, {"ok": True})), \
