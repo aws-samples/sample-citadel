@@ -61,6 +61,16 @@ def _make_conditional_check_failed() -> ClientError:
     )
 
 
+def _mock_table_with_agent(agent_id: str = "agent-123", org_id: str = "org-a"):
+    """Return a MagicMock table that returns an agent item on get_item."""
+    mock_table = MagicMock()
+    mock_table.get_item.return_value = {
+        "Item": {"agentId": agent_id, "orgId": org_id, "state": "draft"},
+    }
+    mock_table.update_item.return_value = {}
+    return mock_table
+
+
 # ---------------------------------------------------------------------------
 # 1. activate_agent happy path
 # ---------------------------------------------------------------------------
@@ -139,19 +149,22 @@ def test_suspend_agent_missing_agent_returns_404():
 
 
 # ---------------------------------------------------------------------------
-# 5. handler dispatches 'activate'
+# 5. handler dispatches 'activate' (with orgId + get_item mock)
 # ---------------------------------------------------------------------------
 def test_handler_dispatches_activate():
-    event = {
-        "detail": {
-            "agentId": "agent-a",
-            "action": "activate",
-            "actor": "alice",
-            "correlationId": "cid-1",
-        }
-    }
-    with patch.object(activator, "activate_agent") as mock_activate:
+    mock_table = _mock_table_with_agent("agent-a", "org-a")
+    with patch.object(activator, "_get_table", return_value=mock_table), \
+         patch.object(activator, "activate_agent") as mock_activate:
         mock_activate.return_value = {"statusCode": 200}
+        event = {
+            "detail": {
+                "agentId": "agent-a",
+                "action": "activate",
+                "actor": "alice",
+                "correlationId": "cid-1",
+                "orgId": "org-a",
+            }
+        }
         result = activator.handler(event)
 
     mock_activate.assert_called_once_with("agent-a", "alice")
@@ -159,19 +172,22 @@ def test_handler_dispatches_activate():
 
 
 # ---------------------------------------------------------------------------
-# 6. handler dispatches 'suspend'
+# 6. handler dispatches 'suspend' (with orgId + get_item mock)
 # ---------------------------------------------------------------------------
 def test_handler_dispatches_suspend():
-    event = {
-        "detail": {
-            "agentId": "agent-b",
-            "action": "suspend",
-            "actor": "bob",
-            "correlationId": "cid-2",
-        }
-    }
-    with patch.object(activator, "suspend_agent") as mock_suspend:
+    mock_table = _mock_table_with_agent("agent-b", "org-a")
+    with patch.object(activator, "_get_table", return_value=mock_table), \
+         patch.object(activator, "suspend_agent") as mock_suspend:
         mock_suspend.return_value = {"statusCode": 200}
+        event = {
+            "detail": {
+                "agentId": "agent-b",
+                "action": "suspend",
+                "actor": "bob",
+                "correlationId": "cid-2",
+                "orgId": "org-a",
+            }
+        }
         result = activator.handler(event)
 
     mock_suspend.assert_called_once_with("agent-b", "bob")
@@ -182,14 +198,14 @@ def test_handler_dispatches_suspend():
 # 7. handler missing agentId → 400
 # ---------------------------------------------------------------------------
 def test_handler_missing_agent_id_returns_400():
-    event = {"detail": {"action": "activate", "actor": "alice"}}
+    event = {"detail": {"action": "activate", "actor": "alice", "orgId": "org-a"}}
     result = activator.handler(event)
     assert result["statusCode"] == 400
     assert "agentId" in result["error"] or "missing" in result["error"]
 
 
 def test_handler_missing_action_returns_400():
-    event = {"detail": {"agentId": "agent-x", "actor": "alice"}}
+    event = {"detail": {"agentId": "agent-x", "actor": "alice", "orgId": "org-a"}}
     result = activator.handler(event)
     assert result["statusCode"] == 400
 
@@ -198,14 +214,17 @@ def test_handler_missing_action_returns_400():
 # 8. handler unknown action → 400
 # ---------------------------------------------------------------------------
 def test_handler_unknown_action_returns_400():
-    event = {
-        "detail": {
-            "agentId": "agent-c",
-            "action": "nuke-from-orbit",
-            "actor": "charlie",
+    mock_table = _mock_table_with_agent("agent-c", "org-a")
+    with patch.object(activator, "_get_table", return_value=mock_table):
+        event = {
+            "detail": {
+                "agentId": "agent-c",
+                "action": "nuke-from-orbit",
+                "actor": "charlie",
+                "orgId": "org-a",
+            }
         }
-    }
-    result = activator.handler(event)
+        result = activator.handler(event)
     assert result["statusCode"] == 400
     assert "nuke-from-orbit" in result["error"]
 
@@ -240,6 +259,10 @@ def test_sequence_of_actions_is_idempotent(actions):
         return {}
 
     mock_table.update_item.side_effect = fake_update_item
+    # get_item must return an agent in the same org for the tenant guard
+    mock_table.get_item.return_value = {
+        "Item": {"agentId": "prop-agent", "orgId": "org-prop", "state": "draft"},
+    }
 
     with patch.object(activator, "_get_table", return_value=mock_table):
         for action in actions:
@@ -249,6 +272,7 @@ def test_sequence_of_actions_is_idempotent(actions):
                     "action": action,
                     "actor": "tester",
                     "correlationId": "cid",
+                    "orgId": "org-prop",
                 }
             }
             result = activator.handler(event)
