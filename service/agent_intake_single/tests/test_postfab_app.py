@@ -20,6 +20,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import request_context
+
 os.environ.setdefault("APPSYNC_GRAPHQL_URL", "https://test.example/graphql")
 
 import tools.postfab as postfab
@@ -73,7 +75,7 @@ def _contract(result):
 def test_no_confirmed_name_returns_proposal_without_mutation(execute, marker_store, monkeypatch):
     _project_tables(monkeypatch, [{"projectId": "proj-1"}], {"name": "Acme Claims"})
 
-    result = json.loads(postfab.create_agent_app(session_id="sess-1"))
+    result = json.loads(postfab.create_agent_app())
 
     assert result["status"] == "proposal"
     # Proposals are pre-sanitized to the registry-safe form ('Acme Claims'
@@ -88,7 +90,7 @@ def test_no_confirmed_name_returns_proposal_without_mutation(execute, marker_sto
 def test_proposal_falls_back_to_dated_name(execute, marker_store, monkeypatch):
     _project_tables(monkeypatch, [], None)
 
-    result = json.loads(postfab.create_agent_app(session_id="sess-1"))
+    result = json.loads(postfab.create_agent_app())
 
     assert result["status"] == "proposal"
     assert result["proposed_name"].startswith("Intake")
@@ -100,7 +102,7 @@ def test_confirmed_name_creates_app_and_updates_marker(execute, marker_store, mo
     _project_tables(monkeypatch, [{"projectId": "proj-1"}], {"name": "Acme Claims"})
     execute.return_value = {"intakeCreateApp": {"appId": "app-9", "name": "My Custom App", "status": "DRAFT"}}
 
-    result = json.loads(postfab.create_agent_app(session_id="sess-1", confirmed_name="My Custom App"))
+    result = json.loads(postfab.create_agent_app(confirmed_name="My Custom App"))
 
     assert result["ok"] is True
     assert result["app_id"] == "app-9"
@@ -125,7 +127,7 @@ def test_created_summary_surfaces_linked_agents(execute, marker_store, monkeypat
         "agentBindings": [{"agentId": "rec-a"}, {"agentId": "rec-b"}],
     }}
 
-    result = json.loads(postfab.create_agent_app(session_id="sess-1", confirmed_name="My Custom App"))
+    result = json.loads(postfab.create_agent_app(confirmed_name="My Custom App"))
 
     assert result["ok"] is True
     assert "linked 2 agents" in result["summary"]
@@ -140,7 +142,7 @@ def test_created_summary_singular_for_one_linked_agent(execute, marker_store, mo
         "agentBindings": [{"agentId": "rec-a"}],
     }}
 
-    result = json.loads(postfab.create_agent_app(session_id="sess-1", confirmed_name="My Custom App"))
+    result = json.loads(postfab.create_agent_app(confirmed_name="My Custom App"))
 
     assert "linked 1 agent" in result["summary"]
     assert "linked 1 agents" not in result["summary"]
@@ -153,7 +155,7 @@ def test_created_summary_unchanged_when_no_bindings_returned(execute, marker_sto
     _project_tables(monkeypatch, [{"projectId": "proj-1"}], {"name": "Acme Claims"})
     execute.return_value = {"intakeCreateApp": {"appId": "app-9", "name": "My Custom App", "status": "DRAFT"}}
 
-    result = json.loads(postfab.create_agent_app(session_id="sess-1", confirmed_name="My Custom App"))
+    result = json.loads(postfab.create_agent_app(confirmed_name="My Custom App"))
 
     assert "linked" not in result["summary"]
     assert "linked_agents" not in result
@@ -169,7 +171,7 @@ def test_create_app_mutation_selects_agent_bindings(execute, marker_store):
 def test_idempotent_when_app_already_created(execute, marker_store):
     marker_store["sess-1"] = {"stage": "app_created", "appId": "app-9", "appName": "Acme Claims"}
 
-    result = json.loads(postfab.create_agent_app(session_id="sess-1", confirmed_name="Acme Claims"))
+    result = json.loads(postfab.create_agent_app(confirmed_name="Acme Claims"))
 
     execute.assert_not_called()
     assert result["status"] == "already_done"
@@ -181,7 +183,7 @@ def test_error_returns_nothing_changed_copy(execute, marker_store, monkeypatch):
     _project_tables(monkeypatch, [], None)
     execute.side_effect = AppSyncError("internal PLUGH", retryable=False)
 
-    result = json.loads(postfab.create_agent_app(session_id="sess-1", confirmed_name="My App"))
+    result = json.loads(postfab.create_agent_app(confirmed_name="My App"))
 
     assert result["ok"] is False
     assert result["retryable"] is False
@@ -204,7 +206,7 @@ def test_timeout_returns_standard_failure_envelope_with_try_again(execute, marke
         retryable=True, error_type="ReadTimeout", timed_out=True,
     )
 
-    result = json.loads(postfab.create_agent_app(session_id="sess-1", confirmed_name="My App"))
+    result = json.loads(postfab.create_agent_app(confirmed_name="My App"))
 
     assert result["ok"] is False
     assert result["retryable"] is True
@@ -233,7 +235,7 @@ def test_proposal_finds_linked_row_beyond_first_scan_page(execute, marker_store,
     monkeypatch.setattr(postfab, "CONVERSATIONS_TABLE", "conv-t")
     monkeypatch.setattr(postfab, "PROJECTS_TABLE", "proj-t")
 
-    result = json.loads(postfab.create_agent_app(session_id="sess-1"))
+    result = json.loads(postfab.create_agent_app())
 
     assert result["status"] == "proposal"
     # Registry-safe pre-sanitized proposal (see the naming tests below).
@@ -252,7 +254,7 @@ def test_proposal_presanitizes_project_name_to_registry_safe_form(execute, marke
     be created — not the raw project name."""
     _project_tables(monkeypatch, [{"projectId": "proj-1"}], {"name": "Test - Ingest"})
 
-    result = json.loads(postfab.create_agent_app(session_id="sess-1"))
+    result = json.loads(postfab.create_agent_app())
 
     assert result["status"] == "proposal"
     assert result["proposed_name"] == "Test-Ingest"
@@ -269,7 +271,7 @@ def test_proposal_dated_fallback_is_registry_safe(execute, marker_store, monkeyp
 
     _project_tables(monkeypatch, [], None)
 
-    result = json.loads(postfab.create_agent_app(session_id="sess-1"))
+    result = json.loads(postfab.create_agent_app())
 
     assert result["status"] == "proposal"
     assert re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_\-./]*$", result["proposed_name"])
@@ -284,7 +286,7 @@ def test_marker_and_copy_store_server_returned_name_not_input(execute, marker_st
         "intakeCreateApp": {"appId": "app-9", "name": "Test-Ingest", "status": "DRAFT"}
     }
 
-    result = json.loads(postfab.create_agent_app(session_id="sess-1", confirmed_name="Test - Ingest"))
+    result = json.loads(postfab.create_agent_app(confirmed_name="Test - Ingest"))
 
     assert result["ok"] is True
     assert marker_store["sess-1"]["appName"] == "Test-Ingest"

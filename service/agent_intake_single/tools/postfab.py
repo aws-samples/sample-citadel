@@ -33,6 +33,7 @@ from tools.kb import s3_get
 from tools.plan_doc import refresh_plan_document
 from tools.state import get_postfab_marker, set_postfab_marker, _internal_update_progress
 from tools.registry_name import sanitize_registry_name
+import request_context
 
 logger = logging.getLogger(__name__)
 
@@ -349,19 +350,17 @@ def _next_gate(session_id: str, marker: dict) -> tuple[str, list[dict]]:
 
 
 @tool
-def check_fabrication_status(session_id: str) -> str:
+def check_fabrication_status() -> str:
     """Check how the queued agent builds are going for this session.
 
     Call this at the START of every turn while a fabrication is in flight
     (you cannot receive push notifications). Read-only; safe to repeat.
 
-    Args:
-        session_id: The current session ID
-
     Returns:
         JSON with aggregate counts, per-agent states in plain language, a
         conversational summary, and the consent question for the next step.
     """
+    session_id = request_context.current_session_id()
     marker = get_postfab_marker(session_id)
     current_stage = marker.get("stage")
 
@@ -557,19 +556,17 @@ def check_fabrication_status(session_id: str) -> str:
 
 
 @tool
-def activate_agents(session_id: str) -> str:
+def activate_agents() -> str:
     """Activate the agents fabricated for this session (consent step 1 of 4).
 
     Only call this after the user has explicitly confirmed. Idempotent —
     re-running a completed activation is safe and reports what was done.
 
-    Args:
-        session_id: The current session ID
-
     Returns:
         JSON with itemized per-agent results, a conversational summary, and
         the consent question for the app-creation gate.
     """
+    session_id = request_context.current_session_id()
     marker = get_postfab_marker(session_id)
     if _stage_rank(marker.get("stage")) >= _stage_rank("activated") and marker.get("activation"):
         activation = marker["activation"]
@@ -653,7 +650,7 @@ def activate_agents(session_id: str) -> str:
 
 
 @tool
-def create_agent_app(session_id: str, confirmed_name: str = "") -> str:
+def create_agent_app(confirmed_name: str = "") -> str:
     """Propose or create the Agent App for this session (consent step 2 of 4).
 
     Call with NO confirmed_name first: it returns a name PROPOSAL from the
@@ -661,13 +658,13 @@ def create_agent_app(session_id: str, confirmed_name: str = "") -> str:
     call again with confirmed_name to actually create the app.
 
     Args:
-        session_id: The current session ID
         confirmed_name: The user-confirmed app name; leave empty to propose.
 
     Returns:
         JSON with the proposal or creation result, a conversational summary,
         and the consent question for the next gate.
     """
+    session_id = request_context.current_session_id()
     marker = get_postfab_marker(session_id)
     if marker.get("appId"):
         question, actions = _next_gate(session_id, marker)
@@ -914,7 +911,7 @@ def _build_envelope(name: str, node_ids: list[str], edges: list[tuple[str, str]]
 
 
 @tool
-def generate_process_blueprint(session_id: str, regenerate: bool = False) -> str:
+def generate_process_blueprint(regenerate: bool = False) -> str:
     """Generate and publish the process blueprint (consent step 3 of 4).
 
     Composes the captured business process from the technical design and
@@ -922,7 +919,6 @@ def generate_process_blueprint(session_id: str, regenerate: bool = False) -> str
     fabricated agents. Only call after the user has explicitly confirmed.
 
     Args:
-        session_id: The current session ID
         regenerate: Pass True ONLY when the user explicitly chose the
             'Regenerate the blueprint' action on an already-published
             blueprint. Publishes a fresh blueprint and re-opens the import
@@ -933,6 +929,7 @@ def generate_process_blueprint(session_id: str, regenerate: bool = False) -> str
         JSON with the blueprint result, a conversational summary, and the
         consent question for the import gate.
     """
+    session_id = request_context.current_session_id()
     marker = get_postfab_marker(session_id)
     app_name = marker.get("appName") or "your new app"
 
@@ -1105,19 +1102,17 @@ def generate_process_blueprint(session_id: str, regenerate: bool = False) -> str
 
 
 @tool
-def import_blueprint_to_app(session_id: str) -> str:
+def import_blueprint_to_app() -> str:
     """Import the published blueprint into the app (consent step 4 of 4).
 
     The imported workflow stays a draft for the user to review and publish on
     the canvas. Only call after the user has explicitly confirmed.
 
-    Args:
-        session_id: The current session ID
-
     Returns:
         JSON with the import result, a conversational summary including where
         to find the workflow, and the closing actions.
     """
+    session_id = request_context.current_session_id()
     marker = get_postfab_marker(session_id)
     app_name = marker.get("appName") or "your new app"
 

@@ -30,6 +30,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import request_context
+
 os.environ.setdefault("APPSYNC_GRAPHQL_URL", "https://test.example/graphql")
 
 import tools.plan_doc as plan_doc
@@ -335,7 +337,7 @@ def test_confirm_plan_emits_invisible_markers_with_blank_separation(monkeypatch)
     monkeypatch.setattr(state, "_internal_update_progress", mock.MagicMock())
 
     plan = json.dumps([{"name": "AgentA", "action": "build", "reason": "new", "spec": "spec"}])
-    fabricate.confirm_fabrication_plan(SESSION, plan)
+    fabricate.confirm_fabrication_plan(plan)
 
     doc = captured[KEY]
     assert "<!--" not in doc
@@ -528,7 +530,7 @@ def test_confirm_plan_wraps_status_table_in_markers(monkeypatch):
     monkeypatch.setattr(state, "_internal_update_progress", mock.MagicMock())
 
     plan = json.dumps([{"name": "AgentA", "action": "build", "reason": "new", "spec": "spec"}])
-    fabricate.confirm_fabrication_plan(SESSION, plan)
+    fabricate.confirm_fabrication_plan(plan)
 
     doc = captured[KEY]
     assert fabricate.PLAN_STATUS_BEGIN in doc
@@ -586,7 +588,7 @@ def test_built_detection_triggers_refresh(marker_store, execute, refresh_spy, mo
         {"agentName": "AgentA", "agentUseId": "AgentA", "status": "COMPLETED"},
     ])
 
-    result = json.loads(postfab.check_fabrication_status(SESSION))
+    result = json.loads(postfab.check_fabrication_status())
 
     assert result["status"] == "complete"
     refresh_spy.assert_called_once_with(SESSION)
@@ -598,7 +600,7 @@ def test_in_progress_does_not_trigger_refresh(marker_store, execute, refresh_spy
         {"agentName": "AgentA", "agentUseId": "AgentA", "status": "PROCESSING"},
     ])
 
-    result = json.loads(postfab.check_fabrication_status(SESSION))
+    result = json.loads(postfab.check_fabrication_status())
 
     assert result["status"] == "in_progress"
     refresh_spy.assert_not_called()
@@ -610,7 +612,7 @@ def test_activation_success_triggers_refresh(marker_store, execute, refresh_spy)
         "activated": ["AgentA"], "failed": [], "alreadyActive": [], "matchedBy": "sessionId",
     }}
 
-    result = json.loads(postfab.activate_agents(SESSION))
+    result = json.loads(postfab.activate_agents())
 
     assert result["ok"] is True
     refresh_spy.assert_called_once_with(SESSION)
@@ -620,7 +622,7 @@ def test_app_creation_triggers_refresh(marker_store, execute, refresh_spy, monke
     marker_store[SESSION] = {"stage": "activated"}
     execute.return_value = {"intakeCreateApp": {"appId": "app-9", "name": "Acme"}}
 
-    result = json.loads(postfab.create_agent_app(SESSION, confirmed_name="Acme"))
+    result = json.loads(postfab.create_agent_app(confirmed_name="Acme"))
 
     assert result["status"] == "created"
     refresh_spy.assert_called_once_with(SESSION)
@@ -640,7 +642,7 @@ def test_blueprint_publish_triggers_refresh(marker_store, execute, refresh_spy, 
         "nodeCount": 1, "missing": None, "errors": None,
     }}
 
-    result = json.loads(postfab.generate_process_blueprint(SESSION))
+    result = json.loads(postfab.generate_process_blueprint())
 
     assert result["status"] == "published"
     refresh_spy.assert_called_once_with(SESSION)
@@ -661,7 +663,7 @@ def test_blueprint_marker_records_node_count(marker_store, execute, refresh_spy,
         "nodeCount": 1, "missing": None, "errors": None,
     }}
 
-    postfab.generate_process_blueprint(SESSION)
+    postfab.generate_process_blueprint()
 
     assert marker_store[SESSION]["nodeCount"] == 1
 
@@ -673,7 +675,7 @@ def test_import_success_triggers_refresh(marker_store, execute, refresh_spy):
         "workflowId": "wf-1", "name": "Acme Process", "status": "DRAFT",
     }}
 
-    result = json.loads(postfab.import_blueprint_to_app(SESSION))
+    result = json.loads(postfab.import_blueprint_to_app())
 
     assert result["status"] == "imported"
     refresh_spy.assert_called_once_with(SESSION)
@@ -686,7 +688,7 @@ def test_refresh_failure_never_breaks_the_tool(marker_store, execute, refresh_sp
         "activated": ["AgentA"], "failed": [], "alreadyActive": [], "matchedBy": "sessionId",
     }}
 
-    result = json.loads(postfab.activate_agents(SESSION))
+    result = json.loads(postfab.activate_agents())
 
     assert result["ok"] is True
     assert result["status"] == "activated"
@@ -699,7 +701,7 @@ def test_refresh_failure_never_breaks_status_check(marker_store, execute, refres
         {"agentName": "AgentA", "agentUseId": "AgentA", "status": "COMPLETED"},
     ])
 
-    result = json.loads(postfab.check_fabrication_status(SESSION))
+    result = json.loads(postfab.check_fabrication_status())
 
     assert result["ok"] is True
     assert result["status"] == "complete"

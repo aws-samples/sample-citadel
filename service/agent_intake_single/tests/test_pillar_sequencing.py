@@ -1,3 +1,4 @@
+import request_context
 """Property tests: the 'dimensions' pillar is a parallel
 fourth pillar routed after business/technical/governance complete.
 
@@ -79,7 +80,7 @@ def test_after_three_pillars_complete_next_question_is_dimensions():
     })
     with patch('tools.extract.load_json_from_s3', side_effect=fake_load), \
          patch('tools.extract.save_json_to_s3'):
-        result = json.loads(get_next_assessment_question(SESSION))
+        result = json.loads(get_next_assessment_question())
     assert result['pillar'] == 'dimensions'
     assert result['section'] == 'coverage'
     # First field in the 'coverage' section is code_dimension
@@ -95,7 +96,7 @@ def test_all_four_pillars_complete_returns_complete_literal():
     })
     with patch('tools.extract.load_json_from_s3', side_effect=fake_load), \
          patch('tools.extract.save_json_to_s3'):
-        assert get_next_assessment_question(SESSION) == 'complete'
+        assert get_next_assessment_question() == 'complete'
 
 def test_dimensions_never_asked_before_governance_complete():
     """AC 4: when governance is incomplete, dimensions MUST NOT be the
@@ -108,7 +109,7 @@ def test_dimensions_never_asked_before_governance_complete():
     })
     with patch('tools.extract.load_json_from_s3', side_effect=fake_load), \
          patch('tools.extract.save_json_to_s3'):
-        result = json.loads(get_next_assessment_question(SESSION))
+        result = json.loads(get_next_assessment_question())
     assert result['pillar'] == 'governance'
     assert result['pillar']!= 'dimensions'
 
@@ -138,7 +139,7 @@ def test_property_pillar_sequencing_follows_pillars_order(
 
     with patch('tools.extract.load_json_from_s3', side_effect=fake_load), \
          patch('tools.extract.save_json_to_s3'):
-        out = get_next_assessment_question(SESSION)
+        out = get_next_assessment_question()
 
     # Expected: first unfilled pillar in PILLARS order, or 'complete'
     expected_pillar = next((p for p in PILLARS if not fill_map[p]), None)

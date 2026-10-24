@@ -7,6 +7,7 @@ from tools.kb import kb_query, load_json_from_s3, save_json_to_s3, s3_get, s3_pu
 from tools.converse_utils import extract_text, capture_converse_usage
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import bedrock, get_agent_model_id
+import request_context
 
 TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), '..', 'templates')
 
@@ -117,18 +118,16 @@ After the section content, add a final line in this exact format (do not omit it
 
 
 @tool
-def generate_technical_design(session_id: str) -> str:
+def generate_technical_design() -> str:
     """Generate the Technical Design document section by section using focused LLM calls.
     Safe to call multiple times — resumes from where it left off.
     Publishes progress events to EventBridge after each section.
     Returns when all sections are complete and the document is assembled.
 
-    Args:
-        session_id: The session ID
-
     Returns:
         Progress update or completion confirmation.
     """
+    session_id = request_context.current_session_id()
     # Import here to avoid circular import
     from tools.state import _internal_update_progress as update_intake_progress
 
@@ -352,16 +351,14 @@ Return JSON:
 
 
 @tool
-def infer_resourcing_inputs(session_id: str) -> str:
+def infer_resourcing_inputs() -> str:
     """Analyse the Technical Design and infer agents (with S/M/L sizing), integrations, and HITL points.
     Call this before generate_resourcing_report to get inputs for user confirmation.
-
-    Args:
-        session_id: The session ID
 
     Returns:
         JSON with inferred agents, integrations, and hitl_points for user confirmation.
     """
+    session_id = request_context.current_session_id()
     inputs = _extract_resourcing_inputs(session_id)
     return json.dumps(inputs, indent=2)
 
@@ -449,7 +446,6 @@ def _build_resourcing_report(inputs: dict, defaults: dict) -> str:
 
 @tool
 def generate_resourcing_report(
-    session_id: str,
     agents: str,
     integrations: str,
     hitl_points: int,
@@ -459,7 +455,6 @@ def generate_resourcing_report(
     Call this after the user has confirmed the inferred inputs (agents, integrations, hitl_points) and provided ui_touchpoints.
 
     Args:
-        session_id: The session ID
         agents: JSON array of confirmed agents e.g. [{"name":"..","size":"M"}]
         integrations: JSON array of confirmed integrations e.g. [{"name":"..","size":"S"}]
         hitl_points: Number of human-in-the-loop trigger points
@@ -468,6 +463,7 @@ def generate_resourcing_report(
     Returns:
         Confirmation with total effort estimate.
     """
+    session_id = request_context.current_session_id()
     defaults = _load_resourcing_template()
     inputs = {
         'agents': json.loads(agents) if isinstance(agents, str) else agents,
@@ -490,16 +486,14 @@ def generate_resourcing_report(
 
 
 @tool
-def get_resourcing_report(session_id: str) -> str:
+def get_resourcing_report() -> str:
     """Read the current resourcing report and its underlying inputs and defaults.
     Call this when the user wants to review or edit the resourcing estimate.
-
-    Args:
-        session_id: The session ID
 
     Returns:
         JSON with report markdown, current inputs, and current defaults.
     """
+    session_id = request_context.current_session_id()
     report = s3_get(RESOURCING_KEY.format(session_id=session_id))
     inputs = load_json_from_s3(RESOURCING_INPUTS_KEY.format(session_id=session_id))
     defaults = load_json_from_s3(RESOURCING_DEFAULTS_KEY.format(session_id=session_id))
@@ -509,17 +503,17 @@ def get_resourcing_report(session_id: str) -> str:
 
 
 @tool
-def update_resourcing_report(session_id: str, edit_instruction: str) -> str:
+def update_resourcing_report(edit_instruction: str) -> str:
     """Apply an edit to the resourcing report — e.g. change agent sizes, day values, counts, or overhead.
     Interprets the instruction, patches inputs/defaults, recalculates, and overwrites the report.
 
     Args:
-        session_id: The session ID
         edit_instruction: Plain-language description of what to change
 
     Returns:
         Confirmation with updated effort estimate.
     """
+    session_id = request_context.current_session_id()
     inputs = load_json_from_s3(RESOURCING_INPUTS_KEY.format(session_id=session_id))
     defaults = load_json_from_s3(RESOURCING_DEFAULTS_KEY.format(session_id=session_id))
     if not inputs or not defaults:
@@ -573,11 +567,8 @@ def _assemble_and_save(session_id: str, template: dict):
 
 
 @tool
-def get_design_structure(session_id: str) -> str:
+def get_design_structure() -> str:
     """Return the list of sections in the Technical Design so the user can choose which to edit.
-
-    Args:
-        session_id: The session ID
 
     Returns:
         JSON list of section id + title.
@@ -587,16 +578,16 @@ def get_design_structure(session_id: str) -> str:
 
 
 @tool
-def get_design_section(session_id: str, section_id: str) -> str:
+def get_design_section(section_id: str) -> str:
     """Read the current content of a specific Technical Design section.
 
     Args:
-        session_id: The session ID
         section_id: Section ID (1–5)
 
     Returns:
         Current markdown content of the section.
     """
+    session_id = request_context.current_session_id()
     content = s3_get(SECTION_KEY.format(session_id=session_id, section_id=section_id))
     if not content:
         return f"Section {section_id} has not been generated yet."
@@ -605,23 +596,23 @@ def get_design_section(session_id: str, section_id: str) -> str:
 
 
 @tool
-def update_design_section(session_id: str, section_id: str, edit_instruction: str) -> str:
+def update_design_section(section_id: str, edit_instruction: str) -> str:
     """Regenerate a single Technical Design section based on an edit instruction, then reassemble the full document.
 
     Args:
-        session_id: The session ID
         section_id: Section ID to regenerate (1–5)
         edit_instruction: Plain-language description of what to change
 
     Returns:
         Confirmation with word count of updated section.
     """
+    session_id = request_context.current_session_id()
     template = _load_template()
     section = next((s for s in template['sections'] if s['id'] == section_id), None)
     if not section:
         return f"Section {section_id} not found."
 
-    existing = get_design_section(session_id, section_id)
+    existing = get_design_section(section_id)
     assessment_summary = _assessment_summary(session_id)
 
     # Inject edit instruction into the section prompt

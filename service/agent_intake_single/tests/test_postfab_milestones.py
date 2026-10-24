@@ -30,6 +30,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import request_context
+
 os.environ.setdefault("APPSYNC_GRAPHQL_URL", "https://test.example/graphql")
 
 import tools.postfab as postfab
@@ -88,7 +90,7 @@ def test_activation_success_records_milestone_70(marker_store, execute, progress
         "activated": ["a1", "a2"], "failed": [], "alreadyActive": [], "matchedBy": "sessionId",
     }}
 
-    result = json.loads(postfab.activate_agents("sess-1"))
+    result = json.loads(postfab.activate_agents())
 
     assert result["ok"] is True
     progress_spy.assert_called_once()
@@ -104,7 +106,7 @@ def test_activation_partial_success_still_records_70(marker_store, execute, prog
         "activated": ["a1"], "failed": ["a2"], "alreadyActive": [], "matchedBy": "sessionId",
     }}
 
-    postfab.activate_agents("sess-1")
+    postfab.activate_agents()
 
     assert progress_spy.call_args.args[2] == 70
 
@@ -115,7 +117,7 @@ def test_activation_already_done_does_not_reemit(marker_store, execute, progress
         "activation": {"activated": ["a1"], "failed": [], "alreadyActive": []},
     }
 
-    result = json.loads(postfab.activate_agents("sess-1"))
+    result = json.loads(postfab.activate_agents())
 
     assert result["status"] == "already_done"
     progress_spy.assert_not_called()
@@ -128,7 +130,7 @@ def test_activation_zero_matched_does_not_record(marker_store, execute, progress
         "activated": [], "failed": [], "alreadyActive": [], "matchedBy": None,
     }}
 
-    result = json.loads(postfab.activate_agents("sess-1"))
+    result = json.loads(postfab.activate_agents())
 
     assert result["status"] == "zero_matched"
     progress_spy.assert_not_called()
@@ -138,7 +140,7 @@ def test_activation_error_does_not_record(marker_store, execute, progress_spy):
     marker_store["sess-1"] = {"stage": "built"}
     execute.side_effect = AppSyncError("boom", retryable=True, error_type="Internal")
 
-    result = json.loads(postfab.activate_agents("sess-1"))
+    result = json.loads(postfab.activate_agents())
 
     assert result["ok"] is False
     progress_spy.assert_not_called()
@@ -151,7 +153,7 @@ def test_activation_milestone_failure_never_breaks_the_tool(marker_store, execut
     }}
     progress_spy.side_effect = RuntimeError("progress table down")
 
-    result = json.loads(postfab.activate_agents("sess-1"))
+    result = json.loads(postfab.activate_agents())
 
     assert result["ok"] is True
     assert result["status"] == "activated"
@@ -167,7 +169,7 @@ def test_app_creation_records_milestone_80(marker_store, execute, progress_spy, 
         "appId": "app-9", "name": "Acme Claims", "status": "DRAFT",
     }}
 
-    result = json.loads(postfab.create_agent_app("sess-1", confirmed_name="Acme Claims"))
+    result = json.loads(postfab.create_agent_app(confirmed_name="Acme Claims"))
 
     assert result["status"] == "created"
     progress_spy.assert_called_once()
@@ -178,7 +180,7 @@ def test_app_proposal_does_not_record(marker_store, execute, progress_spy, monke
     _project_tables(monkeypatch)
     marker_store["sess-1"] = {"stage": "activated"}
 
-    result = json.loads(postfab.create_agent_app("sess-1"))
+    result = json.loads(postfab.create_agent_app())
 
     assert result["status"] == "proposal"
     progress_spy.assert_not_called()
@@ -187,7 +189,7 @@ def test_app_proposal_does_not_record(marker_store, execute, progress_spy, monke
 def test_app_already_done_does_not_reemit(marker_store, execute, progress_spy):
     marker_store["sess-1"] = {"stage": "app_created", "appId": "app-9", "appName": "Acme"}
 
-    result = json.loads(postfab.create_agent_app("sess-1", confirmed_name="Acme"))
+    result = json.loads(postfab.create_agent_app(confirmed_name="Acme"))
 
     assert result["status"] == "already_done"
     progress_spy.assert_not_called()
@@ -220,7 +222,7 @@ def test_blueprint_published_records_milestone_85(marker_store, execute, progres
         "nodeCount": 2, "missing": None, "errors": None,
     }}
 
-    result = json.loads(postfab.generate_process_blueprint("sess-1"))
+    result = json.loads(postfab.generate_process_blueprint())
 
     assert result["status"] == "published"
     progress_spy.assert_called_once()
@@ -234,7 +236,7 @@ def test_blueprint_syncing_does_not_record(marker_store, execute, progress_spy, 
         "nodeCount": None, "missing": ["rec-a"], "errors": [],
     }}
 
-    result = json.loads(postfab.generate_process_blueprint("sess-1"))
+    result = json.loads(postfab.generate_process_blueprint())
 
     assert result["status"] == "agents_syncing"
     progress_spy.assert_not_called()
@@ -252,7 +254,7 @@ def test_import_success_records_milestone_90(marker_store, execute, progress_spy
         "workflowId": "wf-1", "name": "Acme Process", "status": "DRAFT",
     }}
 
-    result = json.loads(postfab.import_blueprint_to_app("sess-1"))
+    result = json.loads(postfab.import_blueprint_to_app())
 
     assert result["status"] == "imported"
     progress_spy.assert_called_once()
@@ -265,7 +267,7 @@ def test_import_already_done_does_not_reemit(marker_store, execute, progress_spy
         "appName": "Acme", "blueprintId": "bp-1", "workflowId": "wf-1",
     }
 
-    result = json.loads(postfab.import_blueprint_to_app("sess-1"))
+    result = json.loads(postfab.import_blueprint_to_app())
 
     assert result["status"] == "already_done"
     progress_spy.assert_not_called()
@@ -278,7 +280,7 @@ def test_import_error_does_not_record(marker_store, execute, progress_spy):
     }
     execute.side_effect = AppSyncError("boom", retryable=False, error_type="Internal")
 
-    result = json.loads(postfab.import_blueprint_to_app("sess-1"))
+    result = json.loads(postfab.import_blueprint_to_app())
 
     assert result["ok"] is False
     progress_spy.assert_not_called()
@@ -302,7 +304,7 @@ def test_confirm_fabrication_plan_sets_implementation_to_10(monkeypatch):
     monkeypatch.setattr(fabricate, "_send_to_fabricator", mock.MagicMock())
 
     plan = json.dumps([{"name": "AgentA", "action": "build", "reason": "new", "spec": "spec"}])
-    fabricate.confirm_fabrication_plan("sess-1", plan)
+    fabricate.confirm_fabrication_plan(plan)
 
     spy.assert_called_once()
     kwargs = spy.call_args.kwargs

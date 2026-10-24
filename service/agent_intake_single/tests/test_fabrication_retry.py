@@ -31,6 +31,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import request_context
+
 os.environ.setdefault("FABRICATOR_QUEUE_URL", "https://sqs.fake/queue")
 
 import tools.fabricate as fab
@@ -124,7 +126,7 @@ def jobs_table(monkeypatch):
 def _call(jobs_table, rows, agent_names=""):
     jobs_table.query.return_value = {"Items": rows}
     return json.loads(
-        fab.retry_failed_fabrication(session_id="sess-1", agent_names=agent_names)
+        fab.retry_failed_fabrication(agent_names=agent_names)
     )
 
 
@@ -278,7 +280,7 @@ def test_no_rows_returns_none_status(jobs_table):
 
 def test_query_failure_returns_unavailable(jobs_table):
     jobs_table.query.side_effect = Exception("ddb down")
-    result = json.loads(fab.retry_failed_fabrication(session_id="sess-1"))
+    result = json.loads(fab.retry_failed_fabrication())
 
     assert result["ok"] is False
     assert result["status"] == "unavailable"
@@ -297,6 +299,6 @@ def test_retry_refuses_when_organisation_unresolved(jobs_table, monkeypatch):
     jobs_table.query.return_value = {"Items": _live_rows()}
 
     with pytest.raises(Exception, match=r"cannot fabricate: no organisation resolved"):
-        fab.retry_failed_fabrication(session_id="sess-1")
+        fab.retry_failed_fabrication()
 
     fab.sqs.send_message.assert_not_called()

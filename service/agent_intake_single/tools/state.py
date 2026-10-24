@@ -1,4 +1,5 @@
 import tools.tracing as tracing
+import request_context
 import boto3
 import json
 import logging
@@ -110,17 +111,15 @@ def publish_usage_event(session_id: str, usage_record: dict, run_id: str | None 
 
 
 @tool
-def get_intake_state(session_id: str) -> str:
+def get_intake_state() -> str:
     """Get the current intake phase and progress for all phases.
-
-    Args:
-        session_id: The session ID
 
     Returns:
         JSON with current phase and progress per phase. The progress keys
         mirror PHASES exactly (assessment, design, planning, implementation) —
         i.e. the '<phase>_progress' fields the write path actually stores.
     """
+    session_id = request_context.current_session_id()
     try:
         resp = _table().get_item(Key={'p_key': session_id, 's_key': 'intake:latest'})
         if 'Item' in resp:
@@ -243,12 +242,11 @@ def _invalidate_agent_cache(session_id: str) -> None:
 
 
 @tool
-def update_intake_progress(session_id: str, phase: str, progress: int, change_summary: str) -> str:
+def update_intake_progress(phase: str, progress: int, change_summary: str) -> str:
     """Update progress for a phase and publish a UI progress event.
     Call this at key milestones: after extraction, after go/no-go, after each design section, on completion.
 
     Args:
-        session_id: The session ID
         phase: One of: assessment, design, planning, implementation
         progress: Completion percentage (0-100)
         change_summary: Brief description of what changed
@@ -256,6 +254,7 @@ def update_intake_progress(session_id: str, phase: str, progress: int, change_su
     Returns:
         Confirmation.
     """
+    session_id = request_context.current_session_id()
     result = _internal_update_progress(session_id, phase, progress, change_summary)
     # A progress change makes the cached Agent's baked-in system prompt stale, so
     # evict it. Best-effort: the DynamoDB write above is the committed unit of

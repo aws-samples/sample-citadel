@@ -1,3 +1,4 @@
+import request_context
 """Tests for parallel field extraction optimizations."""
 import json
 from tools.kb import KBResult
@@ -53,7 +54,7 @@ class TestSectionGroupedKBBatching:
         mock_load.return_value = pillar
         mock_kb.return_value = KBResult(status='content', content='some context')
 
-        extract_information(session_id='test-session')
+        extract_information()
 
         # One KB call per section per pillar (grows with PILLARS;
         # added a 4th pillar 'dimensions' with 1 section, so the expected
@@ -81,7 +82,7 @@ class TestParallelExecution:
 
         with patch('tools.extract._extract_field_with_llm', side_effect=slow_llm):
             start = time.time()
-            extract_information(session_id='test-parallel')
+            extract_information()
             elapsed = time.time() - start
 
         # 6 fields * 0.1s sequential = 0.6s; parallel with 5 workers should be < 0.4s
@@ -97,7 +98,7 @@ class TestBulkS3Write:
         from tools.extract import extract_information, PILLARS
         mock_load.return_value = _sample_pillar_data()
 
-        extract_information(session_id='test-bulk')
+        extract_information()
 
         # Should write once per pillar (3), not once per field
         assert mock_save.call_count == len(PILLARS)
@@ -112,7 +113,7 @@ class TestOutputFormat:
         from tools.extract import extract_information
         mock_load.return_value = _sample_pillar_data()
 
-        result = json.loads(extract_information(session_id='test-format'))
+        result = json.loads(extract_information())
 
         assert 'filled_this_run' in result
         assert 'total_filled' in result
