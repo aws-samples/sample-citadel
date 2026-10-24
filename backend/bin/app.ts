@@ -103,6 +103,7 @@ const projectsStack = new ProjectsStack(
     // (moved here with the resolver) page to BackendStack's shared alarm
     // topic.
     alarmTopic: backendStack.alarmTopic,
+    userOrgMembershipTable: backendStack.userOrgMembershipTable,
   },
 );
 projectsStack.addStackDependency(backendStack);

@@ -1,3 +1,4 @@
+import request_context
 """Tests for agent cache LRU eviction and invalidation."""
 import sys
 import types
@@ -67,7 +68,6 @@ class TestCacheInvalidation:
         assert 'test-session' in agent._agent_cache
 
         update_intake_progress(
-            session_id='test-session',
             phase='assessment',
             progress=50,
             change_summary='test'
@@ -100,7 +100,6 @@ class TestCacheInvalidationFailure:
         with patch.object(agent, '_agent_cache', bad_cache):
             with caplog.at_level(logging.WARNING, logger='tools.state'):
                 result = update_intake_progress(
-                    session_id='test-session',
                     phase='assessment',
                     progress=50,
                     change_summary='test',
@@ -136,7 +135,6 @@ class TestCacheInvalidationFailure:
         with patch.object(agent, '_agent_cache', bad_cache):
             with caplog.at_level(logging.WARNING, logger='tools.state'):
                 result = update_intake_progress(
-                    session_id='test-session',
                     phase='assessment',
                     progress=50,
                     change_summary='test',

@@ -1707,6 +1707,14 @@ export const EXPECTED_NEW_FIELDS: AllowlistEntry[] = [
       "Execution approval API: see ADDITION_ALLOWLIST entry " +
       "AgenticAIApiListAwaitingApprovalsResolver03BFE76A.",
   },
+  {
+    logicalId: "Mutation.recordIntakeConsent",
+    justification:
+      "Intake consent gate (sec/intake-consent-gate): Cognito-auth " +
+      "mutation for writing short-lived consent records before privileged " +
+      "post-fabrication actions. Wired in citadel-projects-dev " +
+      "(projects-stack.ts). Not a backend-template addition.",
+  },
 ];
 
 /**

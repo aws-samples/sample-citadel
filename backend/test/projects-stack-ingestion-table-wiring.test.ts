@@ -157,6 +157,14 @@ describe("ProjectsStack — document-upload resolver jobs-table read path", () =
       alarmTopic: new sns.Topic(backendStack, "AlarmTopic", {
         topicName: "citadel-alarms-test",
       }),
+      userOrgMembershipTable: new dynamodb.Table(
+        backendStack,
+        "UserOrgMembershipTable",
+        {
+          tableName: "citadel-user-org-membership-test",
+          partitionKey: { name: "sub", type: dynamodb.AttributeType.STRING },
+        },
+      ),
     });
     template = Template.fromStack(stack);
   });

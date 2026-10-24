@@ -388,6 +388,14 @@ type Mutation {
   intakeCreateBlueprint(sessionId: ID!, name: String!, definition: AWSJSON!): IntakeBlueprintResult @aws_iam
   intakeImportBlueprintToApp(sessionId: ID!, blueprintId: ID!, appId: ID!, name: String): Workflow @aws_iam
 
+  # ── Intake consent gate (Cognito-only) ────────────────────────────────
+  # Called by the frontend BEFORE the user's message triggers a privileged
+  # post-fabrication tool. Writes a short-lived (10 min) consent record to
+  # the session-memory table; the Python tool checks and consumes it.
+  # action must be one of: activate_agents | create_agent_app |
+  # generate_process_blueprint | import_blueprint_to_app
+  recordIntakeConsent(projectId: ID!, action: String!): IntakeConsentResult @aws_cognito_user_pools
+
   # AgentDesignAssessment (Requirement 7)
   startAgentDesignAssessment(projectId: ID!): AgentDesignAssessment!
   submitAgentDesignAssessment(
@@ -1909,6 +1917,13 @@ type IntakeBlueprintResult @aws_iam @aws_cognito_user_pools {
   nodeCount: Int
   missing: [String!]
   errors: [String!]
+}
+
+# Consent token acknowledgment for a privileged intake post-fabrication action.
+type IntakeConsentResult @aws_cognito_user_pools {
+  ok: Boolean!
+  action: String!
+  expiresAt: AWSDateTime!
 }
 
 type AppStatusEvent {
