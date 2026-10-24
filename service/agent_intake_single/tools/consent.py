@@ -21,10 +21,10 @@ import boto3
 
 logger = logging.getLogger(__name__)
 
-AWS_REGION = os.environ.get("AWS_REGION", "ap-southeast-2")
-TABLE_NAME = os.environ.get("SESSION_MEMORY_TABLE", "")
-
-_dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
+_dynamodb = boto3.resource(
+    "dynamodb",
+    region_name=os.environ.get("AWS_REGION", "ap-southeast-2"),
+)
 
 PRIVILEGED_ACTIONS = frozenset({
     "activate_agents",
@@ -42,8 +42,14 @@ class ConsentRequired(Exception):
         super().__init__(f"Consent required for {action} ({reason})")
 
 
+def _get_table_name() -> str:
+    """Resolve the table name at call time so tests can set the env var
+    via monkeypatch/fixture after the module is imported."""
+    return os.environ.get("SESSION_MEMORY_TABLE", "")
+
+
 def _table():
-    return _dynamodb.Table(TABLE_NAME)
+    return _dynamodb.Table(_get_table_name())
 
 
 def require_consent(session_id: str, action: str) -> None:
@@ -56,7 +62,8 @@ def require_consent(session_id: str, action: str) -> None:
     if action not in PRIVILEGED_ACTIONS:
         return
 
-    if not TABLE_NAME:
+    table_name = _get_table_name()
+    if not table_name:
         logger.warning("SESSION_MEMORY_TABLE not configured; consent check skipped")
         return
 

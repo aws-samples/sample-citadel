@@ -45,6 +45,7 @@ def mock_table(monkeypatch):
     table.delete_item.return_value = {}
 
     from tools import consent
+    monkeypatch.setenv("SESSION_MEMORY_TABLE", "test-session-memory")
     monkeypatch.setattr(consent, "_table", lambda: table)
     return table
 
