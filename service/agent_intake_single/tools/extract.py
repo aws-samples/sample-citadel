@@ -6,6 +6,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from strands.tools import tool
 from tools.kb import kb_retrieve, load_json_from_s3, save_json_to_s3
+from tools.fence import fence_untrusted
 from tools.converse_utils import extract_text, capture_converse_usage
 from config import bedrock, AWS_REGION
 from region import cross_region_prefix
@@ -253,7 +254,7 @@ def extract_information() -> str:
             })
             continue
         if result.status == 'content':
-            section_contexts[key] = result.content
+            section_contexts[key] = fence_untrusted(result.content, source="knowledge_base")
 
     # Parallel extraction
     filled_this_run = 0
