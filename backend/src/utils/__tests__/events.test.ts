@@ -117,6 +117,66 @@ describe("events.ts traceContext propagation (additive)", () => {
   });
 });
 
+describe("events.ts orgId propagation (additive)", () => {
+  beforeEach(() => {
+    mockSend.mockClear();
+    (AWSXRay.getSegment as jest.Mock).mockReset();
+    (AWSXRay.getSegment as jest.Mock).mockReturnValue(undefined);
+  });
+
+  function lastPublishedDetail(): Record<string, unknown> {
+    const call = mockSend.mock.calls[mockSend.mock.calls.length - 1][0];
+    return JSON.parse(call.input.Entries[0].Detail);
+  }
+
+  it("includes orgId in Detail when AgentEvent carries orgId", async () => {
+    await publishEvent({
+      eventType: "agent.status_updated",
+      projectId: "p1",
+      agentId: "a1",
+      orgId: "org-server",
+      payload: {},
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+
+    const detail = lastPublishedDetail();
+    expect(detail.orgId).toBe("org-server");
+  });
+
+  it("omits orgId key from Detail when AgentEvent has no orgId", async () => {
+    await publishEvent({
+      eventType: "agent.status_updated",
+      projectId: "p1",
+      payload: {},
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+
+    const detail = lastPublishedDetail();
+    expect("orgId" in detail).toBe(false);
+  });
+
+  it("orgId is additive — absent-orgId Detail is byte-identical to pre-feature baseline", async () => {
+    await publishEvent({
+      eventType: "project.created",
+      projectId: "p1",
+      payload: { a: 1 },
+      timestamp: "2026-01-01T00:00:00.000Z",
+      correlationId: "corr-1",
+    });
+
+    const detail = lastPublishedDetail();
+    expect(detail).toEqual({
+      projectId: "p1",
+      agentId: undefined,
+      payload: { a: 1 },
+      timestamp: "2026-01-01T00:00:00.000Z",
+      correlationId: "corr-1",
+    });
+    expect("orgId" in detail).toBe(false);
+    expect("traceContext" in detail).toBe(false);
+  });
+});
+
 describe("createReleaseEvent (G5 — RELEASE_POINTER_MOVED)", () => {
   beforeEach(() => {
     mockSend.mockClear();

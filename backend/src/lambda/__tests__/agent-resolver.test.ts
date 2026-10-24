@@ -295,6 +295,11 @@ describe("agent-resolver", () => {
       expect(dynamoMock.commandCalls(GetCommand)).toHaveLength(1);
       expect(dynamoMock.commandCalls(PutCommand)).toHaveLength(1);
       expect(eventBridgeMock.commandCalls(PutEventsCommand)).toHaveLength(1);
+
+      // orgId stamped from project.organization, NOT from client input.
+      const ebCall = eventBridgeMock.commandCalls(PutEventsCommand)[0];
+      const detail = JSON.parse(ebCall.args[0].input.Entries![0].Detail!);
+      expect(detail.orgId).toBe("org-1");
     });
 
     // ─── Authz: project-membership check (security-architect issue 1) ─────
@@ -384,6 +389,35 @@ describe("agent-resolver", () => {
       expect(result.status).toBe("COMPLETED");
       expect(dynamoMock.commandCalls(PutCommand)).toHaveLength(1);
       expect(eventBridgeMock.commandCalls(PutEventsCommand)).toHaveLength(1);
+    });
+
+    test("orgId in event comes from project.organization, never from client input", async () => {
+      // Caller claims org-1 via JWT, but the project's authoritative org is
+      // 'server-org'. The emitted event must carry 'server-org'.
+      mockDynamoGets({ id: "proj-1", organization: "server-org" }, undefined);
+      dynamoMock.on(PutCommand).resolves({});
+      eventBridgeMock.on(PutEventsCommand).resolves({});
+
+      // Admin event so the cross-org call succeeds (caller has no org
+      // matching 'server-org').
+      await invoke(
+        makeAdminEvent("updateAgentStatus", {
+          projectId: "proj-1",
+          agentId: "agent-1",
+          status: {
+            status: "COMPLETED",
+            progress: 100,
+            // Attacker might try to slip orgId into metadata — must be
+            // ignored because emitEvent reads project.organization.
+            metadata: { orgId: "attacker-org" },
+          },
+        }),
+      );
+
+      const ebCall = eventBridgeMock.commandCalls(PutEventsCommand)[0];
+      const detail = JSON.parse(ebCall.args[0].input.Entries![0].Detail!);
+      expect(detail.orgId).toBe("server-org");
+      expect(detail.orgId).not.toBe("attacker-org");
     });
   });
 

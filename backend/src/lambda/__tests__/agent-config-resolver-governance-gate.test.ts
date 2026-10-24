@@ -182,7 +182,7 @@ describe("agent-config-resolver governance activation gate (US-IMP)", () => {
     });
 
     test.each(["shadow", "permissive"])(
-      "imported + pending + %s → activation PROCEEDS and emits a gate event",
+      "imported + pending + %s → activation PROCEEDS and emits a gate event with orgId",
       async (mode) => {
         mockGetResource.mockResolvedValue(importedRecord("pending"));
         mockUpdateResource.mockResolvedValue(importedRecord("pending"));
@@ -206,6 +206,8 @@ describe("agent-config-resolver governance activation gate (US-IMP)", () => {
           attestationStatus: "pending",
           mode,
         });
+        // orgId stamped from the record's server-owned metadata, not client.
+        expect(evt.orgId).toBe("test-org-a");
       },
     );
 
@@ -343,7 +345,7 @@ describe("agent-config-resolver governance activation gate (US-IMP)", () => {
       expect(mockSubmitForApproval).toHaveBeenCalledWith("plain-1");
     });
 
-    test("shadow → imported-unattested agent activates and emits a gate event", async () => {
+    test("shadow → imported-unattested agent activates and emits a gate event with orgId", async () => {
       mockListResources.mockResolvedValue([importedBatchRecord]);
       mockGetGovernanceEnforce.mockResolvedValue("shadow");
 
@@ -357,6 +359,9 @@ describe("agent-config-resolver governance activation gate (US-IMP)", () => {
         "APPROVED",
       );
       expect(mockPublishEvent).toHaveBeenCalledTimes(1);
+      const evt = mockPublishEvent.mock.calls[0][0];
+      // orgId extracted from the record's server-owned metadata.
+      expect(evt.orgId).toBe("test-org-a");
     });
   });
 });

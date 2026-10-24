@@ -36,6 +36,7 @@ export async function publishEvent(event: AgentEvent): Promise<void> {
             payload: event.payload,
             timestamp: event.timestamp,
             correlationId: event.correlationId,
+            ...(event.orgId ? { orgId: event.orgId } : {}),
             ...(traceContext ? { traceContext } : {}),
           }),
           EventBusName: EVENT_BUS_NAME,
@@ -77,6 +78,7 @@ export function createAgentEvent(
   agentId: string,
   payload: unknown,
   correlationId?: string,
+  orgId?: string,
 ): AgentEvent {
   return {
     eventType,
@@ -85,6 +87,7 @@ export function createAgentEvent(
     payload,
     timestamp: new Date().toISOString(),
     correlationId,
+    ...(orgId ? { orgId } : {}),
   };
 }
 
@@ -131,6 +134,8 @@ export const EventTypes = {
   AGENT_IMPORT_FAILED: "agent.import.failed",
   AGENT_IMPORT_ATTESTED: "agent.import.attested",
   AGENT_IMPORT_ACTIVATION_GATE: "agent.import.activation_gate",
+  AGENT_ACTIVATED: "agent.activated",
+  AGENT_SUSPENDED: "agent.suspended",
   MODEL_CONFIG_CHANGED: "model.config.changed",
   MODEL_CATALOG_SYNCED: "model.catalog.synced",
   MODEL_CATALOG_SYNC_REQUESTED: "model.catalog.sync_requested",

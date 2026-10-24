@@ -301,6 +301,8 @@ export interface AgentEvent {
   eventType: string;
   projectId: string;
   agentId?: string;
+  /** Server-derived organisation identifier. Never sourced from client input. */
+  orgId?: string;
   payload: unknown;
   timestamp: string;
   correlationId?: string;
