@@ -1,4 +1,5 @@
 from decimal import Decimal
+import json
 import os
 from typing import Any
 import boto3
@@ -52,7 +53,20 @@ def load_config_from_dynamodb(org_id: str | None = None):
     for item in items:
         # Only load agents with state 'active'
         if item.get('state') == 'active':
-            configs.append(_with_approval_fields(item['config'], item))
+            cfg = item['config']
+            # Live DynamoDB rows may store config as a JSON string; parse it.
+            if isinstance(cfg, str):
+                try:
+                    cfg = json.loads(cfg)
+                except (json.JSONDecodeError, TypeError):
+                    print(json.dumps({
+                        'level': 'WARN',
+                        'component': 'SupervisorAgentConfig',
+                        'action': 'skip_malformed_config',
+                        'agentId': item.get('agentId', 'unknown'),
+                    }))
+                    continue
+            configs.append(_with_approval_fields(cfg, item))
 
     # Tenant isolation: filter catalogue to bound org + system records
     if org_id:
@@ -105,7 +119,20 @@ def load_app_scoped_agents(app_id: str) -> dict:
             print(f"Skipping agent {agent_id}: not found or not active")
             continue
 
-        config = _with_approval_fields(item['config'], item)
+        config = item['config']
+        # Live DynamoDB rows may store config as a JSON string; parse it.
+        if isinstance(config, str):
+            try:
+                config = json.loads(config)
+            except (json.JSONDecodeError, TypeError):
+                print(json.dumps({
+                    'level': 'WARN',
+                    'component': 'SupervisorAgentConfig',
+                    'action': 'skip_malformed_config',
+                    'agentId': agent_id,
+                }))
+                continue
+        config = _with_approval_fields(config, item)
 
         # Apply binding overrides
         if binding.get('systemPromptAddition'):

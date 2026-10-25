@@ -531,9 +531,11 @@ def assert_tool_spec_binding(tool_config: dict, spec_id: str | None) -> None:
 def load_file_from_s3_into_tmp(bucket_name, file_name, record_id=None, expected_sha256=None):
     """Download agent code, validating key derivation and optional digest.
 
-    Key derivation: S3 key is ``agents/{record_id}/{basename}`` when
-    *record_id* is supplied, falling back to ``agents/{basename}`` for
-    legacy records.  Basename enforcement strips traversal components.
+    Key derivation: when *record_id* is supplied, tries the scoped key
+    ``agents/{record_id}/{basename}`` first; on a 404/NoSuchKey it falls
+    back to the legacy flat key ``agents/{basename}`` (with a structured
+    INFO log).  When *record_id* is empty/None the legacy key is used
+    directly.  Basename enforcement strips traversal components.
 
     When *expected_sha256* is supplied, the downloaded file's SHA-256
     is verified.  A mismatch raises ``ValueError`` and REMOVES the file.
@@ -541,11 +543,31 @@ def load_file_from_s3_into_tmp(bucket_name, file_name, record_id=None, expected_
     import hashlib
     s3 = boto3.client('s3')
     basename = os.path.basename(file_name)  # strip traversal
+
     if record_id:
-        s3_key = f"agents/{record_id}/{basename}"
+        scoped_key = f"agents/{record_id}/{basename}"
+        legacy_key = f"agents/{basename}"
+        try:
+            s3.download_file(bucket_name, scoped_key, "/tmp/loaded_module.py")
+            s3_key = scoped_key
+        except ClientError as exc:
+            error_code = exc.response.get('Error', {}).get('Code', '')
+            if error_code in ('404', 'NoSuchKey'):
+                print(json.dumps({
+                    'level': 'INFO',
+                    'component': 'WorkerWrapper',
+                    'action': 'legacy_code_key',
+                    'scoped_key': scoped_key,
+                    'legacy_key': legacy_key,
+                }))
+                s3.download_file(bucket_name, legacy_key, "/tmp/loaded_module.py")
+                s3_key = legacy_key
+            else:
+                raise
     else:
         s3_key = f"agents/{basename}"  # legacy fallback
-    s3.download_file(bucket_name, s3_key, "/tmp/loaded_module.py")
+        s3.download_file(bucket_name, s3_key, "/tmp/loaded_module.py")
+
     if expected_sha256:
         with open("/tmp/loaded_module.py", "rb") as f:
             actual = hashlib.sha256(f.read()).hexdigest()
