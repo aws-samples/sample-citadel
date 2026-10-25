@@ -2403,5 +2403,49 @@ export const ALLOWED_SATELLITE_ADDED_STATEMENTS: Record<
       ],
       conditionKeys: [],
     },
+    // fix(projects): grantReadData on the projects table so
+    // assertProjectAccess (project-access.ts) can reconcile the caller's
+    // tenancy — without this the resolver fails closed with "Access denied".
+    {
+      effect: "Allow",
+      actions: [
+        "dynamodb:BatchGetItem",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:DescribeTable",
+        "dynamodb:GetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:Scan",
+      ],
+      resources: [
+        "GETATT:ProjectsTableAA0A2089:Arn",
+        "JOIN::GETATT:ProjectsTableAA0A2089:Arn/index/*",
+      ],
+      conditionKeys: [],
+    },
+  ],
+  // fix(projects): grantReadData on the projects table so
+  // assertProjectAccess (project-access.ts) can reconcile the caller's
+  // tenancy — without this the resolver fails closed with "Access denied".
+  DocumentResolverFunctionADF84905: [
+    {
+      effect: "Allow",
+      actions: [
+        "dynamodb:BatchGetItem",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:DescribeTable",
+        "dynamodb:GetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:Scan",
+      ],
+      resources: [
+        "GETATT:ProjectsTableAA0A2089:Arn",
+        "JOIN::GETATT:ProjectsTableAA0A2089:Arn/index/*",
+      ],
+      conditionKeys: [],
+    },
   ],
 };

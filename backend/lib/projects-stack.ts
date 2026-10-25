@@ -344,6 +344,7 @@ export class ProjectsStack extends cdk.Stack {
           KB_ID_PARAM: `/citadel/knowledge-base-id-${props.environment}`,
           DS_ID_PARAM: `/citadel/knowledge-base-datasource-id-${props.environment}`,
           EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+          PROJECTS_TABLE: props.projectsTable.tableName,
           // Source-of-truth jobs table (created in ServicesStack). Referenced
           // by deterministic name — NOT a cross-stack construct import —
           // mirroring the pre-split backend-stack.ts wiring exactly: importing
@@ -369,6 +370,7 @@ export class ProjectsStack extends cdk.Stack {
     props.documentBucket.grantPut(documentUploadResolverFunction);
     props.documentBucket.grantRead(documentUploadResolverFunction);
     props.documentBucket.grantDelete(documentUploadResolverFunction);
+    props.projectsTable.grantReadData(documentUploadResolverFunction);
     // Resolve the KB id published by ServicesStack via SSM (same cross-stack
     // pattern services-stack.ts uses for registryId/registryArn) to avoid
     // a direct construct import that would create a dependency cycle.
@@ -458,6 +460,7 @@ export class ProjectsStack extends cdk.Stack {
         environment: {
           SESSION_BUCKET: `citadel-sessions-${props.environment}-${this.account}-${this.region}`,
           PDF_GENERATOR_FUNCTION: `citadel-pdf-generator-${props.environment}`,
+          PROJECTS_TABLE: props.projectsTable.tableName,
         },
         timeout: cdk.Duration.minutes(6), // PDF generation can take up to 5 min
         logGroup: new logs.LogGroup(this, "DocumentResolverFunctionLogs", {
@@ -467,6 +470,7 @@ export class ProjectsStack extends cdk.Stack {
       },
     );
 
+    props.projectsTable.grantReadData(documentResolverFunction);
     const sessionBucketArn = `arn:aws:s3:::citadel-sessions-${props.environment}-${this.account}-${this.region}`;
     documentResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
