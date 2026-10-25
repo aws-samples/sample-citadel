@@ -56,6 +56,38 @@ _STATUS_PLAIN = {
 }
 _TERMINAL = ("COMPLETED", "FAILED")
 
+# Registry-approval-aware completions. The fabricator writes
+# registryApprovalStatus='pending_approval' onto the job row when the
+# AgentCore Registry's SubmitRegistryRecordForApproval returns
+# PENDING_APPROVAL (manual-review mode). Absent or any other value means
+# the record was auto-approved.
+_APPROVAL_PLAIN = {
+    "pending_approval": "built, awaiting approval on the Approvals page",
+    "approved": "built and approved",
+}
+
+def _plain_state(item: dict) -> str:
+    """Human-readable state for a single job row, approval-aware.
+
+    COMPLETED rows with ``registryApprovalStatus='pending_approval'`` read as
+    'built, awaiting approval on the Approvals page'; COMPLETED without that
+    flag (auto-approved or flag absent) read as 'built and approved'.
+    """
+    status = item.get("status")
+    if status == "COMPLETED":
+        approval = item.get("registryApprovalStatus")
+        if approval == "pending_approval":
+            return _APPROVAL_PLAIN["pending_approval"]
+        return _APPROVAL_PLAIN.get(approval, "built and approved")
+    return _STATUS_PLAIN.get(status, "in an unknown state")
+
+
+def _is_pending_approval(item: dict) -> bool:
+    """True when a COMPLETED job still needs registry approval."""
+    return (item.get("status") == "COMPLETED"
+            and item.get("registryApprovalStatus") == "pending_approval")
+
+
 _STAGE_ORDER = [
     "fabrication_pending", "built", "activated", "app_created",
     "blueprint_created", "workflow_imported", "done",
@@ -413,6 +445,7 @@ def check_fabrication_status() -> str:
 
     succeeded = [_name(i) for i in items if i.get("status") == "COMPLETED"]
     failed = [_name(i) for i in items if i.get("status") == "FAILED"]
+    pending_approval = [_name(i) for i in items if _is_pending_approval(i)]
     # Non-terminal rows split by updatedAt age: a stale row is orphaned — its
     # writer can never re-stamp it (see STALE_ACTIVE_SECONDS in
     # tools/fabricate.py for the derivation) — so it gates like a failure
@@ -428,13 +461,14 @@ def check_fabrication_status() -> str:
         {"name": _name(i),
          "state": "stalled"
          if i.get("status") not in _TERMINAL and _name(i) in stale_set
-         else _STATUS_PLAIN.get(i.get("status"), "in an unknown state")}
+         else _plain_state(i)}
         for i in items
     ]
     counts = {
         "built": len(succeeded),
         "failed": len(failed),
         "stalled": len(stale),
+        "pending_approval": len(pending_approval),
         "being_built": sum(1 for i in items
                            if i.get("status") == "PROCESSING" and _name(i) not in stale_set),
         "waiting_to_start": sum(1 for i in items
@@ -460,6 +494,7 @@ def check_fabrication_status() -> str:
         "agents": agents, "succeeded": succeeded, "failed": failed,
         "building": building, "stalled": stale, "all_terminal": all_terminal,
         "all_succeeded": all_succeeded, "any_failed": any_failed,
+        "pending_approval": pending_approval,
     }
 
     if status == "none":
@@ -514,6 +549,24 @@ def check_fabrication_status() -> str:
             )
 
     if status == "complete":
+        if pending_approval:
+            pa_summary = (
+                f"All {total} agents built successfully. "
+                f"{_join_names(pending_approval)} "
+                + ("is" if len(pending_approval) == 1 else "are")
+                + " awaiting approval — you can approve "
+                + ("it" if len(pending_approval) == 1 else "them")
+                + " on the Approvals page."
+            )
+            return _result(
+                True, "complete",
+                pa_summary,
+                "Once approved, I can activate them. Check the Approvals page "
+                "in the registry, then come back and check status again.",
+                [_action("Check again", "Check the build status again"),
+                 _action("Not now", "Not now")],
+                **extra,
+            )
         return _result(
             True, "complete",
             f"All {total} agents built successfully.",
@@ -532,8 +585,21 @@ def check_fabrication_status() -> str:
             )
         if stale:
             bits.append(_stalled_sentence(stale))
-        actions = [_action(f"Activate {len(succeeded)} agents",
-                           "Yes, activate the agents that are ready")]
+        if pending_approval:
+            bits.append(
+                f"{_join_names(pending_approval)} "
+                + ("is" if len(pending_approval) == 1 else "are")
+                + " awaiting approval on the Approvals page."
+            )
+        # Activatable = completed agents that are NOT pending approval.
+        activatable = [n for n in succeeded if n not in pending_approval]
+        if pending_approval and not activatable:
+            # All completed agents are pending — can't activate yet.
+            actions = [_action("Check again", "Check the build status again")]
+        else:
+            activate_count = len(activatable) if pending_approval else len(succeeded)
+            actions = [_action(f"Activate {activate_count} agents",
+                               "Yes, activate the agents that are ready")]
         retryable = failed + stale
         if retryable:
             actions.append(_retry_gate_action(retryable))
@@ -541,9 +607,16 @@ def check_fabrication_status() -> str:
             actions.append(_action(f"Look at {_join_names(failed[:1])} first",
                                    "Let's look at the failed agent first"))
         actions.append(_action("Not now", "Not now"))
+        activate_count = len(activatable) if pending_approval else len(succeeded)
+        consent_q = (
+            "Once approved, I can activate them. Check the Approvals page, "
+            "then come back and check status again."
+            if pending_approval and not activatable
+            else f"Want me to activate the {activate_count} that are ready?"
+        )
         return _result(
             True, "partial", " ".join(bits),
-            f"Want me to activate the {len(succeeded)} that are ready?",
+            consent_q,
             actions,
             **extra,
         )
@@ -590,6 +663,42 @@ def activate_agents() -> str:
             f"The agents are already activated — {done} are active and they'll show as Active in your agent list.",
             question, actions, activation=activation,
         )
+
+    # Gate: refuse activation when any completed agent is still awaiting
+    # registry approval.  The user must approve on the Approvals page first.
+    if FABRICATION_JOBS_TABLE:
+        try:
+            pa_items: list[dict] = []
+            kwargs = {"KeyConditionExpression": Key("orchestrationId").eq(session_id)}
+            while True:
+                resp = dynamodb.Table(FABRICATION_JOBS_TABLE).query(**kwargs)
+                pa_items.extend(resp.get("Items", []))
+                if not resp.get("LastEvaluatedKey"):
+                    break
+                kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+            pa_names = [
+                i.get("agentName") or i.get("agentUseId")
+                for i in pa_items if _is_pending_approval(i)
+            ]
+            if pa_names:
+                return _result(
+                    False, "pending_approval",
+                    f"{_join_names(pa_names)} "
+                    + ("is" if len(pa_names) == 1 else "are")
+                    + " built but still awaiting approval. "
+                    "You can approve "
+                    + ("it" if len(pa_names) == 1 else "them")
+                    + " on the Approvals page in the registry, "
+                    "then come back and I'll activate.",
+                    "Check the Approvals page, then come back and check status again.",
+                    [_action("Check build status", "Check the build status again"),
+                     _action("Not now", "Not now")],
+                )
+        except Exception as e:  # noqa: BLE001 — best-effort gate, never blocks activation
+            logger.warning(
+                "pending_approval gate query failed session=%s: %s",
+                session_id, e,
+            )
 
     try:
         require_consent(session_id, "activate_agents")
