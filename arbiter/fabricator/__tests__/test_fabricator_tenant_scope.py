@@ -132,12 +132,12 @@ class TestLoadConfigOrgScope:
                 {
                     "state": "active",
                     "orgId": "org-A",
-                    "config": {"name": "tool-a", "description": "Tool A"},
+                    "config": {"name": "tool-a", "description": "Tool A", "schema": {"type": "object"}},
                 },
                 {
                     "state": "active",
                     "orgId": "org-B",
-                    "config": {"name": "tool-b", "description": "Tool B"},
+                    "config": {"name": "tool-b", "description": "Tool B", "schema": {"type": "object"}},
                 },
             ],
         }
