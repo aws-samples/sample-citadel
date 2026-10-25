@@ -313,12 +313,65 @@ def _registry_state_from_status(status: str) -> str:
 
 
 
+def _extract_org_from_summary(summary: dict) -> str | None:
+    """Extract orgId from a registry record summary.
+
+    The orgId lives inside ``descriptors.custom.data`` (a JSON string) under
+    the key ``orgId``.  Returns:
+
+    - The orgId string (possibly ``""``) when descriptors are present and
+      parseable.  ``""`` means system/shared — visible to every tenant.
+    - ``None`` when descriptors are absent or unparseable — the caller MUST
+      treat this as "org undeterminable" and EXCLUDE the record.
+
+    Live verification (2026-10-24): ListRegistryRecords summaries do NOT
+    include ``descriptors`` — only id/name/status/description/timestamps.
+    Returning ``None`` (not ``""``) for absent descriptors prevents a false
+    "system" classification that would let every record through the filter.
+    Records whose org cannot be determined from the summary are excluded;
+    a system record is identified ONLY by an explicit ``orgId == ""`` in the
+    detailed record's custom descriptor data.
+    """
+    try:
+        descriptors = summary.get("descriptors")
+        if descriptors is None:
+            return None
+        custom = descriptors.get("custom") or {}
+        data_str = custom.get("data", "")
+        if not data_str or not isinstance(data_str, str):
+            return None
+        data = json.loads(data_str)
+        return data.get("orgId", "")
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        pass
+    return None
+
+
 def _get_existing_agents() -> dict[str, dict]:
     """Return factory records from the AgentCore Registry, keyed by record name.
 
     Fabricated agents are persisted to the AgentCore Registry (via the arbiter's
     store_agent_config_registry), NEVER to a DynamoDB agent-config table — so
     the intake catalog must read the registry to see ap-*-agent-v1 agents.
+
+    **Org-scoped** (C23 fix): only records belonging to the session's
+    organisation (from ``request_context``) or system records (orgId ``""``)
+    are returned.  This prevents one tenant's agents from leaking into
+    another tenant's fabrication prompt or being bound by another tenant's
+    session.  The session org_id is REQUIRED — if the session has no org,
+    the function fails closed (returns ``{}``) instead of exposing the full
+    unscoped registry.
+
+    **Live-verified (2026-10-24):** ListRegistryRecords summaries do NOT
+    include ``descriptors`` — they carry only id/name/status/description/
+    timestamps.  Since orgId lives inside descriptors.custom.data, it is
+    NOT derivable from summaries.  Records whose org is undeterminable
+    (descriptors absent) are EXCLUDED — never treated as system.  This
+    means the summary-only path currently returns an empty dict (no records
+    pass the filter) until the API starts returning descriptors on summaries
+    or we add per-record detail fetches.  This is the CORRECT fail-closed
+    behaviour: exposing zero agents is safe; exposing other tenants' agents
+    is not.
 
     Built from LIST-PAGE SUMMARIES ONLY — no per-record GetRegistryRecord
     calls. The previous implementation issued one GET per record to read the
@@ -353,6 +406,16 @@ def _get_existing_agents() -> dict[str, dict]:
         logger.info("REGISTRY_ID unset; cannot list factory agents from registry")
         return {}
 
+    # C23 fix: resolve the session's org and fail closed when absent.
+    try:
+        session_org = request_context.current_session().org_id
+    except RuntimeError:
+        logger.warning("_get_existing_agents called outside request scope; returning empty")
+        return {}
+    if not session_org:
+        logger.warning("session has no org_id; returning empty to avoid cross-tenant leak")
+        return {}
+
     try:
         client = _get_registry_client()
     except Exception as e:  # noqa: BLE001 — client build must not raise
@@ -381,6 +444,14 @@ def _get_existing_agents() -> dict[str, dict]:
                 name = summary.get("name")
                 record_id = summary.get("recordId")
                 if not name or not record_id:
+                    continue
+                # C23 org-scope filter: keep own-org + system (orgId "")
+                # records; drop everything else.  When org is None the
+                # summary lacked descriptors entirely — exclude rather
+                # than assuming system (live-verified: summaries omit
+                # descriptors).
+                record_org = _extract_org_from_summary(summary)
+                if record_org is None or (record_org != "" and record_org != session_org):
                     continue
                 agents[name] = {
                     "name": name,

@@ -24,6 +24,7 @@ Run with:
     PYTHONPATH=. pytest tests/test_factory_registry.py -q
 from the service/agent_intake_single directory.
 """
+import json
 import os
 import sys
 from unittest import mock
@@ -35,6 +36,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("FABRICATOR_QUEUE_URL", "https://sqs.fake/queue")
 
 import tools.fabricate as fab
+
+
+def _org_desc(org_id: str = "org-1") -> dict:
+    """Return descriptors dict stamped with the given orgId."""
+    return {"custom": {"data": json.dumps({"orgId": org_id})}}
 
 
 def _client(records):
@@ -52,7 +58,7 @@ def _client(records):
 def test_get_existing_agents_returns_summary_backed_dict(monkeypatch):
     monkeypatch.setattr(fab, "REGISTRY_ID", "reg-1")
     records = [
-        {"name": "ap-billing-agent-v1", "recordId": "rec1", "status": "APPROVED", "description": "Billing agent"}
+        {"name": "ap-billing-agent-v1", "recordId": "rec1", "status": "APPROVED", "description": "Billing agent", "descriptors": _org_desc()}
     ]
     monkeypatch.setattr(fab, "_get_registry_client", lambda: _client(records))
 
@@ -74,7 +80,7 @@ def test_get_existing_agents_never_issues_per_record_gets(monkeypatch):
     GetRegistryRecord calls."""
     monkeypatch.setattr(fab, "REGISTRY_ID", "reg-1")
     records = [
-        {"name": f"ap-agent-{i}-v1", "recordId": f"r{i}", "status": "APPROVED", "description": f"Agent {i}"}
+        {"name": f"ap-agent-{i}-v1", "recordId": f"r{i}", "status": "APPROVED", "description": f"Agent {i}", "descriptors": _org_desc()}
         for i in range(340)
     ]
     client = _client(records)
@@ -89,7 +95,7 @@ def test_get_existing_agents_never_issues_per_record_gets(monkeypatch):
 
 def test_get_existing_agents_maps_draft_state(monkeypatch):
     monkeypatch.setattr(fab, "REGISTRY_ID", "reg-1")
-    records = [{"name": "ap-draft-agent-v1", "recordId": "rd", "status": "DRAFT", "description": "Draft agent"}]
+    records = [{"name": "ap-draft-agent-v1", "recordId": "rd", "status": "DRAFT", "description": "Draft agent", "descriptors": _org_desc()}]
     monkeypatch.setattr(fab, "_get_registry_client", lambda: _client(records))
 
     result = fab._get_existing_agents()
@@ -125,8 +131,8 @@ def test_get_existing_agents_includes_unclassifiable_records_without_gets(monkey
     the live 30s budget)."""
     monkeypatch.setattr(fab, "REGISTRY_ID", "reg-1")
     records = [
-        {"name": "ap-agent-v1", "recordId": "a", "status": "APPROVED", "description": "An agent"},
-        {"name": "some-tool", "recordId": "t", "status": "APPROVED", "description": "A tool"},
+        {"name": "ap-agent-v1", "recordId": "a", "status": "APPROVED", "description": "An agent", "descriptors": _org_desc()},
+        {"name": "some-tool", "recordId": "t", "status": "APPROVED", "description": "A tool", "descriptors": _org_desc()},
     ]
     client = _client(records)
     monkeypatch.setattr(fab, "_get_registry_client", lambda: client)
@@ -141,8 +147,8 @@ def test_get_existing_agents_includes_unclassifiable_records_without_gets(monkey
 def test_get_existing_agents_paginates(monkeypatch):
     monkeypatch.setattr(fab, "REGISTRY_ID", "reg-1")
     client = mock.MagicMock()
-    page1 = {"registryRecords": [{"name": "a1", "recordId": "r1", "status": "APPROVED", "description": "first"}], "nextToken": "tok"}
-    page2 = {"registryRecords": [{"name": "a2", "recordId": "r2", "status": "APPROVED", "description": "second"}], "nextToken": None}
+    page1 = {"registryRecords": [{"name": "a1", "recordId": "r1", "status": "APPROVED", "description": "first", "descriptors": _org_desc()}], "nextToken": "tok"}
+    page2 = {"registryRecords": [{"name": "a2", "recordId": "r2", "status": "APPROVED", "description": "second", "descriptors": _org_desc()}], "nextToken": None}
     client.list_registry_records.side_effect = [page1, page2]
     monkeypatch.setattr(fab, "_get_registry_client", lambda: client)
 
@@ -155,7 +161,7 @@ def test_get_existing_agents_paginates(monkeypatch):
 
 def test_list_factory_agents_renders_registry_agents(monkeypatch):
     monkeypatch.setattr(fab, "REGISTRY_ID", "reg-1")
-    records = [{"name": "ap-billing-agent-v1", "recordId": "rec1", "status": "DRAFT", "description": "Billing agent"}]
+    records = [{"name": "ap-billing-agent-v1", "recordId": "rec1", "status": "DRAFT", "description": "Billing agent", "descriptors": _org_desc()}]
     monkeypatch.setattr(fab, "_get_registry_client", lambda: _client(records))
 
     out = fab.list_factory_agents()
@@ -180,7 +186,7 @@ def test_get_existing_agents_tolerates_legacy_records_key(monkeypatch):
     monkeypatch.setattr(fab, "REGISTRY_ID", "reg-1")
     client = mock.MagicMock()
     client.list_registry_records.return_value = {
-        "records": [{"name": "ap-legacy-agent-v1", "recordId": "rl", "status": "APPROVED", "description": "Legacy agent"}],
+        "records": [{"name": "ap-legacy-agent-v1", "recordId": "rl", "status": "APPROVED", "description": "Legacy agent", "descriptors": _org_desc()}],
         "nextToken": None,
     }
     monkeypatch.setattr(fab, "_get_registry_client", lambda: client)
