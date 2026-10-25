@@ -121,6 +121,7 @@ class _RegistrationRunState:
         self.published = set()
         self.succeeded = set()
         self.failed = {}
+        self.pending_approval = set()
 
 
 _registration_run_state = None
@@ -168,10 +169,7 @@ def _find_existing_record_id(
     while True:
         kwargs: dict[str, Any] = {
             "registryId": registry_id,
-            "filters": [
-                {"key": "recordType", "values": ["CUSTOM"]},
-                {"key": "displayName", "values": [agent_id]},
-            ],
+            "name": agent_id,
         }
         if next_token:
             kwargs["nextToken"] = next_token
@@ -191,7 +189,7 @@ def _find_existing_record_id(
         for summary in summaries:
             if not isinstance(summary, dict):
                 continue
-            if summary.get("displayName") != agent_id:
+            if summary.get("displayName", summary.get("name")) != agent_id:
                 continue
             # Org-scoped idempotency (§2.2-C): read the orgId from the
             # record's custom descriptor metadata and compare with the
@@ -341,6 +339,7 @@ def _write_fabrication_status(
     agent_name: str | None = None,
     registration_errors: list | None = None,
     org_id: str | None = None,
+    registry_approval_status: str | None = None,
 ) -> bool:
     """Upsert a per-agent fabrication status row in the durable jobs table.
 
@@ -458,6 +457,11 @@ def _write_fabrication_status(
         # registrationErrors was added to eliminate).
         names["#registrationErrors"] = "registrationErrors"
         remove_parts.append("#registrationErrors")
+
+    if registry_approval_status:
+        set_parts.append("#registryApprovalStatus = :registryApprovalStatus")
+        names["#registryApprovalStatus"] = "registryApprovalStatus"
+        values[":registryApprovalStatus"] = {"S": registry_approval_status}
 
     update_expression = "SET " + ", ".join(set_parts)
     if remove_parts:
@@ -1853,29 +1857,59 @@ def store_tool_config_registry(
             f"{tool_id}"
         )
 
-        # CreateRegistryRecord does NOT accept a recordId — the service generates
-        # one. We use the toolId as the record name so records can be located
-        # by name in subsequent operations.
-        create_kwargs = {
-            "registryId": registry_id,
-            "name": tool_id,
-            "displayName": tool_id,
-            "description": tool_description or "",
-            "recordType": "CUSTOM",
-            "descriptors": {
-                "custom": {
-                    "data": json.dumps(custom_metadata, default=str),
+        # Idempotency guard (tool-registration hardening): SQS redeliveries
+        # and re-triggers must NOT create a duplicate Registry record for the
+        # same tool name. Mirrors the agent idempotency guard in
+        # store_agent_config_registry. When a same-org record exists, SKIP
+        # creation and approve in place. When a same-name record belongs to
+        # ANOTHER org, the registry's name-uniqueness constraint makes
+        # creation impossible — surface a clear error.
+        existing_record_id = _find_existing_record_id(
+            registry_id, tool_id, org_id=org_id,
+        )
+        if existing_record_id is not None:
+            print(
+                f"[store_tool_config_registry] Record with name '{tool_id}' "
+                f"already exists for this org (recordId={existing_record_id}); "
+                f"skipping CreateRegistryRecord"
+            )
+            record_id = existing_record_id
+        else:
+            # Check whether the name exists under a DIFFERENT org — if so,
+            # the registry's name-uniqueness constraint blocks creation.
+            cross_org_record = _find_existing_record_id(
+                registry_id, tool_id, org_id="",
+            )
+            if cross_org_record is not None:
+                raise ValueError(
+                    f"Tool name '{tool_id}' is already used by another "
+                    f"organisation (recordId={cross_org_record}). Choose a "
+                    f"different tool name."
+                )
+
+            # CreateRegistryRecord does NOT accept a recordId — the service generates
+            # one. We use the toolId as the record name so records can be located
+            # by name in subsequent operations.
+            create_kwargs = {
+                "registryId": registry_id,
+                "name": tool_id,
+                "displayName": tool_id,
+                "description": tool_description or "",
+                "recordType": "CUSTOM",
+                "descriptors": {
+                    "custom": {
+                        "data": json.dumps(custom_metadata, default=str),
+                    },
                 },
-            },
-        }
+            }
 
-        def _record_id_from(create_response) -> str:
-            # Extract recordId from the ARN returned by CreateRegistryRecord.
-            record_arn = create_response.get("recordArn", "")
-            return record_arn.rsplit("/", 1)[-1] if "/" in record_arn else tool_id
+            def _record_id_from(create_response) -> str:
+                # Extract recordId from the ARN returned by CreateRegistryRecord.
+                record_arn = create_response.get("recordArn", "")
+                return record_arn.rsplit("/", 1)[-1] if "/" in record_arn else tool_id
 
-        response = _get_registry_client().create_registry_record(**create_kwargs)
-        record_id = _record_id_from(response)
+            response = _get_registry_client().create_registry_record(**create_kwargs)
+            record_id = _record_id_from(response)
 
         print(
             f"[store_tool_config_registry] Record created (recordId={record_id}), "
@@ -1890,7 +1924,13 @@ def store_tool_config_registry(
         # "PUBLISHED" value raised a live ValidationException. APPROVED is the
         # value both the intake catalog (_registry_state_from_status) and the
         # backend (toInternalState) map to "active".
-        def _approve(rid: str) -> None:
+        def _approve(rid: str) -> str:
+            """Submit the record for approval and return the resulting status.
+
+            Returns 'approved' when the registry auto-approves synchronously,
+            or 'pending_approval' when the record enters manual review.
+            Raises on genuinely stuck CREATING or unexpected terminal states.
+            """
             # Live-oracle-verified transition (2026-08-02 scratch-record probe
             # on bedrock-agentcore-control, us-west-2): the two-step
             # UpdateRegistryRecordStatus(DRAFT->PENDING_APPROVAL->APPROVED)
@@ -1904,36 +1944,47 @@ def store_tool_config_registry(
             # can NEVER reach APPROVED from DRAFT by any path. The proven
             # legal path is the dedicated SubmitRegistryRecordForApproval
             # operation, which returns status=APPROVED SYNCHRONOUSLY in one
-            # call (PENDING_APPROVAL was never observed as an intermediate
-            # state on the live service). This callable is shared by the
-            # happy path and both registry-recovery approve-in-place call
-            # sites, so fixing it here repairs approval everywhere at once.
+            # call when auto-approval is configured. When manual review is
+            # enabled, the response returns PENDING_APPROVAL — a legitimate
+            # successful submission, not a failure.
             client = _get_registry_client()
             response = client.submit_registry_record_for_approval(
                 registryId=registry_id,
                 recordId=rid,
             )
             status = (response or {}).get("status")
-            if status != "APPROVED":
-                # Defensive fallback: confirm via a fresh read rather than
-                # trusting a response shape that didn't match the oracle.
-                # Any failure here (including a non-APPROVED status) is
-                # propagated so the caller's existing terminal error handling
-                # (registry_recovery's OrphanedRegistryRecordError path, or
-                # the bare re-raise on the happy path) is unchanged.
-                confirm = client.get_registry_record(
-                    registryId=registry_id, recordId=rid,
+            if status == "APPROVED":
+                return "approved"
+            if status == "PENDING_APPROVAL":
+                print(
+                    f"[store_tool_config_registry] Record {rid} entered "
+                    f"manual review (PENDING_APPROVAL) — successful submission"
                 )
-                if (confirm or {}).get("status") != "APPROVED":
-                    raise RuntimeError(
-                        f"submit_registry_record_for_approval did not reach "
-                        f"APPROVED for recordId {rid} "
-                        f"(response status={status!r}, confirmed status="
-                        f"{(confirm or {}).get('status')!r})"
-                    )
+                return "pending_approval"
+            # Neither auto-approved nor pending review — confirm via a fresh
+            # read before failing.
+            confirm = client.get_registry_record(
+                registryId=registry_id, recordId=rid,
+            )
+            confirmed_status = (confirm or {}).get("status")
+            if confirmed_status == "APPROVED":
+                return "approved"
+            if confirmed_status == "PENDING_APPROVAL":
+                print(
+                    f"[store_tool_config_registry] Record {rid} confirmed as "
+                    f"PENDING_APPROVAL via get_registry_record"
+                )
+                return "pending_approval"
+            raise RuntimeError(
+                f"submit_registry_record_for_approval did not reach "
+                f"APPROVED or PENDING_APPROVAL for recordId {rid} "
+                f"(response status={status!r}, confirmed status="
+                f"{confirmed_status!r})"
+            )
 
+        approval_status = "approved"  # default for recovery path
         try:
-            _approve(record_id)
+            approval_status = _approve(record_id)
         except Exception as approve_err:  # noqa: BLE001 — classified below
             if not is_creating_conflict(approve_err):
                 raise
@@ -1969,10 +2020,14 @@ def store_tool_config_registry(
         # instead of the run being SIGKILLed later.
         registration_checkpoint(f"after tool registration '{tool_id}'")
 
-        print(f"[store_tool_config_registry] SUCCESS - Registry response: {response}")
+        print(f"[store_tool_config_registry] SUCCESS - recordId={record_id}")
         run_state = _registration_run_state
         if run_state is not None:
             run_state.succeeded.add(tool_id)
+            # Track approval status so the fabrication-status write can
+            # surface 'pending_approval' to the intake conversation.
+            if approval_status == "pending_approval":
+                run_state.pending_approval.add(tool_id)
         return True
 
     except Exception as e:
@@ -2527,6 +2582,11 @@ def process_event(event, context, request_type=None):
             agent_id=agent_use_id, agent_name=agent_use_id,
             registration_errors=registration_errors,
             org_id=org_id,
+            registry_approval_status=(
+                "pending_approval"
+                if run_state is not None and run_state.pending_approval
+                else None
+            ),
         )
 
     except FabricationDeadlineExceeded as deadline_exc:

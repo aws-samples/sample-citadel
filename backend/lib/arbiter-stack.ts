@@ -1502,6 +1502,33 @@ export class ArbiterStack extends cdk.Stack {
       );
     }
 
+    // The fabricator emits best-effort metrics (FabricatorStalePendingClaim,
+    // SparseConfigSkipped) into the CitadelArbiter / Citadel/Fabricator
+    // namespaces. PutMetricData has no resource-level scoping; the calls are
+    // narrowed to those namespaces in code (same pattern as the worker grant
+    // at ~L1183).
+    fabricatorLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["cloudwatch:PutMetricData"],
+        resources: ["*"],
+      }),
+    );
+    NagSuppressions.addResourceSuppressions(
+      fabricatorLambda.role!,
+      [
+        {
+          id: "AwsSolutions-IAM5",
+          reason:
+            "cloudwatch:PutMetricData has no resource-level scoping; the " +
+            "fabricator narrows calls to the CitadelArbiter and " +
+            "Citadel/Fabricator namespaces in code.",
+          appliesTo: ["Resource::*"],
+        },
+      ],
+      true,
+    );
+
     // Reliability hardening: batchSize=1 so each Lambda invocation processes
     // exactly ONE fabrication message. The SQS default (up to 10) lets a
     // single invocation stack many agents and blow past the 15-min function
@@ -2230,11 +2257,9 @@ export class ArbiterStack extends cdk.Stack {
     // metric-math operand limits. Routed through the shared
     // `operationalAlarms` array below, so it inherits the existing
     // alarm-delivery path (props.alarmTopic -> citadel-alarms-<env> SNS, or
-    // the in-stack escalation topic fallback) with zero new IAM — only
-    // `cloudwatch:PutMetricData` is needed at the Lambda side, and that
-    // permission is already implicit for any Lambda (CloudWatch's
-    // PutMetricData does not require a resource-scoped grant; no
-    // fabricatorLambda.addToRolePolicy call was added). Additive only.
+    // the in-stack escalation topic fallback) — the fabricator's
+    // `cloudwatch:PutMetricData` grant (added above, near the registry
+    // grants) covers the emit side. Additive only.
     operationalAlarms.push(
       new cloudwatch.Alarm(this, "FabricatorStalePendingClaimAlarm", {
         alarmName: `citadel-fabricator-stale-pending-claim-${props.environment}`,
