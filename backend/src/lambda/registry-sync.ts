@@ -632,29 +632,50 @@ export function buildAgentProjectionRow(
  *   2. recordDescription (plain-text description used as fallback)
  *   3. recordName injected as `name` when absent
  *
+ * `metaConfig` may arrive as:
+ *   - a plain object (common case — `deserializeCustomMetadata` already
+ *     JSON-parsed the outer customDescriptorContent, so `config` is a
+ *     nested object);
+ *   - a JSON string (legacy path, or when the registry double-encodes
+ *     config inside the metadata string);
+ *   - undefined/null (no config in the descriptor at all).
+ *
  * Mirrors the logic of RegistryService.toValidConfigJson + ensureConfigName
  * but is a standalone, exported function so the backfill script can reuse it.
  */
 export function buildFullToolConfig(
-  metaConfig: string | undefined,
+  metaConfig: unknown,
   recordDescription: string | undefined,
   recordName: string | undefined,
 ): string {
   let parsed: Record<string, unknown> = {};
 
-  // Try meta.config first (the full tool config from customDescriptorContent)
-  if (typeof metaConfig === "string" && metaConfig !== "") {
-    try {
-      const candidate = JSON.parse(metaConfig);
-      if (
-        typeof candidate === "object" &&
-        candidate !== null &&
-        !Array.isArray(candidate)
-      ) {
-        parsed = candidate as Record<string, unknown>;
+  if (metaConfig != null) {
+    if (typeof metaConfig === "string" && metaConfig !== "") {
+      // Legacy / double-encoded path: config is a JSON string
+      try {
+        const candidate = JSON.parse(metaConfig);
+        if (
+          typeof candidate === "object" &&
+          candidate !== null &&
+          !Array.isArray(candidate)
+        ) {
+          parsed = candidate as Record<string, unknown>;
+        }
+      } catch {
+        // Not JSON — fall through to fallback
+        console.warn(
+          `buildFullToolConfig: meta.config is a non-JSON string, falling back to record-level fields`,
+        );
       }
-    } catch {
-      // Not JSON — fall through to fallback
+    } else if (typeof metaConfig === "object" && !Array.isArray(metaConfig)) {
+      // Common case: config is already a parsed object
+      parsed = metaConfig as Record<string, unknown>;
+    } else {
+      // Unexpected type (number, boolean, array) — warn and fall through
+      console.warn(
+        `buildFullToolConfig: meta.config has unexpected type "${typeof metaConfig}", falling back to record-level fields`,
+      );
     }
   }
 
@@ -698,7 +719,7 @@ export function buildToolProjectionRow(
     record.customDescriptorContent ?? null,
     {
       ...TOOL_METADATA_DEFAULTS,
-      config: undefined as string | undefined,
+      config: undefined as unknown,
       orgId: undefined as string | undefined,
       createdBy: undefined as string | undefined,
       decidedBy: undefined as string | undefined,
