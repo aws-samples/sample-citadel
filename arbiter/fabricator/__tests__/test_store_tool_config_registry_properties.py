@@ -105,6 +105,9 @@ datastore_bindings_list = st.lists(datastore_binding, min_size=1, max_size=3)
 def _make_registry_mock(record_id: str = "gen-record-id"):
     """Construct a mock boto3 client that returns a realistic CreateRecord response."""
     client = MagicMock()
+    client.list_registry_records.return_value = {
+        "registryRecords": [],
+    }
     client.create_registry_record.return_value = {
         "recordArn": f"arn:aws:bedrock-agentcore:us-west-2:123456789012:registry/reg/record/{record_id}",
         "recordId": record_id,

@@ -164,26 +164,26 @@ class TestCreatingConflictRecoveryWiring:
         )
         pub.assert_not_called()
 
-    def test_approve_raises_terminal_when_get_fallback_not_approved_either(
+    def test_pending_approval_treated_as_successful_submission(
         self, run_state
     ):
+        """PENDING_APPROVAL from submit (manual review configured) is a
+        successful submission, not a failure. The tool returns True and
+        no error event is published."""
         client = MagicMock()
+        client.list_registry_records.return_value = {"registryRecords": []}
         client.create_registry_record.return_value = _arn("rec-1")
         client.submit_registry_record_for_approval.return_value = {
-            "recordId": "rec-1", "status": "PENDING_APPROVAL",
-        }
-        client.get_registry_record.return_value = {
             "recordId": "rec-1", "status": "PENDING_APPROVAL",
         }
 
         with patch.object(index, "_get_registry_client", return_value=client), \
                 patch.object(index, "publish_fabrication_event") as pub:
-            with pytest.raises(RuntimeError, match="did not reach APPROVED"):
-                _call_store_tool()
+            assert _call_store_tool() is True
 
-        # Errors propagate terminally as today (existing publish-on-failure
-        # behavior, unchanged).
-        assert pub.call_count == 1
+        # No fallback read needed — PENDING_APPROVAL recognized directly.
+        client.get_registry_record.assert_not_called()
+        pub.assert_not_called()
 
     def test_in_flight_creating_recovers_and_returns_true(self, run_state):
         client = MagicMock()
