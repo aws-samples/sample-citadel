@@ -1,4 +1,5 @@
 from decimal import Decimal
+import json
 import os
 from typing import Any
 import boto3
@@ -79,7 +80,20 @@ def load_config_from_dynamodb(org_id: str = ""):
     for item in items:
         # Only load agents with state 'active'
         if item.get('state') == 'active':
-            configs.append(item['config'])
+            cfg = item['config']
+            # Live DynamoDB rows store config as a JSON string; parse it.
+            if isinstance(cfg, str):
+                try:
+                    cfg = json.loads(cfg)
+                except (json.JSONDecodeError, TypeError):
+                    print(json.dumps({
+                        'level': 'WARN',
+                        'component': 'FabricatorToolsConfig',
+                        'action': 'skip_malformed_config',
+                        'toolId': item.get('toolId', 'unknown'),
+                    }))
+                    continue
+            configs.append(cfg)
     print(f"Loaded {len(configs)} active tools for org_id={org_id}")
     print(configs)
     return {'tools': configs}
