@@ -99,7 +99,7 @@ class TestStringConfigParsing:
                     "toolId": "tool-good",
                     "orgId": "Default",
                     "state": "active",
-                    "config": '{"name": "good-tool", "description": "OK"}',
+                    "config": '{"name": "good-tool", "description": "OK", "schema": {"type": "object"}}',
                 },
             ],
         }
@@ -130,13 +130,13 @@ class TestStringConfigParsing:
                     "toolId": "tool-a",
                     "orgId": "org-A",
                     "state": "active",
-                    "config": '{"name": "tool-a", "description": "A tool"}',
+                    "config": '{"name": "tool-a", "description": "A tool", "schema": {"type": "object"}}',
                 },
                 {
                     "toolId": "tool-b",
                     "orgId": "org-B",
                     "state": "active",
-                    "config": '{"name": "tool-b", "description": "B tool"}',
+                    "config": '{"name": "tool-b", "description": "B tool", "schema": {"type": "object"}}',
                 },
             ],
         }

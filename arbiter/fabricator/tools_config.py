@@ -37,6 +37,15 @@ def parse_decimals(data: Any) -> Any:
     else:
         return data
 
+def _is_complete_tool_config(cfg: dict) -> bool:
+    """Return True iff cfg has all fields the fabricator needs (name+description+schema)."""
+    return (
+        isinstance(cfg.get("name"), str) and len(cfg["name"]) > 0
+        and isinstance(cfg.get("description"), str) and len(cfg["description"]) > 0
+        and cfg.get("schema") is not None
+    )
+
+
 def load_config_from_dynamodb(org_id: str = ""):
     """Load active tool configs, filtered to the caller's organisation.
 
@@ -50,6 +59,12 @@ def load_config_from_dynamodb(org_id: str = ""):
     Fail-closed: if ``org_id`` is empty the function returns an empty tools
     list — the upstream ``process_event`` already refuses empty org_id, so
     this is a defence-in-depth backstop.
+
+    Sparse-row tolerance (PR-397): projection rows whose config is missing
+    name, description, or schema are SKIPPED with a structured WARN log and
+    a CloudWatch SparseConfigSkipped metric — the fabricator never crashes on
+    incomplete config.  When a legacy (MAP) row and a projection (STRING) row
+    share the same tool name, the row with the most complete config wins.
     """
     if CONFIG_TABLE is None:
         print("Warning: TOOL_CONFIG_TABLE environment variable not set, returning empty tools list")
@@ -76,42 +91,135 @@ def load_config_from_dynamodb(org_id: str = ""):
         items, org_id, allow_system=False, component="fabricator_tools",
     )
 
-    configs = []
+    # First pass: parse configs, skip malformed/sparse rows
+    seen: dict[str, dict] = {}  # keyed by tool name → best config dict
+    sparse_count = 0
     for item in items:
         # Only load agents with state 'active'
-        if item.get('state') == 'active':
-            cfg = item['config']
-            # Live DynamoDB rows store config as a JSON string; parse it.
-            if isinstance(cfg, str):
-                try:
-                    cfg = json.loads(cfg)
-                except (json.JSONDecodeError, TypeError):
-                    print(json.dumps({
-                        'level': 'WARN',
-                        'component': 'FabricatorToolsConfig',
-                        'action': 'skip_malformed_config',
-                        'toolId': item.get('toolId', 'unknown'),
-                    }))
-                    continue
-            configs.append(cfg)
+        if item.get('state') != 'active':
+            continue
+        cfg = item.get('config')
+        if cfg is None:
+            sparse_count += 1
+            print(json.dumps({
+                'level': 'WARN',
+                'component': 'FabricatorToolsConfig',
+                'action': 'skip_missing_config',
+                'toolId': item.get('toolId', 'unknown'),
+            }))
+            continue
+        # Live DynamoDB rows store config as a JSON string; parse it.
+        if isinstance(cfg, str):
+            try:
+                cfg = json.loads(cfg)
+            except (json.JSONDecodeError, TypeError):
+                sparse_count += 1
+                print(json.dumps({
+                    'level': 'WARN',
+                    'component': 'FabricatorToolsConfig',
+                    'action': 'skip_malformed_config',
+                    'toolId': item.get('toolId', 'unknown'),
+                }))
+                continue
+        if not isinstance(cfg, dict):
+            sparse_count += 1
+            print(json.dumps({
+                'level': 'WARN',
+                'component': 'FabricatorToolsConfig',
+                'action': 'skip_non_dict_config',
+                'toolId': item.get('toolId', 'unknown'),
+            }))
+            continue
+
+        # Validate required fields — skip sparse rows
+        if not _is_complete_tool_config(cfg):
+            sparse_count += 1
+            print(json.dumps({
+                'level': 'WARN',
+                'component': 'FabricatorToolsConfig',
+                'action': 'skip_sparse_config',
+                'toolId': item.get('toolId', 'unknown'),
+                'hasName': isinstance(cfg.get('name'), str) and len(cfg.get('name', '')) > 0,
+                'hasDescription': isinstance(cfg.get('description'), str) and len(cfg.get('description', '')) > 0,
+                'hasSchema': cfg.get('schema') is not None,
+            }))
+            continue
+
+        # Dedupe by name — prefer the row with the most complete config
+        tool_name = cfg.get('name', '')
+        if tool_name in seen:
+            existing = seen[tool_name]
+            # Count non-None keys in each to pick the most complete
+            new_fields = sum(1 for v in cfg.values() if v is not None)
+            old_fields = sum(1 for v in existing.values() if v is not None)
+            if new_fields <= old_fields:
+                continue  # existing is at least as complete
+        seen[tool_name] = cfg
+
+    configs = list(seen.values())
+
+    if sparse_count > 0:
+        print(json.dumps({
+            'level': 'WARN',
+            'component': 'FabricatorToolsConfig',
+            'action': 'sparse_config_summary',
+            'skippedCount': sparse_count,
+        }))
+        _emit_sparse_metric(sparse_count)
+
     print(f"Loaded {len(configs)} active tools for org_id={org_id}")
     print(configs)
     return {'tools': configs}
 
+
+def _emit_sparse_metric(count: int) -> None:
+    """Best-effort: emit a SparseConfigSkipped CloudWatch metric."""
+    try:
+        import datetime
+        cw = boto3.client('cloudwatch')
+        cw.put_metric_data(
+            Namespace='Citadel/Fabricator',
+            MetricData=[{
+                'MetricName': 'SparseConfigSkipped',
+                'Value': count,
+                'Unit': 'Count',
+                'Timestamp': datetime.datetime.now(datetime.timezone.utc),
+            }],
+        )
+    except Exception as exc:
+        print(json.dumps({
+            'level': 'WARN',
+            'component': 'FabricatorToolsConfig',
+            'action': 'metric_emit_failed',
+            'error': str(exc),
+        }))
+
 def create_tool_specs(tools_config):
-    return [{
-        "toolSpec": {
-            "name": tool["name"],
-            "description": tool["description"],
-            "inputSchema": {"json": parse_decimals(tool["schema"])}
-        }
-    } for tool in tools_config.get("tools", [])]
+    specs = []
+    for tool in tools_config.get("tools", []):
+        name = tool.get("name", "")
+        description = tool.get("description", "")
+        schema = tool.get("schema") or tool.get("inputSchema") or {"type": "object"}
+        if not name:
+            continue  # skip tools without a name — can't build a valid toolSpec
+        specs.append({
+            "toolSpec": {
+                "name": name,
+                "description": description,
+                "inputSchema": {"json": parse_decimals(schema)}
+            }
+        })
+    return specs
 
 def create_tool_desc(tools_config):
-    return [
-        f"{tool['name']} | {tool['description']}"
-        for tool in tools_config.get("tools", [])
-    ]
+    descs = []
+    for tool in tools_config.get("tools", []):
+        name = tool.get("name", "")
+        description = tool.get("description", "")
+        if not name:
+            continue
+        descs.append(f"{name} | {description}")
+    return descs
 
 # Directional code generation instructions for the Fabricator system prompt.
 # When generating tool code, the Fabricator uses these instructions to produce

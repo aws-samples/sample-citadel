@@ -30,6 +30,7 @@ import {
 } from "../src/services/registry-service";
 import { resolveKind } from "../src/utils/citadel-kind";
 import { readRegistrySequentially } from "./lib/registry-sequential-reader";
+import { buildFullToolConfig } from "../src/lambda/registry-sync";
 
 // ---------------------------------------------------------------------------
 // CLI args
@@ -148,16 +149,24 @@ function buildProjectionItem(
     };
   }
 
-  // tool
-  const mapped = registryService.mapToToolConfig(record);
+  // tool — use the shared buildFullToolConfig to produce the same full
+  // config JSON that buildToolProjectionRow in registry-sync.ts writes,
+  // so rerunning the backfill repairs the 132 sparse rows.
+  const fullConfig = buildFullToolConfig(
+    meta.config as string | undefined,
+    record.description,
+    record.name,
+  );
   return {
     toolId: record.recordId,
-    config: mapped.config,
-    state: mapped.state,
-    categories: mapped.categories || [],
+    config: fullConfig,
+    description: record.description ?? "",
+    name: record.name ?? "",
+    state: registryService.mapToToolConfig(record).state,
+    categories: (meta.categories as string[]) || [],
     integrationBindings: meta.integrationBindings,
     dataStoreBindings: meta.dataStoreBindings,
-    icon: meta.icon ?? "",
+    icon: (meta.icon as string) ?? "",
     appId: meta.appId,
     createdAt: record.createdAt?.toISOString() ?? now,
     updatedAt: record.updatedAt?.toISOString() ?? now,

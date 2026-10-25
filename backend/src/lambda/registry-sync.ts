@@ -579,6 +579,10 @@ export interface ToolProjectionRow extends ToolCacheRecord {
   decidedBy?: string;
   decidedAt?: string;
   statusReason?: string;
+  /** Human-readable name denormalized from the registry record. */
+  name?: string;
+  /** Plain-text description denormalized from the registry record. */
+  description?: string;
 }
 
 /**
@@ -611,9 +615,79 @@ export function buildAgentProjectionRow(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Full tool config builder — shared between buildToolProjectionRow and the
+// backfill script. Produces a JSON string carrying {name, description,
+// schema/inputSchema, filename, version} so the fabricator catalogue
+// (tools_config.py) can create tool specs and descriptions without KeyError.
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds a full tool config JSON string from the registry record's
+ * customDescriptorContent `config` field, falling back to
+ * `recordDescription` and `recordName` for missing fields.
+ *
+ * Priority:
+ *   1. meta.config (the full tool config persisted in customDescriptorContent)
+ *   2. recordDescription (plain-text description used as fallback)
+ *   3. recordName injected as `name` when absent
+ *
+ * Mirrors the logic of RegistryService.toValidConfigJson + ensureConfigName
+ * but is a standalone, exported function so the backfill script can reuse it.
+ */
+export function buildFullToolConfig(
+  metaConfig: string | undefined,
+  recordDescription: string | undefined,
+  recordName: string | undefined,
+): string {
+  let parsed: Record<string, unknown> = {};
+
+  // Try meta.config first (the full tool config from customDescriptorContent)
+  if (typeof metaConfig === "string" && metaConfig !== "") {
+    try {
+      const candidate = JSON.parse(metaConfig);
+      if (
+        typeof candidate === "object" &&
+        candidate !== null &&
+        !Array.isArray(candidate)
+      ) {
+        parsed = candidate as Record<string, unknown>;
+      }
+    } catch {
+      // Not JSON — fall through to fallback
+    }
+  }
+
+  // Ensure name
+  if (
+    !parsed.name ||
+    (typeof parsed.name === "string" && parsed.name.trim() === "")
+  ) {
+    if (recordName) {
+      parsed.name = recordName;
+    }
+  }
+
+  // Ensure description
+  if (
+    !parsed.description ||
+    (typeof parsed.description === "string" && parsed.description.trim() === "")
+  ) {
+    if (recordDescription) {
+      parsed.description = recordDescription;
+    }
+  }
+
+  return JSON.stringify(parsed);
+}
+
 /**
  * Builds a full projection row for a tool, suitable for list-from-projection
- * reads.
+ * reads. The `config` field carries the FULL tool config JSON (name,
+ * description, schema, filename, version) from the registry record's
+ * customDescriptorContent — NOT the bare `record.description` string that
+ * `buildToolCacheRecord` uses for the legacy event-driven path. This is
+ * what the fabricator catalogue (tools_config.py) expects.
  */
 export function buildToolProjectionRow(
   record: RegistryRecord,
@@ -624,6 +698,7 @@ export function buildToolProjectionRow(
     record.customDescriptorContent ?? null,
     {
       ...TOOL_METADATA_DEFAULTS,
+      config: undefined as string | undefined,
       orgId: undefined as string | undefined,
       createdBy: undefined as string | undefined,
       decidedBy: undefined as string | undefined,
@@ -632,8 +707,20 @@ export function buildToolProjectionRow(
     },
   );
   const now = new Date().toISOString();
+
+  // Build full config from meta.config, injecting record-level name if
+  // absent — mirrors RegistryService.toValidConfigJson + ensureConfigName.
+  const fullConfig = buildFullToolConfig(
+    meta.config,
+    record.description,
+    record.name,
+  );
+
   return {
     ...base,
+    config: fullConfig,
+    description: record.description ?? "",
+    name: record.name ?? "",
     citadelKind: "tool",
     projectionVersion: PROJECTION_VERSION,
     projectedAt: now,
