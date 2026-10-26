@@ -2,7 +2,8 @@
 
 The fix replaces the write-once ``registryApprovalStatus`` snapshot on the
 job row with a live query to the AgentCore Registry.  For COMPLETED jobs the
-postfab tool now calls ``ListRegistryRecords(name=agentName)`` and derives
+postfab tool now calls ``ListRegistryRecords(filters=[{name:'recordType',
+values:['CUSTOM']},{name:'name',values:[agent_name]}])`` and derives
 the human-readable state from the LIVE record status:
 
   DRAFT            -> 'built, not yet submitted for approval'
@@ -13,6 +14,11 @@ the human-readable state from the LIVE record status:
 
 Each test uses the botocore Stubber so kwargs are validated against the
 real service model — no mocks that could drift from the API shape.
+
+A dedicated ``TestParamValidatorRejectsTopLevelName`` class validates the
+built kwargs with ``botocore.validate.ParamValidator`` against the REAL
+service model's input shape — proving the old ``name=agent_name`` top-level
+kwarg would be rejected by the live API.
 
 Job row fixture mirrors the LIVE row shape written by
 ``arbiter/fabricator/index.py::_write_fabrication_status``.
@@ -77,7 +83,12 @@ def _job(
 
 
 def _registry_record(name, status, record_id=None):
-    """Build a registry record summary matching the ListRegistryRecords shape."""
+    """Build a registry record summary matching the ListRegistryRecords shape
+    on the ``agent-registry-control`` SDK model (not bedrock-agentcore-control).
+
+    Required fields per the model: registryArn, recordArn, recordId, name,
+    recordType, recordVersion, status, createdAt, updatedAt.
+    """
     rid = record_id or f"rec-{name[:8].ljust(8, '0')}"
     return {
         "registryArn": f"arn:aws:bedrock-agentcore:us-west-2:123456:registry/reg-test-1",
@@ -85,7 +96,7 @@ def _registry_record(name, status, record_id=None):
         "recordId": rid,
         "name": name,
         "description": f"Test agent {name}",
-        "descriptorType": "CUSTOM",
+        "recordType": "CUSTOM",
         "recordVersion": "1",
         "status": status,
         "createdAt": datetime(2026, 10, 1, tzinfo=timezone.utc),
@@ -129,9 +140,12 @@ def registry_stubber(monkeypatch):
     """Provide a botocore Stubber for the registry client.
 
     Replaces the lazy singleton so every test gets a fresh client+stubber.
+    Uses ``agent-registry-control`` (not ``bedrock-agentcore-control``) to
+    match the production client — the newer SDK model exposes the
+    ``filters``-based ListRegistryRecords shape the live service expects.
     """
     client = boto3.client(
-        "bedrock-agentcore-control", region_name="ap-southeast-2",
+        "agent-registry-control", region_name="ap-southeast-2",
     )
     monkeypatch.setattr(postfab, "_registry_client", client)
     monkeypatch.setattr(postfab, "REGISTRY_ID", "reg-test-1")
@@ -151,7 +165,13 @@ def _bind_session():
 
 
 def _stub_list(stubber, agent_name, registry_status):
-    """Stub a single ListRegistryRecords call returning one record."""
+    """Stub a single ListRegistryRecords call returning one record.
+
+    expected_params uses the ``filters`` shape — ListRegistryRecords has NO
+    top-level ``name`` parameter; the caller must pass
+    ``filters=[{name:'recordType',values:['CUSTOM']},{name:'name',values:[agent_name]}]``.
+    Mirrors arbiter/fabricator/index.py::_find_existing_record_id (source of truth).
+    """
     stubber.add_response(
         "list_registry_records",
         {
@@ -159,7 +179,10 @@ def _stub_list(stubber, agent_name, registry_status):
         },
         expected_params={
             "registryId": "reg-test-1",
-            "name": agent_name,
+            "filters": [
+                {"name": "recordType", "values": ["CUSTOM"]},
+                {"name": "name", "values": [agent_name]},
+            ],
             "maxResults": 10,
         },
     )
@@ -506,3 +529,74 @@ class TestFailedJobsUnchanged:
         assert result["status"] == "all_failed"
         states = {a["name"]: a["state"] for a in result["agents"]}
         assert states["AgentA"] == "didn't finish"
+
+
+# ===========================================================================
+# ParamValidator: prove the old top-level-name shape is rejected
+# ===========================================================================
+
+class TestParamValidatorRejectsTopLevelName:
+    """Validate the built kwargs against the REAL botocore service model.
+
+    botocore.validate.ParamValidator.validate() runs the same validation the
+    SDK would run before making a wire call — it checks the kwargs against
+    the service model's input shape. This proves that the
+    ``agent-registry-control`` model (which matches the LIVE service) does
+    NOT accept a top-level ``name`` kwarg — only ``filters``.
+
+    The older ``bedrock-agentcore-control`` model DID have ``name`` as a
+    query-string parameter, but the live service rejects it (the exact error
+    seen in production: 'Unknown parameter in input: name, must be one of:
+    registryId, maxResults, nextToken, filters').
+    """
+
+    @staticmethod
+    def _get_operation_model():
+        """Return the botocore OperationModel for ListRegistryRecords on the
+        agent-registry-control model (matches the LIVE service)."""
+        client = boto3.client(
+            "agent-registry-control", region_name="ap-southeast-2",
+        )
+        service_model = client._service_model
+        return service_model.operation_model("ListRegistryRecords")
+
+    def test_old_top_level_name_kwarg_rejected(self):
+        """The OLD shape (name=agent_name as top-level kwarg) MUST fail
+        validation on the agent-registry-control model — this is the exact
+        bug that caused the live error."""
+        from botocore.validate import ParamValidator
+
+        op_model = self._get_operation_model()
+        old_kwargs = {
+            "registryId": "reg-test-1",
+            "name": "arbiter-agent",
+            "maxResults": 10,
+        }
+        report = ParamValidator().validate(old_kwargs, op_model.input_shape)
+        assert report.has_errors(), (
+            "ParamValidator should reject top-level 'name' kwarg on the "
+            "agent-registry-control model but it passed"
+        )
+        # The report should mention 'name' as unknown
+        errors_str = report.generate_report()
+        assert "name" in errors_str.lower()
+
+    def test_new_filters_shape_accepted(self):
+        """The NEW shape (filters-based) MUST pass validation — this is the
+        correct API shape mirrored from _find_existing_record_id."""
+        from botocore.validate import ParamValidator
+
+        op_model = self._get_operation_model()
+        new_kwargs = {
+            "registryId": "reg-test-1",
+            "filters": [
+                {"name": "recordType", "values": ["CUSTOM"]},
+                {"name": "name", "values": ["arbiter-agent"]},
+            ],
+            "maxResults": 10,
+        }
+        report = ParamValidator().validate(new_kwargs, op_model.input_shape)
+        assert not report.has_errors(), (
+            f"ParamValidator should accept filters-based shape but got errors: "
+            f"{report.generate_report()}"
+        )

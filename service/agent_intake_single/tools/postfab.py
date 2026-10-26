@@ -52,11 +52,18 @@ _registry_client = None
 
 
 def _get_registry_client():
-    """Lazy boto3 client for bedrock-agentcore-control Registry APIs."""
+    """Lazy boto3 client for agent-registry-control Registry APIs.
+
+    Uses ``agent-registry-control`` (not ``bedrock-agentcore-control``) to
+    match arbiter/fabricator/index.py — the live service accepts the
+    ``filters``-based ListRegistryRecords shape exposed by this newer SDK
+    model and rejects the ``name`` query-string parameter from the older
+    ``bedrock-agentcore-control`` model.
+    """
     global _registry_client
     if _registry_client is None:
         _registry_client = boto3.client(
-            "bedrock-agentcore-control", region_name=AWS_REGION,
+            "agent-registry-control", region_name=AWS_REGION,
         )
     return _registry_client
 
@@ -120,9 +127,16 @@ def _resolve_registry_status(agent_name: str, org_id: str) -> str | None:
         return None
     try:
         client = _get_registry_client()
+        # Use filters (not top-level name kwarg) — ListRegistryRecords has
+        # no top-level `name` parameter; the API accepts `filters` to narrow
+        # results. Mirrors arbiter/fabricator/index.py::_find_existing_record_id
+        # (source of truth for the filter shape).
         response = client.list_registry_records(
             registryId=REGISTRY_ID,
-            name=agent_name,
+            filters=[
+                {"name": "recordType", "values": ["CUSTOM"]},
+                {"name": "name", "values": [agent_name]},
+            ],
             maxResults=10,
         )
         if not isinstance(response, dict):
