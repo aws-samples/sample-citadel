@@ -373,9 +373,9 @@ class TestRegistryFallback:
 
         result = _run_status(jobs_table, items, marker_store)
 
-        # No REGISTRY_ID -> assume auto-approved (legacy behavior)
+        # No REGISTRY_ID -> no live lookup, no snapshot -> "could not be confirmed"
         states = {a["name"]: a["state"] for a in result["agents"]}
-        assert states["AgentA"] == "built and approved"
+        assert states["AgentA"] == "built; approval status could not be confirmed"
 
 
 # ===========================================================================
@@ -459,9 +459,9 @@ class TestBoundedLookups:
         states = {a["name"]: a["state"] for a in result["agents"]}
         for n in names[:5]:
             assert states[n] == "built and approved"
-        # Last 2 get snapshot fallback (no registryApprovalStatus = auto-approved)
+        # Last 2 get snapshot fallback (no registryApprovalStatus = "could not be confirmed")
         for n in names[5:]:
-            assert states[n] == "built and approved"
+            assert states[n] == "built; approval status could not be confirmed"
 
 
 # ===========================================================================

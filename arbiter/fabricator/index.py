@@ -2666,10 +2666,13 @@ def process_event(event, context, request_type=None):
             agent_id=agent_use_id, agent_name=agent_use_id,
             registration_errors=registration_errors,
             org_id=org_id,
+            # Always write registryApprovalStatus on COMPLETED jobs so the
+            # intake status-check never falls back to a dangerous default.
+            # Priority: pending_approval > draft > approved.
             registry_approval_status=(
                 "pending_approval"
                 if run_state is not None and run_state.pending_approval
-                else None
+                else "approved"
             ),
         )
 
