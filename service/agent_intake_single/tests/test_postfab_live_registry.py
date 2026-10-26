@@ -62,12 +62,15 @@ def _job(
     registry_approval_status=None,
     updated_at=None,
     org_id="org-1",
+    registry_record_id=None,
+    registry_name=None,
 ):
     """Build a DynamoDB job row with the shape the fabricator writes.
 
     Keys match arbiter/fabricator/index.py::_write_fabrication_status:
     orchestrationId (PK), agentUseId (SK), status, agentName, updatedAt,
-    orgId, registryApprovalStatus, registrationErrors, errorMessage.
+    orgId, registryApprovalStatus, registrationErrors, errorMessage,
+    registryRecordId, registryName.
     """
     row = {
         "orchestrationId": "sess-1",
@@ -79,6 +82,10 @@ def _job(
     }
     if registry_approval_status is not None:
         row["registryApprovalStatus"] = registry_approval_status
+    if registry_record_id is not None:
+        row["registryRecordId"] = registry_record_id
+    if registry_name is not None:
+        row["registryName"] = registry_name
     return row
 
 
@@ -207,7 +214,7 @@ class TestLiveStatusApproved:
         # Job row says pending_approval (stale snapshot)
         items = [_job("AgentA", "COMPLETED", registry_approval_status="pending_approval")]
         # Registry says APPROVED (live truth)
-        _stub_list(registry_stubber, "AgentA", "APPROVED")
+        _stub_list(registry_stubber, "agenta", "APPROVED")
 
         result = _run_status(jobs_table, items, marker_store)
 
@@ -233,7 +240,7 @@ class TestLiveStatusApproved:
         jobs_table.query.return_value = {"Items": items}
 
         # Stub for the activation gate's own live resolution
-        _stub_list(registry_stubber, "AgentA", "APPROVED")
+        _stub_list(registry_stubber, "agenta", "APPROVED")
 
         execute = mock.MagicMock()
         execute.return_value = {"intakeActivateProjectAgents": {
@@ -260,7 +267,7 @@ class TestLiveStatusPendingApproval:
         self, jobs_table, marker_store, registry_stubber,
     ):
         items = [_job("AgentA", "COMPLETED", registry_approval_status="pending_approval")]
-        _stub_list(registry_stubber, "AgentA", "PENDING_APPROVAL")
+        _stub_list(registry_stubber, "agenta", "PENDING_APPROVAL")
 
         result = _run_status(jobs_table, items, marker_store)
 
@@ -280,7 +287,7 @@ class TestLiveStatusDraft:
         self, jobs_table, marker_store, registry_stubber,
     ):
         items = [_job("AgentA", "COMPLETED")]
-        _stub_list(registry_stubber, "AgentA", "DRAFT")
+        _stub_list(registry_stubber, "agenta", "DRAFT")
 
         result = _run_status(jobs_table, items, marker_store)
 
@@ -295,7 +302,7 @@ class TestLiveStatusDraft:
         self, jobs_table, marker_store, registry_stubber,
     ):
         items = [_job("AgentA", "COMPLETED")]
-        _stub_list(registry_stubber, "AgentA", "DRAFT")
+        _stub_list(registry_stubber, "agenta", "DRAFT")
 
         result = _run_status(jobs_table, items, marker_store)
 
@@ -314,7 +321,7 @@ class TestLiveStatusRejected:
         self, jobs_table, marker_store, registry_stubber,
     ):
         items = [_job("AgentA", "COMPLETED")]
-        _stub_list(registry_stubber, "AgentA", "REJECTED")
+        _stub_list(registry_stubber, "agenta", "REJECTED")
 
         result = _run_status(jobs_table, items, marker_store)
 
@@ -333,7 +340,7 @@ class TestLiveStatusDeprecated:
         self, jobs_table, marker_store, registry_stubber,
     ):
         items = [_job("AgentA", "COMPLETED")]
-        _stub_list(registry_stubber, "AgentA", "DEPRECATED")
+        _stub_list(registry_stubber, "agenta", "DEPRECATED")
 
         result = _run_status(jobs_table, items, marker_store)
 
@@ -393,8 +400,8 @@ class TestMixedLiveStatuses:
             _job("AgentB", "COMPLETED", registry_approval_status="pending_approval"),
         ]
         # A is now approved, B is still pending
-        _stub_list(registry_stubber, "AgentA", "APPROVED")
-        _stub_list(registry_stubber, "AgentB", "PENDING_APPROVAL")
+        _stub_list(registry_stubber, "agenta", "APPROVED")
+        _stub_list(registry_stubber, "agentb", "PENDING_APPROVAL")
 
         result = _run_status(jobs_table, items, marker_store)
 
@@ -410,7 +417,7 @@ class TestMixedLiveStatuses:
             _job("AgentA", "COMPLETED"),
             _job("AgentB", "FAILED"),
         ]
-        _stub_list(registry_stubber, "AgentA", "APPROVED")
+        _stub_list(registry_stubber, "agenta", "APPROVED")
 
         result = _run_status(jobs_table, items, marker_store)
 
@@ -425,8 +432,8 @@ class TestMixedLiveStatuses:
             _job("AgentA", "COMPLETED"),
             _job("AgentB", "COMPLETED"),
         ]
-        _stub_list(registry_stubber, "AgentA", "DRAFT")
-        _stub_list(registry_stubber, "AgentB", "APPROVED")
+        _stub_list(registry_stubber, "agenta", "DRAFT")
+        _stub_list(registry_stubber, "agentb", "APPROVED")
 
         result = _run_status(jobs_table, items, marker_store)
 
@@ -449,9 +456,9 @@ class TestBoundedLookups:
     ):
         names = [f"Agent{i}" for i in range(7)]
         items = [_job(n, "COMPLETED") for n in names]
-        # Stub only the first 5
+        # Stub only the first 5 — the fallback path lowercases the name
         for n in names[:5]:
-            _stub_list(registry_stubber, n, "APPROVED")
+            _stub_list(registry_stubber, n.lower(), "APPROVED")
 
         result = _run_status(jobs_table, items, marker_store)
 
@@ -475,7 +482,7 @@ class TestNoRawEnums:
         self, jobs_table, marker_store, registry_stubber,
     ):
         items = [_job("AgentA", "COMPLETED")]
-        _stub_list(registry_stubber, "AgentA", "APPROVED")
+        _stub_list(registry_stubber, "agenta", "APPROVED")
 
         result = _run_status(jobs_table, items, marker_store)
 
@@ -488,7 +495,7 @@ class TestNoRawEnums:
         self, jobs_table, marker_store, registry_stubber,
     ):
         items = [_job("AgentA", "COMPLETED")]
-        _stub_list(registry_stubber, "AgentA", "DRAFT")
+        _stub_list(registry_stubber, "agenta", "DRAFT")
 
         result = _run_status(jobs_table, items, marker_store)
 
@@ -501,7 +508,7 @@ class TestNoRawEnums:
         self, jobs_table, marker_store, registry_stubber,
     ):
         items = [_job("AgentA", "COMPLETED")]
-        _stub_list(registry_stubber, "AgentA", "PENDING_APPROVAL")
+        _stub_list(registry_stubber, "agenta", "PENDING_APPROVAL")
 
         result = _run_status(jobs_table, items, marker_store)
 
@@ -600,3 +607,220 @@ class TestParamValidatorRejectsTopLevelName:
             f"ParamValidator should accept filters-based shape but got errors: "
             f"{report.generate_report()}"
         )
+
+
+# ===========================================================================
+# Resolve by registryRecordId (GetRegistryRecord, exact)
+# ===========================================================================
+
+def _stub_get_record(stubber, record_id, name, registry_status):
+    """Stub a single GetRegistryRecord call returning one record."""
+    stubber.add_response(
+        "get_registry_record",
+        {
+            "registryArn": f"arn:aws:bedrock-agentcore:us-west-2:123456:registry/reg-test-1",
+            "recordArn": f"arn:aws:bedrock-agentcore:us-west-2:123456:registry/reg-test-1/record/{record_id}",
+            "recordId": record_id,
+            "name": name,
+            "description": f"Test agent {name}",
+            "recordType": "CUSTOM",
+            "recordVersion": "1",
+            "status": registry_status,
+            "createdAt": datetime(2026, 10, 1, tzinfo=timezone.utc),
+            "updatedAt": datetime(2026, 10, 25, tzinfo=timezone.utc),
+        },
+        expected_params={
+            "registryId": "reg-test-1",
+            "recordId": record_id,
+        },
+    )
+
+
+class TestResolveByRegistryRecordId:
+    """When the job row carries registryRecordId, resolve via
+    GetRegistryRecord (one call, exact) — never ListRegistryRecords."""
+
+    def test_resolve_by_record_id_approved(
+        self, jobs_table, marker_store, registry_stubber,
+    ):
+        items = [
+            _job(
+                "Arbiter Agent", "COMPLETED",
+                registry_record_id="MshBnaCcFECO",
+                registry_name="arbiter-agent",
+            ),
+        ]
+        _stub_get_record(
+            registry_stubber, "MshBnaCcFECO", "arbiter-agent", "APPROVED",
+        )
+
+        result = _run_status(jobs_table, items, marker_store)
+
+        assert result["ok"] is True
+        assert result["status"] == "complete"
+        states = {a["name"]: a["state"] for a in result["agents"]}
+        assert states["Arbiter Agent"] == "built and approved"
+
+    def test_resolve_by_record_id_pending_approval(
+        self, jobs_table, marker_store, registry_stubber,
+    ):
+        items = [
+            _job(
+                "Arbiter Agent", "COMPLETED",
+                registry_record_id="MshBnaCcFECO",
+                registry_name="arbiter-agent",
+            ),
+        ]
+        _stub_get_record(
+            registry_stubber, "MshBnaCcFECO", "arbiter-agent", "PENDING_APPROVAL",
+        )
+
+        result = _run_status(jobs_table, items, marker_store)
+
+        states = {a["name"]: a["state"] for a in result["agents"]}
+        assert "awaiting approval" in states["Arbiter Agent"]
+        assert result["pending_approval"] == ["Arbiter Agent"]
+
+
+# ===========================================================================
+# Resolve by registryName (ListRegistryRecords with sanitised name)
+# ===========================================================================
+
+class TestResolveByRegistryName:
+    """When the job row carries registryName but no registryRecordId,
+    resolve via ListRegistryRecords using the stamped sanitised name."""
+
+    def test_resolve_by_registry_name(
+        self, jobs_table, marker_store, registry_stubber,
+    ):
+        items = [
+            _job(
+                "Arbiter Agent", "COMPLETED",
+                registry_name="arbiter-agent",
+            ),
+        ]
+        _stub_list(registry_stubber, "arbiter-agent", "APPROVED")
+
+        result = _run_status(jobs_table, items, marker_store)
+
+        assert result["ok"] is True
+        states = {a["name"]: a["state"] for a in result["agents"]}
+        assert states["Arbiter Agent"] == "built and approved"
+
+
+# ===========================================================================
+# Fallback: sanitise display name when no registryRecordId/registryName
+# ===========================================================================
+
+class TestFallbackSanitiseDisplayName:
+    """When the job row has NO registryRecordId and NO registryName
+    (pre-fix rows), the display name is sanitised with
+    sanitize_registry_name before being passed to the name filter.
+
+    Fixture copied from the LIVE job row shape: agentName is
+    'Catering & Fuel Sequencing Agent' — the sanitised form is
+    'Catering-Fuel-Sequencing-Agent'.
+    """
+
+    def test_display_name_sanitised_for_filter(
+        self, jobs_table, marker_store, registry_stubber,
+    ):
+        items = [
+            _job("Catering & Fuel Sequencing Agent", "COMPLETED"),
+        ]
+        # The sanitised, lowercased name that sanitize_registry_name().lower()
+        # produces: '&' and spaces -> '-', consecutive dashes collapsed, then
+        # lowercased to match the fabricator's LLM naming convention.
+        _stub_list(
+            registry_stubber,
+            "catering-fuel-sequencing-agent",
+            "APPROVED",
+        )
+
+        result = _run_status(jobs_table, items, marker_store)
+
+        states = {a["name"]: a["state"] for a in result["agents"]}
+        assert states["Catering & Fuel Sequencing Agent"] == "built and approved"
+
+    def test_display_name_validation_exception_shows_not_confirmed(
+        self, jobs_table, marker_store, registry_stubber,
+    ):
+        """When the registry returns an error even for the sanitised name,
+        the state should show 'could not be confirmed', never 'approved'."""
+        items = [
+            _job("Catering & Fuel Sequencing Agent", "COMPLETED"),
+        ]
+        registry_stubber.add_client_error(
+            "list_registry_records",
+            service_error_code="ValidationException",
+            service_message="Invalid value for filter name",
+        )
+
+        result = _run_status(jobs_table, items, marker_store)
+
+        states = {a["name"]: a["state"] for a in result["agents"]}
+        assert "could not be confirmed" in states["Catering & Fuel Sequencing Agent"]
+
+    def test_param_validator_rejects_raw_display_name(self):
+        """Prove that passing the raw display name 'Catering & Fuel
+        Sequencing Agent' through the name filter would be accepted by
+        botocore's ParamValidator (it validates structure, not business
+        rules) — but the LIVE API rejects it. This test documents why
+        sanitisation is needed: the ValidationException is server-side,
+        not client-side."""
+        from botocore.validate import ParamValidator
+
+        client = boto3.client(
+            "agent-registry-control", region_name="ap-southeast-2",
+        )
+        op_model = client._service_model.operation_model("ListRegistryRecords")
+        # This shape is structurally valid (ParamValidator passes) but the
+        # LIVE server rejects the ampersand/spaces — the fix is to
+        # sanitise before calling.
+        kwargs = {
+            "registryId": "reg-test-1",
+            "filters": [
+                {"name": "recordType", "values": ["CUSTOM"]},
+                {"name": "name", "values": ["Catering & Fuel Sequencing Agent"]},
+            ],
+            "maxResults": 10,
+        }
+        report = ParamValidator().validate(kwargs, op_model.input_shape)
+        # ParamValidator is structural only — this PASSES locally but the
+        # server rejects it. The test documents the gap.
+        assert not report.has_errors()
+
+
+# ===========================================================================
+# GetRegistryRecord fallback to name on failure
+# ===========================================================================
+
+class TestRecordIdFallbackToName:
+    """When GetRegistryRecord by id fails, fall through to name lookup."""
+
+    def test_get_record_fails_falls_back_to_name(
+        self, jobs_table, marker_store, registry_stubber,
+    ):
+        items = [
+            _job(
+                "Arbiter Agent", "COMPLETED",
+                registry_record_id="BADID",
+                registry_name="arbiter-agent",
+            ),
+        ]
+        # GetRegistryRecord fails
+        registry_stubber.add_client_error(
+            "get_registry_record",
+            service_error_code="ResourceNotFoundException",
+            expected_params={
+                "registryId": "reg-test-1",
+                "recordId": "BADID",
+            },
+        )
+        # Falls through to ListRegistryRecords by name
+        _stub_list(registry_stubber, "arbiter-agent", "APPROVED")
+
+        result = _run_status(jobs_table, items, marker_store)
+
+        states = {a["name"]: a["state"] for a in result["agents"]}
+        assert states["Arbiter Agent"] == "built and approved"

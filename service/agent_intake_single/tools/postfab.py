@@ -115,27 +115,68 @@ _REGISTRY_STATUS_PLAIN: dict[str, str] = {
 _MAX_REGISTRY_LOOKUPS = 5
 
 
-def _resolve_registry_status(agent_name: str, org_id: str) -> str | None:
-    """Look up the LIVE registry status for a single agent by name.
+def _resolve_registry_status(
+    agent_name: str,
+    org_id: str,
+    registry_record_id: str | None = None,
+    registry_name: str | None = None,
+) -> str | None:
+    """Look up the LIVE registry status for a single agent.
+
+    Resolution order (most-to-least precise):
+      1. ``registry_record_id`` — one GetRegistryRecord call, exact.
+      2. ``registry_name`` — the sanitised record name written by the
+         fabricator; ListRegistryRecords with the ``name`` filter.
+      3. Sanitise the display ``agent_name`` with the SAME function the
+         fabricator uses (``sanitize_registry_name``, imported from
+         ``tools.registry_name`` — the Python twin of the backend
+         sanitiser) and list with filters.
+
+    Never passes the raw display name to the ``name`` filter — that is the
+    bug this fix addresses (the API rejects names with spaces/special
+    characters with ValidationException).
 
     Returns the raw registry status string (e.g. 'APPROVED',
     'PENDING_APPROVAL', 'DRAFT') or None when the record cannot be found
     or the lookup fails. Sequential and bounded — called at most
     _MAX_REGISTRY_LOOKUPS times per status check.
     """
-    if not REGISTRY_ID or not agent_name:
+    if not REGISTRY_ID:
         return None
     try:
         client = _get_registry_client()
-        # Use filters (not top-level name kwarg) — ListRegistryRecords has
-        # no top-level `name` parameter; the API accepts `filters` to narrow
-        # results. Mirrors arbiter/fabricator/index.py::_find_existing_record_id
-        # (source of truth for the filter shape).
+
+        # Path 1: exact record id — one call, no filter ambiguity.
+        if registry_record_id:
+            try:
+                resp = client.get_registry_record(
+                    registryId=REGISTRY_ID,
+                    recordId=registry_record_id,
+                )
+                if isinstance(resp, dict) and resp.get("status"):
+                    return resp["status"]
+            except Exception as e:
+                logger.warning(
+                    "registry_status_lookup_by_id_failed record_id=%s "
+                    "error_type=%s: %s — falling through to name lookup",
+                    registry_record_id, type(e).__name__, e,
+                )
+
+        # Path 2/3: list by name — prefer the stamped registry_name, else
+        # sanitise the display name with the SAME function the fabricator
+        # uses to create record names.  The fabricator's LLM produces
+        # lowercase names (e.g. 'arbiter-agent'), and the registry name
+        # filter is case-sensitive, so the sanitised fallback is also
+        # lowercased to match the convention.
+        lookup_name = registry_name or sanitize_registry_name(agent_name).lower()
+        if not lookup_name:
+            return None
+
         response = client.list_registry_records(
             registryId=REGISTRY_ID,
             filters=[
                 {"name": "recordType", "values": ["CUSTOM"]},
-                {"name": "name", "values": [agent_name]},
+                {"name": "name", "values": [lookup_name]},
             ],
             maxResults=10,
         )
@@ -144,7 +185,7 @@ def _resolve_registry_status(agent_name: str, org_id: str) -> str | None:
         for summary in response.get("registryRecords", []):
             if not isinstance(summary, dict):
                 continue
-            if summary.get("name") == agent_name:
+            if summary.get("name") == lookup_name:
                 return summary.get("status")
         return None
     except Exception as e:
@@ -168,6 +209,13 @@ def _resolve_live_statuses(
     on miss). Only the first _MAX_REGISTRY_LOOKUPS COMPLETED agents are
     resolved; the rest get None (fall back to job row snapshot).
     Reads are sequential to stay within SDK rate limits.
+
+    Resolution priority per item (see ``_resolve_registry_status``):
+      1. ``registryRecordId`` → GetRegistryRecord (one call, exact).
+      2. ``registryName`` → ListRegistryRecords by sanitised name.
+      3. Sanitise the display ``agentName`` with ``sanitize_registry_name``
+         (same function the fabricator uses) → ListRegistryRecords.
+    Never passes the raw display name to the ``name`` filter.
     """
     result: dict[str, str | None] = {}
     # Derive org_id from the current session for org-scoped lookups.
@@ -187,7 +235,12 @@ def _resolve_live_statuses(
             result[name] = None
             continue
         lookups += 1
-        result[name] = _resolve_registry_status(name, org_id)
+        result[name] = _resolve_registry_status(
+            name,
+            org_id,
+            registry_record_id=item.get("registryRecordId"),
+            registry_name=item.get("registryName"),
+        )
     return result
 
 

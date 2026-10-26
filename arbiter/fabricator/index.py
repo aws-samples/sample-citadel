@@ -122,6 +122,12 @@ class _RegistrationRunState:
         self.succeeded = set()
         self.failed = {}
         self.pending_approval = set()
+        # Maps agent_use_id -> (registry_record_id, registry_name) so the
+        # COMPLETED status write can stamp the exact record coordinates onto
+        # the job row — postfab resolves by record id (one call, exact)
+        # instead of passing the display name through the name filter
+        # (which rejects special characters).
+        self.agent_record_info: dict[str, tuple[str, str]] = {}
 
 
 _registration_run_state = None
@@ -344,6 +350,8 @@ def _write_fabrication_status(
     registration_errors: list | None = None,
     org_id: str | None = None,
     registry_approval_status: str | None = None,
+    registry_record_id: str | None = None,
+    registry_name: str | None = None,
 ) -> bool:
     """Upsert a per-agent fabrication status row in the durable jobs table.
 
@@ -466,6 +474,16 @@ def _write_fabrication_status(
         set_parts.append("#registryApprovalStatus = :registryApprovalStatus")
         names["#registryApprovalStatus"] = "registryApprovalStatus"
         values[":registryApprovalStatus"] = {"S": registry_approval_status}
+
+    if registry_record_id:
+        set_parts.append("#registryRecordId = :registryRecordId")
+        names["#registryRecordId"] = "registryRecordId"
+        values[":registryRecordId"] = {"S": registry_record_id}
+
+    if registry_name:
+        set_parts.append("#registryName = :registryName")
+        names["#registryName"] = "registryName"
+        values[":registryName"] = {"S": registry_name}
 
     update_expression = "SET " + ", ".join(set_parts)
     if remove_parts:
@@ -1678,6 +1696,15 @@ def store_agent_config_registry(
                 requested_by=requested_by,
                 org_id=org_id,
             )
+            # Stash record coordinates so the COMPLETED status write can
+            # stamp them onto the job row — postfab resolves by record id
+            # (one call, exact) instead of passing the display name through
+            # the name filter (which rejects special characters).
+            run_state = _registration_run_state
+            if run_state is not None:
+                run_state.agent_record_info[agent_id] = (
+                    existing_record_id, agent_id,
+                )
             return True
 
         # CreateRegistryRecord does NOT accept a recordId — the service generates
@@ -1730,6 +1757,10 @@ def store_agent_config_registry(
         # activation to a usable state happens later via the catalog.
 
         print(f"[store_agent_config_registry] SUCCESS - Registry response: {response}")
+        # Stash record coordinates (same rationale as the reuse path above).
+        run_state = _registration_run_state
+        if run_state is not None:
+            run_state.agent_record_info[agent_id] = (record_id, agent_id)
         return True
 
     except Exception as e:
@@ -2673,6 +2704,21 @@ def process_event(event, context, request_type=None):
                 "pending_approval"
                 if run_state is not None and run_state.pending_approval
                 else "approved"
+            ),
+            # Stamp the registry record id and sanitised registry name onto
+            # the job row so postfab can resolve the agent's live registry
+            # status by exact record id (one GetRegistryRecord call) instead
+            # of passing the display name through the ListRegistryRecords name
+            # filter (which rejects names with spaces/special characters).
+            registry_record_id=(
+                next(iter(run_state.agent_record_info.values()), (None,))[0]
+                if run_state is not None and run_state.agent_record_info
+                else None
+            ),
+            registry_name=(
+                next(iter(run_state.agent_record_info.values()), (None, None))[1]
+                if run_state is not None and run_state.agent_record_info
+                else None
             ),
         )
 
