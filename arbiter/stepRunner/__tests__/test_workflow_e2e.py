@@ -561,7 +561,7 @@ def _harness(workflow_item, execution_item, *, fail=False, fail_node_ids=None, w
         stack.enter_context(patch.object(_WORKER, 'boto3', _FakeBoto3(fake_eb, executions_table=executions_table)))
         stack.enter_context(patch.object(
             _WORKER, 'load_config_from_dynamodb',
-            return_value={'config': {'filename': 'echo_agent.py'}},
+            return_value={'config': {'filename': 'echo_agent.py'}, 'orgId': ''},
         ))
         stack.enter_context(patch.object(_WORKER, 'get_scoped_credentials', return_value=None))
         stack.enter_context(patch.object(_WORKER, 'load_file_from_s3_into_tmp'))
@@ -787,7 +787,7 @@ class TestWorkflowEndToEndPerNodeConfiguration:
         workflow_item['configuration'] = json.dumps({'shared': 'wf-value'})
         execution_item = _pending_execution('exec-cfg', 'wf-cfg', ['echo-1', 'echo-2'])
 
-        agent_cfg = {'config': {'filename': 'echo_agent.py', 'description': 'Echo agent.'}}
+        agent_cfg = {'config': {'filename': 'echo_agent.py', 'description': 'Echo agent.'}, 'orgId': ''}
         captured_envs = []
         base_run = _make_fake_subprocess_run(fail=False)
 

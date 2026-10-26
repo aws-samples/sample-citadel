@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 _METRIC_NAMESPACE = "Citadel/Arbiter"
 _METRIC_NAME = "TenantOrgMismatch"
+_ORG_UNKNOWN_METRIC = "OrgUnknownRecord"
 
 
 class OrgMismatchError(Exception):
@@ -64,8 +65,30 @@ def require_same_org(
     Raises:
         OrgMismatchError: on mismatch or missing orgId.
     """
-    record_org = record.get(org_field, "")
     record_id = record.get(record_id_field, "<unknown>")
+
+    # orgUnknown rows: the record's org was never set (pre-tagging legacy).
+    # Fail closed — never treat as system-shared.
+    if record.get("orgUnknown"):
+        logger.warning(
+            "tenant_guard: OrgUnknownRecord record_id=%s component=%s — excluded (fail-closed)",
+            record_id,
+            component,
+        )
+        _emit_metric(_ORG_UNKNOWN_METRIC, component, record_id)
+        raise OrgMismatchError("<unknown>", bound_org, record_id, component)
+
+    record_org = record.get(org_field)
+
+    # Absent orgId (org_field not present at all) — fail closed.
+    if record_org is None:
+        logger.warning(
+            "tenant_guard: OrgUnknownRecord record_id=%s component=%s — orgId absent, excluded (fail-closed)",
+            record_id,
+            component,
+        )
+        _emit_metric(_ORG_UNKNOWN_METRIC, component, record_id)
+        raise OrgMismatchError("<absent>", bound_org, record_id, component)
 
     # System / shared records (empty-string convention)
     if allow_system and record_org == "":
@@ -80,7 +103,7 @@ def require_same_org(
             bound_org,
             component,
         )
-        _emit_mismatch_metric(component, record_id)
+        _emit_metric(_METRIC_NAME, component, record_id)
         raise OrgMismatchError(record_org, bound_org, record_id, component)
 
 
@@ -97,10 +120,34 @@ def filter_by_org(
     Used for scan-then-filter paths (supervisor catalogue, fabricator tool
     catalogue) where the table lacks an orgId GSI.  Each rejected record
     emits a warning-level log.
+
+    Records with ``orgUnknown == True`` or a missing orgId are excluded
+    (fail-closed) with an ``OrgUnknownRecord`` metric.
     """
     result: list[dict[str, Any]] = []
     for item in items:
-        item_org = item.get(org_field, "")
+        # orgUnknown rows: org was never set — fail closed.
+        if item.get("orgUnknown"):
+            record_id = item.get("agentId") or item.get("toolId") or "<unknown>"
+            logger.warning(
+                "tenant_guard: OrgUnknownRecord record=%s component=%s — excluded from %s catalogue",
+                record_id,
+                component,
+                component,
+            )
+            _emit_metric(_ORG_UNKNOWN_METRIC, component, str(record_id))
+            continue
+        item_org = item.get(org_field)
+        if item_org is None:
+            record_id = item.get("agentId") or item.get("toolId") or "<unknown>"
+            logger.warning(
+                "tenant_guard: OrgUnknownRecord record=%s component=%s — orgId absent, excluded from %s catalogue",
+                record_id,
+                component,
+                component,
+            )
+            _emit_metric(_ORG_UNKNOWN_METRIC, component, str(record_id))
+            continue
         if item_org == bound_org:
             result.append(item)
         elif allow_system and item_org == "":
@@ -115,7 +162,7 @@ def filter_by_org(
     return result
 
 
-def _emit_mismatch_metric(component: str, record_id: str) -> None:
+def _emit_metric(metric_name: str, component: str, record_id: str) -> None:
     """Best-effort CloudWatch metric.  Never raises."""
     try:
         import boto3
@@ -125,7 +172,7 @@ def _emit_mismatch_metric(component: str, record_id: str) -> None:
             Namespace=_METRIC_NAMESPACE,
             MetricData=[
                 {
-                    "MetricName": _METRIC_NAME,
+                    "MetricName": metric_name,
                     "Dimensions": [
                         {"Name": "Component", "Value": component},
                     ],

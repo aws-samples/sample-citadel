@@ -41,6 +41,13 @@ def _with_approval_fields(config: dict, item: dict) -> dict:
         config['registryStatus'] = item['registryStatus']
     if 'createdAt' in item:
         config['createdAt'] = item['createdAt']
+    # Carry orgId + orgUnknown so tenant filtering (filter_by_org downstream)
+    # can scope the catalogue. Without this, config dicts lack orgId and
+    # filter_by_org treats them as unknown → excluded.
+    if 'orgId' in item:
+        config['orgId'] = item['orgId']
+    if item.get('orgUnknown'):
+        config['orgUnknown'] = True
     return config
 
 

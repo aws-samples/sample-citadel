@@ -47,17 +47,18 @@ class TestRequireSameOrgMismatch:
         assert err.component == "worker"
 
     def test_missing_orgId_treated_as_empty(self):
-        """A record without an orgId key is treated as orgId=''.
-        With allow_system=False, this is a mismatch."""
+        """A record without an orgId key is rejected (fail-closed).
+        With allow_system=False, absent orgId is a mismatch."""
         record = {"agentId": "x1"}
         with pytest.raises(OrgMismatchError):
             require_same_org(record, "org-a", component="test")
 
-    def test_missing_orgId_allowed_with_system(self):
-        """A record without orgId (empty-string convention) is allowed when
-        allow_system=True."""
+    def test_missing_orgId_rejected_even_with_system(self):
+        """A record without orgId is NOT treated as system-shared — fail closed.
+        Only an explicit orgId == '' counts as system."""
         record = {"agentId": "x1"}
-        require_same_org(record, "org-a", allow_system=True, component="test")
+        with pytest.raises(OrgMismatchError):
+            require_same_org(record, "org-a", allow_system=True, component="test")
 
     def test_custom_fields(self):
         record = {"toolId": "t1", "org": "org-b"}
@@ -143,3 +144,56 @@ def test_filter_never_returns_another_orgs_record(org_a, org_b, n_a, n_b, n_sys)
             f"filter_by_org returned item with org={item['orgId']!r}, "
             f"expected org_a={org_a!r} or system ('')"
         )
+
+
+# ---------------------------------------------------------------------------
+# orgUnknown handling tests
+# ---------------------------------------------------------------------------
+class TestOrgUnknownRequireSameOrg:
+    """require_same_org rejects orgUnknown rows (fail-closed)."""
+
+    def test_orgUnknown_true_raises(self):
+        record = {"agentId": "legacy-1", "orgId": "", "orgUnknown": True}
+        with pytest.raises(OrgMismatchError):
+            require_same_org(record, "org-a", allow_system=True, component="test")
+
+    def test_orgUnknown_false_system_allowed(self):
+        """orgUnknown=False with orgId='' is system-shared — should pass."""
+        record = {"agentId": "sys-1", "orgId": "", "orgUnknown": False}
+        require_same_org(record, "org-a", allow_system=True, component="test")
+
+    def test_absent_orgId_raises(self):
+        """No orgId key at all → fail closed."""
+        record = {"agentId": "no-org"}
+        with pytest.raises(OrgMismatchError):
+            require_same_org(record, "org-a", allow_system=True, component="test")
+
+    def test_explicit_empty_string_system_allowed(self):
+        """Explicit orgId='' (no orgUnknown) is system-shared."""
+        record = {"agentId": "seeded", "orgId": ""}
+        require_same_org(record, "org-a", allow_system=True, component="test")
+
+
+class TestOrgUnknownFilterByOrg:
+    """filter_by_org excludes orgUnknown rows."""
+
+    def test_excludes_orgUnknown_items(self):
+        items = [
+            {"agentId": "a1", "orgId": "org-a"},
+            {"agentId": "legacy", "orgId": "", "orgUnknown": True},
+            {"agentId": "sys", "orgId": ""},
+        ]
+        result = filter_by_org(items, "org-a", allow_system=True, component="test")
+        ids = [r["agentId"] for r in result]
+        assert "a1" in ids
+        assert "sys" in ids
+        assert "legacy" not in ids
+
+    def test_excludes_absent_orgId_items(self):
+        items = [
+            {"agentId": "a1", "orgId": "org-a"},
+            {"agentId": "no-org"},
+        ]
+        result = filter_by_org(items, "org-a", allow_system=True, component="test")
+        assert len(result) == 1
+        assert result[0]["agentId"] == "a1"

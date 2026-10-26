@@ -373,3 +373,118 @@ describe("buildFullToolConfig", () => {
     expect(typeof parsed.version).toBe("number");
   });
 });
+
+describe("buildAgentProjectionRow — orgUnknown", () => {
+  test("sets orgUnknown: true and omits orgId when descriptor has no orgId", () => {
+    const record = {
+      recordId: "no-org-agent",
+      name: "legacy-agent",
+      description: "A legacy agent",
+      status: "APPROVED",
+      customDescriptorContent: JSON.stringify({
+        categories: ["worker"],
+        icon: "",
+        state: "APPROVED",
+        // orgId deliberately absent
+      }),
+      createdAt: new Date("2026-09-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-10-23T00:00:00.000Z"),
+    };
+
+    const row = buildAgentProjectionRow(record as unknown as RegistryRecord);
+
+    expect(row.orgUnknown).toBe(true);
+    expect(row.orgId).toBeUndefined();
+    expect(row.citadelKind).toBe("agent");
+  });
+
+  test("does NOT set orgUnknown when orgId is explicit empty string (system)", () => {
+    const record = {
+      recordId: "system-agent",
+      name: "seeded-agent",
+      description: "System agent",
+      status: "APPROVED",
+      customDescriptorContent: JSON.stringify({
+        categories: ["built-in"],
+        icon: "",
+        state: "APPROVED",
+        orgId: "",
+      }),
+      createdAt: new Date("2026-09-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-10-23T00:00:00.000Z"),
+    };
+
+    const row = buildAgentProjectionRow(record as unknown as RegistryRecord);
+
+    expect(row.orgUnknown).toBeUndefined();
+    expect(row.orgId).toBe("");
+  });
+
+  test("does NOT set orgUnknown when orgId is a real org", () => {
+    const record = {
+      recordId: "org-agent",
+      name: "tenant-agent",
+      description: "Tenant agent",
+      status: "APPROVED",
+      customDescriptorContent: JSON.stringify({
+        categories: ["worker"],
+        icon: "",
+        state: "APPROVED",
+        orgId: "Default",
+      }),
+      createdAt: new Date("2026-09-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-10-23T00:00:00.000Z"),
+    };
+
+    const row = buildAgentProjectionRow(record as unknown as RegistryRecord);
+
+    expect(row.orgUnknown).toBeUndefined();
+    expect(row.orgId).toBe("Default");
+  });
+});
+
+describe("buildToolProjectionRow — orgUnknown", () => {
+  test("sets orgUnknown: true when descriptor has no orgId", () => {
+    const record = {
+      recordId: "no-org-tool",
+      name: "legacy-tool",
+      description: "A legacy tool",
+      status: "APPROVED",
+      customDescriptorContent: JSON.stringify({
+        categories: ["utility"],
+        icon: "",
+        state: "active",
+        // orgId deliberately absent
+      }),
+      createdAt: new Date("2026-09-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-10-23T00:00:00.000Z"),
+    };
+
+    const row = buildToolProjectionRow(record as unknown as RegistryRecord);
+
+    expect(row.orgUnknown).toBe(true);
+    expect(row.orgId).toBeUndefined();
+  });
+
+  test("does NOT set orgUnknown when orgId is explicit empty string", () => {
+    const record = {
+      recordId: "system-tool",
+      name: "seeded-tool",
+      description: "System tool",
+      status: "APPROVED",
+      customDescriptorContent: JSON.stringify({
+        categories: ["built-in"],
+        icon: "",
+        state: "active",
+        orgId: "",
+      }),
+      createdAt: new Date("2026-09-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-10-23T00:00:00.000Z"),
+    };
+
+    const row = buildToolProjectionRow(record as unknown as RegistryRecord);
+
+    expect(row.orgUnknown).toBeUndefined();
+    expect(row.orgId).toBe("");
+  });
+});

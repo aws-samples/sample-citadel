@@ -38,6 +38,12 @@ FABRICATOR_QUEUE_URL = os.getenv("FABRICATOR_QUEUE_URL", "")
 # store_agent_config_registry), NOT to a DynamoDB table — so the intake
 # catalog reads the registry. REGISTRY_ID identifies the registry to list.
 REGISTRY_ID = os.getenv("REGISTRY_ID", "")
+# Agents cache table (citadel-agents-${env}), written by registry-sync +
+# backfill. Carries orgId, citadelKind, registryStatus, name, description
+# per record — used as the PRIMARY org-determination source for
+# _get_existing_agents (ListRegistryRecords summaries omit descriptors so
+# orgId is not derivable from summaries alone).
+AGENT_CONFIG_TABLE = os.getenv("AGENT_CONFIG_TABLE", "")
 # Durable per-agent fabrication status table (citadel-fabrication-jobs-${env}).
 # When unset the PENDING status write is skipped so this stays backward-
 # compatible in environments that haven't wired the table yet.
@@ -347,6 +353,130 @@ def _extract_org_from_summary(summary: dict) -> str | None:
     return None
 
 
+# Maximum number of sequential GetRegistryRecord detail reads when the
+# projection table is empty (fallback path C). Bounded to prevent fan-out
+# against large registries.
+_DETAIL_READ_CAP = 60
+_DETAIL_READ_DELAY_BASE_S = 0.25
+
+
+def _get_agents_from_projection(session_org: str) -> dict[str, dict] | None:
+    """Read the agents cache table (AGENT_CONFIG_TABLE) for org-scoped agents.
+
+    Returns a dict keyed by agent name (same shape as _get_existing_agents),
+    or ``None`` when the projection table is unavailable/empty — signalling
+    the caller to fall through to the detail-read path.
+
+    Filters: citadelKind == "agent", orgId in {session_org, ""} (own org +
+    system), registryStatus in {APPROVED, PENDING_APPROVAL} matching the
+    active/draft lifecycle that plan_fabrication consumes.
+    """
+    if not AGENT_CONFIG_TABLE:
+        return None
+    try:
+        table = dynamodb.Table(AGENT_CONFIG_TABLE)
+        items: list[dict] = []
+        scan_kwargs: dict = {}
+        while True:
+            resp = table.scan(**scan_kwargs)
+            items.extend(resp.get("Items", []))
+            if not resp.get("LastEvaluatedKey"):
+                break
+            scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    except Exception as e:  # noqa: BLE001 — projection is optional; fall through
+        logger.warning("agents projection scan failed: %s", e)
+        return None
+
+    if not items:
+        return None
+
+    agents: dict[str, dict] = {}
+    for item in items:
+        # Filter: agents only (exclude tool projection rows).
+        if item.get("citadelKind") != "agent":
+            continue
+        # orgUnknown rows: org was never set (pre-tagging legacy) — fail closed.
+        if item.get("orgUnknown"):
+            logger.warning(
+                "OrgUnknownRecord: excluding agent %s from projection (orgId absent/unknown)",
+                item.get("agentId") or item.get("name") or "<unknown>",
+            )
+            continue
+        # Org-scope: own org or system (orgId "").
+        item_org = item.get("orgId")
+        if item_org is None:
+            logger.warning(
+                "OrgUnknownRecord: excluding agent %s from projection (orgId attribute absent)",
+                item.get("agentId") or item.get("name") or "<unknown>",
+            )
+            continue
+        if item_org != "" and item_org != session_org:
+            continue
+        # Status filter: only active lifecycle statuses.
+        reg_status = (item.get("registryStatus") or "").upper()
+        if reg_status not in ("APPROVED", "PENDING_APPROVAL"):
+            continue
+        name = item.get("name") or ""
+        record_id = item.get("agentId") or item.get("registryRecordId") or ""
+        if not name or not record_id:
+            continue
+        agents[name] = {
+            "name": name,
+            "state": _registry_state_from_status(reg_status),
+            "recordId": record_id,
+            "description": item.get("description") or "",
+        }
+    return agents
+
+
+def _bounded_detail_reads(
+    summaries: list[dict], session_org: str,
+) -> dict[str, dict]:
+    """Fallback path (C): sequential GetRegistryRecord calls to determine org.
+
+    Capped at ``_DETAIL_READ_CAP`` records with backoff. Records whose org
+    cannot be determined are excluded (fail-closed).
+    """
+    client = _get_registry_client()
+    agents: dict[str, dict] = {}
+    reads = 0
+    for summary in summaries:
+        if reads >= _DETAIL_READ_CAP:
+            logger.warning(
+                "detail-read cap (%d) reached; %d summaries unresolved",
+                _DETAIL_READ_CAP, len(summaries) - reads,
+            )
+            break
+        name = summary.get("name")
+        record_id = summary.get("recordId")
+        if not name or not record_id:
+            continue
+        try:
+            detail = client.get_registry_record(
+                registryId=REGISTRY_ID, recordId=record_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("detail read failed for %s: %s", record_id, e)
+            reads += 1
+            time.sleep(_DETAIL_READ_DELAY_BASE_S * (1 + reads * 0.1))
+            continue
+        reads += 1
+        # Extract org from the detail record's descriptors.
+        record_data = detail if isinstance(detail, dict) else {}
+        record_org = _extract_org_from_summary(record_data)
+        if record_org is None or (record_org != "" and record_org != session_org):
+            continue
+        agents[name] = {
+            "name": name,
+            "state": _registry_state_from_status(summary.get("status", "")),
+            "recordId": record_id,
+            "description": summary.get("description") or "",
+        }
+        if reads < _DETAIL_READ_CAP:
+            time.sleep(_DETAIL_READ_DELAY_BASE_S)
+    return agents
+
+
 def _get_existing_agents() -> dict[str, dict]:
     """Return factory records from the AgentCore Registry, keyed by record name.
 
@@ -362,32 +492,21 @@ def _get_existing_agents() -> dict[str, dict]:
     the function fails closed (returns ``{}``) instead of exposing the full
     unscoped registry.
 
-    **Live-verified (2026-10-24):** ListRegistryRecords summaries do NOT
-    include ``descriptors`` — they carry only id/name/status/description/
-    timestamps.  Since orgId lives inside descriptors.custom.data, it is
-    NOT derivable from summaries.  Records whose org is undeterminable
-    (descriptors absent) are EXCLUDED — never treated as system.  This
-    means the summary-only path currently returns an empty dict (no records
-    pass the filter) until the API starts returning descriptors on summaries
-    or we add per-record detail fetches.  This is the CORRECT fail-closed
-    behaviour: exposing zero agents is safe; exposing other tenants' agents
-    is not.
+    **Org-source strategy (2026-10-26):** ListRegistryRecords summaries do
+    NOT include ``descriptors`` — orgId is not derivable from summaries.
+    Three-tier resolution:
 
-    Built from LIST-PAGE SUMMARIES ONLY — no per-record GetRegistryRecord
-    calls. The previous implementation issued one GET per record to read the
-    CUSTOM descriptor inlineContent (the agent/tool ``manifest`` discriminator
-    plus ``sourceProjectId``); at 340 live records that sequential N+1 (each
-    GET carrying SDK retries) blew the 30s tool budget. Every consumer
-    (plan_fabrication reuse-matching, list_factory_agents, postfab
-    _compose_steps, plan_doc) reads only name/state/recordId/description —
-    all present on summaries — and nothing consumed sourceProjectId, so the
-    GETs bought nothing the common path needs.
+    (A) **Projection table** (cheapest, preferred): scan AGENT_CONFIG_TABLE
+        (citadel-agents-${env}) — the agents cache written by registry-sync
+        + backfill. Rows carry orgId, citadelKind, registryStatus, name,
+        description. A single DynamoDB Scan with client-side filtering.
+    (B) **Projection empty/unavailable**: fall through to path (C).
+    (C) **Bounded detail reads**: sequential GetRegistryRecord calls (capped
+        at 60, 250ms backoff) to resolve org from descriptors.custom.data.
+        Never the uncapped fan-out.
 
-    Documented tradeoff: without inlineContent the agent/tool discriminator
-    is invisible, so tool records sharing the registry are no longer filtered
-    out. Consumers match exact designed-agent names, so this surfaces only as
-    extra rows in the human-facing catalog — accepted in exchange for
-    removing the live timeout.
+    Records whose org cannot be determined after all tiers are excluded
+    (fail-closed). System records (orgId ``""``) are visible to every tenant.
 
     Each value is::
 
@@ -416,55 +535,66 @@ def _get_existing_agents() -> dict[str, dict]:
         logger.warning("session has no org_id; returning empty to avoid cross-tenant leak")
         return {}
 
+    # --- Path (A): projection table ---
+    projection = _get_agents_from_projection(session_org)
+    if projection is not None:
+        return projection
+
+    # --- Paths (B)/(C): list summaries, then bounded detail reads ---
     try:
         client = _get_registry_client()
     except Exception as e:  # noqa: BLE001 — client build must not raise
         logger.warning("Failed to build registry client: %s", e)
         return {}
 
-    agents: dict[str, dict] = {}
+    all_summaries: list[dict] = []
     next_token = None
     try:
         while True:
-            kwargs = {"registryId": REGISTRY_ID, "descriptorType": "CUSTOM"}
+            kwargs: dict = {"registryId": REGISTRY_ID, "descriptorType": "CUSTOM"}
             if next_token:
                 kwargs["nextToken"] = next_token
             response = client.list_registry_records(**kwargs)
             if not isinstance(response, dict):
                 break
-            # Real API shape: summaries under "registryRecords" (matches the
-            # backend's registry-service.ts). Tolerate the legacy "records"
-            # key as a fallback for older/local stubs.
             summaries = response.get("registryRecords")
             if summaries is None:
                 summaries = response.get("records", [])
             for summary in summaries:
-                if not isinstance(summary, dict):
-                    continue
-                name = summary.get("name")
-                record_id = summary.get("recordId")
-                if not name or not record_id:
-                    continue
-                # C23 org-scope filter: keep own-org + system (orgId "")
-                # records; drop everything else.  When org is None the
-                # summary lacked descriptors entirely — exclude rather
-                # than assuming system (live-verified: summaries omit
-                # descriptors).
-                record_org = _extract_org_from_summary(summary)
-                if record_org is None or (record_org != "" and record_org != session_org):
-                    continue
-                agents[name] = {
-                    "name": name,
-                    "state": _registry_state_from_status(summary.get("status", "")),
-                    "recordId": record_id,
-                    "description": summary.get("description") or "",
-                }
+                if isinstance(summary, dict) and summary.get("name") and summary.get("recordId"):
+                    all_summaries.append(summary)
             next_token = response.get("nextToken")
             if not isinstance(next_token, str) or not next_token:
                 break
     except Exception as e:  # noqa: BLE001 — degrade gracefully, never raise
         logger.warning("Failed to list factory agents from registry: %s", e)
         return {}
+
+    if not all_summaries:
+        return {}
+
+    # First pass: check if any summaries carry descriptors (future API).
+    agents: dict[str, dict] = {}
+    unresolved: list[dict] = []
+    for summary in all_summaries:
+        record_org = _extract_org_from_summary(summary)
+        if record_org is None:
+            unresolved.append(summary)
+            continue
+        if record_org != "" and record_org != session_org:
+            continue
+        name = summary["name"]
+        agents[name] = {
+            "name": name,
+            "state": _registry_state_from_status(summary.get("status", "")),
+            "recordId": summary["recordId"],
+            "description": summary.get("description") or "",
+        }
+
+    # Path (C): bounded detail reads for unresolved summaries.
+    if unresolved:
+        detail_agents = _bounded_detail_reads(unresolved, session_org)
+        agents.update(detail_agents)
 
     return agents
 

@@ -121,11 +121,12 @@ function buildProjectionItem(
 
   if (kind === "agent") {
     const mapped = registryService.mapToAgentConfig(record);
-    return {
+    const sourceOrgId = mapped.orgId;
+    const orgUnknown = sourceOrgId === undefined || sourceOrgId === null;
+    const item: Record<string, unknown> = {
       agentId: record.recordId,
       name: mapped.name,
       description: mapped.description,
-      orgId: mapped.orgId ?? "",
       config: mapped.config,
       state: mapped.state,
       categories: mapped.categories || [],
@@ -147,6 +148,14 @@ function buildProjectionItem(
       decidedAt: meta.decidedAt,
       statusReason: meta.statusReason,
     };
+    if (orgUnknown) {
+      // Leave orgId absent (do NOT coerce to '') — mark as unknown so
+      // readers can fail-closed.
+      item.orgUnknown = true;
+    } else {
+      item.orgId = sourceOrgId;
+    }
+    return item;
   }
 
   // tool — use the shared buildFullToolConfig to produce the same full
@@ -157,7 +166,9 @@ function buildProjectionItem(
     record.description,
     record.name,
   );
-  return {
+  const toolOrgId = meta.orgId as string | undefined;
+  const toolOrgUnknown = toolOrgId === undefined;
+  const toolItem: Record<string, unknown> = {
     toolId: record.recordId,
     config: fullConfig,
     description: record.description ?? "",
@@ -174,13 +185,18 @@ function buildProjectionItem(
     citadelKind: "tool",
     projectionVersion: PROJECTION_VERSION,
     projectedAt: now,
-    orgId: meta.orgId,
     createdBy: meta.createdBy,
     registryStatus: record.status,
     decidedBy: meta.decidedBy,
     decidedAt: meta.decidedAt,
     statusReason: meta.statusReason,
   };
+  if (toolOrgUnknown) {
+    toolItem.orgUnknown = true;
+  } else {
+    toolItem.orgId = toolOrgId;
+  }
+  return toolItem;
 }
 
 // ---------------------------------------------------------------------------

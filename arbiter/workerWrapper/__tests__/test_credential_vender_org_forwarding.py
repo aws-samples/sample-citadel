@@ -32,7 +32,8 @@ def _base_agent_config():
             "filename": "agent.zip",
             "description": "test agent",
             "requiredPermissions": {"dataStores": ["ds-1"]},
-        })
+        }),
+        "orgId": "org-abc",
     }
 
 
