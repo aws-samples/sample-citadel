@@ -43,8 +43,28 @@ AWS_REGION = os.environ.get("AWS_REGION", "ap-southeast-2")
 FABRICATION_JOBS_TABLE = os.environ.get("FABRICATION_JOBS_TABLE", "")
 PROJECTS_TABLE = os.environ.get("PROJECTS_TABLE", "")
 CONVERSATIONS_TABLE = os.environ.get("CONVERSATIONS_TABLE", "")
+REGISTRY_ID = os.environ.get("REGISTRY_ID", "")
 
 dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
+
+# Lazy registry client — built on first use so module import stays cheap.
+_registry_client = None
+
+
+def _get_registry_client():
+    """Lazy boto3 client for bedrock-agentcore-control Registry APIs."""
+    global _registry_client
+    if _registry_client is None:
+        _registry_client = boto3.client(
+            "bedrock-agentcore-control", region_name=AWS_REGION,
+        )
+    return _registry_client
+
+
+def _reset_registry_client_for_test() -> None:
+    """Test-only hook — forces the next call to rebuild the cached client."""
+    global _registry_client
+    _registry_client = None
 
 # Plain-language translations for fabrication job statuses — raw enums must
 # never reach the conversation.
@@ -61,20 +81,113 @@ _TERMINAL = ("COMPLETED", "FAILED")
 # AgentCore Registry's SubmitRegistryRecordForApproval returns
 # PENDING_APPROVAL (manual-review mode). Absent or any other value means
 # the record was auto-approved.
+#
+# LIVE STATUS RESOLUTION (fix/intake-build-status-from-registry):
+# The job row's registryApprovalStatus is a WRITE-ONCE snapshot taken at
+# fabrication time. After a human approves (or rejects) the record on the
+# Approvals page, the snapshot is stale. For COMPLETED jobs we now resolve
+# the agent's registry record by name and derive state from the LIVE status.
+# The job row value is only used as a fallback when the registry is
+# unreachable or REGISTRY_ID is unset.
 _APPROVAL_PLAIN = {
     "pending_approval": "built, awaiting approval on the Approvals page",
     "approved": "built and approved",
 }
 
-def _plain_state(item: dict) -> str:
-    """Human-readable state for a single job row, approval-aware.
+# Registry status -> human-readable state for COMPLETED jobs.
+_REGISTRY_STATUS_PLAIN: dict[str, str] = {
+    "DRAFT": "built, not yet submitted for approval",
+    "PENDING_APPROVAL": "awaiting approval on the Approvals page",
+    "APPROVED": "built and approved",
+    "REJECTED": "built, but the approval was rejected",
+    "DEPRECATED": "built, but has been deprecated",
+}
 
-    COMPLETED rows with ``registryApprovalStatus='pending_approval'`` read as
-    'built, awaiting approval on the Approvals page'; COMPLETED without that
-    flag (auto-approved or flag absent) read as 'built and approved'.
+# Max number of COMPLETED agents to resolve via registry reads per
+# check_fabrication_status call — keeps latency bounded.
+_MAX_REGISTRY_LOOKUPS = 5
+
+
+def _resolve_registry_status(agent_name: str, org_id: str) -> str | None:
+    """Look up the LIVE registry status for a single agent by name.
+
+    Returns the raw registry status string (e.g. 'APPROVED',
+    'PENDING_APPROVAL', 'DRAFT') or None when the record cannot be found
+    or the lookup fails. Sequential and bounded — called at most
+    _MAX_REGISTRY_LOOKUPS times per status check.
+    """
+    if not REGISTRY_ID or not agent_name:
+        return None
+    try:
+        client = _get_registry_client()
+        response = client.list_registry_records(
+            registryId=REGISTRY_ID,
+            name=agent_name,
+            maxResults=10,
+        )
+        if not isinstance(response, dict):
+            return None
+        for summary in response.get("registryRecords", []):
+            if not isinstance(summary, dict):
+                continue
+            if summary.get("name") == agent_name:
+                return summary.get("status")
+        return None
+    except Exception as e:
+        logger.warning(
+            "registry status lookup failed agent=%s: %s",
+            agent_name, type(e).__name__,
+        )
+        return None
+
+
+def _resolve_live_statuses(
+    items: list[dict],
+) -> dict[str, str | None]:
+    """Resolve live registry statuses for COMPLETED job rows.
+
+    Returns a dict mapping agentName -> registry status string (or None
+    on miss). Only the first _MAX_REGISTRY_LOOKUPS COMPLETED agents are
+    resolved; the rest get None (fall back to job row snapshot).
+    Reads are sequential to stay within SDK rate limits.
+    """
+    result: dict[str, str | None] = {}
+    # Derive org_id from the current session for org-scoped lookups.
+    org_id = ""
+    try:
+        org_id = request_context.current_session().org_id
+    except (RuntimeError, AttributeError):
+        pass
+    lookups = 0
+    for item in items:
+        name = item.get("agentName") or item.get("agentUseId")
+        if not name:
+            continue
+        if item.get("status") != "COMPLETED":
+            continue
+        if lookups >= _MAX_REGISTRY_LOOKUPS:
+            result[name] = None
+            continue
+        lookups += 1
+        result[name] = _resolve_registry_status(name, org_id)
+    return result
+
+
+def _plain_state(item: dict, live_status: str | None = None) -> str:
+    """Human-readable state for a single job row, live-registry-aware.
+
+    When ``live_status`` is provided (from a registry lookup), it takes
+    precedence over the job row's write-once ``registryApprovalStatus``.
+    Falls back to the snapshot when the registry is unreachable.
     """
     status = item.get("status")
     if status == "COMPLETED":
+        if live_status is not None:
+            return _REGISTRY_STATUS_PLAIN.get(
+                live_status,
+                f"built (registry status: {live_status.lower()})",
+            )
+        # Fallback to job row snapshot.
         approval = item.get("registryApprovalStatus")
         if approval == "pending_approval":
             return _APPROVAL_PLAIN["pending_approval"]
@@ -82,10 +195,28 @@ def _plain_state(item: dict) -> str:
     return _STATUS_PLAIN.get(status, "in an unknown state")
 
 
-def _is_pending_approval(item: dict) -> bool:
-    """True when a COMPLETED job still needs registry approval."""
-    return (item.get("status") == "COMPLETED"
-            and item.get("registryApprovalStatus") == "pending_approval")
+def _is_pending_approval(
+    item: dict, live_status: str | None = None,
+) -> bool:
+    """True when a COMPLETED job still needs registry approval.
+
+    Checks the LIVE registry status first; falls back to the job row
+    snapshot when the registry is unreachable.
+    """
+    if item.get("status") != "COMPLETED":
+        return False
+    if live_status is not None:
+        return live_status == "PENDING_APPROVAL"
+    return item.get("registryApprovalStatus") == "pending_approval"
+
+
+def _is_draft(item: dict, live_status: str | None = None) -> bool:
+    """True when a COMPLETED job's registry record is still in DRAFT."""
+    if item.get("status") != "COMPLETED":
+        return False
+    if live_status is not None:
+        return live_status == "DRAFT"
+    return False
 
 
 _STAGE_ORDER = [
@@ -443,9 +574,21 @@ def check_fabrication_status() -> str:
     def _name(i: dict) -> str:
         return i.get("agentName") or i.get("agentUseId")
 
+    # Resolve LIVE registry statuses for COMPLETED agents (bounded, sequential).
+    live_statuses = _resolve_live_statuses(items)
+
+    def _live(i: dict) -> str | None:
+        """Live registry status for this item, or None if not resolved."""
+        return live_statuses.get(_name(i))
+
     succeeded = [_name(i) for i in items if i.get("status") == "COMPLETED"]
     failed = [_name(i) for i in items if i.get("status") == "FAILED"]
-    pending_approval = [_name(i) for i in items if _is_pending_approval(i)]
+    pending_approval = [
+        _name(i) for i in items if _is_pending_approval(i, _live(i))
+    ]
+    draft_agents = [
+        _name(i) for i in items if _is_draft(i, _live(i))
+    ]
     # Non-terminal rows split by updatedAt age: a stale row is orphaned — its
     # writer can never re-stamp it (see STALE_ACTIVE_SECONDS in
     # tools/fabricate.py for the derivation) — so it gates like a failure
@@ -461,7 +604,7 @@ def check_fabrication_status() -> str:
         {"name": _name(i),
          "state": "stalled"
          if i.get("status") not in _TERMINAL and _name(i) in stale_set
-         else _plain_state(i)}
+         else _plain_state(i, _live(i))}
         for i in items
     ]
     counts = {
@@ -495,6 +638,7 @@ def check_fabrication_status() -> str:
         "building": building, "stalled": stale, "all_terminal": all_terminal,
         "all_succeeded": all_succeeded, "any_failed": any_failed,
         "pending_approval": pending_approval,
+        "draft_agents": draft_agents,
     }
 
     if status == "none":
@@ -549,6 +693,27 @@ def check_fabrication_status() -> str:
             )
 
     if status == "complete":
+        if draft_agents:
+            # DRAFT = never submitted for approval. The intake tools do not
+            # have a submit-for-approval action today — the user must submit
+            # from the registry UI or an operator must approve directly.
+            draft_summary = (
+                f"All {total} agents built successfully. "
+                f"{_join_names(draft_agents)} "
+                + ("has" if len(draft_agents) == 1 else "have")
+                + " not been submitted for approval yet — you can submit "
+                + ("it" if len(draft_agents) == 1 else "them")
+                + " from the agent registry."
+            )
+            return _result(
+                True, "complete",
+                draft_summary,
+                "Submit the agents for approval in the registry, then come "
+                "back and check status again.",
+                [_action("Check again", "Check the build status again"),
+                 _action("Not now", "Not now")],
+                **extra,
+            )
         if pending_approval:
             pa_summary = (
                 f"All {total} agents built successfully. "
@@ -585,19 +750,26 @@ def check_fabrication_status() -> str:
             )
         if stale:
             bits.append(_stalled_sentence(stale))
+        if draft_agents:
+            bits.append(
+                f"{_join_names(draft_agents)} "
+                + ("has" if len(draft_agents) == 1 else "have")
+                + " not been submitted for approval yet."
+            )
         if pending_approval:
             bits.append(
                 f"{_join_names(pending_approval)} "
                 + ("is" if len(pending_approval) == 1 else "are")
                 + " awaiting approval on the Approvals page."
             )
-        # Activatable = completed agents that are NOT pending approval.
-        activatable = [n for n in succeeded if n not in pending_approval]
-        if pending_approval and not activatable:
-            # All completed agents are pending — can't activate yet.
+        # Activatable = completed agents that are NOT pending approval and NOT draft.
+        not_activatable = set(pending_approval) | set(draft_agents)
+        activatable = [n for n in succeeded if n not in not_activatable]
+        if not_activatable and not activatable:
+            # All completed agents are pending/draft — can't activate yet.
             actions = [_action("Check again", "Check the build status again")]
         else:
-            activate_count = len(activatable) if pending_approval else len(succeeded)
+            activate_count = len(activatable) if not_activatable else len(succeeded)
             actions = [_action(f"Activate {activate_count} agents",
                                "Yes, activate the agents that are ready")]
         retryable = failed + stale
@@ -607,11 +779,11 @@ def check_fabrication_status() -> str:
             actions.append(_action(f"Look at {_join_names(failed[:1])} first",
                                    "Let's look at the failed agent first"))
         actions.append(_action("Not now", "Not now"))
-        activate_count = len(activatable) if pending_approval else len(succeeded)
+        activate_count = len(activatable) if not_activatable else len(succeeded)
         consent_q = (
             "Once approved, I can activate them. Check the Approvals page, "
             "then come back and check status again."
-            if pending_approval and not activatable
+            if not_activatable and not activatable
             else f"Want me to activate the {activate_count} that are ready?"
         )
         return _result(
@@ -676,9 +848,17 @@ def activate_agents() -> str:
                 if not resp.get("LastEvaluatedKey"):
                     break
                 kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+            # Resolve live registry statuses for the gate check (bounded).
+            gate_live = _resolve_live_statuses(pa_items)
             pa_names = [
                 i.get("agentName") or i.get("agentUseId")
-                for i in pa_items if _is_pending_approval(i)
+                for i in pa_items
+                if _is_pending_approval(
+                    i,
+                    gate_live.get(
+                        i.get("agentName") or i.get("agentUseId"),
+                    ),
+                )
             ]
             if pa_names:
                 return _result(
