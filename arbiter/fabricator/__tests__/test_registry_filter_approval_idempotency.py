@@ -54,10 +54,16 @@ def _reset_cached_client():
 # ---- helpers ---------------------------------------------------------------
 
 def _stubbed_client():
-    """Create a real botocore client with Stubber for shape validation."""
+    """Create a real botocore client with Stubber for shape validation.
+
+    Uses ``agent-registry-control`` — the same service the runtime code
+    constructs via ``boto3.client('agent-registry-control')``.  An earlier
+    version mistakenly used ``bedrock-agentcore-control`` which is a
+    different service model with different ListRegistryRecords params.
+    """
     session = botocore.session.get_session()
     client = session.create_client(
-        "bedrock-agentcore-control", region_name="us-west-2"
+        "agent-registry-control", region_name="us-west-2"
     )
     stubber = Stubber(client)
     return client, stubber
@@ -95,9 +101,9 @@ def _make_mock(
 class TestFilterShapeValidation:
     """Botocore Stubber validates kwargs against the real service model.
 
-    The old code passed a 'filters' kwarg that doesn't exist on
-    ListRegistryRecords — Stubber would reject it with ParamValidationError.
-    The fix uses the 'name' query-string parameter instead.
+    The old code passed 'name' as a top-level kwarg; the fix uses
+    'filters' with {name, values} entries per the agent-registry-control
+    service model.
     """
 
     def test_find_existing_record_id_uses_valid_api_shape(self):
@@ -112,7 +118,8 @@ class TestFilterShapeValidation:
                         "recordArn": "arn:aws:bedrock-agentcore:us-west-2:123:registry/r/record/found-id-1234",
                         "recordId": "found-id-1234",
                         "name": "my-agent",
-                        "descriptorType": "CUSTOM",
+                        "displayName": "my-agent",
+                        "recordType": "CUSTOM",
                         "recordVersion": "1",
                         "status": "APPROVED",
                         "createdAt": "2026-01-01T00:00:00Z",
@@ -122,7 +129,11 @@ class TestFilterShapeValidation:
             },
             expected_params={
                 "registryId": REGISTRY_ID,
-                "name": "my-agent",
+                "filters": [
+                    {"name": "recordType", "values": ["CUSTOM"]},
+                    {"name": "name", "values": ["my-agent"]},
+                ],
+                "maxResults": 100,
             },
         )
         with stubber:
@@ -140,7 +151,11 @@ class TestFilterShapeValidation:
             {"registryRecords": []},
             expected_params={
                 "registryId": REGISTRY_ID,
-                "name": "missing-agent",
+                "filters": [
+                    {"name": "recordType", "values": ["CUSTOM"]},
+                    {"name": "name", "values": ["missing-agent"]},
+                ],
+                "maxResults": 100,
             },
         )
         with stubber:
@@ -164,11 +179,11 @@ class TestFilterShapeValidation:
         assert result == "via-name-field"
 
     def test_old_filters_kwarg_rejected_by_botocore_validator(self):
-        """Prove the old 'filters' kwarg is invalid — botocore rejects it."""
+        """Prove the old {key, values} filter entries are invalid — botocore rejects them."""
         from botocore.validate import ParamValidator
         session = botocore.session.get_session()
         client = session.create_client(
-            "bedrock-agentcore-control", region_name="us-west-2"
+            "agent-registry-control", region_name="us-west-2"
         )
         model = client.meta.service_model.operation_model("ListRegistryRecords")
         validator = ParamValidator()
@@ -180,7 +195,7 @@ class TestFilterShapeValidation:
             model.input_shape,
         )
         assert report.has_errors(), (
-            "The old 'filters' kwarg should be rejected by the service model"
+            "The old {key, values} filter entries should be rejected by the service model"
         )
 
 

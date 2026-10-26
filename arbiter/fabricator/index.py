@@ -169,7 +169,11 @@ def _find_existing_record_id(
     while True:
         kwargs: dict[str, Any] = {
             "registryId": registry_id,
-            "name": agent_id,
+            "filters": [
+                {"name": "recordType", "values": ["CUSTOM"]},
+                {"name": "name", "values": [agent_id]},
+            ],
+            "maxResults": 100,
         }
         if next_token:
             kwargs["nextToken"] = next_token
