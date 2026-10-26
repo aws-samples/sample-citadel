@@ -210,6 +210,8 @@ class TestApprovalPendingApproval:
     def test_pending_approval_does_not_raise(self):
         """PENDING_APPROVAL from submit should succeed, not raise."""
         client = _make_mock(approval_status="PENDING_APPROVAL")
+        # _approve pre-reads status: DRAFT → submit → PENDING_APPROVAL.
+        client.get_registry_record.return_value = {"status": "DRAFT"}
         with patch("index._get_registry_client", return_value=client):
             result = store_tool_config_registry(
                 file_name="/tmp/tool.py",
@@ -218,9 +220,8 @@ class TestApprovalPendingApproval:
                 tool_description="A tool",
             )
         assert result is True
-        # Should NOT call get_registry_record as a fallback — the response
-        # status was recognized directly.
-        client.get_registry_record.assert_not_called()
+        # get_registry_record IS called once for the _approve status pre-read.
+        assert client.get_registry_record.call_count == 1
 
     def test_approved_still_works(self):
         """APPROVED (auto-approval) continues to work as before."""
@@ -268,8 +269,8 @@ class TestApprovalPendingApproval:
             index._registration_run_state = None
 
     def test_confirmed_pending_approval_via_get_registry_record(self):
-        """When submit returns an unrecognized status but get_registry_record
-        shows PENDING_APPROVAL, it should succeed."""
+        """When get_registry_record pre-read shows PENDING_APPROVAL, the
+        tool returns True immediately without calling submit."""
         client = _make_mock(approval_status="SOME_NEW_STATUS")
         client.get_registry_record.return_value = {"status": "PENDING_APPROVAL"}
         with patch("index._get_registry_client", return_value=client):

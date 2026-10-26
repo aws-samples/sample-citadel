@@ -123,6 +123,8 @@ class TestCreatingConflictRecoveryWiring:
         # status=APPROVED synchronously.
         client = MagicMock()
         client.create_registry_record.return_value = _arn("rec-1")
+        # _approve reads status first: DRAFT → submit.
+        client.get_registry_record.return_value = {"status": "DRAFT"}
         client.submit_registry_record_for_approval.return_value = {
             "recordId": "rec-1",
             "status": "APPROVED",
@@ -137,7 +139,9 @@ class TestCreatingConflictRecoveryWiring:
         assert len(calls) == 1
         assert calls[0].kwargs["registryId"] == os.environ["REGISTRY_ID"]
         assert calls[0].kwargs["recordId"] == "rec-1"
-        client.get_registry_record.assert_not_called()
+        # _approve now reads status before submitting, so get_registry_record
+        # IS called once (the status pre-read).
+        assert client.get_registry_record.call_count == 1
         pub.assert_not_called()
 
     def test_approve_falls_back_to_get_when_submit_response_not_approved(
@@ -151,17 +155,17 @@ class TestCreatingConflictRecoveryWiring:
         client.submit_registry_record_for_approval.return_value = {
             "recordId": "rec-1",
         }
-        client.get_registry_record.return_value = {
-            "recordId": "rec-1", "status": "APPROVED",
-        }
+        client.get_registry_record.side_effect = [
+            {"status": "DRAFT"},                       # _approve pre-read
+            {"recordId": "rec-1", "status": "APPROVED"},  # fallback confirm
+        ]
 
         with patch.object(index, "_get_registry_client", return_value=client), \
                 patch.object(index, "publish_fabrication_event") as pub:
             assert _call_store_tool() is True
 
-        client.get_registry_record.assert_called_once_with(
-            registryId=os.environ["REGISTRY_ID"], recordId="rec-1",
-        )
+        # get_registry_record called twice: pre-read + fallback confirm.
+        assert client.get_registry_record.call_count == 2
         pub.assert_not_called()
 
     def test_pending_approval_treated_as_successful_submission(
@@ -173,6 +177,8 @@ class TestCreatingConflictRecoveryWiring:
         client = MagicMock()
         client.list_registry_records.return_value = {"registryRecords": []}
         client.create_registry_record.return_value = _arn("rec-1")
+        # _approve reads status first: DRAFT → submit → PENDING_APPROVAL.
+        client.get_registry_record.return_value = {"status": "DRAFT"}
         client.submit_registry_record_for_approval.return_value = {
             "recordId": "rec-1", "status": "PENDING_APPROVAL",
         }
@@ -181,21 +187,24 @@ class TestCreatingConflictRecoveryWiring:
                 patch.object(index, "publish_fabrication_event") as pub:
             assert _call_store_tool() is True
 
-        # No fallback read needed — PENDING_APPROVAL recognized directly.
-        client.get_registry_record.assert_not_called()
+        # get_registry_record called once for the status pre-read.
+        assert client.get_registry_record.call_count == 1
         pub.assert_not_called()
 
     def test_in_flight_creating_recovers_and_returns_true(self, run_state):
         client = MagicMock()
         client.create_registry_record.return_value = _arn("rec-1")
-        # First approve attempt: submit_registry_record_for_approval hits the
-        # CREATING conflict. Recovery polls to DRAFT, then approve-in-place
-        # retries the single submit call.
+        # _approve pre-read: DRAFT → submit → CREATING conflict.
+        # Recovery polls: DRAFT → approve-in-place pre-read: DRAFT → submit → APPROVED.
+        client.get_registry_record.side_effect = [
+            {"status": "DRAFT"},   # _approve pre-read before first submit
+            {"status": "DRAFT"},   # recovery poll
+            {"status": "DRAFT"},   # _approve pre-read before second submit (approve-in-place)
+        ]
         client.submit_registry_record_for_approval.side_effect = [
             _conflict(operation="SubmitRegistryRecordForApproval"),
             {"recordId": "rec-1", "status": "APPROVED"},
         ]
-        client.get_registry_record.side_effect = [{"status": "DRAFT"}]
 
         with patch.object(index, "_get_registry_client", return_value=client), \
                 patch.object(index, "publish_fabrication_event") as pub:
@@ -221,8 +230,10 @@ class TestCreatingConflictRecoveryWiring:
             {"recordId": "rec-1", "status": "APPROVED"},
         ]
         client.get_registry_record.side_effect = [
-            {"status": "CREATING"},
-            {"status": "DRAFT"},
+            {"status": "DRAFT"},     # _approve pre-read before first submit
+            {"status": "CREATING"},  # recovery poll #1
+            {"status": "DRAFT"},     # recovery poll #2: settled
+            {"status": "DRAFT"},     # _approve pre-read before second submit (approve-in-place)
         ]
 
         with patch.object(index, "_get_registry_client", return_value=client), \
@@ -260,6 +271,8 @@ class TestCreatingConflictRecoveryWiring:
     def test_non_creating_conflict_is_not_recovered(self, run_state):
         client = MagicMock()
         client.create_registry_record.return_value = _arn("rec-1")
+        # _approve pre-read: DRAFT → submit → non-CREATING conflict.
+        client.get_registry_record.return_value = {"status": "DRAFT"}
         client.submit_registry_record_for_approval.side_effect = _conflict(
             operation="SubmitRegistryRecordForApproval",
             message="Record is being updated by another request",
@@ -270,7 +283,8 @@ class TestCreatingConflictRecoveryWiring:
             with pytest.raises(ClientError):
                 _call_store_tool()
 
-        client.get_registry_record.assert_not_called()
+        # get_registry_record called once for the _approve pre-read.
+        assert client.get_registry_record.call_count == 1
         client.delete_registry_record.assert_not_called()
 
     def test_recovery_arm_approve_in_place_uses_submit_primitive(self, run_state):
@@ -287,7 +301,11 @@ class TestCreatingConflictRecoveryWiring:
             _conflict(operation="SubmitRegistryRecordForApproval"),
             {"recordId": "rec-1", "status": "APPROVED"},
         ]
-        client.get_registry_record.side_effect = [{"status": "DRAFT"}]
+        client.get_registry_record.side_effect = [
+            {"status": "DRAFT"},   # _approve pre-read before first submit
+            {"status": "DRAFT"},   # recovery poll
+            {"status": "DRAFT"},   # _approve pre-read before second submit (approve-in-place)
+        ]
 
         with patch.object(index, "_get_registry_client", return_value=client), \
                 patch.object(index, "publish_fabrication_event") as pub:
@@ -361,6 +379,7 @@ class TestTerminalLatchAndPublishOnce:
 
             healthy = MagicMock()
             healthy.create_registry_record.return_value = _arn("rec-9")
+            healthy.get_registry_record.return_value = {"status": "DRAFT"}
             healthy.submit_registry_record_for_approval.return_value = {
                 "recordId": "rec-9", "status": "APPROVED",
             }
@@ -383,6 +402,7 @@ class TestTerminalLatchAndPublishOnce:
             index._begin_registration_run()
             healthy = MagicMock()
             healthy.create_registry_record.return_value = _arn("rec-9")
+            healthy.get_registry_record.return_value = {"status": "DRAFT"}
             healthy.submit_registry_record_for_approval.return_value = {
                 "recordId": "rec-9", "status": "APPROVED",
             }
@@ -424,12 +444,15 @@ class TestRegistrationDeadlineCheckpoints:
     def test_tool_registration_checkpoints_after_completing_registration(self):
         # Entry has room; the exit checkpoint lands inside the margin —
         # registration completes, then the guard stops further work.
+        # Clock ticks: entry checkpoint (OK) → exit checkpoint (margin hit).
         clock = iter([900_000, 10_000])
         set_fabrication_deadline(
             FabricationDeadline(lambda: next(clock, 10_000))
         )
         client = MagicMock()
         client.create_registry_record.return_value = _arn("rec-1")
+        # _approve pre-read: DRAFT → submit → APPROVED.
+        client.get_registry_record.return_value = {"status": "DRAFT"}
         client.submit_registry_record_for_approval.return_value = {
             "recordId": "rec-1", "status": "APPROVED",
         }
@@ -469,6 +492,7 @@ class TestRegistrationDeadlineCheckpoints:
     def test_no_deadline_set_keeps_registration_working(self):
         client = MagicMock()
         client.create_registry_record.return_value = _arn("rec-1")
+        client.get_registry_record.return_value = {"status": "DRAFT"}
         client.submit_registry_record_for_approval.return_value = {
             "recordId": "rec-1", "status": "APPROVED",
         }
