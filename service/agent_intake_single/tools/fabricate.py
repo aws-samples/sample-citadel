@@ -395,10 +395,21 @@ def _get_agents_from_projection(session_org: str) -> dict[str, dict] | None:
         # Filter: agents only (exclude tool projection rows).
         if item.get("citadelKind") != "agent":
             continue
+        # orgUnknown rows: org was never set (pre-tagging legacy) — fail closed.
+        if item.get("orgUnknown"):
+            logger.warning(
+                "OrgUnknownRecord: excluding agent %s from projection (orgId absent/unknown)",
+                item.get("agentId") or item.get("name") or "<unknown>",
+            )
+            continue
         # Org-scope: own org or system (orgId "").
         item_org = item.get("orgId")
         if item_org is None:
-            continue  # undeterminable — fail closed
+            logger.warning(
+                "OrgUnknownRecord: excluding agent %s from projection (orgId attribute absent)",
+                item.get("agentId") or item.get("name") or "<unknown>",
+            )
+            continue
         if item_org != "" and item_org != session_org:
             continue
         # Status filter: only active lifecycle statuses.

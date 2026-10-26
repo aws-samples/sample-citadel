@@ -560,6 +560,14 @@ export interface AgentProjectionRow extends AgentCacheRecord {
   decidedBy?: string;
   decidedAt?: string;
   statusReason?: string;
+  /**
+   * True when the source record had no orgId in its descriptor — i.e. the
+   * org is genuinely unknown (pre-tagging legacy record), NOT system-shared.
+   * Readers MUST exclude rows with orgUnknown === true (fail-closed) and
+   * emit a WARN-level OrgUnknownRecord metric. Only an explicit orgId === ''
+   * counts as system-shared.
+   */
+  orgUnknown?: boolean;
 }
 
 export interface ToolProjectionRow extends ToolCacheRecord {
@@ -583,6 +591,11 @@ export interface ToolProjectionRow extends ToolCacheRecord {
   name?: string;
   /** Plain-text description denormalized from the registry record. */
   description?: string;
+  /**
+   * True when the source record had no orgId in its descriptor — the org is
+   * genuinely unknown, NOT system-shared. Readers MUST exclude (fail-closed).
+   */
+  orgUnknown?: boolean;
 }
 
 /**
@@ -600,7 +613,16 @@ export function buildAgentProjectionRow(
     AGENT_METADATA_DEFAULTS,
   );
   const now = new Date().toISOString();
-  return {
+
+  // Distinguish MISSING orgId (pre-tagging legacy) from SYSTEM (explicit '').
+  // When the source descriptor omits orgId entirely, leave the attribute
+  // absent on the DDB item and set orgUnknown: true so readers can
+  // fail-closed. Only an explicit '' written by the seeders counts as
+  // system-shared.
+  const sourceOrgId = meta.orgId;
+  const orgUnknown = sourceOrgId === undefined;
+
+  const row: AgentProjectionRow = {
     ...base,
     // Override fields that buildAgentCacheRecord cannot set from the legacy path
     registryRecordId: record.recordId,
@@ -613,6 +635,14 @@ export function buildAgentProjectionRow(
     decidedAt: meta.decidedAt as string | undefined,
     statusReason: meta.statusReason as string | undefined,
   };
+
+  if (orgUnknown) {
+    // Leave orgId absent (do NOT coerce to '') and mark as unknown.
+    delete (row as unknown as Record<string, unknown>).orgId;
+    row.orgUnknown = true;
+  }
+
+  return row;
 }
 
 // ---------------------------------------------------------------------------
@@ -737,7 +767,11 @@ export function buildToolProjectionRow(
     record.name,
   );
 
-  return {
+  // Distinguish MISSING orgId from SYSTEM ('') — same logic as agent path.
+  const sourceOrgId = meta.orgId;
+  const orgUnknown = sourceOrgId === undefined;
+
+  const row: ToolProjectionRow = {
     ...base,
     config: fullConfig,
     description: record.description ?? "",
@@ -745,13 +779,19 @@ export function buildToolProjectionRow(
     citadelKind: "tool",
     projectionVersion: PROJECTION_VERSION,
     projectedAt: now,
-    orgId: meta.orgId,
+    orgId: orgUnknown ? undefined : meta.orgId,
     createdBy: meta.createdBy,
     registryStatus: record.status,
     decidedBy: meta.decidedBy,
     decidedAt: meta.decidedAt,
     statusReason: meta.statusReason,
   };
+
+  if (orgUnknown) {
+    row.orgUnknown = true;
+  }
+
+  return row;
 }
 
 /**
