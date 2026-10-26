@@ -1622,6 +1622,55 @@ def store_agent_config_registry(
                 f"already exists (recordId={existing_record_id}); skipping "
                 f"CreateRegistryRecord to keep fabrication idempotent"
             )
+            # Read the reused record's current status and apply the same
+            # state table used by the tool path: APPROVED/PENDING_APPROVAL
+            # are done; DRAFT needs submission; REJECTED/DEPRECATED are
+            # terminal failures; CREATING is left to the caller to handle.
+            # A reused record's content is NOT rewritten — content writes
+            # demote non-DRAFT records.
+            try:
+                existing_resp = _get_registry_client().get_registry_record(
+                    registryId=registry_id, recordId=existing_record_id,
+                )
+                existing_status = (existing_resp or {}).get("status")
+            except Exception as status_err:  # noqa: BLE001
+                logger.warning(
+                    "[store_agent_config_registry] Could not read status of "
+                    "existing record %s: %s — treating as DRAFT (legacy behavior)",
+                    existing_record_id, type(status_err).__name__,
+                )
+                existing_status = None
+
+            if existing_status in ("REJECTED", "DEPRECATED"):
+                raise RuntimeError(
+                    f"Reused agent record '{agent_id}' (recordId "
+                    f"{existing_record_id}) is in terminal status "
+                    f"{existing_status!r} and cannot be approved. "
+                    f"Create a new record or ask an operator to update it."
+                )
+
+            # Submit DRAFT records for approval so they follow the same
+            # lifecycle as freshly-created tool records.
+            if existing_status == "DRAFT":
+                try:
+                    submit_resp = _get_registry_client().submit_registry_record_for_approval(
+                        registryId=registry_id,
+                        recordId=existing_record_id,
+                    )
+                    submit_status = (submit_resp or {}).get("status")
+                    if submit_status == "PENDING_APPROVAL":
+                        print(
+                            f"[store_agent_config_registry] Record "
+                            f"{existing_record_id} entered manual review "
+                            f"(PENDING_APPROVAL)"
+                        )
+                except Exception as submit_err:  # noqa: BLE001
+                    logger.warning(
+                        "[store_agent_config_registry] Failed to submit "
+                        "existing DRAFT record %s for approval: %s",
+                        existing_record_id, type(submit_err).__name__,
+                    )
+
             _write_app_meta_row(
                 record_id=existing_record_id,
                 agent_id=agent_id,
@@ -1929,29 +1978,60 @@ def store_tool_config_registry(
         # value both the intake catalog (_registry_state_from_status) and the
         # backend (toInternalState) map to "active".
         def _approve(rid: str) -> str:
-            """Submit the record for approval and return the resulting status.
+            """Ensure the record reaches an approved or pending-approval state.
 
-            Returns 'approved' when the registry auto-approves synchronously,
-            or 'pending_approval' when the record enters manual review.
+            Reads the record's current status first so that reused records
+            that are already APPROVED or PENDING_APPROVAL are never
+            re-submitted (the registry rejects SubmitRegistryRecordForApproval
+            on non-DRAFT records with ValidationException 'Cannot submit the
+            record for approval in current status: APPROVED').
+
+            State table:
+              APPROVED          → return 'approved' immediately
+              PENDING_APPROVAL  → return 'pending_approval' immediately
+              DRAFT             → submit for approval, map the result
+              CREATING          → caller handles via the CREATING-recovery path
+              REJECTED / DEPRECATED → raise (terminal, non-recoverable)
+              other             → submit and hope (forward-compatible)
+
+            Returns 'approved' or 'pending_approval'.
             Raises on genuinely stuck CREATING or unexpected terminal states.
             """
+            client = _get_registry_client()
+
+            # Read current status before attempting submission.
+            current = client.get_registry_record(
+                registryId=registry_id, recordId=rid,
+            )
+            current_status = (current or {}).get("status")
+
+            if current_status == "APPROVED":
+                print(
+                    f"[store_tool_config_registry] Record {rid} is already "
+                    f"APPROVED — skipping submission"
+                )
+                return "approved"
+            if current_status == "PENDING_APPROVAL":
+                print(
+                    f"[store_tool_config_registry] Record {rid} is already "
+                    f"PENDING_APPROVAL — skipping submission"
+                )
+                return "pending_approval"
+            if current_status in ("REJECTED", "DEPRECATED"):
+                raise RuntimeError(
+                    f"Registry record {rid} is in terminal status "
+                    f"{current_status!r} and cannot be approved. "
+                    f"Create a new record or ask an operator to update it."
+                )
+
+            # DRAFT (or any other submittable status) → submit for approval.
             # Live-oracle-verified transition (2026-08-02 scratch-record probe
             # on bedrock-agentcore-control, us-west-2): the two-step
             # UpdateRegistryRecordStatus(DRAFT->PENDING_APPROVAL->APPROVED)
-            # sequence that used to live here is REJECTED by the live
-            # service — 'ValidationException: Invalid target status:
-            # PENDING_APPROVAL' (100% failure rate on the 2026-08-02 re-run,
-            # 6/6 tool registrations). The service self-contradicts on the
-            # direct path too (DRAFT->APPROVED raises 'Invalid status
-            # transition ... Valid transitions from DRAFT: PENDING_APPROVAL,
-            # DEPRECATED, DRAFT, UPDATING'), so UpdateRegistryRecordStatus
-            # can NEVER reach APPROVED from DRAFT by any path. The proven
-            # legal path is the dedicated SubmitRegistryRecordForApproval
-            # operation, which returns status=APPROVED SYNCHRONOUSLY in one
-            # call when auto-approval is configured. When manual review is
-            # enabled, the response returns PENDING_APPROVAL — a legitimate
-            # successful submission, not a failure.
-            client = _get_registry_client()
+            # sequence is REJECTED by the live service. The proven legal path
+            # is SubmitRegistryRecordForApproval, which returns
+            # status=APPROVED synchronously when auto-approval is configured,
+            # or PENDING_APPROVAL when manual review is enabled.
             response = client.submit_registry_record_for_approval(
                 registryId=registry_id,
                 recordId=rid,
