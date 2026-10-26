@@ -145,11 +145,13 @@ class TestStatusPendingApproval:
     def test_approved_agent_state_reads_built_and_approved(
         self, jobs_table, marker_store,
     ):
-        items = [_job("AgentA", "COMPLETED")]  # no registryApprovalStatus = auto-approved
+        items = [_job("AgentA", "COMPLETED")]  # no registryApprovalStatus = unknown
         result = _run_status(jobs_table, items, marker_store)
 
         states = {a["name"]: a["state"] for a in result["agents"]}
-        assert states["AgentA"] == "built and approved"
+        # Without an explicit registryApprovalStatus, the fallback is
+        # "could not be confirmed" — never "approved" by default.
+        assert states["AgentA"] == "built; approval status could not be confirmed"
 
     def test_mixed_approved_and_pending_partial_like(
         self, jobs_table, marker_store,

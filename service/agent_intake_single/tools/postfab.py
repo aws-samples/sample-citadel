@@ -148,9 +148,13 @@ def _resolve_registry_status(agent_name: str, org_id: str) -> str | None:
                 return summary.get("status")
         return None
     except Exception as e:
-        logger.warning(
-            "registry status lookup failed agent=%s: %s",
-            agent_name, type(e).__name__,
+        # Log at ERROR (not warning) so CloudWatch metric filters can alert
+        # on registry-client unavailability — the fallback path must never
+        # silently default to 'approved'.
+        logger.error(
+            "registry_status_lookup_failed agent=%s error_type=%s: %s "
+            "(approval status will show 'could not be confirmed')",
+            agent_name, type(e).__name__, e,
         )
         return None
 
@@ -205,7 +209,10 @@ def _plain_state(item: dict, live_status: str | None = None) -> str:
         approval = item.get("registryApprovalStatus")
         if approval == "pending_approval":
             return _APPROVAL_PLAIN["pending_approval"]
-        return _APPROVAL_PLAIN.get(approval, "built and approved")
+        if approval == "approved":
+            return _APPROVAL_PLAIN["approved"]
+        # Unknown or absent approval status — never default to "approved".
+        return "built; approval status could not be confirmed"
     return _STATUS_PLAIN.get(status, "in an unknown state")
 
 
