@@ -8,7 +8,11 @@
 import { EventBridgeEvent } from "aws-lambda";
 import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+} from "@aws-sdk/lib-dynamodb";
 import { SignatureV4 } from "@aws-sdk/signature-v4";
 import { Sha256 } from "@aws-crypto/sha256-js";
 import { HttpRequest } from "@smithy/protocol-http";
@@ -53,6 +57,7 @@ const docClient = DynamoDBDocumentClient.from(dynamoClient);
 
 const CONVERSATIONS_TABLE = process.env.CONVERSATIONS_TABLE!;
 const APPSYNC_ENDPOINT = process.env.APPSYNC_ENDPOINT!;
+const PROJECTS_TABLE = process.env.PROJECTS_TABLE!;
 const idempotencyGuard = new IdempotencyGuard(process.env.IDEMPOTENCY_TABLE!);
 
 // ── SSM Cache (persists across warm Lambda invocations) ──────────────
@@ -245,6 +250,42 @@ export async function getAgentConfig(
   } catch (error) {
     console.error("Failed to get agent config:", { agentId, error });
     throw error;
+  }
+}
+
+/**
+ * Look up the project's organization from the projects table.
+ *
+ * The handler derives the org SERVER-SIDE from the project record (which
+ * `assertProjectAccess` in resolver paths already reads) rather than trusting
+ * any client-supplied value.  Returns `undefined` when the project row is
+ * missing or carries no organization — callers MUST treat that as a
+ * fail-closed condition.
+ */
+export async function lookupProjectOrganization(
+  projectId: string,
+): Promise<string | undefined> {
+  if (!PROJECTS_TABLE) return undefined;
+  try {
+    const result = await docClient.send(
+      new GetCommand({
+        TableName: PROJECTS_TABLE,
+        Key: { id: projectId },
+        ProjectionExpression: "organization",
+      }),
+    );
+    const org = result.Item?.organization as string | undefined;
+    return org || undefined;
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        level: "error",
+        msg: "Failed to look up project organization",
+        projectId,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    return undefined;
   }
 }
 
@@ -865,13 +906,49 @@ export const handler = async (
         const agentConfig = await getAgentConfig(agentId);
         console.log(`Retrieved agent config:`, agentConfig);
 
+        // ── Derive the project's organization SERVER-SIDE ────────────────────
+        // The org is read from the projects table (the same row
+        // assertProjectAccess reads in resolver paths). If the org cannot
+        // be determined, we MUST NOT invoke the agent: tenant-scoped tools
+        // inside the intake container would see an empty org_id and fail
+        // closed, producing an opaque error. Surface a clear message instead.
+        const projectOrg = await lookupProjectOrganization(projectId);
+        if (!projectOrg) {
+          console.error(
+            JSON.stringify({
+              level: "error",
+              msg: "Could not determine organisation for project; not invoking agent",
+              projectId,
+              agentId,
+            }),
+          );
+          emitMetrics({
+            metrics: [{ name: "MissingProjectOrg", value: 1, unit: "Count" }],
+            properties: { projectId, agentId },
+          });
+          const errorMessage =
+            "⚠️ Could not determine your organisation for this project. " +
+            "Please ensure the project belongs to an organisation and try again.";
+          const errorRecord = await storeAgentResponse(
+            projectId,
+            agentId,
+            errorMessage,
+            messageId,
+            metadata,
+          );
+          await triggerAppSyncMutation(errorRecord);
+          return;
+        }
+
         // Use projectId as sessionId to maintain conversation context
         const sessionId = projectId;
 
-        // Prepare session attributes
+        // Prepare session attributes — org and userId are derived
+        // server-side, never from client input.
         const sessionAttributes: Record<string, unknown> = {
           projectId: projectId,
           userId: userId,
+          org: projectOrg,
           messageId: messageId,
           ...(metadata && { metadata }),
         };

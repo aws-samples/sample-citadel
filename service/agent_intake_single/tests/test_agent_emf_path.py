@@ -110,7 +110,7 @@ class TestInvokeEmfPath:
         import agent
 
         fake = FakeStrandsAgent(["Hello ", "world"], _no_tool_result())
-        _run_turn(agent, fake, {"session_id": "sess-emf-1", "prompt": "hi"})
+        _run_turn(agent, fake, {"session_id": "sess-emf-1", "prompt": "hi", "sessionAttributes": {"org": "o1"}})
 
         blobs = _emf_lines(capsys)
         assert len(blobs) == 1
@@ -129,7 +129,7 @@ class TestInvokeEmfPath:
         import agent
 
         fake = FakeStrandsAgent(["Hello ", "world"], _no_tool_result())
-        chunks = _run_turn(agent, fake, {"session_id": "sess-emf-2", "prompt": "hi"})
+        chunks = _run_turn(agent, fake, {"session_id": "sess-emf-2", "prompt": "hi", "sessionAttributes": {"org": "o1"}})
 
         assert chunks == ["Hello ", "world"]
         # The user message forwarded to the strands agent is also unchanged.
@@ -139,9 +139,9 @@ class TestInvokeEmfPath:
         import agent
 
         _run_turn(agent, FakeStrandsAgent(["a"], _no_tool_result()),
-                  {"session_id": "s1", "prompt": "one"})
+                  {"session_id": "s1", "prompt": "one", "sessionAttributes": {"org": "o1"}})
         _run_turn(agent, FakeStrandsAgent(["b"], _no_tool_result()),
-                  {"session_id": "s2", "prompt": "two"})
+                  {"session_id": "s2", "prompt": "two", "sessionAttributes": {"org": "o1"}})
 
         blobs = _emf_lines(capsys)
         assert len(blobs) == 2
@@ -158,7 +158,7 @@ class TestInvokeEmfPath:
             )
         )
         _run_turn(agent, FakeStrandsAgent(["ok"], result),
-                  {"session_id": "s3", "prompt": "go"})
+                  {"session_id": "s3", "prompt": "go", "sessionAttributes": {"org": "o1"}})
 
         blobs = _emf_lines(capsys)
         assert len(blobs) == 2  # turn line + one tool line
@@ -177,7 +177,7 @@ class TestInvokeEmfPath:
                     yield {"data": "partial"}
                 return _gen()
 
-        chunks = _run_turn(agent, NoResultAgent(), {"session_id": "s4", "prompt": "hi"})
+        chunks = _run_turn(agent, NoResultAgent(), {"session_id": "s4", "prompt": "hi", "sessionAttributes": {"org": "o1"}})
 
         assert chunks == ["partial"]
         blobs = _emf_lines(capsys)

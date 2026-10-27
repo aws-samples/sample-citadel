@@ -24,7 +24,7 @@ _METRIC_NAME = "IntakeSessionMismatch"
 class SessionIdentity:
     session_id: str
     user_id: str   # Cognito sub — from sessionAttributes.userId
-    org_id: str     # from sessionAttributes.org (best-effort, may be "")
+    org_id: str     # from sessionAttributes.org (server-derived, required)
 
 
 _current: ContextVar[SessionIdentity | None] = ContextVar(
@@ -36,11 +36,22 @@ class MissingSessionError(ValueError):
     """Raised when bind_request receives a payload without session_id."""
 
 
+class MissingOrgError(ValueError):
+    """Raised when bind_request receives a payload without sessionAttributes.org.
+
+    The org is derived server-side (agent-message-handler reads the projects
+    table). An absent org means the handler should never have invoked the
+    agent — fail closed so tenant-scoped tools cannot silently operate with
+    an empty org_id.
+    """
+
+
 def bind_request(payload: dict) -> SessionIdentity:
     """Bind the request-scoped identity from trusted payload fields.
 
     Called once per entrypoint invocation.  Raises MissingSessionError when
-    session_id is absent or empty — the entrypoint must fail closed.
+    session_id is absent or empty, and MissingOrgError when
+    sessionAttributes.org is absent or empty — the entrypoint must fail closed.
     """
     session_id = (payload.get("session_id") or "").strip()
     if not session_id:
@@ -48,7 +59,13 @@ def bind_request(payload: dict) -> SessionIdentity:
 
     attrs = payload.get("sessionAttributes") or {}
     user_id = str(attrs.get("userId") or "")
-    org_id = str(attrs.get("org") or "")
+    org_id = str(attrs.get("org") or "").strip()
+
+    if not org_id:
+        raise MissingOrgError(
+            "payload missing required sessionAttributes.org — "
+            "the invoking handler must derive the organisation from the project record"
+        )
 
     identity = SessionIdentity(
         session_id=session_id,
