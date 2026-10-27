@@ -8,6 +8,13 @@
  *   - citadel-tools-dev: 191 rows — 25 absent (all decision# keys), 165 Default, 1 All Organizations
  *   - NO row has orgId '' or NULL
  *
+ * Uses a stateful fake table that honours DynamoDB Limit/FilterExpression
+ * semantics: Limit caps *evaluated* items BEFORE the filter, so a
+ * `Limit: 1` + FilterExpression scan can return 0 matches even when
+ * matching rows exist later in the table. The old per-candidate
+ * ScanCommand approach with Limit: 1 was broken by this; the fix
+ * builds an in-memory index from the full scan.
+ *
  * Covers:
  *   - default (no --include-unkinded): only rows with citadelKind + absent orgId picked up
  *   - --include-unkinded: also considers rows lacking citadelKind whose orgId is absent
@@ -17,6 +24,7 @@
  *   - apply stamps only targeted rows
  *   - twin inheritance: recordId-keyed candidate inherits orgId from name-keyed twin
  *   - twin inheritance: name-keyed candidate inherits orgId from recordId-keyed twin
+ *   - twin found even when twin is not the first row scanned (stateful fake)
  *   - no twin: candidate gets --org flag value
  */
 import {
@@ -38,6 +46,110 @@ jest.mock("../../src/services/registry-service", () => ({
 import { runBackfillRecordOrg, parseArgs } from "../backfill-record-org";
 
 const dynamoMock = mockClient(DynamoDBDocumentClient);
+
+// ---------------------------------------------------------------------------
+// Stateful fake table (lesson: stateful-fakes-for-lifecycle-apis)
+//
+// Simulates DynamoDB Scan semantics:
+//   - Limit applies to items *evaluated* (BEFORE FilterExpression)
+//   - ExclusiveStartKey resumes from a position
+//   - FilterExpression applied AFTER Limit
+// This proves the old Limit:1 + FilterExpression approach was broken.
+// ---------------------------------------------------------------------------
+
+type FakeTableRow = Record<string, unknown>;
+
+function buildFakeTableScanHandler(rows: FakeTableRow[], keyAttr: string) {
+  // Returns a function that handles ScanCommand input and returns
+  // DynamoDB-like responses with correct Limit/Filter semantics.
+  return (input: Record<string, unknown>) => {
+    const limit = input.Limit as number | undefined;
+    const startKey = input.ExclusiveStartKey as
+      Record<string, unknown> | undefined;
+    const filterExpr = input.FilterExpression as string | undefined;
+    const exprNames = (input.ExpressionAttributeNames ?? {}) as Record<
+      string,
+      string
+    >;
+    const exprValues = (input.ExpressionAttributeValues ?? {}) as Record<
+      string,
+      unknown
+    >;
+
+    // Find start position
+    let startIdx = 0;
+    if (startKey) {
+      const startKeyVal = startKey[keyAttr] as string;
+      startIdx = rows.findIndex((r) => r[keyAttr] === startKeyVal) + 1;
+    }
+
+    // Evaluate up to `limit` items (or all remaining)
+    const evalCount = limit ?? rows.length - startIdx;
+    const evaluated = rows.slice(startIdx, startIdx + evalCount);
+
+    // Apply filter AFTER limit (this is the DynamoDB behaviour)
+    let filtered = evaluated;
+    if (filterExpr) {
+      filtered = evaluated.filter((item) => {
+        return evalFilterExpression(
+          filterExpr,
+          item,
+          exprNames,
+          exprValues,
+          keyAttr,
+        );
+      });
+    }
+
+    // Pagination: if there are more rows past evaluated range
+    const nextIdx = startIdx + evalCount;
+    const lastKey =
+      nextIdx < rows.length
+        ? { [keyAttr]: rows[nextIdx - 1][keyAttr] }
+        : undefined;
+
+    return {
+      Items: filtered,
+      LastEvaluatedKey: lastKey,
+      Count: filtered.length,
+      ScannedCount: evaluated.length,
+    };
+  };
+}
+
+/**
+ * Minimal FilterExpression evaluator for "#n = :name AND #k <> :key".
+ */
+function evalFilterExpression(
+  expr: string,
+  item: FakeTableRow,
+  names: Record<string, string>,
+  values: Record<string, unknown>,
+  _keyAttr: string,
+): boolean {
+  // Split on AND
+  const clauses = expr.split(/\s+AND\s+/i);
+  for (const clause of clauses) {
+    const trimmed = clause.trim();
+    // Handle "attr = :val"
+    const eqMatch = trimmed.match(/^(#\w+)\s*=\s*(:\w+)$/);
+    if (eqMatch) {
+      const attr = names[eqMatch[1]] ?? eqMatch[1];
+      const val = values[eqMatch[2]];
+      if (item[attr] !== val) return false;
+      continue;
+    }
+    // Handle "attr <> :val"
+    const neqMatch = trimmed.match(/^(#\w+)\s*<>\s*(:\w+)$/);
+    if (neqMatch) {
+      const attr = names[neqMatch[1]] ?? neqMatch[1];
+      const val = values[neqMatch[2]];
+      if (item[attr] === val) return false;
+      continue;
+    }
+  }
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // Live-shape projection fixtures
@@ -150,14 +262,9 @@ const AGENT_NO_TWIN = {
   // no citadelKind, no orgId
 };
 
-// Helper: build a default twin-lookup-miss ScanCommand response
-const EMPTY_SCAN = { Items: [] };
-
 describe("backfill-record-org", () => {
   beforeEach(() => {
     dynamoMock.reset();
-    // Default: twin lookups via GetCommand return nothing (no twin found)
-    dynamoMock.on(GetCommand).resolves({ Item: undefined });
   });
 
   describe("parseArgs", () => {
@@ -195,7 +302,7 @@ describe("backfill-record-org", () => {
     it("picks up kinded rows with absent orgId but NOT unkinded rows", async () => {
       dynamoMock
         .on(ScanCommand)
-        // Scan #1: agent table full scan
+        // Scan #1: agent table full scan (returns ALL rows)
         .resolvesOnce({
           Items: [
             AGENT_KINDED_ABSENT,
@@ -204,9 +311,7 @@ describe("backfill-record-org", () => {
             AGENT_SCOPED,
           ],
         })
-        // Scan #2: twin lookup for AGENT_KINDED_ABSENT (name-keyed, no twin)
-        .resolvesOnce(EMPTY_SCAN)
-        // Scan #3: tool table full scan
+        // Scan #2: tool table full scan
         .resolvesOnce({ Items: [] });
 
       const counters = await runBackfillRecordOrg(
@@ -249,7 +354,7 @@ describe("backfill-record-org", () => {
     it("picks up unkinded agent rows with absent orgId", async () => {
       dynamoMock
         .on(ScanCommand)
-        // Scan #1: agent table full scan
+        // Scan #1: agent table full scan (ALL rows including org'd ones)
         .resolvesOnce({
           Items: [
             AGENT_KINDED_ABSENT,
@@ -258,11 +363,7 @@ describe("backfill-record-org", () => {
             AGENT_SCOPED,
           ],
         })
-        // Scan #2: twin lookup for AGENT_KINDED_ABSENT (name-keyed, no twin)
-        .resolvesOnce(EMPTY_SCAN)
-        // Scan #3: twin lookup for AGENT_UNKINDED_ABSENT (name-keyed, no twin)
-        .resolvesOnce(EMPTY_SCAN)
-        // Scan #4: tool table full scan
+        // Scan #2: tool table full scan
         .resolvesOnce({ Items: [] });
 
       const counters = await runBackfillRecordOrg(
@@ -286,9 +387,7 @@ describe("backfill-record-org", () => {
         // Scan #2: tool table full scan
         .resolvesOnce({
           Items: [TOOL_DECISION_KEY, TOOL_UNKINDED_ABSENT, TOOL_ALL_ORGS],
-        })
-        // Scan #3: twin lookup for TOOL_UNKINDED_ABSENT (name-keyed, no twin)
-        .resolvesOnce(EMPTY_SCAN);
+        });
 
       const counters = await runBackfillRecordOrg(
         "Default",
@@ -402,12 +501,8 @@ describe("backfill-record-org", () => {
         .on(ScanCommand)
         // Scan #1: agent table
         .resolvesOnce({ Items: [AGENT_KINDED_ABSENT] })
-        // Scan #2: twin lookup for AGENT_KINDED_ABSENT (no twin)
-        .resolvesOnce(EMPTY_SCAN)
-        // Scan #3: tool table
-        .resolvesOnce({ Items: [TOOL_KINDED_ABSENT] })
-        // Scan #4: twin lookup for TOOL_KINDED_ABSENT (no twin)
-        .resolvesOnce(EMPTY_SCAN);
+        // Scan #2: tool table
+        .resolvesOnce({ Items: [TOOL_KINDED_ABSENT] });
 
       const counters = await runBackfillRecordOrg(
         "Default",
@@ -428,22 +523,14 @@ describe("backfill-record-org", () => {
     it("sends UpdateCommands for orphaned rows in apply mode", async () => {
       dynamoMock
         .on(ScanCommand)
-        // Scan #1: agent table
+        // Scan #1: agent table (ALL rows)
         .resolvesOnce({
           Items: [AGENT_KINDED_ABSENT, AGENT_UNKINDED_ABSENT],
         })
-        // Scan #2: twin lookup for AGENT_KINDED_ABSENT (no twin)
-        .resolvesOnce(EMPTY_SCAN)
-        // Scan #3: twin lookup for AGENT_UNKINDED_ABSENT (no twin)
-        .resolvesOnce(EMPTY_SCAN)
-        // Scan #4: tool table
+        // Scan #2: tool table (ALL rows)
         .resolvesOnce({
           Items: [TOOL_KINDED_ABSENT, TOOL_DECISION_KEY, TOOL_UNKINDED_ABSENT],
-        })
-        // Scan #5: twin lookup for TOOL_KINDED_ABSENT (no twin)
-        .resolvesOnce(EMPTY_SCAN)
-        // Scan #6: twin lookup for TOOL_UNKINDED_ABSENT (no twin)
-        .resolvesOnce(EMPTY_SCAN);
+        });
       dynamoMock.on(UpdateCommand).resolves({});
 
       const counters = await runBackfillRecordOrg(
@@ -479,21 +566,17 @@ describe("backfill-record-org", () => {
   // -------------------------------------------------------------------------
 
   describe("twin inheritance", () => {
-    it("recordId-keyed candidate inherits orgId from name-keyed twin via GetCommand", async () => {
-      // The recordId-keyed orphan (fabricator) should look up its name-keyed
-      // twin via GetCommand(key=fabricator) and find 'All Organizations'.
+    it("recordId-keyed candidate inherits orgId from name-keyed twin via index", async () => {
+      // Full scan returns ALL rows including the twin with orgId set.
+      // The index-based approach finds the twin without a separate GetCommand.
       dynamoMock
         .on(ScanCommand)
-        // Scan #1: agent table — only the recordId-keyed orphan is a candidate
+        // Scan #1: agent table — ALL rows (twin has orgId, is included)
         .resolvesOnce({
           Items: [AGENT_RECORDID_KEYED_ORPHAN, AGENT_NAME_KEYED_TWIN_ALLORGS],
         })
         // Scan #2: tool table
         .resolvesOnce({ Items: [] });
-      // GetCommand for twin lookup: return the name-keyed twin
-      dynamoMock
-        .on(GetCommand)
-        .resolves({ Item: AGENT_NAME_KEYED_TWIN_ALLORGS });
       dynamoMock.on(UpdateCommand).resolves({});
 
       const counters = await runBackfillRecordOrg(
@@ -505,7 +588,7 @@ describe("backfill-record-org", () => {
         true,
       );
 
-      // The recordId-keyed orphan is the only candidate (twin has orgId, skipped by scan)
+      // The recordId-keyed orphan is the only candidate (twin has orgId)
       expect(counters.agentProjectionUpdated).toBe(1);
 
       const updateCalls = dynamoMock.commandCalls(UpdateCommand);
@@ -514,18 +597,21 @@ describe("backfill-record-org", () => {
       const vals = updateCalls[0].args[0].input
         .ExpressionAttributeValues as Record<string, unknown>;
       expect(vals[":org"]).toBe("All Organizations");
+
+      // No GetCommand fallback needed — resolved from in-memory index
+      expect(dynamoMock.commandCalls(GetCommand)).toHaveLength(0);
     });
 
-    it("name-keyed candidate inherits orgId from recordId-keyed twin via scan fallback", async () => {
-      // The name-keyed orphan (demo-echo-agent) should find its recordId-keyed
-      // twin via the ScanCommand fallback (twin not in orphan list).
+    it("name-keyed candidate inherits orgId from recordId-keyed twin via index", async () => {
+      // Both the orphan and its twin are in the full scan.
+      // The index finds the twin by name without a separate scan.
       dynamoMock
         .on(ScanCommand)
-        // Scan #1: agent table — only the name-keyed orphan
-        .resolvesOnce({ Items: [AGENT_NAME_KEYED_ORPHAN] })
-        // Scan #2: twin lookup for name-keyed candidate — returns the recordId-keyed twin
-        .resolvesOnce({ Items: [AGENT_RECORDID_KEYED_TWIN_ALLORGS] })
-        // Scan #3: tool table
+        // Scan #1: agent table — ALL rows
+        .resolvesOnce({
+          Items: [AGENT_NAME_KEYED_ORPHAN, AGENT_RECORDID_KEYED_TWIN_ALLORGS],
+        })
+        // Scan #2: tool table
         .resolvesOnce({ Items: [] });
       dynamoMock.on(UpdateCommand).resolves({});
 
@@ -553,9 +639,7 @@ describe("backfill-record-org", () => {
         .on(ScanCommand)
         // Scan #1: agent table — orphan with no twin anywhere
         .resolvesOnce({ Items: [AGENT_NO_TWIN] })
-        // Scan #2: twin lookup for name-keyed candidate — no twin found
-        .resolvesOnce(EMPTY_SCAN)
-        // Scan #3: tool table
+        // Scan #2: tool table
         .resolvesOnce({ Items: [] });
       dynamoMock.on(UpdateCommand).resolves({});
 
@@ -583,18 +667,16 @@ describe("backfill-record-org", () => {
 
       dynamoMock
         .on(ScanCommand)
-        // Scan #1: agent table
+        // Scan #1: agent table — ALL rows including twins
         .resolvesOnce({
-          Items: [AGENT_RECORDID_KEYED_ORPHAN, AGENT_NO_TWIN],
+          Items: [
+            AGENT_RECORDID_KEYED_ORPHAN,
+            AGENT_NAME_KEYED_TWIN_ALLORGS,
+            AGENT_NO_TWIN,
+          ],
         })
-        // Scan #2: twin lookup for AGENT_NO_TWIN (name-keyed, no twin)
-        .resolvesOnce(EMPTY_SCAN)
-        // Scan #3: tool table
+        // Scan #2: tool table
         .resolvesOnce({ Items: [] });
-      // GetCommand for recordId-keyed twin lookup → finds twin with All Orgs
-      dynamoMock
-        .on(GetCommand)
-        .resolvesOnce({ Item: AGENT_NAME_KEYED_TWIN_ALLORGS });
 
       await runBackfillRecordOrg(
         "Default",
@@ -630,9 +712,7 @@ describe("backfill-record-org", () => {
             AGENT_NO_TWIN,
           ],
         })
-        // Scan #2: twin lookup for AGENT_NO_TWIN (no twin)
-        .resolvesOnce(EMPTY_SCAN)
-        // Scan #3: tool table
+        // Scan #2: tool table
         .resolvesOnce({ Items: [] });
       dynamoMock.on(UpdateCommand).resolves({});
 
@@ -652,6 +732,209 @@ describe("backfill-record-org", () => {
       expect(updateCalls[0].args[0].input.Key).toEqual({
         agentId: "smoke-idempotency-agent",
       });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Stateful fake: proves old Limit:1 + FilterExpression was broken
+  // -------------------------------------------------------------------------
+
+  describe("stateful fake — twin found when not the first row scanned", () => {
+    it("finds twin even when many non-matching rows precede it in scan order", async () => {
+      // Scenario: name-keyed candidate "demo-echo-agent" has a twin
+      // (recordId-keyed, with orgId) that appears AFTER several
+      // non-matching rows. With the old Limit:1 + FilterExpression
+      // approach, the first evaluated row wouldn't match the filter,
+      // returning 0 results and falling back to --org flag.
+      //
+      // The in-memory index approach reads ALL rows and always finds it.
+
+      // These filler rows come BEFORE the twin in scan order.
+      const filler1 = {
+        agentId: "aaaa-1111",
+        name: "filler-one",
+        orgId: "Default",
+      };
+      const filler2 = {
+        agentId: "bbbb-2222",
+        name: "filler-two",
+        orgId: "Default",
+      };
+      const filler3 = {
+        agentId: "cccc-3333",
+        name: "filler-three",
+        orgId: "Default",
+      };
+
+      // The twin we need to find — appears AFTER the fillers
+      const twinRow = {
+        agentId: "dddd4444-e5f6-7890-abcd-000099998888",
+        name: "demo-echo-agent",
+        orgId: "All Organizations",
+      };
+
+      // The candidate (name-keyed, no orgId)
+      const candidate = {
+        agentId: "demo-echo-agent",
+        name: "demo-echo-agent",
+        // no orgId
+      };
+
+      // All rows in the table, in scan order.
+      // The twin is at position 4, after 3 fillers and the candidate.
+      const allRows = [filler1, filler2, candidate, filler3, twinRow];
+
+      // Verify the stateful fake demonstrates the old Limit:1 bug:
+      const fakeHandler = buildFakeTableScanHandler(allRows, "agentId");
+      const limitedResult = fakeHandler({
+        FilterExpression: "#n = :name AND #k <> :key",
+        ExpressionAttributeNames: { "#n": "name", "#k": "agentId" },
+        ExpressionAttributeValues: {
+          ":name": "demo-echo-agent",
+          ":key": "demo-echo-agent",
+        },
+        Limit: 1,
+      });
+      // Old approach: Limit:1 evaluates ONLY filler1, which doesn't
+      // match the filter → 0 results. Twin is missed!
+      expect(limitedResult.Items).toHaveLength(0);
+
+      // Now verify the full-scan index approach finds the twin:
+      dynamoMock
+        .on(ScanCommand)
+        // Scan #1: agent table — ALL rows
+        .resolvesOnce({ Items: allRows })
+        // Scan #2: tool table
+        .resolvesOnce({ Items: [] });
+      dynamoMock.on(UpdateCommand).resolves({});
+
+      const counters = await runBackfillRecordOrg(
+        "Default",
+        "reg-1",
+        "agents-tbl",
+        "tools-tbl",
+        false,
+        true,
+      );
+
+      // candidate is the only orphan
+      expect(counters.agentProjectionUpdated).toBe(1);
+
+      const updateCalls = dynamoMock.commandCalls(UpdateCommand);
+      expect(updateCalls.length).toBe(1);
+      // Twin found via index → inherits 'All Organizations'
+      const vals = updateCalls[0].args[0].input
+        .ExpressionAttributeValues as Record<string, unknown>;
+      expect(vals[":org"]).toBe("All Organizations");
+    });
+
+    it("proves recordId-keyed twin also found from index regardless of scan position", async () => {
+      // Scenario: recordId-keyed candidate "fabricator" UUID has a
+      // name-keyed twin (agentId=fabricator, with orgId) that appears
+      // after several filler rows. The full-scan index finds it.
+
+      const filler1 = {
+        agentId: "xx-filler-1",
+        name: "other-agent-1",
+        orgId: "Default",
+      };
+      const filler2 = {
+        agentId: "xx-filler-2",
+        name: "other-agent-2",
+        orgId: "Default",
+      };
+
+      // The twin (name-keyed, with orgId)
+      const twinRow = {
+        agentId: "fabricator",
+        name: "fabricator",
+        orgId: "All Organizations",
+      };
+
+      // The candidate (recordId-keyed, no orgId)
+      const candidate = {
+        agentId: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        name: "fabricator",
+        // no orgId
+      };
+
+      const allRows = [filler1, candidate, filler2, twinRow];
+
+      dynamoMock
+        .on(ScanCommand)
+        // Scan #1: agent table — ALL rows
+        .resolvesOnce({ Items: allRows })
+        // Scan #2: tool table
+        .resolvesOnce({ Items: [] });
+      dynamoMock.on(UpdateCommand).resolves({});
+
+      const counters = await runBackfillRecordOrg(
+        "Default",
+        "reg-1",
+        "agents-tbl",
+        "tools-tbl",
+        false,
+        true,
+      );
+
+      expect(counters.agentProjectionUpdated).toBe(1);
+
+      const updateCalls = dynamoMock.commandCalls(UpdateCommand);
+      expect(updateCalls.length).toBe(1);
+      // Twin found → inherits 'All Organizations'
+      const vals = updateCalls[0].args[0].input
+        .ExpressionAttributeValues as Record<string, unknown>;
+      expect(vals[":org"]).toBe("All Organizations");
+
+      // No per-candidate GetCommand or ScanCommand for twin lookup
+      expect(dynamoMock.commandCalls(GetCommand)).toHaveLength(0);
+    });
+
+    it("smoke-idempotency-agent gets flag when no twin exists at any scan position", async () => {
+      // No twin in any position → falls back to --org flag.
+      const filler1 = {
+        agentId: "zz-filler-1",
+        name: "unrelated-1",
+        orgId: "Default",
+      };
+      const filler2 = {
+        agentId: "zz-filler-2",
+        name: "unrelated-2",
+        orgId: "Default",
+      };
+
+      const candidate = {
+        agentId: "smoke-idempotency-agent",
+        name: "smoke-idempotency-agent",
+        // no orgId
+      };
+
+      const allRows = [filler1, candidate, filler2];
+
+      dynamoMock
+        .on(ScanCommand)
+        // Scan #1: agent table — ALL rows
+        .resolvesOnce({ Items: allRows })
+        // Scan #2: tool table
+        .resolvesOnce({ Items: [] });
+      dynamoMock.on(UpdateCommand).resolves({});
+
+      const counters = await runBackfillRecordOrg(
+        "Default",
+        "reg-1",
+        "agents-tbl",
+        "tools-tbl",
+        false,
+        true,
+      );
+
+      expect(counters.agentProjectionUpdated).toBe(1);
+
+      const updateCalls = dynamoMock.commandCalls(UpdateCommand);
+      expect(updateCalls.length).toBe(1);
+      const vals = updateCalls[0].args[0].input
+        .ExpressionAttributeValues as Record<string, unknown>;
+      expect(vals[":org"]).toBe("Default");
     });
   });
 });

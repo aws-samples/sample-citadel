@@ -15,11 +15,12 @@
  *
  * Dual-key cache twin resolution (PR #369): an agent/tool may have two
  * rows — one keyed by a recordId (UUID) and one keyed by its display
- * name (agentId == name).  For each candidate, the script looks up the
- * twin row; if the twin carries a non-absent orgId, the candidate
- * inherits that value (even 'All Organizations').  Otherwise the --org
- * flag value is stamped.  Dry-run output includes the resolved orgId and
- * its source (twin | flag) for each candidate.
+ * name (agentId == name).  For each candidate, the twin is resolved from
+ * an in-memory index built from the full table scan (the script already
+ * reads every row).  If the twin carries a non-absent orgId, the
+ * candidate inherits that value (even 'All Organizations').  Otherwise
+ * the --org flag value is stamped.  Dry-run output includes the resolved
+ * orgId and its source (twin | flag) for each candidate.
  *
  * For single-tenant dev where the owner confirms all pre-tagging records
  * belong to a single organisation (e.g. 'Default').
@@ -39,7 +40,6 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
-  GetCommand,
   ScanCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
@@ -133,13 +133,19 @@ const ALL_ORGANIZATIONS = "All Organizations";
 /** Key prefix for decision bookkeeping rows — never actual records. */
 const DECISION_KEY_PREFIX = "decision#";
 
+interface ScanResult {
+  orphaned: Record<string, unknown>[];
+  allItems: Record<string, unknown>[];
+}
+
 async function scanOrphanedRows(
   docClient: DynamoDBDocumentClient,
   tableName: string,
   keyAttr: string,
   includeUnkinded: boolean = false,
-): Promise<Record<string, unknown>[]> {
+): Promise<ScanResult> {
   const orphaned: Record<string, unknown>[] = [];
+  const allItems: Record<string, unknown>[] = [];
   let lastKey: Record<string, unknown> | undefined;
 
   do {
@@ -150,6 +156,7 @@ async function scanOrphanedRows(
       }),
     );
     for (const item of resp.Items ?? []) {
+      allItems.push(item);
       const key = (item[keyAttr] as string) ?? "";
 
       // ALWAYS skip decision bookkeeping rows (not records).
@@ -175,7 +182,7 @@ async function scanOrphanedRows(
     lastKey = resp.LastEvaluatedKey;
   } while (lastKey);
 
-  return orphaned;
+  return { orphaned, allItems };
 }
 
 /**
@@ -199,14 +206,48 @@ interface ResolvedOrg {
   source: "twin" | "flag";
 }
 
-async function resolveTwinOrg(
-  docClient: DynamoDBDocumentClient,
-  tableName: string,
+/**
+ * Build an in-memory index: name → rows for fast twin lookup.
+ */
+function buildNameIndex(
+  allItems: Record<string, unknown>[],
+): Map<string, Record<string, unknown>[]> {
+  const idx = new Map<string, Record<string, unknown>[]>();
+  for (const item of allItems) {
+    const name = item.name as string | undefined;
+    if (!name) continue;
+    let arr = idx.get(name);
+    if (!arr) {
+      arr = [];
+      idx.set(name, arr);
+    }
+    arr.push(item);
+  }
+  return idx;
+}
+
+/**
+ * Build an in-memory index: key → row for fast key lookup.
+ */
+function buildKeyIndex(
+  allItems: Record<string, unknown>[],
+  keyAttr: string,
+): Map<string, Record<string, unknown>> {
+  const idx = new Map<string, Record<string, unknown>>();
+  for (const item of allItems) {
+    const key = item[keyAttr] as string | undefined;
+    if (key) idx.set(key, item);
+  }
+  return idx;
+}
+
+function resolveTwinOrg(
   keyAttr: string,
   candidate: Record<string, unknown>,
-  allItems: Record<string, unknown>[],
+  nameIndex: Map<string, Record<string, unknown>[]>,
+  keyIndex: Map<string, Record<string, unknown>>,
   flagOrg: string,
-): Promise<ResolvedOrg> {
+): ResolvedOrg {
   const candidateKey = candidate[keyAttr] as string;
   const candidateName = (candidate.name as string) ?? "";
 
@@ -218,58 +259,19 @@ async function resolveTwinOrg(
 
   if (isRecordIdKeyed && candidateName) {
     // Twin is the name-keyed row: key = candidate.name
-    const twin = allItems.find(
-      (r) => r[keyAttr] === candidateName && r !== candidate,
-    );
-    // Fallback to GetCommand if twin not found in scanned items
-    // (twin may have orgId set and thus was not scanned as orphan)
-    const twinItem =
-      twin ??
-      (
-        await docClient.send(
-          new GetCommand({
-            TableName: tableName,
-            Key: { [keyAttr]: candidateName },
-          }),
-        )
-      ).Item;
-    if (twinItem && twinItem.orgId != null) {
+    const twinItem = keyIndex.get(candidateName);
+    if (twinItem && twinItem !== candidate && twinItem.orgId != null) {
       return { orgId: twinItem.orgId as string, source: "twin" };
     }
   } else {
     // Candidate is name-keyed; twin is the recordId-keyed row whose
     // `name` field equals the candidate's key.
-    const twin = allItems.find(
-      (r) =>
-        r !== candidate &&
-        r.name === candidateKey &&
-        r[keyAttr] !== candidateKey,
-    );
-    // Fallback: no cheap GetCommand possible (we'd need a GSI on name),
-    // but the full scan already captured all orphans — and the twin is
-    // likely already-org'd and thus not in orphans. We do a scan-filter
-    // for just that one name as a last resort.
-    if (twin && twin.orgId != null) {
-      return { orgId: twin.orgId as string, source: "twin" };
-    }
-    if (!twin) {
-      // Twin not in allItems — it may have an orgId and wasn't scanned.
-      // Scan for a row whose name == candidateKey with a different key.
-      const resp = await docClient.send(
-        new ScanCommand({
-          TableName: tableName,
-          FilterExpression: "#n = :name AND #k <> :key",
-          ExpressionAttributeNames: { "#n": "name", "#k": keyAttr },
-          ExpressionAttributeValues: {
-            ":name": candidateKey,
-            ":key": candidateKey,
-          },
-          Limit: 1,
-        }),
-      );
-      const remoteTwin = resp.Items?.[0];
-      if (remoteTwin && remoteTwin.orgId != null) {
-        return { orgId: remoteTwin.orgId as string, source: "twin" };
+    const siblings = nameIndex.get(candidateKey) ?? [];
+    for (const sibling of siblings) {
+      if (sibling !== candidate && sibling[keyAttr] !== candidateKey) {
+        if (sibling.orgId != null) {
+          return { orgId: sibling.orgId as string, source: "twin" };
+        }
       }
     }
   }
@@ -308,12 +310,10 @@ export async function runBackfillRecordOrg(
   };
 
   // Scan agents table for orphaned rows
-  const agentOrphans = await scanOrphanedRows(
-    docClient,
-    tableAgents,
-    "agentId",
-    includeUnkinded,
-  );
+  const { orphaned: agentOrphans, allItems: allAgentItems } =
+    await scanOrphanedRows(docClient, tableAgents, "agentId", includeUnkinded);
+  const agentNameIndex = buildNameIndex(allAgentItems);
+  const agentKeyIndex = buildKeyIndex(allAgentItems, "agentId");
   console.log(`Found ${agentOrphans.length} orphaned agent projection rows`);
 
   for (const item of agentOrphans) {
@@ -326,12 +326,11 @@ export async function runBackfillRecordOrg(
 
     try {
       // Dual-key twin resolution (PR #369)
-      const resolved = await resolveTwinOrg(
-        docClient,
-        tableAgents,
+      const resolved = resolveTwinOrg(
         "agentId",
         item,
-        agentOrphans,
+        agentNameIndex,
+        agentKeyIndex,
         org,
       );
       const stampOrg = resolved.orgId;
@@ -402,12 +401,10 @@ export async function runBackfillRecordOrg(
   }
 
   // Scan tools table for orphaned rows
-  const toolOrphans = await scanOrphanedRows(
-    docClient,
-    tableTools,
-    "toolId",
-    includeUnkinded,
-  );
+  const { orphaned: toolOrphans, allItems: allToolItems } =
+    await scanOrphanedRows(docClient, tableTools, "toolId", includeUnkinded);
+  const toolNameIndex = buildNameIndex(allToolItems);
+  const toolKeyIndex = buildKeyIndex(allToolItems, "toolId");
   console.log(`Found ${toolOrphans.length} orphaned tool projection rows`);
 
   for (const item of toolOrphans) {
@@ -419,12 +416,11 @@ export async function runBackfillRecordOrg(
 
     try {
       // Dual-key twin resolution (PR #369)
-      const resolved = await resolveTwinOrg(
-        docClient,
-        tableTools,
+      const resolved = resolveTwinOrg(
         "toolId",
         item,
-        toolOrphans,
+        toolNameIndex,
+        toolKeyIndex,
         org,
       );
       const stampOrg = resolved.orgId;
