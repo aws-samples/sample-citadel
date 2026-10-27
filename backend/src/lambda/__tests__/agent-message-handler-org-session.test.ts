@@ -278,10 +278,45 @@ describe("agent-message-handler — org session attribute", () => {
     expect(org).toBeUndefined();
   });
 
-  test("lookupProjectOrganization returns undefined on DynamoDB error", async () => {
+  test("lookupProjectOrganization rethrows SDK errors instead of swallowing them", async () => {
     libDynamo.__docSend.mockRejectedValueOnce(new Error("DynamoDB timeout"));
-    const org = await lookupProjectOrganization("proj-err");
-    expect(org).toBeUndefined();
+    await expect(lookupProjectOrganization("proj-err")).rejects.toThrow(
+      "DynamoDB timeout",
+    );
+  });
+
+  test("SDK error in lookupProjectOrganization surfaces as a handler error, not missing org", async () => {
+    // Clear prior PutCommand calls from earlier tests in this describe
+    libDynamo.PutCommand.mockClear();
+
+    libDynamo.__docSend.mockImplementation(async (cmd: unknown) => {
+      const c = cmd as { ProjectionExpression?: string };
+      if (c.ProjectionExpression === "organization") {
+        throw new Error("AccessDeniedException: not authorized");
+      }
+      return {};
+    });
+
+    await handler(makeEvent());
+
+    // AgentCore must NOT have been invoked
+    expect(agentCoreSend).not.toHaveBeenCalled();
+
+    // The outer catch stores a generic error message (not the "Could not
+    // determine your organisation" one that previously hid the real cause)
+    const putCalls = libDynamo.PutCommand.mock.calls;
+    const errorPut = putCalls.find((call: unknown[]) => {
+      const item = (call[0] as { Item?: { message?: string } })?.Item;
+      return item?.message?.includes("encountered an error");
+    });
+    expect(errorPut).toBeDefined();
+
+    // The "missing org" path must NOT have been taken
+    const missingOrgPut = putCalls.find((call: unknown[]) => {
+      const item = (call[0] as { Item?: { message?: string } })?.Item;
+      return item?.message?.includes("Could not determine your organisation");
+    });
+    expect(missingOrgPut).toBeUndefined();
   });
 
   // ── EMF metric on missing org ─────────────────────────────────────────

@@ -2346,6 +2346,7 @@ export class BackendStack extends cdk.Stack {
     );
 
     this.idempotencyTable.grantReadWriteData(agentMessageHandlerFunction);
+    this.projectsTable.grantReadData(agentMessageHandlerFunction);
 
     // Grant permissions to read SSM parameters for agent configuration
     agentMessageHandlerFunction.addToRolePolicy(
