@@ -23,17 +23,27 @@ Flags: `--org` (required), `--table` (required), `--apply`, `--dry-run` (default
 
 Stamps `orgId` on agents/tools projection rows and DRAFT registry records.
 
+By default only considers rows with a `citadelKind` attribute (projection rows).
+Keys starting `decision#` (bookkeeping, not records) and rows with
+orgId `'All Organizations'` are **always** skipped.
+
 ```bash
 # Dry-run
 npx ts-node --project tsconfig.scripts.json scripts/backfill-record-org.ts \
   --org Default --registry-id <id> --table-agents <table> --table-tools <table>
 
-# Apply (also treating orgId '' as missing)
+# Also consider rows lacking citadelKind
 npx ts-node --project tsconfig.scripts.json scripts/backfill-record-org.ts \
   --org Default --registry-id <id> --table-agents <table> --table-tools <table> \
-  --include-empty --apply
+  --include-unkinded
+
+# Apply
+npx ts-node --project tsconfig.scripts.json scripts/backfill-record-org.ts \
+  --org Default --registry-id <id> --table-agents <table> --table-tools <table> \
+  --include-unkinded --apply
 ```
 
 Flags: `--org` (required), `--registry-id` (required), `--table-agents` (required),
-`--table-tools` (required), `--apply`, `--dry-run` (default), `--include-empty`
-(treat orgId `''` as missing — rows with orgId `'All Organizations'` are never touched).
+`--table-tools` (required), `--apply`, `--dry-run` (default), `--include-unkinded`
+(also consider rows lacking `citadelKind` whose orgId is absent — `decision#` keys
+and orgId `'All Organizations'` rows are never touched).

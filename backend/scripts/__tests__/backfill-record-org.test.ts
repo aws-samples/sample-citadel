@@ -1,12 +1,18 @@
 /**
- * Tests for backfill-record-org.ts --include-empty flag and
- * 'All Organizations' protection.
+ * Tests for backfill-record-org.ts --include-unkinded flag,
+ * 'All Organizations' protection, and decision# skip.
+ *
+ * Live-shape fixtures derived from actual DynamoDB scans:
+ *   - citadel-agents-dev: 75 rows — 12 orgId absent, 54 Default, 9 All Organizations
+ *   - citadel-tools-dev: 191 rows — 25 absent (all decision# keys), 165 Default, 1 All Organizations
+ *   - NO row has orgId '' or NULL
  *
  * Covers:
- *   - default (no --include-empty): orgId '' rows are NOT picked up
- *   - --include-empty: orgId '' rows ARE picked up
+ *   - default (no --include-unkinded): only rows with citadelKind + absent orgId picked up
+ *   - --include-unkinded: also considers rows lacking citadelKind whose orgId is absent
+ *   - decision# keys are ALWAYS skipped (not records)
  *   - 'All Organizations' rows are NEVER touched regardless of flags
- *   - dry-run writes nothing
+ *   - dry-run prints candidates but writes nothing
  *   - apply stamps only targeted rows
  */
 import {
@@ -28,42 +34,71 @@ import { runBackfillRecordOrg, parseArgs } from "../backfill-record-org";
 
 const dynamoMock = mockClient(DynamoDBDocumentClient);
 
+// ---------------------------------------------------------------------------
 // Live-shape projection fixtures
-const AGENT_ORPHAN_ABSENT = {
-  agentId: "agent-orphan-absent",
+// ---------------------------------------------------------------------------
+
+// Agent with citadelKind, orgId absent (orgUnknown: true) — picked up by default
+const AGENT_KINDED_ABSENT = {
+  agentId: "agent-kinded-absent",
   citadelKind: "agent",
   orgUnknown: true,
   name: "OrphanAgent",
+  createdAt: "2026-09-15T10:00:00Z",
 };
-const AGENT_ORPHAN_EMPTY = {
-  agentId: "agent-orphan-empty",
-  citadelKind: "agent",
-  orgId: "",
-  name: "EmptyOrgAgent",
+
+// Agent WITHOUT citadelKind, orgId absent — picked up ONLY with --include-unkinded
+const AGENT_UNKINDED_ABSENT = {
+  agentId: "agent-unkinded-absent",
+  name: "UnkindedAgent",
+  createdAt: "2026-09-14T08:00:00Z",
 };
+
+// Agent with orgId 'All Organizations' — NEVER touched
 const AGENT_ALL_ORGS = {
   agentId: "agent-all-orgs",
   citadelKind: "agent",
   orgId: "All Organizations",
   name: "SystemAgent",
 };
+
+// Agent already scoped — not a candidate
 const AGENT_SCOPED = {
   agentId: "agent-scoped",
   citadelKind: "agent",
-  orgId: "Acme",
+  orgId: "Default",
   name: "ScopedAgent",
 };
-const TOOL_ORPHAN_EMPTY = {
-  toolId: "tool-orphan-empty",
+
+// Tool with citadelKind, orgId absent — picked up by default
+const TOOL_KINDED_ABSENT = {
+  toolId: "tool-kinded-absent",
   citadelKind: "tool",
-  orgId: "",
-  name: "EmptyOrgTool",
+  orgUnknown: true,
+  name: "OrphanTool",
+  createdAt: "2026-09-15T11:00:00Z",
 };
+
+// decision# bookkeeping row — ALWAYS skipped (live: all 25 absent-orgId tool rows are decision#)
+const TOOL_DECISION_KEY = {
+  toolId: "decision#dec-abc-123",
+  name: "Decision Record",
+  createdAt: "2026-09-10T00:00:00Z",
+};
+
+// Tool with orgId 'All Organizations' — NEVER touched
 const TOOL_ALL_ORGS = {
   toolId: "tool-all-orgs",
   citadelKind: "tool",
   orgId: "All Organizations",
   name: "SystemTool",
+};
+
+// Tool WITHOUT citadelKind, orgId absent, NOT decision# — only with --include-unkinded
+const TOOL_UNKINDED_ABSENT = {
+  toolId: "tool-unkinded-absent",
+  name: "UnkindedTool",
+  createdAt: "2026-09-12T00:00:00Z",
 };
 
 describe("backfill-record-org", () => {
@@ -72,7 +107,7 @@ describe("backfill-record-org", () => {
   });
 
   describe("parseArgs", () => {
-    it("parses --include-empty flag", () => {
+    it("parses --include-unkinded flag", () => {
       const result = parseArgs([
         "--org",
         "Acme",
@@ -82,12 +117,12 @@ describe("backfill-record-org", () => {
         "agents",
         "--table-tools",
         "tools",
-        "--include-empty",
+        "--include-unkinded",
       ]);
-      expect(result.includeEmpty).toBe(true);
+      expect(result.includeUnkinded).toBe(true);
     });
 
-    it("includeEmpty defaults to false", () => {
+    it("includeUnkinded defaults to false", () => {
       const result = parseArgs([
         "--org",
         "Acme",
@@ -98,30 +133,26 @@ describe("backfill-record-org", () => {
         "--table-tools",
         "tools",
       ]);
-      expect(result.includeEmpty).toBe(false);
+      expect(result.includeUnkinded).toBe(false);
     });
   });
 
-  describe("default (no --include-empty)", () => {
-    it("picks up orgUnknown/absent rows but NOT empty-string rows", async () => {
-      // Agents table: one absent, one empty, one 'All Organizations', one scoped
+  describe("default (no --include-unkinded)", () => {
+    it("picks up kinded rows with absent orgId but NOT unkinded rows", async () => {
       dynamoMock
         .on(ScanCommand)
         .resolvesOnce({
           Items: [
-            AGENT_ORPHAN_ABSENT,
-            AGENT_ORPHAN_EMPTY,
+            AGENT_KINDED_ABSENT,
+            AGENT_UNKINDED_ABSENT,
             AGENT_ALL_ORGS,
             AGENT_SCOPED,
           ],
         })
-        .resolvesOnce({
-          Items: [],
-        });
-      dynamoMock.on(UpdateCommand).resolves({});
+        .resolvesOnce({ Items: [] });
 
       const counters = await runBackfillRecordOrg(
-        "Acme",
+        "Default",
         "reg-1",
         "agents-tbl",
         "tools-tbl",
@@ -129,22 +160,20 @@ describe("backfill-record-org", () => {
         false,
       );
 
-      // Only the absent/orgUnknown agent is picked up.
-      // Empty string should NOT be picked up without --include-empty.
+      // Only the kinded+absent agent is picked up.
       expect(counters.agentProjectionUpdated).toBe(1);
     });
 
-    it("does not touch empty-string tool rows without --include-empty", async () => {
+    it("skips unkinded tool rows and decision# keys without the flag", async () => {
       dynamoMock
         .on(ScanCommand)
         .resolvesOnce({ Items: [] })
         .resolvesOnce({
-          Items: [TOOL_ORPHAN_EMPTY, TOOL_ALL_ORGS],
+          Items: [TOOL_DECISION_KEY, TOOL_UNKINDED_ABSENT, TOOL_ALL_ORGS],
         });
-      dynamoMock.on(UpdateCommand).resolves({});
 
       const counters = await runBackfillRecordOrg(
-        "Acme",
+        "Default",
         "reg-1",
         "agents-tbl",
         "tools-tbl",
@@ -156,23 +185,22 @@ describe("backfill-record-org", () => {
     });
   });
 
-  describe("--include-empty", () => {
-    it("picks up empty-string agent rows", async () => {
+  describe("--include-unkinded", () => {
+    it("picks up unkinded agent rows with absent orgId", async () => {
       dynamoMock
         .on(ScanCommand)
         .resolvesOnce({
           Items: [
-            AGENT_ORPHAN_ABSENT,
-            AGENT_ORPHAN_EMPTY,
+            AGENT_KINDED_ABSENT,
+            AGENT_UNKINDED_ABSENT,
             AGENT_ALL_ORGS,
             AGENT_SCOPED,
           ],
         })
         .resolvesOnce({ Items: [] });
-      dynamoMock.on(UpdateCommand).resolves({});
 
       const counters = await runBackfillRecordOrg(
-        "Acme",
+        "Default",
         "reg-1",
         "agents-tbl",
         "tools-tbl",
@@ -180,21 +208,20 @@ describe("backfill-record-org", () => {
         true,
       );
 
-      // Both absent/orgUnknown and empty-string should be picked up.
+      // Both kinded+absent and unkinded+absent should be picked up.
       expect(counters.agentProjectionUpdated).toBe(2);
     });
 
-    it("picks up empty-string tool rows", async () => {
+    it("picks up unkinded tool rows but still skips decision# keys", async () => {
       dynamoMock
         .on(ScanCommand)
         .resolvesOnce({ Items: [] })
         .resolvesOnce({
-          Items: [TOOL_ORPHAN_EMPTY, TOOL_ALL_ORGS],
+          Items: [TOOL_DECISION_KEY, TOOL_UNKINDED_ABSENT, TOOL_ALL_ORGS],
         });
-      dynamoMock.on(UpdateCommand).resolves({});
 
       const counters = await runBackfillRecordOrg(
-        "Acme",
+        "Default",
         "reg-1",
         "agents-tbl",
         "tools-tbl",
@@ -202,7 +229,52 @@ describe("backfill-record-org", () => {
         true,
       );
 
+      // Unkinded tool picked up; decision# and All Organizations skipped.
       expect(counters.toolProjectionUpdated).toBe(1);
+    });
+  });
+
+  describe("decision# keys always skipped", () => {
+    it("never touches decision# tool rows even with --include-unkinded", async () => {
+      dynamoMock
+        .on(ScanCommand)
+        .resolvesOnce({ Items: [] })
+        .resolvesOnce({ Items: [TOOL_DECISION_KEY] });
+
+      const counters = await runBackfillRecordOrg(
+        "Default",
+        "reg-1",
+        "agents-tbl",
+        "tools-tbl",
+        false,
+        true,
+      );
+
+      expect(counters.toolProjectionUpdated).toBe(0);
+      expect(dynamoMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    });
+
+    it("never touches decision# agent rows even with --include-unkinded", async () => {
+      const agentDecisionKey = {
+        agentId: "decision#dec-xyz-789",
+        name: "Agent Decision",
+      };
+      dynamoMock
+        .on(ScanCommand)
+        .resolvesOnce({ Items: [agentDecisionKey] })
+        .resolvesOnce({ Items: [] });
+
+      const counters = await runBackfillRecordOrg(
+        "Default",
+        "reg-1",
+        "agents-tbl",
+        "tools-tbl",
+        false,
+        true,
+      );
+
+      expect(counters.agentProjectionUpdated).toBe(0);
+      expect(dynamoMock.commandCalls(UpdateCommand)).toHaveLength(0);
     });
   });
 
@@ -212,10 +284,9 @@ describe("backfill-record-org", () => {
         .on(ScanCommand)
         .resolvesOnce({ Items: [AGENT_ALL_ORGS] })
         .resolvesOnce({ Items: [] });
-      dynamoMock.on(UpdateCommand).resolves({});
 
       const counters = await runBackfillRecordOrg(
-        "Acme",
+        "Default",
         "reg-1",
         "agents-tbl",
         "tools-tbl",
@@ -232,10 +303,9 @@ describe("backfill-record-org", () => {
         .on(ScanCommand)
         .resolvesOnce({ Items: [] })
         .resolvesOnce({ Items: [TOOL_ALL_ORGS] });
-      dynamoMock.on(UpdateCommand).resolves({});
 
       const counters = await runBackfillRecordOrg(
-        "Acme",
+        "Default",
         "reg-1",
         "agents-tbl",
         "tools-tbl",
@@ -252,19 +322,20 @@ describe("backfill-record-org", () => {
     it("reports counts but sends no UpdateCommands", async () => {
       dynamoMock
         .on(ScanCommand)
-        .resolvesOnce({ Items: [AGENT_ORPHAN_ABSENT] })
-        .resolvesOnce({ Items: [] });
+        .resolvesOnce({ Items: [AGENT_KINDED_ABSENT] })
+        .resolvesOnce({ Items: [TOOL_KINDED_ABSENT] });
 
       const counters = await runBackfillRecordOrg(
-        "Acme",
+        "Default",
         "reg-1",
         "agents-tbl",
         "tools-tbl",
         true,
-        true,
+        false,
       );
 
       expect(counters.agentProjectionUpdated).toBe(1);
+      expect(counters.toolProjectionUpdated).toBe(1);
       expect(dynamoMock.commandCalls(UpdateCommand)).toHaveLength(0);
     });
   });
@@ -273,12 +344,16 @@ describe("backfill-record-org", () => {
     it("sends UpdateCommands for orphaned rows in apply mode", async () => {
       dynamoMock
         .on(ScanCommand)
-        .resolvesOnce({ Items: [AGENT_ORPHAN_ABSENT, AGENT_ORPHAN_EMPTY] })
-        .resolvesOnce({ Items: [TOOL_ORPHAN_EMPTY] });
+        .resolvesOnce({
+          Items: [AGENT_KINDED_ABSENT, AGENT_UNKINDED_ABSENT],
+        })
+        .resolvesOnce({
+          Items: [TOOL_KINDED_ABSENT, TOOL_DECISION_KEY, TOOL_UNKINDED_ABSENT],
+        });
       dynamoMock.on(UpdateCommand).resolves({});
 
       const counters = await runBackfillRecordOrg(
-        "Acme",
+        "Default",
         "reg-1",
         "agents-tbl",
         "tools-tbl",
@@ -286,12 +361,13 @@ describe("backfill-record-org", () => {
         true,
       );
 
-      // Agent: absent + empty = 2; Tool: empty = 1
+      // Agent: kinded+absent + unkinded+absent = 2
+      // Tool: kinded+absent + unkinded+absent = 2 (decision# skipped)
       expect(counters.agentProjectionUpdated).toBe(2);
-      expect(counters.toolProjectionUpdated).toBe(1);
+      expect(counters.toolProjectionUpdated).toBe(2);
 
       const updateCalls = dynamoMock.commandCalls(UpdateCommand);
-      expect(updateCalls.length).toBe(3);
+      expect(updateCalls.length).toBe(4);
 
       // Verify the stamped value
       for (const call of updateCalls) {
@@ -299,7 +375,7 @@ describe("backfill-record-org", () => {
           string,
           unknown
         >;
-        expect(vals[":org"]).toBe("Acme");
+        expect(vals[":org"]).toBe("Default");
       }
     });
   });
