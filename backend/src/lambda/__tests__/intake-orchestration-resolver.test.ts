@@ -5,61 +5,82 @@
  * derivation, then delegation to the existing resolver cores (which are
  * mocked here — their own behavior is covered by their own suites).
  */
-import { DynamoDBDocumentClient, GetCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  ScanCommand,
+} from "@aws-sdk/lib-dynamodb";
 import {
   CognitoIdentityProviderClient,
   AdminGetUserCommand,
-} from '@aws-sdk/client-cognito-identity-provider';
-import { mockClient } from 'aws-sdk-client-mock';
+} from "@aws-sdk/client-cognito-identity-provider";
+import { mockClient } from "aws-sdk-client-mock";
 
-jest.mock('../agent-config-resolver', () => ({
+jest.mock("../agent-config-resolver", () => ({
   activateProjectAgents: jest.fn(),
   findProjectAgentRecords: jest.fn(),
 }));
-jest.mock('../registry-agent-record-resolver', () => ({
+jest.mock("../registry-agent-record-resolver", () => ({
   createApp: jest.fn(),
   ensureAppAgentBindings: jest.fn(),
   findAppBySourceProjectId: jest.fn(),
 }));
-jest.mock('../workflow-resolver', () => ({
+jest.mock("../workflow-resolver", () => ({
   createWorkflow: jest.fn(),
   publishWorkflow: jest.fn(),
   importBlueprint: jest.fn(),
 }));
-jest.mock('../ensure-agent-config-rows', () => ({
+jest.mock("../ensure-agent-config-rows", () => ({
   // Real extractor (pure) + mocked healer so wiring order is observable.
-  extractAgentIdsFromDefinition: jest.requireActual('../ensure-agent-config-rows')
-    .extractAgentIdsFromDefinition,
+  extractAgentIdsFromDefinition: jest.requireActual(
+    "../ensure-agent-config-rows",
+  ).extractAgentIdsFromDefinition,
   ensureAgentConfigRows: jest.fn(),
 }));
 
-import { activateProjectAgents, findProjectAgentRecords } from '../agent-config-resolver';
+import {
+  activateProjectAgents,
+  findProjectAgentRecords,
+} from "../agent-config-resolver";
 import {
   createApp,
   ensureAppAgentBindings,
   findAppBySourceProjectId,
-} from '../registry-agent-record-resolver';
-import { createWorkflow, publishWorkflow, importBlueprint } from '../workflow-resolver';
-import { ensureAgentConfigRows } from '../ensure-agent-config-rows';
-import { handler } from '../intake-orchestration-resolver';
+} from "../registry-agent-record-resolver";
+import {
+  createWorkflow,
+  publishWorkflow,
+  importBlueprint,
+} from "../workflow-resolver";
+import { ensureAgentConfigRows } from "../ensure-agent-config-rows";
+import { handler } from "../intake-orchestration-resolver";
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 const cognitoMock = mockClient(CognitoIdentityProviderClient);
 
-const activateMock = activateProjectAgents as jest.MockedFunction<typeof activateProjectAgents>;
-const findProjectAgentRecordsMock = findProjectAgentRecords as jest.MockedFunction<
-  typeof findProjectAgentRecords
+const activateMock = activateProjectAgents as jest.MockedFunction<
+  typeof activateProjectAgents
 >;
+const findProjectAgentRecordsMock =
+  findProjectAgentRecords as jest.MockedFunction<
+    typeof findProjectAgentRecords
+  >;
 const createAppMock = createApp as jest.MockedFunction<typeof createApp>;
-const findAppBySourceProjectIdMock = findAppBySourceProjectId as jest.MockedFunction<
-  typeof findAppBySourceProjectId
+const findAppBySourceProjectIdMock =
+  findAppBySourceProjectId as jest.MockedFunction<
+    typeof findAppBySourceProjectId
+  >;
+const ensureAppAgentBindingsMock =
+  ensureAppAgentBindings as jest.MockedFunction<typeof ensureAppAgentBindings>;
+const createWorkflowMock = createWorkflow as jest.MockedFunction<
+  typeof createWorkflow
 >;
-const ensureAppAgentBindingsMock = ensureAppAgentBindings as jest.MockedFunction<
-  typeof ensureAppAgentBindings
+const publishWorkflowMock = publishWorkflow as jest.MockedFunction<
+  typeof publishWorkflow
 >;
-const createWorkflowMock = createWorkflow as jest.MockedFunction<typeof createWorkflow>;
-const publishWorkflowMock = publishWorkflow as jest.MockedFunction<typeof publishWorkflow>;
-const importBlueprintMock = importBlueprint as jest.MockedFunction<typeof importBlueprint>;
+const importBlueprintMock = importBlueprint as jest.MockedFunction<
+  typeof importBlueprint
+>;
 const ensureAgentConfigRowsMock = ensureAgentConfigRows as jest.MockedFunction<
   typeof ensureAgentConfigRows
 >;
@@ -67,15 +88,15 @@ const ensureAgentConfigRowsMock = ensureAgentConfigRows as jest.MockedFunction<
 type HandlerEvent = Parameters<typeof handler>[0];
 
 const IAM_IDENTITY = {
-  accountId: '123456789012',
-  userArn: 'arn:aws:sts::123456789012:assumed-role/intake-runtime-role/session',
-  username: 'AROAEXAMPLE:session',
-  sourceIp: ['10.0.0.1'],
+  accountId: "123456789012",
+  userArn: "arn:aws:sts::123456789012:assumed-role/intake-runtime-role/session",
+  username: "AROAEXAMPLE:session",
+  sourceIp: ["10.0.0.1"],
 };
 
 const COGNITO_IDENTITY = {
-  sub: 'user-123',
-  claims: { sub: 'user-123', 'custom:organization': 'org-evil' },
+  sub: "user-123",
+  claims: { sub: "user-123", "custom:organization": "org-evil" },
 };
 
 function makeEvent(
@@ -92,13 +113,13 @@ function makeEvent(
 
 const invoke = handler as (event: HandlerEvent) => Promise<unknown>;
 
-const SESSION_ID = 'sess-1111';
-const PROJECT_ID = 'proj-2222';
-const ORG_ID = 'org-1';
+const SESSION_ID = "sess-1111";
+const PROJECT_ID = "proj-2222";
+const ORG_ID = "org-1";
 // UUID-shaped: `Project.owner` is the creator's Cognito sub (getUserId →
 // identity.sub), which is the UserOrgMembership partition key.
-const OWNER_SUB = '3f2a1b7c-9d4e-4f61-8a2b-0c5d6e7f8a9b';
-const MEMBERSHIP_TABLE = 'citadel-user-org-membership-test';
+const OWNER_SUB = "3f2a1b7c-9d4e-4f61-8a2b-0c5d6e7f8a9b";
+const MEMBERSHIP_TABLE = "citadel-user-org-membership-test";
 
 /** Wire the owner's UserOrgMembership row (the authoritative user↔org link). */
 function mockOwnerMembership(row: Record<string, unknown> | null): void {
@@ -113,24 +134,31 @@ function mockSessionLinkage(opts?: {
   project?: Record<string, unknown> | null;
 }): void {
   ddbMock
-    .on(ScanCommand, { TableName: 'citadel-conversations-test' })
-    .resolves({ Items: opts?.conversationItems ?? [{ projectId: PROJECT_ID }] });
+    .on(ScanCommand, { TableName: "citadel-conversations-test" })
+    .resolves({
+      Items: opts?.conversationItems ?? [{ projectId: PROJECT_ID }],
+    });
   const project =
     opts?.project === undefined
-      ? { id: PROJECT_ID, name: 'Alpha Project', organization: ORG_ID, owner: OWNER_SUB }
+      ? {
+          id: PROJECT_ID,
+          name: "Alpha Project",
+          organization: ORG_ID,
+          owner: OWNER_SUB,
+        }
       : opts.project;
   ddbMock
-    .on(GetCommand, { TableName: 'citadel-projects-test' })
+    .on(GetCommand, { TableName: "citadel-projects-test" })
     .resolves({ Item: project ?? undefined });
 }
 
-describe('intake-orchestration-resolver', () => {
+describe("intake-orchestration-resolver", () => {
   beforeAll(() => {
-    process.env.PROJECTS_TABLE = 'citadel-projects-test';
-    process.env.CONVERSATIONS_TABLE = 'citadel-conversations-test';
-    process.env.APPS_TABLE = 'citadel-apps-test';
-    process.env.WORKFLOWS_TABLE = 'citadel-workflows-test';
-    process.env.USER_POOL_ID = 'us-west-2_testpool';
+    process.env.PROJECTS_TABLE = "citadel-projects-test";
+    process.env.CONVERSATIONS_TABLE = "citadel-conversations-test";
+    process.env.APPS_TABLE = "citadel-apps-test";
+    process.env.WORKFLOWS_TABLE = "citadel-workflows-test";
+    process.env.USER_POOL_ID = "us-west-2_testpool";
     process.env.USER_ORG_MEMBERSHIP_TABLE = MEMBERSHIP_TABLE;
   });
 
@@ -150,7 +178,11 @@ describe('intake-orchestration-resolver', () => {
     cognitoMock.on(AdminGetUserCommand).resolves({ UserAttributes: [] });
     jest.clearAllMocks();
     // Healing is a no-op unless a test asserts on it explicitly.
-    ensureAgentConfigRowsMock.mockResolvedValue({ ensured: [], existing: [], failed: [] });
+    ensureAgentConfigRowsMock.mockResolvedValue({
+      ensured: [],
+      existing: [],
+      failed: [],
+    });
     // Idempotency guard: no pre-existing session app unless a test wires one.
     findAppBySourceProjectIdMock.mockResolvedValue(null);
     // No session agents / no binding activity unless a test wires them.
@@ -165,88 +197,107 @@ describe('intake-orchestration-resolver', () => {
 
   // ─── identity guard (defence-in-depth on top of @aws_iam) ────────────
 
-  describe('IAM identity guard', () => {
+  describe("IAM identity guard", () => {
     const fields = [
-      'intakeActivateProjectAgents',
-      'intakeCreateApp',
-      'intakeCreateBlueprint',
-      'intakeImportBlueprintToApp',
+      "intakeActivateProjectAgents",
+      "intakeCreateApp",
+      "intakeCreateBlueprint",
+      "intakeImportBlueprintToApp",
     ];
 
-    test.each(fields)('rejects a Cognito-shaped identity on %s', async (field) => {
-      await expect(
-        invoke(makeEvent(field, { sessionId: SESSION_ID }, COGNITO_IDENTITY)),
-      ).rejects.toThrow(/IAM-only/);
-    });
+    test.each(fields)(
+      "rejects a Cognito-shaped identity on %s",
+      async (field) => {
+        await expect(
+          invoke(makeEvent(field, { sessionId: SESSION_ID }, COGNITO_IDENTITY)),
+        ).rejects.toThrow(/IAM-only/);
+      },
+    );
 
-    test('rejects a null identity', async () => {
+    test("rejects a null identity", async () => {
       await expect(
-        invoke(makeEvent('intakeActivateProjectAgents', { sessionId: SESSION_ID }, null)),
+        invoke(
+          makeEvent(
+            "intakeActivateProjectAgents",
+            { sessionId: SESSION_ID },
+            null,
+          ),
+        ),
       ).rejects.toThrow(/IAM-only/);
     });
   });
 
-  test('throws on unknown field', async () => {
-    await expect(invoke(makeEvent('somethingElse', {}))).rejects.toThrow(/Unknown field/);
+  test("throws on unknown field", async () => {
+    await expect(invoke(makeEvent("somethingElse", {}))).rejects.toThrow(
+      /Unknown field/,
+    );
   });
 
   // ─── intakeActivateProjectAgents (R1 matching) ───────────────────────
 
-  describe('intakeActivateProjectAgents', () => {
-    test('throws a validation error when sessionId is missing', async () => {
-      await expect(invoke(makeEvent('intakeActivateProjectAgents', {}))).rejects.toThrow(
-        /sessionId/,
-      );
+  describe("intakeActivateProjectAgents", () => {
+    test("throws a validation error when sessionId is missing", async () => {
+      await expect(
+        invoke(makeEvent("intakeActivateProjectAgents", {})),
+      ).rejects.toThrow(/sessionId/);
     });
 
-    test('activates by sessionId (the fabricator sourceProjectId key) and tags matchedBy sessionId', async () => {
+    test("activates by sessionId (the fabricator sourceProjectId key) and tags matchedBy sessionId", async () => {
       mockSessionLinkage();
       activateMock.mockResolvedValueOnce({
-        activated: ['agent-a'],
+        activated: ["agent-a"],
         failed: [],
-        alreadyActive: ['agent-b'],
+        alreadyActive: ["agent-b"],
       });
 
       const result = await invoke(
-        makeEvent('intakeActivateProjectAgents', { sessionId: SESSION_ID }),
+        makeEvent("intakeActivateProjectAgents", { sessionId: SESSION_ID }),
       );
 
       expect(activateMock).toHaveBeenCalledTimes(1);
       expect(activateMock).toHaveBeenCalledWith(SESSION_ID);
       expect(result).toEqual({
-        activated: ['agent-a'],
+        activated: ["agent-a"],
         failed: [],
-        alreadyActive: ['agent-b'],
-        matchedBy: 'sessionId',
+        alreadyActive: ["agent-b"],
+        matchedBy: "sessionId",
       });
     });
 
-    test('falls back to the conversations-linked projectId when sessionId matches zero agents', async () => {
+    test("falls back to the conversations-linked projectId when sessionId matches zero agents", async () => {
       mockSessionLinkage();
       activateMock
         .mockResolvedValueOnce({ activated: [], failed: [], alreadyActive: [] })
-        .mockResolvedValueOnce({ activated: ['agent-a'], failed: [], alreadyActive: [] });
+        .mockResolvedValueOnce({
+          activated: ["agent-a"],
+          failed: [],
+          alreadyActive: [],
+        });
 
       const result = await invoke(
-        makeEvent('intakeActivateProjectAgents', { sessionId: SESSION_ID }),
+        makeEvent("intakeActivateProjectAgents", { sessionId: SESSION_ID }),
       );
 
       expect(activateMock).toHaveBeenNthCalledWith(1, SESSION_ID);
       expect(activateMock).toHaveBeenNthCalledWith(2, PROJECT_ID);
       expect(result).toEqual({
-        activated: ['agent-a'],
+        activated: ["agent-a"],
         failed: [],
         alreadyActive: [],
-        matchedBy: 'projectId',
+        matchedBy: "projectId",
       });
     });
 
-    test('surfaces zero-activated explicitly with matchedBy null when both keys match nothing', async () => {
+    test("surfaces zero-activated explicitly with matchedBy null when both keys match nothing", async () => {
       mockSessionLinkage();
-      activateMock.mockResolvedValue({ activated: [], failed: [], alreadyActive: [] });
+      activateMock.mockResolvedValue({
+        activated: [],
+        failed: [],
+        alreadyActive: [],
+      });
 
       const result = await invoke(
-        makeEvent('intakeActivateProjectAgents', { sessionId: SESSION_ID }),
+        makeEvent("intakeActivateProjectAgents", { sessionId: SESSION_ID }),
       );
 
       expect(activateMock).toHaveBeenCalledTimes(2);
@@ -258,39 +309,52 @@ describe('intake-orchestration-resolver', () => {
       });
     });
 
-    test('does not retry when no conversation row links a distinct projectId', async () => {
+    test("does not retry when no conversation row links a distinct projectId", async () => {
       // No conversation rows → linked projectId falls back to the sessionId
       // itself, so a second activation attempt would be identical: skip it.
       mockSessionLinkage({ conversationItems: [] });
-      activateMock.mockResolvedValueOnce({ activated: [], failed: [], alreadyActive: [] });
+      activateMock.mockResolvedValueOnce({
+        activated: [],
+        failed: [],
+        alreadyActive: [],
+      });
 
       const result = await invoke(
-        makeEvent('intakeActivateProjectAgents', { sessionId: SESSION_ID }),
+        makeEvent("intakeActivateProjectAgents", { sessionId: SESSION_ID }),
       );
 
       expect(activateMock).toHaveBeenCalledTimes(1);
       expect(result).toMatchObject({ matchedBy: null });
     });
 
-    test('finds the linked conversation row beyond the first Scan page', async () => {
+    test("finds the linked conversation row beyond the first Scan page", async () => {
       // Dev-observed latent bug: Scan's Limit caps items EVALUATED (pre-
       // filter), so with >Limit rows in the table the single-page lookup
       // usually returned zero matches. The lookup must follow
       // LastEvaluatedKey until the linked row is found.
-      const lastKey = { projectId: 'other-proj', timestamp: '2026-01-01T00:00:00Z' };
+      const lastKey = {
+        projectId: "other-proj",
+        timestamp: "2026-01-01T00:00:00Z",
+      };
       ddbMock
-        .on(ScanCommand, { TableName: 'citadel-conversations-test' })
+        .on(ScanCommand, { TableName: "citadel-conversations-test" })
         .resolvesOnce({ Items: [], LastEvaluatedKey: lastKey })
         .resolvesOnce({ Items: [{ projectId: PROJECT_ID }] });
       ddbMock
-        .on(GetCommand, { TableName: 'citadel-projects-test' })
-        .resolves({ Item: { id: PROJECT_ID, name: 'Alpha', organization: ORG_ID } });
+        .on(GetCommand, { TableName: "citadel-projects-test" })
+        .resolves({
+          Item: { id: PROJECT_ID, name: "Alpha", organization: ORG_ID },
+        });
       activateMock
         .mockResolvedValueOnce({ activated: [], failed: [], alreadyActive: [] })
-        .mockResolvedValueOnce({ activated: ['agent-a'], failed: [], alreadyActive: [] });
+        .mockResolvedValueOnce({
+          activated: ["agent-a"],
+          failed: [],
+          alreadyActive: [],
+        });
 
       const result = await invoke(
-        makeEvent('intakeActivateProjectAgents', { sessionId: SESSION_ID }),
+        makeEvent("intakeActivateProjectAgents", { sessionId: SESSION_ID }),
       );
 
       // Pagination proof: the second page request continues from the first
@@ -301,38 +365,41 @@ describe('intake-orchestration-resolver', () => {
       expect(scanCalls[1].args[0].input.ExclusiveStartKey).toEqual(lastKey);
       // The row found on page 2 drives the projectId fallback activation.
       expect(activateMock).toHaveBeenNthCalledWith(2, PROJECT_ID);
-      expect(result).toMatchObject({ matchedBy: 'projectId' });
+      expect(result).toMatchObject({ matchedBy: "projectId" });
     });
   });
 
   // ─── intakeCreateApp ─────────────────────────────────────────────────
 
-  describe('intakeCreateApp', () => {
-    test('derives orgId server-side and stamps sourceProjectId with the sessionId', async () => {
+  describe("intakeCreateApp", () => {
+    test("derives orgId server-side and stamps sourceProjectId with the sessionId", async () => {
       mockSessionLinkage();
-      createAppMock.mockResolvedValueOnce({ appId: 'rec123456789', name: 'My App' });
+      createAppMock.mockResolvedValueOnce({
+        appId: "rec123456789",
+        name: "My App",
+      });
 
       const result = await invoke(
-        makeEvent('intakeCreateApp', {
+        makeEvent("intakeCreateApp", {
           sessionId: SESSION_ID,
-          name: 'My App',
-          description: 'Desc',
+          name: "My App",
+          description: "Desc",
           // A hostile caller cannot smuggle scoping fields:
-          orgId: 'org-evil',
-          sourceProjectId: 'proj-evil',
+          orgId: "org-evil",
+          sourceProjectId: "proj-evil",
         }),
       );
 
       expect(createAppMock).toHaveBeenCalledWith(
         {
           orgId: ORG_ID,
-          name: 'My App',
-          description: 'Desc',
+          name: "My App",
+          description: "Desc",
           sourceProjectId: SESSION_ID,
         },
         IAM_IDENTITY.userArn,
       );
-      expect(result).toEqual({ appId: 'rec123456789', name: 'My App' });
+      expect(result).toEqual({ appId: "rec123456789", name: "My App" });
     });
 
     test("falls back to the project owner's UserOrgMembership row when the project row is org-less (decision 00d40a31)", async () => {
@@ -342,14 +409,20 @@ describe('intake-orchestration-resolver', () => {
       // resolve the org the owner belongs to from the AUTHORITATIVE
       // membership table (GetItem by sub, ConsistentRead) — never from the
       // Cognito attribute, even when it is populated with something else.
-      mockSessionLinkage({ project: { id: PROJECT_ID, name: 'Alpha', owner: OWNER_SUB } });
-      mockOwnerMembership({ sub: OWNER_SUB, orgName: 'org-owner' });
-      cognitoMock.on(AdminGetUserCommand).resolves({
-        UserAttributes: [{ Name: 'custom:organization', Value: 'org-evil-mirror' }],
+      mockSessionLinkage({
+        project: { id: PROJECT_ID, name: "Alpha", owner: OWNER_SUB },
       });
-      createAppMock.mockResolvedValueOnce({ appId: 'rec123456789' });
+      mockOwnerMembership({ sub: OWNER_SUB, orgName: "org-owner" });
+      cognitoMock.on(AdminGetUserCommand).resolves({
+        UserAttributes: [
+          { Name: "custom:organization", Value: "org-evil-mirror" },
+        ],
+      });
+      createAppMock.mockResolvedValueOnce({ appId: "rec123456789" });
 
-      await invoke(makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }));
+      await invoke(
+        makeEvent("intakeCreateApp", { sessionId: SESSION_ID, name: "My App" }),
+      );
 
       const membershipReads = ddbMock
         .commandCalls(GetCommand)
@@ -362,7 +435,7 @@ describe('intake-orchestration-resolver', () => {
       });
       expect(cognitoMock.commandCalls(AdminGetUserCommand)).toHaveLength(0);
       expect(createAppMock).toHaveBeenCalledWith(
-        expect.objectContaining({ orgId: 'org-owner' }),
+        expect.objectContaining({ orgId: "org-owner" }),
         expect.any(String),
       );
     });
@@ -374,46 +447,60 @@ describe('intake-orchestration-resolver', () => {
       // `selectedOrganization || 'default'` (AppBuilderWizard.tsx). A hard
       // throw here would make intake STRICTER than the UI path it delegates
       // to, which is exactly the dev failure being fixed.
-      mockSessionLinkage({ project: { id: PROJECT_ID, name: 'Alpha', owner: OWNER_SUB } });
+      mockSessionLinkage({
+        project: { id: PROJECT_ID, name: "Alpha", owner: OWNER_SUB },
+      });
       mockOwnerMembership(null);
       cognitoMock.on(AdminGetUserCommand).resolves({
-        UserAttributes: [{ Name: 'custom:organization', Value: 'org-evil-mirror' }],
+        UserAttributes: [
+          { Name: "custom:organization", Value: "org-evil-mirror" },
+        ],
       });
-      createAppMock.mockResolvedValueOnce({ appId: 'rec123456789' });
+      createAppMock.mockResolvedValueOnce({ appId: "rec123456789" });
 
-      await invoke(makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }));
+      await invoke(
+        makeEvent("intakeCreateApp", { sessionId: SESSION_ID, name: "My App" }),
+      );
 
       expect(cognitoMock.commandCalls(AdminGetUserCommand)).toHaveLength(0);
       expect(createAppMock).toHaveBeenCalledWith(
-        expect.objectContaining({ orgId: 'default' }),
+        expect.objectContaining({ orgId: "default" }),
         expect.any(String),
       );
     });
 
     test("falls back to 'default' without any owner lookup when the project row has no owner", async () => {
-      mockSessionLinkage({ project: { id: PROJECT_ID, name: 'Alpha' } });
-      createAppMock.mockResolvedValueOnce({ appId: 'rec123456789' });
+      mockSessionLinkage({ project: { id: PROJECT_ID, name: "Alpha" } });
+      createAppMock.mockResolvedValueOnce({ appId: "rec123456789" });
 
-      await invoke(makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }));
+      await invoke(
+        makeEvent("intakeCreateApp", { sessionId: SESSION_ID, name: "My App" }),
+      );
 
       expect(
-        ddbMock.commandCalls(GetCommand).filter((c) => c.args[0].input.TableName === MEMBERSHIP_TABLE),
+        ddbMock
+          .commandCalls(GetCommand)
+          .filter((c) => c.args[0].input.TableName === MEMBERSHIP_TABLE),
       ).toHaveLength(0);
       expect(cognitoMock.commandCalls(AdminGetUserCommand)).toHaveLength(0);
       expect(createAppMock).toHaveBeenCalledWith(
-        expect.objectContaining({ orgId: 'default' }),
+        expect.objectContaining({ orgId: "default" }),
         expect.any(String),
       );
     });
 
-    test('makes no owner lookup when the project row already carries an organization', async () => {
+    test("makes no owner lookup when the project row already carries an organization", async () => {
       mockSessionLinkage();
-      createAppMock.mockResolvedValueOnce({ appId: 'rec123456789' });
+      createAppMock.mockResolvedValueOnce({ appId: "rec123456789" });
 
-      await invoke(makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }));
+      await invoke(
+        makeEvent("intakeCreateApp", { sessionId: SESSION_ID, name: "My App" }),
+      );
 
       expect(
-        ddbMock.commandCalls(GetCommand).filter((c) => c.args[0].input.TableName === MEMBERSHIP_TABLE),
+        ddbMock
+          .commandCalls(GetCommand)
+          .filter((c) => c.args[0].input.TableName === MEMBERSHIP_TABLE),
       ).toHaveLength(0);
       expect(cognitoMock.commandCalls(AdminGetUserCommand)).toHaveLength(0);
       expect(createAppMock).toHaveBeenCalledWith(
@@ -423,94 +510,116 @@ describe('intake-orchestration-resolver', () => {
     });
 
     test("falls back to 'default' when the membership-table read itself fails", async () => {
-      mockSessionLinkage({ project: { id: PROJECT_ID, name: 'Alpha', owner: OWNER_SUB } });
+      mockSessionLinkage({
+        project: { id: PROJECT_ID, name: "Alpha", owner: OWNER_SUB },
+      });
       ddbMock
-        .on(GetCommand, { TableName: MEMBERSHIP_TABLE, Key: { sub: OWNER_SUB } })
-        .rejects(new Error('ProvisionedThroughputExceededException'));
-      createAppMock.mockResolvedValueOnce({ appId: 'rec123456789' });
+        .on(GetCommand, {
+          TableName: MEMBERSHIP_TABLE,
+          Key: { sub: OWNER_SUB },
+        })
+        .rejects(new Error("ProvisionedThroughputExceededException"));
+      createAppMock.mockResolvedValueOnce({ appId: "rec123456789" });
 
-      await invoke(makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }));
+      await invoke(
+        makeEvent("intakeCreateApp", { sessionId: SESSION_ID, name: "My App" }),
+      );
 
       expect(createAppMock).toHaveBeenCalledWith(
-        expect.objectContaining({ orgId: 'default' }),
+        expect.objectContaining({ orgId: "default" }),
         expect.any(String),
       );
     });
 
-    test('throws a validation error when name is missing', async () => {
+    test("throws a validation error when name is missing", async () => {
       await expect(
-        invoke(makeEvent('intakeCreateApp', { sessionId: SESSION_ID })),
+        invoke(makeEvent("intakeCreateApp", { sessionId: SESSION_ID })),
       ).rejects.toThrow(/name/);
       expect(createAppMock).not.toHaveBeenCalled();
     });
 
-    test('neutralises HTML markup in the client-supplied name', async () => {
+    test("neutralises HTML markup in the client-supplied name", async () => {
       mockSessionLinkage();
-      createAppMock.mockResolvedValueOnce({ appId: 'rec123456789' });
+      createAppMock.mockResolvedValueOnce({ appId: "rec123456789" });
 
       await invoke(
-        makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: '  <b>App</b>  ' }),
+        makeEvent("intakeCreateApp", {
+          sessionId: SESSION_ID,
+          name: "  <b>App</b>  ",
+        }),
       );
 
       expect(createAppMock).toHaveBeenCalledWith(
-        expect.objectContaining({ name: '&lt;b&gt;App&lt;/b&gt;' }),
+        expect.objectContaining({ name: "&lt;b&gt;App&lt;/b&gt;" }),
         expect.any(String),
       );
     });
 
     // ── idempotency guard (triplicate-create fix) ──────────────────────
 
-    test('returns the existing session app without creating when one already exists', async () => {
+    test("returns the existing session app without creating when one already exists", async () => {
       // Live incident: the client timed out at 30s while the Lambda kept
       // running; a user-consented retry then created a duplicate app (three
       // apps from one consent). The guard: look the session's app up by the
       // server-stamped sourceProjectId BEFORE creating.
       mockSessionLinkage();
       const existing = {
-        appId: 'rec-existing1',
-        name: 'My App',
-        status: 'DRAFT',
-        agentBindings: [{ agentId: 'agt000000001' }],
+        appId: "rec-existing1",
+        name: "My App",
+        status: "DRAFT",
+        agentBindings: [{ agentId: "agt000000001" }],
       };
       findAppBySourceProjectIdMock.mockResolvedValueOnce(existing);
 
       const result = await invoke(
-        makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }),
+        makeEvent("intakeCreateApp", { sessionId: SESSION_ID, name: "My App" }),
       );
 
-      expect(findAppBySourceProjectIdMock).toHaveBeenCalledWith(SESSION_ID, ORG_ID);
+      expect(findAppBySourceProjectIdMock).toHaveBeenCalledWith(
+        SESSION_ID,
+        ORG_ID,
+      );
       expect(createAppMock).not.toHaveBeenCalled();
       expect(result).toBe(existing);
     });
 
-    test('creates the app when no existing app matches the session (lookup runs first)', async () => {
+    test("creates the app when no existing app matches the session (lookup runs first)", async () => {
       mockSessionLinkage();
-      createAppMock.mockResolvedValueOnce({ appId: 'rec123456789' });
+      createAppMock.mockResolvedValueOnce({ appId: "rec123456789" });
 
-      await invoke(makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }));
+      await invoke(
+        makeEvent("intakeCreateApp", { sessionId: SESSION_ID, name: "My App" }),
+      );
 
-      expect(findAppBySourceProjectIdMock).toHaveBeenCalledWith(SESSION_ID, ORG_ID);
+      expect(findAppBySourceProjectIdMock).toHaveBeenCalledWith(
+        SESSION_ID,
+        ORG_ID,
+      );
       expect(createAppMock).toHaveBeenCalledTimes(1);
       // The guard must run BEFORE the create so a retry can never race past it.
-      expect(findAppBySourceProjectIdMock.mock.invocationCallOrder[0]).toBeLessThan(
-        createAppMock.mock.invocationCallOrder[0],
-      );
+      expect(
+        findAppBySourceProjectIdMock.mock.invocationCallOrder[0],
+      ).toBeLessThan(createAppMock.mock.invocationCallOrder[0]);
     });
 
     // ── no inline session-agent binding (latency fix) ──────────────────
 
-    test('does not bind session agents inline — import-time binding is the binding point', async () => {
+    test("does not bind session agents inline — import-time binding is the binding point", async () => {
       // Live incident: the app persisted ~1.2s in, then the inline binding
       // pass burned the remaining ~28s of the Lambda's 30s budget. Binding
       // now happens exclusively at blueprint import (ensureBindingsForDefinition),
       // so createApp must return the create-time projection in seconds with
       // ZERO registry list-scans.
       mockSessionLinkage();
-      const created = { appId: 'rec123456789', name: 'My App', agentBindings: [] };
+      const created = {
+        appId: "rec123456789",
+        name: "My App",
+        agentBindings: [],
+      };
       createAppMock.mockResolvedValueOnce(created);
 
       const result = await invoke(
-        makeEvent('intakeCreateApp', { sessionId: SESSION_ID, name: 'My App' }),
+        makeEvent("intakeCreateApp", { sessionId: SESSION_ID, name: "My App" }),
       );
 
       expect(findProjectAgentRecordsMock).not.toHaveBeenCalled();
@@ -521,46 +630,59 @@ describe('intake-orchestration-resolver', () => {
 
   // ─── intakeCreateBlueprint (AWSJSON §7 normalization) ────────────────
 
-  describe('intakeCreateBlueprint', () => {
+  describe("intakeCreateBlueprint", () => {
     const DEFINITION_OBJ = {
-      version: '1.0.0',
-      nodes: [{ id: 'rec1', agentId: 'rec1', position: { x: 100, y: 200 }, configuration: {} }],
+      version: "1.0.0",
+      nodes: [
+        {
+          id: "rec1",
+          agentId: "rec1",
+          position: { x: 100, y: 200 },
+          configuration: {},
+        },
+      ],
       edges: [],
     };
 
     function mockHappyCreate(): void {
-      createWorkflowMock.mockResolvedValueOnce({ workflowId: 'wf-1', status: 'DRAFT' });
-      publishWorkflowMock.mockResolvedValueOnce({ workflowId: 'wf-1', status: 'PUBLISHED' });
+      createWorkflowMock.mockResolvedValueOnce({
+        workflowId: "wf-1",
+        status: "DRAFT",
+      });
+      publishWorkflowMock.mockResolvedValueOnce({
+        workflowId: "wf-1",
+        status: "PUBLISHED",
+      });
     }
 
-    test('normalizes an object-shaped definition to a JSON string exactly once', async () => {
+    test("normalizes an object-shaped definition to a JSON string exactly once", async () => {
       mockSessionLinkage();
       mockHappyCreate();
 
       await invoke(
-        makeEvent('intakeCreateBlueprint', {
+        makeEvent("intakeCreateBlueprint", {
           sessionId: SESSION_ID,
-          name: 'BP',
+          name: "BP",
           definition: DEFINITION_OBJ,
         }),
       );
 
       const input = createWorkflowMock.mock.calls[0][0];
-      expect(typeof input.definition).toBe('string');
+      expect(typeof input.definition).toBe("string");
       expect(JSON.parse(input.definition as string)).toEqual(DEFINITION_OBJ);
       expect(input.isBlueprint).toBe(true);
       expect(input.orgId).toBe(ORG_ID);
     });
 
-    test('passes a string-shaped definition through unchanged (no double-encoding)', async () => {
+    test("passes a string-shaped definition through unchanged (no double-encoding)", async () => {
       mockSessionLinkage();
       mockHappyCreate();
       const asString = JSON.stringify(DEFINITION_OBJ);
 
       await invoke(
-        makeEvent('intakeCreateBlueprint', {
+        makeEvent("intakeCreateBlueprint", {
           sessionId: SESSION_ID,
-          name: 'BP',
+          name: "BP",
           definition: asString,
         }),
       );
@@ -569,66 +691,75 @@ describe('intake-orchestration-resolver', () => {
       expect(input.definition).toBe(asString);
     });
 
-    test('returns PUBLISHED with blueprintId and nodeCount on success', async () => {
+    test("returns PUBLISHED with blueprintId and nodeCount on success", async () => {
       mockSessionLinkage();
       mockHappyCreate();
 
       const result = await invoke(
-        makeEvent('intakeCreateBlueprint', {
+        makeEvent("intakeCreateBlueprint", {
           sessionId: SESSION_ID,
-          name: 'BP',
+          name: "BP",
           definition: DEFINITION_OBJ,
         }),
       );
 
-      expect(publishWorkflowMock).toHaveBeenCalledWith('wf-1', IAM_IDENTITY.userArn, expect.anything());
+      expect(publishWorkflowMock).toHaveBeenCalledWith(
+        "wf-1",
+        IAM_IDENTITY.userArn,
+        expect.anything(),
+      );
       expect(result).toEqual({
         ok: true,
-        blueprintId: 'wf-1',
-        status: 'PUBLISHED',
+        blueprintId: "wf-1",
+        status: "PUBLISHED",
         nodeCount: 1,
         missing: [],
         errors: [],
       });
     });
 
-    test('maps a missing-agent publish failure to AGENTS_SYNCING with the missing agentIds', async () => {
+    test("maps a missing-agent publish failure to AGENTS_SYNCING with the missing agentIds", async () => {
       mockSessionLinkage();
-      createWorkflowMock.mockResolvedValueOnce({ workflowId: 'wf-1', status: 'DRAFT' });
+      createWorkflowMock.mockResolvedValueOnce({
+        workflowId: "wf-1",
+        status: "DRAFT",
+      });
       publishWorkflowMock.mockRejectedValueOnce(
         new Error(
           "Validation failed: workflow references agents that do not exist: node 'n1' -> agentId 'rec1'; node 'n2' -> agentId 'rec2'. " +
-            'Map each node to an existing agent before publishing; the workflow remains DRAFT.',
+            "Map each node to an existing agent before publishing; the workflow remains DRAFT.",
         ),
       );
 
       const result = await invoke(
-        makeEvent('intakeCreateBlueprint', {
+        makeEvent("intakeCreateBlueprint", {
           sessionId: SESSION_ID,
-          name: 'BP',
+          name: "BP",
           definition: DEFINITION_OBJ,
         }),
       );
 
       expect(result).toMatchObject({
         ok: false,
-        blueprintId: 'wf-1',
-        status: 'AGENTS_SYNCING',
-        missing: ['rec1', 'rec2'],
+        blueprintId: "wf-1",
+        status: "AGENTS_SYNCING",
+        missing: ["rec1", "rec2"],
       });
     });
 
-    test('maps a definition validation failure to VALIDATION_FAILED with errors', async () => {
+    test("maps a definition validation failure to VALIDATION_FAILED with errors", async () => {
       mockSessionLinkage();
       createWorkflowMock.mockRejectedValueOnce(
-        new Error('Invalid workflow definition: definition.nodes must be an array'),
+        new Error(
+          "Invalid workflow definition: definition.nodes must be an array",
+        ),
       );
 
       const result = await invoke(
-        makeEvent('intakeCreateBlueprint', {
+        makeEvent("intakeCreateBlueprint", {
           sessionId: SESSION_ID,
-          name: 'BP',
-          definition: { nodes: 'nope' },
+          name: "BP",
+          definition: { nodes: "nope" },
         }),
       );
 
@@ -636,70 +767,175 @@ describe('intake-orchestration-resolver', () => {
       expect(result).toMatchObject({
         ok: false,
         blueprintId: null,
-        status: 'VALIDATION_FAILED',
-        errors: ['Invalid workflow definition: definition.nodes must be an array'],
+        status: "VALIDATION_FAILED",
+        errors: [
+          "Invalid workflow definition: definition.nodes must be an array",
+        ],
       });
     });
 
-    test('throws a validation error when definition is absent', async () => {
+    test("throws a validation error when definition is absent", async () => {
       await expect(
-        invoke(makeEvent('intakeCreateBlueprint', { sessionId: SESSION_ID, name: 'BP' })),
+        invoke(
+          makeEvent("intakeCreateBlueprint", {
+            sessionId: SESSION_ID,
+            name: "BP",
+          }),
+        ),
       ).rejects.toThrow(/definition/);
       expect(createWorkflowMock).not.toHaveBeenCalled();
     });
 
-    test('materializes agent-config rows for the definition agents BEFORE publishing', async () => {
+    test("materializes agent-config rows for the definition agents BEFORE publishing", async () => {
       // Bug B (dual-store gap): fabricated agents exist only in the registry,
       // so publishWorkflow's verifyAgentsExist gate fails without healing.
       mockSessionLinkage();
       mockHappyCreate();
 
       await invoke(
-        makeEvent('intakeCreateBlueprint', {
+        makeEvent("intakeCreateBlueprint", {
           sessionId: SESSION_ID,
-          name: 'BP',
+          name: "BP",
           definition: DEFINITION_OBJ,
         }),
       );
 
-      expect(ensureAgentConfigRowsMock).toHaveBeenCalledWith(['rec1']);
+      expect(ensureAgentConfigRowsMock).toHaveBeenCalledWith(["rec1"]);
       // Healing must happen strictly before the publish gate reads the table.
-      expect(ensureAgentConfigRowsMock.mock.invocationCallOrder[0]).toBeLessThan(
-        publishWorkflowMock.mock.invocationCallOrder[0],
-      );
+      expect(
+        ensureAgentConfigRowsMock.mock.invocationCallOrder[0],
+      ).toBeLessThan(publishWorkflowMock.mock.invocationCallOrder[0]);
     });
 
-    test('publishes even when healing reports failures (gate stays the authority)', async () => {
+    test("publishes even when healing reports failures (gate stays the authority)", async () => {
       mockSessionLinkage();
       mockHappyCreate();
       ensureAgentConfigRowsMock.mockResolvedValueOnce({
         ensured: [],
         existing: [],
-        failed: ['rec1'],
+        failed: ["rec1"],
       });
 
       const result = await invoke(
-        makeEvent('intakeCreateBlueprint', {
+        makeEvent("intakeCreateBlueprint", {
           sessionId: SESSION_ID,
-          name: 'BP',
+          name: "BP",
           definition: DEFINITION_OBJ,
         }),
       );
 
       expect(publishWorkflowMock).toHaveBeenCalled();
-      expect(result).toMatchObject({ ok: true, status: 'PUBLISHED' });
+      expect(result).toMatchObject({ ok: true, status: "PUBLISHED" });
+    });
+
+    // ── org reconciliation (IAM caller → session-derived org) ──────────
+
+    test("publishes when session org is the orgless-caller default and the created row matches", async () => {
+      // IAM callers have no Cognito org claim; resolveOrgId falls back to
+      // 'default' when the project row is org-less and the owner has no
+      // membership row. publishWorkflow's assertRowOrg check must still
+      // pass because the event is patched with the resolved org.
+      mockSessionLinkage({ project: { id: PROJECT_ID, name: "Alpha" } });
+      createWorkflowMock.mockResolvedValueOnce({
+        workflowId: "wf-1",
+        orgId: "default",
+        status: "DRAFT",
+      });
+      publishWorkflowMock.mockResolvedValueOnce({
+        workflowId: "wf-1",
+        status: "PUBLISHED",
+      });
+
+      const result = await invoke(
+        makeEvent("intakeCreateBlueprint", {
+          sessionId: SESSION_ID,
+          name: "BP",
+          definition: DEFINITION_OBJ,
+        }),
+      );
+
+      expect(result).toMatchObject({ ok: true, status: "PUBLISHED" });
+      // publishWorkflow receives the patched event carrying the derived org.
+      const patchedEvent = publishWorkflowMock.mock.calls[0][2] as Record<
+        string,
+        unknown
+      >;
+      const patchedIdentity = patchedEvent.identity as Record<string, unknown>;
+      expect(patchedIdentity["custom:organization"]).toBe("default");
+    });
+
+    test("throws CrossOrgAccessError when the created row orgId mismatches the session org", async () => {
+      mockSessionLinkage();
+      // createWorkflow returns a row whose orgId doesn't match the session's
+      // resolved org (ORG_ID) — should never happen in practice, but the
+      // guard catches it defensively.
+      createWorkflowMock.mockResolvedValueOnce({
+        workflowId: "wf-1",
+        orgId: "org-rogue",
+        status: "DRAFT",
+      });
+
+      await expect(
+        invoke(
+          makeEvent("intakeCreateBlueprint", {
+            sessionId: SESSION_ID,
+            name: "BP",
+            definition: DEFINITION_OBJ,
+          }),
+        ),
+      ).rejects.toThrow(/Access denied/);
+      expect(publishWorkflowMock).not.toHaveBeenCalled();
+    });
+
+    test("passes the server-derived org claim in the event to publishWorkflow", async () => {
+      mockSessionLinkage();
+      createWorkflowMock.mockResolvedValueOnce({
+        workflowId: "wf-1",
+        orgId: ORG_ID,
+        status: "DRAFT",
+      });
+      publishWorkflowMock.mockResolvedValueOnce({
+        workflowId: "wf-1",
+        status: "PUBLISHED",
+      });
+
+      await invoke(
+        makeEvent("intakeCreateBlueprint", {
+          sessionId: SESSION_ID,
+          name: "BP",
+          definition: DEFINITION_OBJ,
+        }),
+      );
+
+      // The raw IAM event carries no custom:organization claim; the patched
+      // event must carry the session-resolved org so assertRowOrg succeeds.
+      const patchedEvent = publishWorkflowMock.mock.calls[0][2] as Record<
+        string,
+        unknown
+      >;
+      const patchedIdentity = patchedEvent.identity as Record<string, unknown>;
+      expect(patchedIdentity["custom:organization"]).toBe(ORG_ID);
+      // The original IAM identity fields are preserved.
+      expect(patchedIdentity.accountId).toBe(IAM_IDENTITY.accountId);
     });
   });
 
   // ─── intakeImportBlueprintToApp ──────────────────────────────────────
 
-  describe('intakeImportBlueprintToApp', () => {
-    const APP_ID = 'rec123456789';
-    const BLUEPRINT_ID = 'wf-bp-1';
+  describe("intakeImportBlueprintToApp", () => {
+    const APP_ID = "rec123456789";
+    const BLUEPRINT_ID = "wf-bp-1";
 
-    function mockOrgOwnedRows(opts?: { appOrg?: string; blueprintOrg?: string; app?: null }): void {
+    function mockOrgOwnedRows(opts?: {
+      appOrg?: string;
+      blueprintOrg?: string;
+      app?: null;
+    }): void {
       ddbMock
-        .on(GetCommand, { TableName: 'citadel-apps-test', Key: { appId: APP_ID } })
+        .on(GetCommand, {
+          TableName: "citadel-apps-test",
+          Key: { appId: APP_ID },
+        })
         .resolves({
           Item:
             opts?.app === null
@@ -707,17 +943,25 @@ describe('intake-orchestration-resolver', () => {
               : { appId: APP_ID, orgId: opts?.appOrg ?? ORG_ID },
         });
       ddbMock
-        .on(GetCommand, { TableName: 'citadel-workflows-test', Key: { workflowId: BLUEPRINT_ID } })
-        .resolves({ Item: { workflowId: BLUEPRINT_ID, orgId: opts?.blueprintOrg ?? ORG_ID } });
+        .on(GetCommand, {
+          TableName: "citadel-workflows-test",
+          Key: { workflowId: BLUEPRINT_ID },
+        })
+        .resolves({
+          Item: {
+            workflowId: BLUEPRINT_ID,
+            orgId: opts?.blueprintOrg ?? ORG_ID,
+          },
+        });
     }
 
-    test('rejects when the app belongs to a different organization', async () => {
+    test("rejects when the app belongs to a different organization", async () => {
       mockSessionLinkage();
-      mockOrgOwnedRows({ appOrg: 'org-other' });
+      mockOrgOwnedRows({ appOrg: "org-other" });
 
       await expect(
         invoke(
-          makeEvent('intakeImportBlueprintToApp', {
+          makeEvent("intakeImportBlueprintToApp", {
             sessionId: SESSION_ID,
             blueprintId: BLUEPRINT_ID,
             appId: APP_ID,
@@ -727,13 +971,13 @@ describe('intake-orchestration-resolver', () => {
       expect(importBlueprintMock).not.toHaveBeenCalled();
     });
 
-    test('rejects when the blueprint belongs to a different organization', async () => {
+    test("rejects when the blueprint belongs to a different organization", async () => {
       mockSessionLinkage();
-      mockOrgOwnedRows({ blueprintOrg: 'org-other' });
+      mockOrgOwnedRows({ blueprintOrg: "org-other" });
 
       await expect(
         invoke(
-          makeEvent('intakeImportBlueprintToApp', {
+          makeEvent("intakeImportBlueprintToApp", {
             sessionId: SESSION_ID,
             blueprintId: BLUEPRINT_ID,
             appId: APP_ID,
@@ -743,13 +987,13 @@ describe('intake-orchestration-resolver', () => {
       expect(importBlueprintMock).not.toHaveBeenCalled();
     });
 
-    test('rejects when the app does not exist', async () => {
+    test("rejects when the app does not exist", async () => {
       mockSessionLinkage();
       mockOrgOwnedRows({ app: null });
 
       await expect(
         invoke(
-          makeEvent('intakeImportBlueprintToApp', {
+          makeEvent("intakeImportBlueprintToApp", {
             sessionId: SESSION_ID,
             blueprintId: BLUEPRINT_ID,
             appId: APP_ID,
@@ -758,25 +1002,25 @@ describe('intake-orchestration-resolver', () => {
       ).rejects.toThrow(/App not found/);
     });
 
-    test('delegates to importBlueprint with an identity agentMapping', async () => {
+    test("delegates to importBlueprint with an identity agentMapping", async () => {
       mockSessionLinkage();
       mockOrgOwnedRows();
-      const imported = { workflowId: 'wf-new', status: 'DRAFT', appId: APP_ID };
+      const imported = { workflowId: "wf-new", status: "DRAFT", appId: APP_ID };
       importBlueprintMock.mockResolvedValueOnce(imported);
 
       const result = await invoke(
-        makeEvent('intakeImportBlueprintToApp', {
+        makeEvent("intakeImportBlueprintToApp", {
           sessionId: SESSION_ID,
           blueprintId: BLUEPRINT_ID,
           appId: APP_ID,
-          name: 'Process Flow',
+          name: "Process Flow",
         }),
       );
 
       expect(importBlueprintMock).toHaveBeenCalledWith(
         BLUEPRINT_ID,
         APP_ID,
-        'Process Flow',
+        "Process Flow",
         {},
         IAM_IDENTITY.userArn,
         expect.anything(),
@@ -784,51 +1028,93 @@ describe('intake-orchestration-resolver', () => {
       expect(result).toBe(imported);
     });
 
-    test('materializes agent-config rows for the blueprint agents BEFORE importing', async () => {
-      // Sessions resuming at the import step must be healed too — the app's
-      // later publish path BatchGets the same agents table.
+    test("passes the server-derived org claim in the event to importBlueprint so assertRowOrg succeeds", async () => {
       mockSessionLinkage();
-      ddbMock
-        .on(GetCommand, { TableName: 'citadel-apps-test', Key: { appId: APP_ID } })
-        .resolves({ Item: { appId: APP_ID, orgId: ORG_ID } });
-      ddbMock
-        .on(GetCommand, { TableName: 'citadel-workflows-test', Key: { workflowId: BLUEPRINT_ID } })
-        .resolves({
-          Item: {
-            workflowId: BLUEPRINT_ID,
-            orgId: ORG_ID,
-            definition: JSON.stringify({
-              nodes: [
-                { id: 'rec-a', agentId: 'rec-a' },
-                { id: 'rec-b', agentId: 'rec-b' },
-              ],
-              edges: [],
-            }),
-          },
-        });
-      importBlueprintMock.mockResolvedValueOnce({ workflowId: 'wf-new', status: 'DRAFT' });
+      mockOrgOwnedRows();
+      importBlueprintMock.mockResolvedValueOnce({
+        workflowId: "wf-new",
+        status: "DRAFT",
+      });
 
       await invoke(
-        makeEvent('intakeImportBlueprintToApp', {
+        makeEvent("intakeImportBlueprintToApp", {
           sessionId: SESSION_ID,
           blueprintId: BLUEPRINT_ID,
           appId: APP_ID,
         }),
       );
 
-      expect(ensureAgentConfigRowsMock).toHaveBeenCalledWith(['rec-a', 'rec-b']);
-      expect(ensureAgentConfigRowsMock.mock.invocationCallOrder[0]).toBeLessThan(
-        importBlueprintMock.mock.invocationCallOrder[0],
-      );
+      // The event passed to importBlueprint must carry the session-derived
+      // org so the delegated core's assertRowOrg(app, event) succeeds.
+      const patchedEvent = importBlueprintMock.mock.calls[0][5] as Record<
+        string,
+        unknown
+      >;
+      const patchedIdentity = patchedEvent.identity as Record<string, unknown>;
+      expect(patchedIdentity["custom:organization"]).toBe(ORG_ID);
+      expect(patchedIdentity.accountId).toBe(IAM_IDENTITY.accountId);
     });
 
-    test('skips healing when the blueprint row carries no parseable definition', async () => {
+    test("materializes agent-config rows for the blueprint agents BEFORE importing", async () => {
+      // Sessions resuming at the import step must be healed too — the app's
+      // later publish path BatchGets the same agents table.
       mockSessionLinkage();
-      mockOrgOwnedRows(); // blueprint Item has no definition attribute
-      importBlueprintMock.mockResolvedValueOnce({ workflowId: 'wf-new', status: 'DRAFT' });
+      ddbMock
+        .on(GetCommand, {
+          TableName: "citadel-apps-test",
+          Key: { appId: APP_ID },
+        })
+        .resolves({ Item: { appId: APP_ID, orgId: ORG_ID } });
+      ddbMock
+        .on(GetCommand, {
+          TableName: "citadel-workflows-test",
+          Key: { workflowId: BLUEPRINT_ID },
+        })
+        .resolves({
+          Item: {
+            workflowId: BLUEPRINT_ID,
+            orgId: ORG_ID,
+            definition: JSON.stringify({
+              nodes: [
+                { id: "rec-a", agentId: "rec-a" },
+                { id: "rec-b", agentId: "rec-b" },
+              ],
+              edges: [],
+            }),
+          },
+        });
+      importBlueprintMock.mockResolvedValueOnce({
+        workflowId: "wf-new",
+        status: "DRAFT",
+      });
 
       await invoke(
-        makeEvent('intakeImportBlueprintToApp', {
+        makeEvent("intakeImportBlueprintToApp", {
+          sessionId: SESSION_ID,
+          blueprintId: BLUEPRINT_ID,
+          appId: APP_ID,
+        }),
+      );
+
+      expect(ensureAgentConfigRowsMock).toHaveBeenCalledWith([
+        "rec-a",
+        "rec-b",
+      ]);
+      expect(
+        ensureAgentConfigRowsMock.mock.invocationCallOrder[0],
+      ).toBeLessThan(importBlueprintMock.mock.invocationCallOrder[0]);
+    });
+
+    test("skips healing when the blueprint row carries no parseable definition", async () => {
+      mockSessionLinkage();
+      mockOrgOwnedRows(); // blueprint Item has no definition attribute
+      importBlueprintMock.mockResolvedValueOnce({
+        workflowId: "wf-new",
+        status: "DRAFT",
+      });
+
+      await invoke(
+        makeEvent("intakeImportBlueprintToApp", {
           sessionId: SESSION_ID,
           blueprintId: BLUEPRINT_ID,
           appId: APP_ID,
@@ -841,42 +1127,60 @@ describe('intake-orchestration-resolver', () => {
 
     // ── binding-ensure: fresh import + already-imported healing ─────────
 
-    const BP_DEFINITION_ID = '4c2f5e94-0000-4000-8000-000000000001';
+    const BP_DEFINITION_ID = "4c2f5e94-0000-4000-8000-000000000001";
 
     function blueprintDefinition(agentIds: string[]): string {
       return JSON.stringify({
-        version: '1.0.0',
+        version: "1.0.0",
         id: BP_DEFINITION_ID,
-        name: 'Proc',
-        nodes: agentIds.map((id) => ({ id, agentId: id, position: { x: 0, y: 0 }, configuration: {} })),
+        name: "Proc",
+        nodes: agentIds.map((id) => ({
+          id,
+          agentId: id,
+          position: { x: 0, y: 0 },
+          configuration: {},
+        })),
         edges: [],
       });
     }
 
     function mockBlueprintRow(agentIds: string[]): void {
       ddbMock
-        .on(GetCommand, { TableName: 'citadel-workflows-test', Key: { workflowId: BLUEPRINT_ID } })
+        .on(GetCommand, {
+          TableName: "citadel-workflows-test",
+          Key: { workflowId: BLUEPRINT_ID },
+        })
         .resolves({
-          Item: { workflowId: BLUEPRINT_ID, orgId: ORG_ID, definition: blueprintDefinition(agentIds) },
+          Item: {
+            workflowId: BLUEPRINT_ID,
+            orgId: ORG_ID,
+            definition: blueprintDefinition(agentIds),
+          },
         });
     }
 
-    test('ensures READY bindings for the imported workflow agents after a fresh import', async () => {
+    test("ensures READY bindings for the imported workflow agents after a fresh import", async () => {
       mockSessionLinkage();
       ddbMock
-        .on(GetCommand, { TableName: 'citadel-apps-test', Key: { appId: APP_ID } })
+        .on(GetCommand, {
+          TableName: "citadel-apps-test",
+          Key: { appId: APP_ID },
+        })
         .resolves({ Item: { appId: APP_ID, orgId: ORG_ID } }); // no workflowIds yet
-      mockBlueprintRow(['agt000000001', 'agt000000002']);
-      importBlueprintMock.mockResolvedValueOnce({ workflowId: 'wf-new', status: 'DRAFT' });
+      mockBlueprintRow(["agt000000001", "agt000000002"]);
+      importBlueprintMock.mockResolvedValueOnce({
+        workflowId: "wf-new",
+        status: "DRAFT",
+      });
       ensureAppAgentBindingsMock.mockResolvedValueOnce({
-        bound: ['agt000000001', 'agt000000002'],
+        bound: ["agt000000001", "agt000000002"],
         alreadyBound: [],
         failed: [],
         finalApp: { appId: APP_ID },
       });
 
       const result = await invoke(
-        makeEvent('intakeImportBlueprintToApp', {
+        makeEvent("intakeImportBlueprintToApp", {
           sessionId: SESSION_ID,
           blueprintId: BLUEPRINT_ID,
           appId: APP_ID,
@@ -885,78 +1189,101 @@ describe('intake-orchestration-resolver', () => {
 
       expect(ensureAppAgentBindingsMock).toHaveBeenCalledWith(
         APP_ID,
-        ['agt000000001', 'agt000000002'],
+        ["agt000000001", "agt000000002"],
         IAM_IDENTITY.userArn,
       );
       // The import is the primary operation — bindings are ensured after it.
       expect(importBlueprintMock.mock.invocationCallOrder[0]).toBeLessThan(
         ensureAppAgentBindingsMock.mock.invocationCallOrder[0],
       );
-      expect(result).toMatchObject({ workflowId: 'wf-new' });
+      expect(result).toMatchObject({ workflowId: "wf-new" });
     });
 
-    test('returns the existing workflow and skips importBlueprint when the blueprint was already imported (heals bindings)', async () => {
+    test("returns the existing workflow and skips importBlueprint when the blueprint was already imported (heals bindings)", async () => {
       // The conversational re-trigger path that heals a live app whose
       // workflow was imported before bindings existed: matched by the
       // blueprint definition id preserved through the import copy.
       mockSessionLinkage();
       ddbMock
-        .on(GetCommand, { TableName: 'citadel-apps-test', Key: { appId: APP_ID } })
-        .resolves({ Item: { appId: APP_ID, orgId: ORG_ID, workflowIds: ['wf-existing'] } });
-      mockBlueprintRow(['agt000000001']);
+        .on(GetCommand, {
+          TableName: "citadel-apps-test",
+          Key: { appId: APP_ID },
+        })
+        .resolves({
+          Item: { appId: APP_ID, orgId: ORG_ID, workflowIds: ["wf-existing"] },
+        });
+      mockBlueprintRow(["agt000000001"]);
       const existingWorkflow = {
-        workflowId: 'wf-existing',
+        workflowId: "wf-existing",
         appId: APP_ID,
         orgId: ORG_ID,
-        status: 'DRAFT',
-        definition: blueprintDefinition(['agt000000001']),
+        status: "DRAFT",
+        definition: blueprintDefinition(["agt000000001"]),
       };
       ddbMock
-        .on(GetCommand, { TableName: 'citadel-workflows-test', Key: { workflowId: 'wf-existing' } })
+        .on(GetCommand, {
+          TableName: "citadel-workflows-test",
+          Key: { workflowId: "wf-existing" },
+        })
         .resolves({ Item: existingWorkflow });
       ensureAppAgentBindingsMock.mockResolvedValueOnce({
-        bound: ['agt000000001'],
+        bound: ["agt000000001"],
         alreadyBound: [],
         failed: [],
         finalApp: { appId: APP_ID },
       });
 
       const result = await invoke(
-        makeEvent('intakeImportBlueprintToApp', {
+        makeEvent("intakeImportBlueprintToApp", {
           sessionId: SESSION_ID,
           blueprintId: BLUEPRINT_ID,
           appId: APP_ID,
-          name: 'My App Process',
+          name: "My App Process",
         }),
       );
 
       expect(importBlueprintMock).not.toHaveBeenCalled();
       expect(ensureAppAgentBindingsMock).toHaveBeenCalledWith(
         APP_ID,
-        ['agt000000001'],
+        ["agt000000001"],
         IAM_IDENTITY.userArn,
       );
-      expect(result).toMatchObject({ workflowId: 'wf-existing' });
+      expect(result).toMatchObject({ workflowId: "wf-existing" });
     });
 
-    test('imports fresh when the app workflows do not match the blueprint definition id', async () => {
+    test("imports fresh when the app workflows do not match the blueprint definition id", async () => {
       mockSessionLinkage();
       ddbMock
-        .on(GetCommand, { TableName: 'citadel-apps-test', Key: { appId: APP_ID } })
-        .resolves({ Item: { appId: APP_ID, orgId: ORG_ID, workflowIds: ['wf-other'] } });
-      mockBlueprintRow(['agt000000001']);
+        .on(GetCommand, {
+          TableName: "citadel-apps-test",
+          Key: { appId: APP_ID },
+        })
+        .resolves({
+          Item: { appId: APP_ID, orgId: ORG_ID, workflowIds: ["wf-other"] },
+        });
+      mockBlueprintRow(["agt000000001"]);
       ddbMock
-        .on(GetCommand, { TableName: 'citadel-workflows-test', Key: { workflowId: 'wf-other' } })
+        .on(GetCommand, {
+          TableName: "citadel-workflows-test",
+          Key: { workflowId: "wf-other" },
+        })
         .resolves({
           Item: {
-            workflowId: 'wf-other',
-            definition: JSON.stringify({ id: 'a-different-definition-id', nodes: [], edges: [] }),
+            workflowId: "wf-other",
+            definition: JSON.stringify({
+              id: "a-different-definition-id",
+              nodes: [],
+              edges: [],
+            }),
           },
         });
-      importBlueprintMock.mockResolvedValueOnce({ workflowId: 'wf-new', status: 'DRAFT' });
+      importBlueprintMock.mockResolvedValueOnce({
+        workflowId: "wf-new",
+        status: "DRAFT",
+      });
 
       const result = await invoke(
-        makeEvent('intakeImportBlueprintToApp', {
+        makeEvent("intakeImportBlueprintToApp", {
           sessionId: SESSION_ID,
           blueprintId: BLUEPRINT_ID,
           appId: APP_ID,
@@ -964,27 +1291,35 @@ describe('intake-orchestration-resolver', () => {
       );
 
       expect(importBlueprintMock).toHaveBeenCalled();
-      expect(result).toMatchObject({ workflowId: 'wf-new' });
+      expect(result).toMatchObject({ workflowId: "wf-new" });
     });
 
-    test('import still succeeds when binding-ensure fails (best-effort healing)', async () => {
+    test("import still succeeds when binding-ensure fails (best-effort healing)", async () => {
       mockSessionLinkage();
       ddbMock
-        .on(GetCommand, { TableName: 'citadel-apps-test', Key: { appId: APP_ID } })
+        .on(GetCommand, {
+          TableName: "citadel-apps-test",
+          Key: { appId: APP_ID },
+        })
         .resolves({ Item: { appId: APP_ID, orgId: ORG_ID } });
-      mockBlueprintRow(['agt000000001']);
-      importBlueprintMock.mockResolvedValueOnce({ workflowId: 'wf-new', status: 'DRAFT' });
-      ensureAppAgentBindingsMock.mockRejectedValueOnce(new Error('registry unavailable'));
+      mockBlueprintRow(["agt000000001"]);
+      importBlueprintMock.mockResolvedValueOnce({
+        workflowId: "wf-new",
+        status: "DRAFT",
+      });
+      ensureAppAgentBindingsMock.mockRejectedValueOnce(
+        new Error("registry unavailable"),
+      );
 
       const result = await invoke(
-        makeEvent('intakeImportBlueprintToApp', {
+        makeEvent("intakeImportBlueprintToApp", {
           sessionId: SESSION_ID,
           blueprintId: BLUEPRINT_ID,
           appId: APP_ID,
         }),
       );
 
-      expect(result).toMatchObject({ workflowId: 'wf-new' });
+      expect(result).toMatchObject({ workflowId: "wf-new" });
     });
   });
 });

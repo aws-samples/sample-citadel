@@ -42,6 +42,7 @@ import {
   ScanCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { getUserId } from "../utils/appsync";
+import { CrossOrgAccessError } from "../utils/auth-event";
 import { lookupOwnerOrganization } from "../utils/org-membership";
 import { ValidationError, sanitizeString } from "../utils/validation";
 import {
@@ -279,6 +280,28 @@ async function resolveOrgId(ctx: SessionContext): Promise<string> {
   return ORGLESS_CALLER_ORG;
 }
 
+/**
+ * Produces a shallow clone of the IAM event whose identity carries a
+ * `custom:organization` claim equal to the server-derived org. Delegated
+ * cores (`publishWorkflow`, `importBlueprint`) call `assertRowOrg → extractOrgFromEvent`
+ * which reads that claim; an unpatched IAM event carries no claim, so the
+ * check fails closed. This helper satisfies the check with the org
+ * resolved HERE — the IAM boundary — rather than bypassing it.
+ */
+function withSessionOrg(
+  event: IntakeOrchestrationEvent,
+  orgId: string,
+): IntakeOrchestrationEvent {
+  const identity = event.identity ?? {};
+  return {
+    ...event,
+    identity: {
+      ...(identity as Record<string, unknown>),
+      "custom:organization": orgId,
+    },
+  } as unknown as IntakeOrchestrationEvent;
+}
+
 function log(
   fieldName: string,
   correlationId: string,
@@ -478,9 +501,21 @@ async function intakeCreateBlueprint(
     const created = (await createWorkflow(
       { orgId, name, isBlueprint: true, definition },
       userId,
-    )) as { workflowId: string };
+    )) as { workflowId: string; orgId?: string };
     workflowId = created.workflowId;
+
+    // Verify the persisted row carries the org we resolved — fail closed if
+    // createWorkflow stamped a different org (should never happen, but the
+    // publish step below trusts this orgId for the assertRowOrg bypass).
+    if (created.orgId !== undefined && created.orgId !== orgId) {
+      throw new CrossOrgAccessError(
+        "Access denied: created workflow org does not match the session org",
+      );
+    }
   } catch (err) {
+    if (err instanceof CrossOrgAccessError) {
+      throw err;
+    }
     const message = err instanceof Error ? err.message : String(err);
     log("intakeCreateBlueprint", sessionId, { stage: "create", failed: true });
     return {
@@ -500,8 +535,13 @@ async function intakeCreateBlueprint(
   // gate reads the table. Best-effort: the gate remains the authority.
   await healAgentConfigRows("intakeCreateBlueprint", sessionId, definition);
 
+  // Inject the server-derived org into the event identity so that
+  // publishWorkflow → getWorkflow → assertRowOrg sees a matching
+  // `custom:organization` claim instead of the IAM caller's absent one.
+  const patchedEvent = withSessionOrg(event, orgId);
+
   try {
-    await publishWorkflow(workflowId, userId, event);
+    await publishWorkflow(workflowId, userId, patchedEvent);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const missing = message.includes("do not exist")
@@ -721,7 +761,7 @@ async function intakeImportBlueprintToApp(
     name,
     {},
     userId,
-    event,
+    withSessionOrg(event, orgId),
   );
 
   // Associate the workflow's agents with the app so the Agents tab and the
