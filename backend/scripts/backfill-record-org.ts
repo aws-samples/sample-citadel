@@ -14,11 +14,13 @@
  * Usage:
  *   npx ts-node --project tsconfig.scripts.json scripts/backfill-record-org.ts \
  *     --org Default --registry-id <id> --table-agents <table> --table-tools <table> \
- *     [--dry-run] [--apply]
+ *     [--dry-run] [--apply] [--include-empty]
  *
- * --dry-run (default): scans and reports what would change.
- * --apply:             writes orgId to projection rows and DRAFT registry records.
- * --org:               REQUIRED — the orgId to stamp.
+ * --dry-run (default):  scans and reports what would change.
+ * --apply:              writes orgId to projection rows and DRAFT registry records.
+ * --org:                REQUIRED — the orgId to stamp.
+ * --include-empty:      also treat orgId '' as missing (default: off).
+ *                       Rows with orgId 'All Organizations' are NEVER touched.
  */
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
@@ -42,6 +44,7 @@ const KNOWN_FLAGS = new Set([
   "--table-tools",
   "--apply",
   "--dry-run",
+  "--include-empty",
 ]);
 
 export function parseArgs(argv: string[]): {
@@ -50,12 +53,14 @@ export function parseArgs(argv: string[]): {
   tableAgents: string;
   tableTools: string;
   dryRun: boolean;
+  includeEmpty: boolean;
 } {
   let org = "";
   let registryId = "";
   let tableAgents = "";
   let tableTools = "";
   let dryRun = true;
+  let includeEmpty = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -82,6 +87,9 @@ export function parseArgs(argv: string[]): {
       case "--dry-run":
         dryRun = true;
         break;
+      case "--include-empty":
+        includeEmpty = true;
+        break;
     }
   }
 
@@ -89,7 +97,7 @@ export function parseArgs(argv: string[]): {
     console.error(USAGE);
     process.exit(1);
   }
-  return { org, registryId, tableAgents, tableTools, dryRun };
+  return { org, registryId, tableAgents, tableTools, dryRun, includeEmpty };
 }
 
 // ---------------------------------------------------------------------------
@@ -104,10 +112,14 @@ interface BackfillCounters {
   errors: number;
 }
 
+/** Sentinel orgId that marks system/shared rows — never overwritten. */
+const ALL_ORGANIZATIONS = "All Organizations";
+
 async function scanOrphanedRows(
   docClient: DynamoDBDocumentClient,
   tableName: string,
   _keyAttr: string,
+  includeEmpty: boolean = false,
 ): Promise<Record<string, unknown>[]> {
   const orphaned: Record<string, unknown>[] = [];
   let lastKey: Record<string, unknown> | undefined;
@@ -129,7 +141,10 @@ async function scanOrphanedRows(
       // Only pick up projection rows (citadelKind present).
       if (!item.citadelKind) continue;
 
-      if (hasOrgUnknown || orgAbsent || orgEmpty) {
+      // Never touch system rows (e.g. 'All Organizations').
+      if (item.orgId === ALL_ORGANIZATIONS) continue;
+
+      if (hasOrgUnknown || orgAbsent || (orgEmpty && includeEmpty)) {
         orphaned.push(item);
       }
     }
@@ -149,9 +164,10 @@ export async function runBackfillRecordOrg(
   tableAgents: string,
   tableTools: string,
   dryRun: boolean,
+  includeEmpty: boolean = false,
 ): Promise<BackfillCounters> {
   console.log(
-    `Backfill record org: org=${org} registry=${registryId} agents=${tableAgents} tools=${tableTools} dryRun=${dryRun}`,
+    `Backfill record org: org=${org} registry=${registryId} agents=${tableAgents} tools=${tableTools} dryRun=${dryRun} includeEmpty=${includeEmpty}`,
   );
 
   const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -173,6 +189,7 @@ export async function runBackfillRecordOrg(
     docClient,
     tableAgents,
     "agentId",
+    includeEmpty,
   );
   console.log(`Found ${agentOrphans.length} orphaned agent projection rows`);
 
@@ -249,7 +266,12 @@ export async function runBackfillRecordOrg(
   }
 
   // Scan tools table for orphaned rows
-  const toolOrphans = await scanOrphanedRows(docClient, tableTools, "toolId");
+  const toolOrphans = await scanOrphanedRows(
+    docClient,
+    tableTools,
+    "toolId",
+    includeEmpty,
+  );
   console.log(`Found ${toolOrphans.length} orphaned tool projection rows`);
 
   for (const item of toolOrphans) {
@@ -296,9 +318,8 @@ export async function runBackfillRecordOrg(
 }
 
 async function main(): Promise<void> {
-  const { org, registryId, tableAgents, tableTools, dryRun } = parseArgs(
-    process.argv.slice(2),
-  );
+  const { org, registryId, tableAgents, tableTools, dryRun, includeEmpty } =
+    parseArgs(process.argv.slice(2));
 
   const counters = await runBackfillRecordOrg(
     org,
@@ -306,6 +327,7 @@ async function main(): Promise<void> {
     tableAgents,
     tableTools,
     dryRun,
+    includeEmpty,
   );
 
   if (counters.errors > 0) process.exit(1);

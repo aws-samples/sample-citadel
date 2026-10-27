@@ -33,16 +33,11 @@
  *      leaves resolution to an owner decision.
  *
  * Shape chosen: a standalone ts-node SCRIPT (matching
- * scripts/backfill-org-ids.ts), NOT a custom-resource/Lambda (matching
- * src/lambda/backfill-project-org.ts's alternative shape). Rationale: this
+ * scripts/backfill-org-ids.ts), NOT a custom-resource/Lambda. Rationale: this
  * backfill needs no CDK wiring, no IAM role beyond whatever credentials
  * the operator already has configured locally, and no permanent
  * infrastructure — exactly backfill-org-ids.ts's profile (env-var driven,
- * dry-run by default, one AWS table touched). backfill-project-org.ts's
- * Lambda shape exists because that backfill's doc explicitly frames it as
- * "no permanent CDK Lambda resource" ceremony for a wider blast radius
- * (arbitrary orgId assignment via Cognito lookups); this backfill is a
- * single-table, single-purpose sweep that fits the lighter script pattern.
+ * dry-run by default, one AWS table touched).
  *
  * Usage:
  *   ts-node backend/scripts/backfill-org-name-reservations.ts --dry-run  (default)
