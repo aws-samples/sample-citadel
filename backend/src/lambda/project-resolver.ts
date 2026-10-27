@@ -15,7 +15,11 @@ import {
 } from "@aws-sdk/client-eventbridge";
 import { v4 as uuidv4 } from "uuid";
 import { getUserId } from "../utils/appsync";
-import { extractOrgFromEvent, isAdminFromEvent } from "../utils/auth-event";
+import {
+  extractOrgFromEvent,
+  isAdminFromEvent,
+  requireCallerOrg,
+} from "../utils/auth-event";
 import { LifecycleManager, PROJECT_TRANSITIONS } from "../adapters/lifecycle";
 import {
   isGrandfathered,
@@ -32,15 +36,10 @@ const eventBridgeClient = new EventBridgeClient({});
 const PROJECTS_TABLE = process.env.PROJECTS_TABLE!;
 const EVENT_BUS_NAME = process.env.EVENT_BUS_NAME!;
 
-/**
- * Fallback tenant for callers whose JWT is missing the `custom:organization`
- * claim (and for whom the Cognito AdminGetUser fallback also comes up
- * empty). Projects created under this org are still visible to every other
- * caller who also falls back to it — the previous behaviour ("no org" -->
- * `organization: undefined`) silently orphaned the row from the
- * OrganizationIndex GSI and made it invisible to everyone but its owner.
- */
-const DEFAULT_ORGANIZATION = "Default";
+// DEFAULT_ORGANIZATION removed (CIT-252 C15): org-less callers are now
+// refused by requireCallerOrg instead of being pooled into a shared
+// "Default" org. The constant remains in backfill-project-org.ts (migration
+// script, independent constant) where it is still needed.
 
 interface Project {
   id: string;
@@ -247,11 +246,10 @@ async function listProjects(
   }
 
   // Non-admins are scoped to their own organization. Missing/empty org
-  // claims default to DEFAULT_ORGANIZATION so users without a
-  // custom:organization claim still see (and share) a common project pool
-  // instead of being siloed to only the projects they personally created.
-  const userOrganization =
-    (await extractOrgFromEvent(event)) || DEFAULT_ORGANIZATION;
+  // claims now DENY the request (CIT-252 C15, fail-closed) instead of
+  // pooling the caller into a shared "Default" org — requireCallerOrg
+  // throws OrgUnresolvedError when the claim is absent.
+  const userOrganization = await requireCallerOrg(event, "ProjectResolver");
 
   const command = new QueryCommand({
     TableName: PROJECTS_TABLE,
@@ -310,12 +308,10 @@ async function createProject(
   const now = new Date().toISOString();
   const projectId = uuidv4();
 
-  // Get user's organization, defaulting to DEFAULT_ORGANIZATION when the
-  // claim is missing so the project always lands on a real GSI partition
-  // (organization: undefined would silently drop the row out of the
-  // OrganizationIndex and make it invisible to everyone but its owner).
-  const userOrganization =
-    (await extractOrgFromEvent(event)) || DEFAULT_ORGANIZATION;
+  // Get user's organization — fail closed (CIT-252 C15). An org-less
+  // caller is refused with OrgUnresolvedError instead of having the project
+  // stamped with a shared "Default" org.
+  const userOrganization = await requireCallerOrg(event, "ProjectResolver");
 
   const project: Project = {
     id: projectId,
@@ -446,9 +442,7 @@ async function checkC10Spec(project: Project): Promise<void> {
 async function emitBypass(
   project: Project,
   bypassedGate:
-    | "C3_assessment_required"
-    | "C7_adr_required"
-    | "C10_spec_required",
+    "C3_assessment_required" | "C7_adr_required" | "C10_spec_required",
 ): Promise<void> {
   // Read the live effective_at from SSM (cached 60 min by governance-flag.ts).
   // Fire-and-forget: bypass telemetry must not fail the underlying transition.
