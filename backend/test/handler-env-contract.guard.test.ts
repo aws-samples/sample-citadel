@@ -375,3 +375,203 @@ describe("Handler environment-variable contract guard (Node.js Lambdas)", () => 
     expect(lambdas.length).toBeGreaterThan(10);
   });
 });
+
+// ---------------------------------------------------------------------------
+// IAM grant guard: every *_TABLE env var must have a DynamoDB grant
+// ---------------------------------------------------------------------------
+
+/**
+ * For every Node.js Lambda function in the synthesized BackendStack template,
+ * for each `*_TABLE` environment variable whose value is a `{ Ref: <logicalId> }`,
+ * assert that at least one IAM::Policy attached to the function's role grants
+ * a `dynamodb:*` action on that table's ARN.
+ *
+ * This catches the exact bug class where a handler has PROJECTS_TABLE in its
+ * env but no grantReadData/grantReadWriteData on the table — causing
+ * AccessDeniedException at runtime.
+ */
+
+import { BackendStack } from "../lib/backend-stack";
+
+function synthBackendStack(): Template {
+  const app = new cdk.App();
+  const stack = new BackendStack(app, "GuardBackendStack", {
+    environment: "test",
+    env: { account: "123456789012", region: "us-east-1" },
+  });
+  return Template.fromStack(stack);
+}
+
+type CfnPolicyProps = {
+  Properties?: {
+    Roles?: Array<{ Ref?: string } | string>;
+    PolicyDocument?: {
+      Statement?: Array<{
+        Action?: string | string[];
+        Resource?: unknown;
+      }>;
+    };
+  };
+};
+
+type CfnFunctionPropsExtended = {
+  Properties?: {
+    Handler?: string;
+    Runtime?: string;
+    Role?: { "Fn::GetAtt"?: [string, string] };
+    Environment?: { Variables?: Record<string, unknown> };
+  };
+};
+
+/**
+ * Allowlist: functions that legitimately hold a *_TABLE env without needing
+ * DynamoDB access on it.  Each entry MUST have a justification.
+ *
+ * Keyed by handler base name → set of env var names.
+ */
+const TABLE_ENV_GRANT_ALLOWLIST: Record<string, Set<string>> = {
+  // (Currently empty — no known legitimate cases.)
+};
+
+describe("Handler TABLE env → DynamoDB grant guard (BackendStack)", () => {
+  let backendTemplate: Template;
+
+  beforeAll(() => {
+    backendTemplate = synthBackendStack();
+  });
+
+  test("every *_TABLE env var on a Lambda function has a corresponding DynamoDB grant", () => {
+    const fns = backendTemplate.findResources(
+      "AWS::Lambda::Function",
+    ) as Record<string, CfnFunctionPropsExtended>;
+    const policies = backendTemplate.findResources(
+      "AWS::IAM::Policy",
+    ) as Record<string, CfnPolicyProps>;
+
+    const violations: string[] = [];
+
+    for (const [fnLogicalId, fnResource] of Object.entries(fns)) {
+      const props = fnResource.Properties;
+      if (!props) continue;
+      const runtime = props.Runtime ?? "";
+      if (!runtime.toString().startsWith("nodejs")) continue;
+
+      const handlerStr = props.Handler ?? "";
+      const handlerBase = handlerStr.replace(/\.handler$/, "");
+      const roleLogicalId = props.Role?.["Fn::GetAtt"]?.[0];
+      if (!roleLogicalId) continue;
+
+      const envVars = props.Environment?.Variables ?? {};
+
+      // Collect all *_TABLE env vars with Ref values
+      const tableEnvEntries: Array<{
+        envName: string;
+        tableLogicalId: string;
+      }> = [];
+      for (const [envName, envValue] of Object.entries(envVars)) {
+        if (!envName.endsWith("_TABLE")) continue;
+        const ref = (envValue as { Ref?: string })?.Ref;
+        if (!ref) continue;
+        tableEnvEntries.push({ envName, tableLogicalId: ref });
+      }
+
+      if (tableEnvEntries.length === 0) continue;
+
+      // Find all dynamodb-action table logical IDs granted to this role
+      const grantedTableIds = new Set<string>();
+      for (const policy of Object.values(policies)) {
+        const policyProps = policy.Properties;
+        if (!policyProps) continue;
+        const roles = policyProps.Roles ?? [];
+        const attachedToRole = roles.some(
+          (r) => typeof r === "object" && r.Ref === roleLogicalId,
+        );
+        if (!attachedToRole) continue;
+
+        for (const stmt of policyProps.PolicyDocument?.Statement ?? []) {
+          const actions = Array.isArray(stmt.Action)
+            ? stmt.Action
+            : [stmt.Action];
+          const hasDynamo = actions.some(
+            (a) => typeof a === "string" && a.startsWith("dynamodb:"),
+          );
+          if (!hasDynamo) continue;
+
+          // Extract table logical IDs from Resource (may be array or single)
+          const resources = Array.isArray(stmt.Resource)
+            ? stmt.Resource
+            : [stmt.Resource];
+          for (const res of resources) {
+            const resStr = JSON.stringify(res ?? "");
+            // Match Fn::GetAtt references to table ARNs
+            for (const { tableLogicalId } of tableEnvEntries) {
+              if (resStr.includes(tableLogicalId)) {
+                grantedTableIds.add(tableLogicalId);
+              }
+            }
+          }
+        }
+      }
+
+      // Check each TABLE env has a grant
+      for (const { envName, tableLogicalId } of tableEnvEntries) {
+        if (TABLE_ENV_GRANT_ALLOWLIST[handlerBase]?.has(envName)) continue;
+        if (!grantedTableIds.has(tableLogicalId)) {
+          violations.push(
+            `${fnLogicalId} (${handlerStr}): has ${envName} env (table ${tableLogicalId}) but no DynamoDB grant on that table`,
+          );
+        }
+      }
+    }
+
+    expect(violations).toEqual([]);
+  });
+
+  test("AgentMessageHandler specifically has a DynamoDB grant on ProjectsTable", () => {
+    // Targeted assertion for the exact bug this fix addresses
+    const fns = backendTemplate.findResources(
+      "AWS::Lambda::Function",
+    ) as Record<string, CfnFunctionPropsExtended>;
+    const policies = backendTemplate.findResources(
+      "AWS::IAM::Policy",
+    ) as Record<string, CfnPolicyProps>;
+
+    // Find the AgentMessageHandler function
+    const msgHandlerEntry = Object.entries(fns).find(
+      ([, res]) => res.Properties?.Handler === "agent-message-handler.handler",
+    );
+    expect(msgHandlerEntry).toBeDefined();
+    const [, msgHandler] = msgHandlerEntry!;
+    const roleLogicalId = msgHandler.Properties!.Role!["Fn::GetAtt"]![0];
+    const projectsTableRef = (
+      msgHandler.Properties!.Environment!.Variables!.PROJECTS_TABLE as {
+        Ref: string;
+      }
+    ).Ref;
+
+    // Find any dynamodb grant on that table for this role
+    let hasGrant = false;
+    for (const policy of Object.values(policies)) {
+      const policyProps = policy.Properties;
+      if (!policyProps) continue;
+      const roles = policyProps.Roles ?? [];
+      if (!roles.some((r) => typeof r === "object" && r.Ref === roleLogicalId))
+        continue;
+      for (const stmt of policyProps.PolicyDocument?.Statement ?? []) {
+        const actions = Array.isArray(stmt.Action)
+          ? stmt.Action
+          : [stmt.Action];
+        if (
+          !actions.some(
+            (a) => typeof a === "string" && a.startsWith("dynamodb:"),
+          )
+        )
+          continue;
+        if (JSON.stringify(stmt.Resource ?? "").includes(projectsTableRef)) {
+          hasGrant = true;
+        }
+      }
+    }
+    expect(hasGrant).toBe(true);
+  });
+});

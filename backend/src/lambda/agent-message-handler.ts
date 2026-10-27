@@ -266,27 +266,15 @@ export async function lookupProjectOrganization(
   projectId: string,
 ): Promise<string | undefined> {
   if (!PROJECTS_TABLE) return undefined;
-  try {
-    const result = await docClient.send(
-      new GetCommand({
-        TableName: PROJECTS_TABLE,
-        Key: { id: projectId },
-        ProjectionExpression: "organization",
-      }),
-    );
-    const org = result.Item?.organization as string | undefined;
-    return org || undefined;
-  } catch (error) {
-    console.error(
-      JSON.stringify({
-        level: "error",
-        msg: "Failed to look up project organization",
-        projectId,
-        error: error instanceof Error ? error.message : String(error),
-      }),
-    );
-    return undefined;
-  }
+  const result = await docClient.send(
+    new GetCommand({
+      TableName: PROJECTS_TABLE,
+      Key: { id: projectId },
+      ProjectionExpression: "organization",
+    }),
+  );
+  const org = result.Item?.organization as string | undefined;
+  return org || undefined;
 }
 
 /**
