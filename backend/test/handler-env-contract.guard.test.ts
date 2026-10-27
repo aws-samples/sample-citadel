@@ -34,6 +34,19 @@ import { scaffoldBackendAssetDirs } from "./helpers/scaffold-stub-assets";
 
 scaffoldBackendAssetDirs(["dist/lambda", "src/schema"]);
 
+// BackendStack references additional asset paths that resolve outside
+// backend/ (e.g. path.join(__dirname, "../../src/lambda/seed-organizations")
+// in backend-stack.ts resolves to <repo-root>/src/lambda/seed-organizations).
+// Create stubs so synthBackendStack() doesn't throw CannotFindAsset in CI.
+const EXTRA_ASSET_DIRS = [
+  path.resolve(__dirname, "../../src/lambda/seed-organizations"),
+  path.resolve(__dirname, "../src/lambda/seed-admin-user"),
+  path.resolve(__dirname, "../src/lambda/seed-organizations"),
+];
+for (const dir of EXTRA_ASSET_DIRS) {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
 import { ProjectsStack } from "../lib/projects-stack";
 
 jest.setTimeout(60000);
