@@ -13,6 +13,14 @@
  * starting with `decision#` (bookkeeping, not records) and rows with
  * orgId 'All Organizations'.
  *
+ * Dual-key cache twin resolution (PR #369): an agent/tool may have two
+ * rows — one keyed by a recordId (UUID) and one keyed by its display
+ * name (agentId == name).  For each candidate, the script looks up the
+ * twin row; if the twin carries a non-absent orgId, the candidate
+ * inherits that value (even 'All Organizations').  Otherwise the --org
+ * flag value is stamped.  Dry-run output includes the resolved orgId and
+ * its source (twin | flag) for each candidate.
+ *
  * For single-tenant dev where the owner confirms all pre-tagging records
  * belong to a single organisation (e.g. 'Default').
  *
@@ -23,7 +31,7 @@
  *
  * --dry-run (default):  scans and reports what would change.
  * --apply:              writes orgId to projection rows and DRAFT registry records.
- * --org:                REQUIRED — the orgId to stamp.
+ * --org:                REQUIRED — the orgId to stamp (used when no twin provides one).
  * --include-unkinded:   also consider rows lacking citadelKind whose orgId is
  *                       absent (default: off). Keys starting `decision#` and
  *                       rows with orgId 'All Organizations' are NEVER touched.
@@ -31,6 +39,7 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
+  GetCommand,
   ScanCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
@@ -169,6 +178,105 @@ async function scanOrphanedRows(
   return orphaned;
 }
 
+/**
+ * Dual-key cache twin lookup (PR #369).
+ *
+ * An agent may have two rows: one keyed by a recordId (UUID) and one
+ * keyed by the display name (agentId == name).  For a candidate whose
+ * orgId is absent, look up its twin:
+ *
+ *   - candidate is recordId-keyed → twin key = candidate.name
+ *   - candidate is name-keyed     → twin is the row whose `name` field
+ *     equals candidate's key (found via the full-table items already
+ *     scanned, to avoid N+1 queries)
+ *
+ * If the twin has a non-absent orgId the candidate INHERITS it
+ * (including 'All Organizations').  Otherwise the --org flag value is
+ * used.
+ */
+interface ResolvedOrg {
+  orgId: string;
+  source: "twin" | "flag";
+}
+
+async function resolveTwinOrg(
+  docClient: DynamoDBDocumentClient,
+  tableName: string,
+  keyAttr: string,
+  candidate: Record<string, unknown>,
+  allItems: Record<string, unknown>[],
+  flagOrg: string,
+): Promise<ResolvedOrg> {
+  const candidateKey = candidate[keyAttr] as string;
+  const candidateName = (candidate.name as string) ?? "";
+
+  // Heuristic: if the key is a UUID the candidate is recordId-keyed;
+  // otherwise it is name-keyed (agentId == display name).
+  const UUID_RE =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const isRecordIdKeyed = UUID_RE.test(candidateKey);
+
+  if (isRecordIdKeyed && candidateName) {
+    // Twin is the name-keyed row: key = candidate.name
+    const twin = allItems.find(
+      (r) => r[keyAttr] === candidateName && r !== candidate,
+    );
+    // Fallback to GetCommand if twin not found in scanned items
+    // (twin may have orgId set and thus was not scanned as orphan)
+    const twinItem =
+      twin ??
+      (
+        await docClient.send(
+          new GetCommand({
+            TableName: tableName,
+            Key: { [keyAttr]: candidateName },
+          }),
+        )
+      ).Item;
+    if (twinItem && twinItem.orgId != null) {
+      return { orgId: twinItem.orgId as string, source: "twin" };
+    }
+  } else {
+    // Candidate is name-keyed; twin is the recordId-keyed row whose
+    // `name` field equals the candidate's key.
+    const twin = allItems.find(
+      (r) =>
+        r !== candidate &&
+        r.name === candidateKey &&
+        r[keyAttr] !== candidateKey,
+    );
+    // Fallback: no cheap GetCommand possible (we'd need a GSI on name),
+    // but the full scan already captured all orphans — and the twin is
+    // likely already-org'd and thus not in orphans. We do a scan-filter
+    // for just that one name as a last resort.
+    if (twin && twin.orgId != null) {
+      return { orgId: twin.orgId as string, source: "twin" };
+    }
+    if (!twin) {
+      // Twin not in allItems — it may have an orgId and wasn't scanned.
+      // Scan for a row whose name == candidateKey with a different key.
+      const resp = await docClient.send(
+        new ScanCommand({
+          TableName: tableName,
+          FilterExpression: "#n = :name AND #k <> :key",
+          ExpressionAttributeNames: { "#n": "name", "#k": keyAttr },
+          ExpressionAttributeValues: {
+            ":name": candidateKey,
+            ":key": candidateKey,
+          },
+          Limit: 1,
+        }),
+      );
+      const remoteTwin = resp.Items?.[0];
+      if (remoteTwin && remoteTwin.orgId != null) {
+        return { orgId: remoteTwin.orgId as string, source: "twin" };
+      }
+    }
+  }
+
+  return { orgId: flagOrg, source: "flag" };
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -217,9 +325,20 @@ export async function runBackfillRecordOrg(
     }
 
     try {
+      // Dual-key twin resolution (PR #369)
+      const resolved = await resolveTwinOrg(
+        docClient,
+        tableAgents,
+        "agentId",
+        item,
+        agentOrphans,
+        org,
+      );
+      const stampOrg = resolved.orgId;
+
       if (dryRun) {
         console.log(
-          `[DRY-RUN] Would update agent: key=${id} name=${item.name ?? "(none)"} hasRecordId=${!!item.registryRecordId} createdAt=${item.createdAt ?? "(none)"}`,
+          `[DRY-RUN] Would update agent: key=${id} name=${item.name ?? "(none)"} orgId=${stampOrg} source=${resolved.source} hasRecordId=${!!item.registryRecordId} createdAt=${item.createdAt ?? "(none)"}`,
         );
       } else {
         await docClient.send(
@@ -232,11 +351,13 @@ export async function runBackfillRecordOrg(
               "#orgUnknown": "orgUnknown",
             },
             ExpressionAttributeValues: {
-              ":org": org,
+              ":org": stampOrg,
             },
           }),
         );
-        console.log(`Updated agent projection ${id}: orgId=${org}`);
+        console.log(
+          `Updated agent projection ${id}: orgId=${stampOrg} (${resolved.source})`,
+        );
       }
       counters.agentProjectionUpdated++;
 
@@ -251,17 +372,17 @@ export async function runBackfillRecordOrg(
             const meta = record.customDescriptorContent
               ? JSON.parse(record.customDescriptorContent)
               : {};
-            meta.orgId = org;
+            meta.orgId = stampOrg;
             if (dryRun) {
               console.log(
-                `[DRY-RUN] Would update DRAFT registry record ${recordId}: orgId=${org}`,
+                `[DRY-RUN] Would update DRAFT registry record ${recordId}: orgId=${stampOrg}`,
               );
             } else {
               await registryService.updateResource("agent", recordId, {
                 customMetadata: JSON.stringify(meta),
               });
               console.log(
-                `Updated DRAFT registry record ${recordId}: orgId=${org}`,
+                `Updated DRAFT registry record ${recordId}: orgId=${stampOrg}`,
               );
             }
             counters.registryUpdated++;
@@ -297,9 +418,20 @@ export async function runBackfillRecordOrg(
     }
 
     try {
+      // Dual-key twin resolution (PR #369)
+      const resolved = await resolveTwinOrg(
+        docClient,
+        tableTools,
+        "toolId",
+        item,
+        toolOrphans,
+        org,
+      );
+      const stampOrg = resolved.orgId;
+
       if (dryRun) {
         console.log(
-          `[DRY-RUN] Would update tool: key=${id} name=${item.name ?? "(none)"} hasRecordId=${!!item.registryRecordId} createdAt=${item.createdAt ?? "(none)"}`,
+          `[DRY-RUN] Would update tool: key=${id} name=${item.name ?? "(none)"} orgId=${stampOrg} source=${resolved.source} hasRecordId=${!!item.registryRecordId} createdAt=${item.createdAt ?? "(none)"}`,
         );
       } else {
         await docClient.send(
@@ -312,11 +444,13 @@ export async function runBackfillRecordOrg(
               "#orgUnknown": "orgUnknown",
             },
             ExpressionAttributeValues: {
-              ":org": org,
+              ":org": stampOrg,
             },
           }),
         );
-        console.log(`Updated tool projection ${id}: orgId=${org}`);
+        console.log(
+          `Updated tool projection ${id}: orgId=${stampOrg} (${resolved.source})`,
+        );
       }
       counters.toolProjectionUpdated++;
     } catch (err) {

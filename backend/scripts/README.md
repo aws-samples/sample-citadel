@@ -27,6 +27,14 @@ By default only considers rows with a `citadelKind` attribute (projection rows).
 Keys starting `decision#` (bookkeeping, not records) and rows with
 orgId `'All Organizations'` are **always** skipped.
 
+**Dual-key cache twin resolution** (PR #369): an agent/tool may have two
+rows — one keyed by a recordId (UUID) and one keyed by its display name
+(`agentId == name`). For each candidate, the script looks up the twin row;
+if the twin carries a non-absent `orgId`, the candidate inherits that value
+(including `'All Organizations'`). Otherwise the `--org` flag value is stamped.
+Dry-run output includes the resolved `orgId` and its source (`twin` | `flag`)
+for each candidate.
+
 ```bash
 # Dry-run
 npx ts-node --project tsconfig.scripts.json scripts/backfill-record-org.ts \
