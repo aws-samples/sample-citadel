@@ -12,12 +12,19 @@
  * to SDK packages that are NOT available in the Lambda runtime and asserts
  * they are bundled (i.e. NOT left as bare external requires).
  *
- * Prerequisite: run `npm run build:lambda` before this test.
+ * Self-sufficient: if dist/lambda/ is missing or empty, beforeAll runs
+ * `npm run build:lambda` automatically so this test never silently passes
+ * due to a missing build artefact.
  */
+import { execSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 
-const DIST_LAMBDA = path.resolve(__dirname, "..", "dist", "lambda");
+const BACKEND_ROOT = path.resolve(__dirname, "..");
+const DIST_LAMBDA = path.join(BACKEND_ROOT, "dist", "lambda");
+
+// build:lambda takes <2s locally; 30s is generous for CI.
+jest.setTimeout(30_000);
 
 /**
  * SDK packages that are NOT shipped with the Node.js 24 Lambda runtime and
@@ -49,7 +56,24 @@ function findJsFiles(dir: string): string[] {
 }
 
 describe("Handler module-contract guard", () => {
-  const bundles = findJsFiles(DIST_LAMBDA);
+  let bundles: string[];
+
+  beforeAll(() => {
+    // Auto-build if dist/lambda is missing or empty so this guard never
+    // silently passes on a clean checkout (CI never runs build:lambda).
+    const needsBuild =
+      !fs.existsSync(DIST_LAMBDA) ||
+      fs.readdirSync(DIST_LAMBDA).filter((f) => f.endsWith(".js")).length === 0;
+
+    if (needsBuild) {
+      execSync("npm run build:lambda", {
+        cwd: BACKEND_ROOT,
+        stdio: "inherit",
+      });
+    }
+
+    bundles = findJsFiles(DIST_LAMBDA);
+  });
 
   test("dist/lambda/ contains built handler bundles (sanity)", () => {
     expect(bundles.length).toBeGreaterThan(10);
