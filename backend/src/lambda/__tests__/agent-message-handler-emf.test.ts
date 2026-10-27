@@ -41,6 +41,7 @@ jest.mock("@aws-sdk/lib-dynamodb", () => {
   return {
     DynamoDBDocumentClient: { from: jest.fn(() => ({ send })) },
     PutCommand: jest.fn((params: unknown) => params),
+    GetCommand: jest.fn((params: unknown) => params),
     __docSend: send,
   };
 });
@@ -69,6 +70,7 @@ jest.mock("@aws-sdk/signature-v4", () => ({
 process.env.CONVERSATIONS_TABLE = "conversations-test";
 process.env.APPSYNC_ENDPOINT = "https://appsync.invalid/graphql";
 process.env.IDEMPOTENCY_TABLE = "idempotency-test";
+process.env.PROJECTS_TABLE = "projects-test";
 process.env.ENVIRONMENT = "test";
 delete process.env.IMPORT_ENABLED; // force the legacy AgentCore path
 
@@ -167,6 +169,14 @@ describe("agent-message-handler — Wave 0 EMF instrumentation", () => {
     });
 
     libDynamo.__docSend.mockClear();
+    // Route Get (project lookup) vs Put (store response)
+    libDynamo.__docSend.mockImplementation(async (cmd: unknown) => {
+      const c = cmd as { ProjectionExpression?: string };
+      if (c.ProjectionExpression === "organization") {
+        return { Item: { organization: "test-org" } };
+      }
+      return {};
+    });
 
     fetchMock = jest.fn(async () => ({
       ok: true,

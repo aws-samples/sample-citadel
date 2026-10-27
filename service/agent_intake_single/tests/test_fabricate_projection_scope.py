@@ -323,13 +323,10 @@ class TestDetailReadFallback:
 # -----------------------------------------------------------------------
 
 class TestFailClosed:
-    def test_no_session_org_returns_empty(self, projection_env):
-        mock_ddb, _ = projection_env
-        _bind_session("")  # empty org
-
-        result = fab._get_existing_agents()
-
-        assert result == {}
+    def test_no_session_org_raises_at_bind(self, projection_env):
+        from request_context import MissingOrgError
+        with pytest.raises(MissingOrgError):
+            _bind_session("")  # empty org
 
     def test_no_request_scope_returns_empty(self, projection_env):
         mock_ddb, _ = projection_env

@@ -178,34 +178,24 @@ class TestSystemRecordsVisible:
 # ── Session without org fails closed ───────────────────────────────────
 
 class TestFailClosed:
-    """A session missing org_id must return {} — never expose unscoped data."""
+    """A session missing org_id must now be rejected at bind time — the handler
+    must never invoke the agent without a server-derived org."""
 
-    def test_empty_org_returns_empty(self, monkeypatch):
-        # Re-bind with no org
-        request_context.bind_request({
-            "session_id": "sess-no-org",
-            "sessionAttributes": {"userId": "user-1", "org": ""},
-        })
-        monkeypatch.setattr(fab, "REGISTRY_ID", "reg-1")
-        records = [_summary("any-agent", "r1", org_id="org-1")]
-        monkeypatch.setattr(fab, "_get_registry_client", lambda: _client(records))
+    def test_empty_org_raises_at_bind_time(self, monkeypatch):
+        from request_context import MissingOrgError
+        with pytest.raises(MissingOrgError):
+            request_context.bind_request({
+                "session_id": "sess-no-org",
+                "sessionAttributes": {"userId": "user-1", "org": ""},
+            })
 
-        result = fab._get_existing_agents()
-
-        assert result == {}
-
-    def test_no_org_attribute_returns_empty(self, monkeypatch):
-        request_context.bind_request({
-            "session_id": "sess-no-org-attr",
-            "sessionAttributes": {"userId": "user-1"},
-        })
-        monkeypatch.setattr(fab, "REGISTRY_ID", "reg-1")
-        records = [_summary("any-agent", "r1", org_id="org-1")]
-        monkeypatch.setattr(fab, "_get_registry_client", lambda: _client(records))
-
-        result = fab._get_existing_agents()
-
-        assert result == {}
+    def test_no_org_attribute_raises_at_bind_time(self, monkeypatch):
+        from request_context import MissingOrgError
+        with pytest.raises(MissingOrgError):
+            request_context.bind_request({
+                "session_id": "sess-no-org-attr",
+                "sessionAttributes": {"userId": "user-1"},
+            })
 
     def test_outside_request_scope_returns_empty(self, monkeypatch):
         request_context.clear()
