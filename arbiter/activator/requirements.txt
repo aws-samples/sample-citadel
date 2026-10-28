@@ -1,5 +1,5 @@
 boto3>=1.43.116
 aws-xray-sdk==2.15.0
-strands-agents==1.61.1
+strands-agents==1.62.0
 # Security floors for transitive dependencies; remove when strands-agents requires them directly.
 mcp==1.30.0  # CVE-2026-59951 — SSRF via MCP, patched in 1.30.0 (strands-agents caps mcp<2.0.0)
