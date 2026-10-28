@@ -18,10 +18,9 @@
  *    emitEvent call.
  *  - serverDerivedWrite: createProject — stamps the persisted row's
  *    `organization:` from the server-derived caller org
- *    (extractOrgFromEvent) and `owner:` from the caller's identity;
- *    the deliberate `|| DEFAULT_ORGANIZATION` fallback keeps claim-less
- *    users on a real, shared GSI partition (documented in the source) —
- *    the client cannot choose the organization.
+ *    (requireCallerOrg, fail-closed) and `owner:` from the caller's
+ *    identity; org-less callers are refused with OrgUnresolvedError
+ *    (CIT-252 C15) — the client cannot choose the organization.
  */
 import * as fs from "fs";
 import * as path from "path";
@@ -148,9 +147,9 @@ describe("project-resolver — dispatch enumeration completeness", () => {
     const body = functionBody(findTopLevelFunction(sf, "listProjects"));
     const calls = collectCalls(body, sf);
 
-    test("derives identity server-side: isAdminFromEvent bypass + extractOrgFromEvent scoping", () => {
+    test("derives identity server-side: isAdminFromEvent bypass + requireCallerOrg scoping", () => {
       expect(calls.some((c) => c.callee === "isAdminFromEvent")).toBe(true);
-      expect(calls.some((c) => c.callee === "extractOrgFromEvent")).toBe(true);
+      expect(calls.some((c) => c.callee === "requireCallerOrg")).toBe(true);
     });
 
     test("the non-admin path queries the OrganizationIndex keyed on the server-derived org (never a client argument)", () => {
@@ -191,8 +190,8 @@ describe("project-resolver — dispatch enumeration completeness", () => {
     const body = functionBody(findTopLevelFunction(sf, "createProject"));
     const calls = collectCalls(body, sf);
 
-    test("derives the organization server-side (extractOrgFromEvent) before the write", () => {
-      const gates = calls.filter((c) => c.callee === "extractOrgFromEvent");
+    test("derives the organization server-side (requireCallerOrg) before the write", () => {
+      const gates = calls.filter((c) => c.callee === "requireCallerOrg");
       const effects = calls.filter((c) =>
         SIDE_EFFECT_CALLEES.includes(c.callee),
       );

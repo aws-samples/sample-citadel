@@ -23,6 +23,7 @@ import {
   isAdminFromEvent,
   hasRoleFromEvent,
   extractOrgFromEvent,
+  requireCallerOrg,
 } from "../utils/auth-event";
 import { mintRunId, buildDispatchContext } from "../utils/run-id";
 import {
@@ -952,7 +953,6 @@ async function listAwaitingApprovals(
   assertAdminOrArchitect(event);
 
   const isAdmin = isAdminFromEvent(event);
-  const callerOrgId = await extractOrgFromEvent(event);
 
   const scanLimit = Math.min(limit || 20, 100);
 
@@ -971,7 +971,12 @@ async function listAwaitingApprovals(
     ":awaitingApproval": "awaiting_approval",
   };
 
-  if (!isAdmin && callerOrgId) {
+  // CIT-252 H14 (fail-closed): non-admin callers MUST have a resolvable org
+  // — requireCallerOrg throws OrgUnresolvedError when the claim is absent,
+  // instead of silently skipping the org filter and exposing every org's
+  // awaiting-approval executions.
+  if (!isAdmin) {
+    const callerOrgId = await requireCallerOrg(event, "ExecutionResolver");
     filterParts.push("#orgId = :orgId");
     exprNames["#orgId"] = "orgId";
     exprValues[":orgId"] = callerOrgId;

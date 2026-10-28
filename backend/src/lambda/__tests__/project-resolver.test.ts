@@ -42,6 +42,7 @@ import * as execspecResolver from "../execspec-resolver";
 import * as assessmentResolver from "../agent-design-assessment-resolver";
 import { __resetGovernanceNotifierForTest } from "../../utils/notifier-base";
 import { __resetGovernanceFlagCacheForTest } from "../../utils/governance-flag";
+import { OrgUnresolvedError } from "../../utils/auth-event";
 
 const dynamoMock = mockClient(DynamoDBDocumentClient);
 const eventBridgeMock = mockClient(EventBridgeClient);
@@ -70,7 +71,7 @@ const makeEvent = (fieldName: string, args: Record<string, unknown>) =>
   ({
     info: { fieldName },
     arguments: args,
-    identity: { sub: "user-123" },
+    identity: { sub: "user-123", "custom:organization": "Default" },
   }) as unknown as HandlerEvent;
 
 describe("project-resolver — archetype attributes", () => {
@@ -300,54 +301,31 @@ describe("project-resolver — organization scoping", () => {
     );
   });
 
-  test("user with no org claim gets Default org projects via OrganizationIndex", async () => {
-    const defaultOrgItems = [
-      {
-        id: "proj-default-1",
-        name: "Default org project",
-        status: "CREATED",
-        owner: "user-123",
-        organization: "Default",
-        createdAt: "2025-01-01T00:00:00Z",
-        updatedAt: "2025-01-01T00:00:00Z",
-      },
-    ];
-    dynamoMock.on(QueryCommand).resolves({ Items: defaultOrgItems });
+  test("CIT-252 C15: org-less caller is DENIED on listProjects (not pooled into Default)", async () => {
+    await expect(
+      invokeHandler(
+        makeEventWithIdentity("listProjects", {}, { sub: "user-123" }),
+      ),
+    ).rejects.toThrow("Organisation could not be determined for this account");
 
-    const result = (await invokeHandler(
-      makeEventWithIdentity("listProjects", {}, { sub: "user-123" }),
-    )) as unknown as { items: Array<{ id: string }> };
-
+    // No DynamoDB calls should have been made — deny is before the query.
+    expect(dynamoMock.commandCalls(QueryCommand)).toHaveLength(0);
     expect(dynamoMock.commandCalls(ScanCommand)).toHaveLength(0);
-    const queryCalls = dynamoMock.commandCalls(QueryCommand);
-    expect(queryCalls).toHaveLength(1);
-    const queryInput = queryCalls[0].args[0].input;
-    expect(queryInput.IndexName).toBe("OrganizationIndex");
-    expect(
-      (queryInput.ExpressionAttributeValues as Record<string, unknown>)[":org"],
-    ).toBe("Default");
-
-    expect(result.items.map((p) => p.id)).toEqual(["proj-default-1"]);
   });
 
-  test("createProject always stamps organization (never undefined) when org claim is missing", async () => {
-    dynamoMock.on(PutCommand).resolves({});
-
-    const result = (await invokeHandler(
-      makeEventWithIdentity(
-        "createProject",
-        { input: { name: "No-org project" } },
-        { sub: "user-123" },
+  test("CIT-252 C15: org-less caller is DENIED on createProject (not pooled into Default)", async () => {
+    await expect(
+      invokeHandler(
+        makeEventWithIdentity(
+          "createProject",
+          { input: { name: "No-org project" } },
+          { sub: "user-123" },
+        ),
       ),
-    )) as unknown as { organization?: string };
+    ).rejects.toThrow("Organisation could not be determined for this account");
 
-    expect(result.organization).toBe("Default");
-
-    const putCalls = dynamoMock.commandCalls(PutCommand);
-    expect(putCalls).toHaveLength(1);
-    const persisted = putCalls[0].args[0].input.Item as Record<string, unknown>;
-    expect(persisted.organization).toBe("Default");
-    expect(persisted.organization).not.toBeUndefined();
+    // No PutCommand — deny is before the write.
+    expect(dynamoMock.commandCalls(PutCommand)).toHaveLength(0);
   });
 
   test("createProject stamps the claim organization when present (never undefined)", async () => {
@@ -469,7 +447,7 @@ describe("project-resolver — organization scoping", () => {
       makeEventWithIdentity(
         "listProjects",
         { nextToken: JSON.stringify(priorKey) },
-        { sub: "user-123" },
+        { sub: "user-123", "custom:organization": "Default" },
       ),
     )) as unknown as { items: Array<{ id: string }>; nextToken?: string };
 
@@ -481,6 +459,69 @@ describe("project-resolver — organization scoping", () => {
       JSON.stringify({ organization: "Default", id: "proj-next-page" }),
     );
     expect(result.items.map((p) => p.id)).toEqual(["proj-default-2"]);
+  });
+
+  // ─── CIT-252 C15: two-org negative tests ─────────────────────────────
+
+  test("CIT-252 C15: listProjects scopes orgA caller to orgA projects only (two-org negative)", async () => {
+    const orgAItems = [
+      {
+        id: "proj-org-a-1",
+        name: "Org A project",
+        status: "CREATED",
+        owner: "user-a",
+        organization: "org-a",
+        createdAt: "2025-01-01T00:00:00Z",
+        updatedAt: "2025-01-01T00:00:00Z",
+      },
+    ];
+    dynamoMock.on(QueryCommand).resolves({ Items: orgAItems });
+
+    const result = (await invokeHandler(
+      makeEventWithIdentity(
+        "listProjects",
+        {},
+        { sub: "user-a", "custom:organization": "org-a" },
+      ),
+    )) as unknown as { items: Array<{ id: string }> };
+
+    // The query must use OrganizationIndex scoped to org-a.
+    const queryCalls = dynamoMock.commandCalls(QueryCommand);
+    expect(queryCalls).toHaveLength(1);
+    const queryInput = queryCalls[0].args[0].input;
+    expect(queryInput.IndexName).toBe("OrganizationIndex");
+    expect(
+      (queryInput.ExpressionAttributeValues as Record<string, unknown>)[":org"],
+    ).toBe("org-a");
+
+    // Only org-a projects returned (org-b projects are invisible).
+    expect(result.items.map((p) => p.id)).toEqual(["proj-org-a-1"]);
+  });
+
+  test("CIT-252 C15: createProject stamps the caller's org, not a default", async () => {
+    dynamoMock.on(PutCommand).resolves({});
+
+    const result = (await invokeHandler(
+      makeEventWithIdentity(
+        "createProject",
+        { input: { name: "Org B project" } },
+        { sub: "user-b", "custom:organization": "org-b" },
+      ),
+    )) as unknown as { organization?: string };
+
+    expect(result.organization).toBe("org-b");
+
+    const putCalls = dynamoMock.commandCalls(PutCommand);
+    const persisted = putCalls[0].args[0].input.Item as Record<string, unknown>;
+    expect(persisted.organization).toBe("org-b");
+  });
+
+  test("CIT-252 C15: OrgUnresolvedError is thrown, not CrossOrgAccessError, for org-less callers", async () => {
+    await expect(
+      invokeHandler(
+        makeEventWithIdentity("listProjects", {}, { sub: "orgless-user" }),
+      ),
+    ).rejects.toBeInstanceOf(OrgUnresolvedError);
   });
 });
 

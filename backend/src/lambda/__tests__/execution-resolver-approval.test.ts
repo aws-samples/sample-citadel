@@ -495,6 +495,78 @@ describe("execution-resolver — CIT-030 approval mutations", () => {
       const filter = scanCalls[0].args[0].input.FilterExpression;
       expect(filter).not.toContain("orgId");
     });
+
+    // CIT-252 H14: two-org negative tests
+
+    test("CIT-252 H14: org-less architect is DENIED (OrgUnresolvedError, not empty list)", async () => {
+      // Build the event manually to ensure NO custom:organization claim
+      // (the makeEvent helper defaults to "org-1" when org is undefined).
+      const orglessEvent = {
+        info: { fieldName: "listAwaitingApprovals" },
+        arguments: {},
+        identity: {
+          sub: "architect-no-org",
+          "cognito:groups": ["architect"],
+          claims: {
+            sub: "architect-no-org",
+            "cognito:groups": ["architect"],
+          },
+        },
+      } as unknown as HandlerEvent;
+
+      await expect(invoke(orglessEvent)).rejects.toThrow(
+        "Organisation could not be determined for this account",
+      );
+
+      // No DynamoDB scan should have been made.
+      expect(ddbMock.commandCalls(ScanCommand)).toHaveLength(0);
+    });
+
+    test("CIT-252 H14: orgA architect cannot see orgB awaiting approvals (two-org negative)", async () => {
+      // DDB contains one orgA and one orgB awaiting-approval execution.
+      const orgAExec = {
+        ...EXECUTION_AWAITING,
+        executionId: "exec-org-a",
+        orgId: "org-a",
+        approvalRequests: {
+          "node-a": {
+            ...EXECUTION_AWAITING.approvalRequests["node-a"],
+            orgId: "org-a",
+          },
+        },
+      };
+      // orgB execution exists in DDB but is filtered out server-side by
+      // the orgId = callerOrg constraint — it is never returned to the caller.
+
+      // The scan filter enforces orgId = callerOrg server-side,
+      // so DDB only returns org-a items to an org-a caller.
+      ddbMock.on(ScanCommand).resolves({ Items: [orgAExec] });
+
+      const result = await invoke<{ items: Record<string, unknown>[] }>(
+        makeEvent(
+          "listAwaitingApprovals",
+          {},
+          { groups: ["architect"], org: "org-a" },
+        ),
+      );
+
+      // Only org-a execution returned.
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0].executionId).toBe("exec-org-a");
+
+      // Verify the scan filter included the org constraint.
+      const scanCalls = ddbMock.commandCalls(ScanCommand);
+      const filter = scanCalls[0].args[0].input.FilterExpression;
+      expect(filter).toContain("#orgId = :orgId");
+      expect(
+        (
+          scanCalls[0].args[0].input.ExpressionAttributeValues as Record<
+            string,
+            unknown
+          >
+        )[":orgId"],
+      ).toBe("org-a");
+    });
   });
 
   // ─── getExecution strips token ─────────────────────────────────

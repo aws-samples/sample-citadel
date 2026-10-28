@@ -30,6 +30,8 @@ import {
   deriveRoles,
   resolveScopedOrgFromEvent,
   canCallerSeeRow,
+  requireCallerOrg,
+  OrgUnresolvedError,
 } from "../auth-event";
 
 const cognitoMock = mockClient(CognitoIdentityProviderClient);
@@ -713,6 +715,89 @@ describe("auth-event", () => {
       await expect(
         canCallerSeeRow({ orgId: "org-completely-different" }, event),
       ).resolves.toBe(false);
+    });
+  });
+
+  describe("requireCallerOrg (CIT-252, fail-closed org primitive)", () => {
+    test("returns the caller org when the claim is present", async () => {
+      const event = {
+        identity: { sub: "u1", "custom:organization": "org-alpha" },
+      };
+      const org = await requireCallerOrg(event);
+      expect(org).toBe("org-alpha");
+    });
+
+    test("throws OrgUnresolvedError when the claim is absent (not CrossOrgAccessError)", async () => {
+      const event = { identity: { sub: "u1" } };
+      await expect(requireCallerOrg(event)).rejects.toBeInstanceOf(
+        OrgUnresolvedError,
+      );
+      await expect(requireCallerOrg(event)).rejects.toThrow(
+        "Organisation could not be determined for this account",
+      );
+    });
+
+    test("throws OrgUnresolvedError when the claim is an empty string", async () => {
+      const event = {
+        identity: { sub: "u1", "custom:organization": "" },
+      };
+      await expect(requireCallerOrg(event)).rejects.toBeInstanceOf(
+        OrgUnresolvedError,
+      );
+    });
+
+    test("does NOT special-case admins — admin with no claim is also denied", async () => {
+      const event = {
+        identity: { sub: "admin-1", "cognito:groups": ["admin"] },
+      };
+      await expect(requireCallerOrg(event)).rejects.toBeInstanceOf(
+        OrgUnresolvedError,
+      );
+    });
+
+    test("admin with a valid claim gets it returned (same as non-admin)", async () => {
+      const event = {
+        identity: {
+          sub: "admin-1",
+          "cognito:groups": ["admin"],
+          "custom:organization": "org-admin-home",
+        },
+      };
+      const org = await requireCallerOrg(event);
+      expect(org).toBe("org-admin-home");
+    });
+
+    test("returns null event identity gracefully (throws)", async () => {
+      await expect(requireCallerOrg({})).rejects.toBeInstanceOf(
+        OrgUnresolvedError,
+      );
+      await expect(requireCallerOrg(null)).rejects.toBeInstanceOf(
+        OrgUnresolvedError,
+      );
+      await expect(requireCallerOrg(undefined)).rejects.toBeInstanceOf(
+        OrgUnresolvedError,
+      );
+    });
+
+    test("OrgUnresolvedError.name is 'OrgUnresolvedError' (distinct from CrossOrgAccessError)", () => {
+      const err = new OrgUnresolvedError();
+      expect(err.name).toBe("OrgUnresolvedError");
+      expect(err).toBeInstanceOf(Error);
+      expect(err).not.toBeInstanceOf(CrossOrgAccessError);
+    });
+
+    test("OrgUnresolvedError never falls back to Cognito attribute lookup (decision 00d40a31)", async () => {
+      cognitoMock.on(AdminGetUserCommand).resolves({
+        UserAttributes: [
+          { Name: "custom:organization", Value: "org-from-attribute" },
+        ],
+      });
+
+      const event = { identity: { sub: "u1" } };
+      await expect(requireCallerOrg(event)).rejects.toBeInstanceOf(
+        OrgUnresolvedError,
+      );
+      expect(cognitoMock.commandCalls(AdminGetUserCommand).length).toBe(0);
     });
   });
 });

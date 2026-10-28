@@ -194,6 +194,88 @@ export function hasRoleFromEvent(event: unknown, role: string): boolean {
 }
 
 /**
+ * Thrown by {@link requireCallerOrg} when a non-admin caller's JWT carries
+ * no resolvable `custom:organization` claim. This is a HARD DENY — callers
+ * must not catch and fall back to a default org. The message is
+ * intentionally user-visible (surfaced via AppSync error response).
+ *
+ * Distinct from {@link CrossOrgAccessError}: that error means the caller
+ * HAS an org but it doesn't match the target row; this error means the
+ * caller has NO org at all.
+ */
+export class OrgUnresolvedError extends Error {
+  constructor(
+    message = "Organisation could not be determined for this account",
+  ) {
+    super(message);
+    this.name = "OrgUnresolvedError";
+  }
+}
+
+/**
+ * Extracts the caller's org and FAILS CLOSED when it is absent.
+ *
+ * For list/create paths that need the caller's own org as a filter key or
+ * stamp value — NOT for by-ID reads (use {@link assertRowOrg} /
+ * {@link canCallerSeeRow} for those).
+ *
+ * Admin callers: this function does NOT special-case admins.  Admin bypass
+ * logic (full-table scan, no org filter) is the caller's responsibility
+ * — the admin code path should never call requireCallerOrg in the first
+ * place.  If an admin somehow reaches this function, they are treated
+ * identically to a non-admin: claim present → return it, claim absent →
+ * throw.  This is deliberate: {@link assertRowOrg} is the admin-bypass
+ * primitive for row-level reads; requireCallerOrg is the non-admin
+ * primitive for list/create paths.
+ *
+ * Emits a `Citadel/Resolvers` → `OrgUnresolved` CloudWatch metric
+ * (best-effort, never throws on metric failure) with a `resolver`
+ * dimension so dashboards can identify which entry point hit the deny.
+ *
+ * @param event  AppSync resolver event (any shape accepted by
+ *               {@link extractOrgFromEvent})
+ * @param resolverName  dimension value for the OrgUnresolved metric
+ *                      (e.g. `"ProjectResolver"`)
+ * @returns the caller's organisation string (never null/empty)
+ * @throws {OrgUnresolvedError} when the claim is absent or empty
+ */
+export async function requireCallerOrg(
+  event: unknown,
+  resolverName?: string,
+): Promise<string> {
+  const org = await extractOrgFromEvent(event);
+  if (org) return org;
+
+  // Best-effort metric — import dynamically so the module stays
+  // side-effect-free at import time and test files don't need to mock CW
+  // unless they test this path.
+  if (resolverName) {
+    try {
+      const { CloudWatchClient, PutMetricDataCommand } =
+        await import("@aws-sdk/client-cloudwatch");
+      const cw = new CloudWatchClient({});
+      await cw.send(
+        new PutMetricDataCommand({
+          Namespace: "Citadel/Resolvers",
+          MetricData: [
+            {
+              MetricName: "OrgUnresolved",
+              Value: 1,
+              Unit: "Count",
+              Dimensions: [{ Name: "resolver", Value: resolverName }],
+            },
+          ],
+        }),
+      );
+    } catch {
+      // Best effort — metric failure must never block the deny path.
+    }
+  }
+
+  throw new OrgUnresolvedError();
+}
+
+/**
  * Fetch-then-verify row-org reconciliation gate. Shared by every resolver
  * that loads a client-supplied-ID row and must refuse a cross-org caller
  * BEFORE any mutation/side-effect (finding ca76d041). Mirrors the
