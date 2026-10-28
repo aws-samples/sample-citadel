@@ -60,9 +60,13 @@ is why `aws-cdk-lib`'s override stays at `>=5.0.9 <6`. It does **not** apply to 
 which pins the same chains to a patched **1.x** version (`>=1.1.18 <2`) — same major line minimatch@3
 already expects, no API-shape change. Do not widen the minimatch@3 chains to 5.x.
 
-## GHSA-rgw5-rvv9-x895 — brace-expansion (HIGH DoS via unbounded intermediate arrays; bypasses GHSA-mh99-v99m-4gvg mitigation)
+## GHSA-rgw5-rvv9-x895 — brace-expansion (HIGH DoS via unbounded intermediate arrays; bypasses GHSA-mh99-v99m-4gvg mitigation) — STALE, entry removed
 
-**Affected instances:**
+**Resolved (2026-10-28):** npm audit no longer reports this advisory against the current root
+lockfile. The allowlist entry has been removed from `.audit-ci.json` (audit-ci was warning
+"Consider not allowlisting" because the advisory was absent). Historical detail retained below.
+
+**Affected instances (historical):**
 - `node_modules/aws-cdk-lib/node_modules/brace-expansion@5.0.8` (`inBundle: true`; advisory range `>=4.0.0 <5.0.9`)
 
 This is the same bundled copy as GHSA-mh99-v99m-4gvg above — rgw5 is its unallowlisted
@@ -111,11 +115,14 @@ stale `_comment` claim have been removed from the root `.audit-ci.json` allowlis
 is fully resolved with no remaining allowlist entries anywhere in the repo.
 
 
-## GHSA-6j4f-fj2g-mc7p — brace-expansion (HIGH DoS via uncontrolled recursion in parseCommaParts)
+## GHSA-6j4f-fj2g-mc7p — brace-expansion (HIGH DoS via uncontrolled recursion in parseCommaParts) — STALE, entry removed
+
+**Resolved (2026-10-28):** npm audit no longer reports this advisory against the current root
+lockfile. The allowlist entry has been removed from `.audit-ci.json`. Historical detail retained below.
 
 **Added: 2026-09-30** | **revisitBy: 2026-11-30**
 
-**Affected instances:**
+**Affected instances (historical):**
 - `node_modules/aws-cdk-lib/node_modules/brace-expansion@5.0.8` (`inBundle: true`; advisory range `4.0.0 - 5.0.11`, fix `5.0.12`)
 
 **Why remediation is blocked:**
@@ -128,11 +135,14 @@ rewrite `bundleDependencies` content. The override `aws-cdk-lib.minimatch.brace-
   unbounded brace-expansion syntax. Not exposed to runtime/production traffic.
 - Acceptance: risk is minimal; no remediation path until aws-cdk-lib ships >=5.0.12.
 
-## GHSA-q2hr-2g5m-vwhr — brace-expansion (MODERATE Quadratic-time expansion of `{a},b}` rewrite)
+## GHSA-q2hr-2g5m-vwhr — brace-expansion (MODERATE Quadratic-time expansion of `{a},b}` rewrite) — STALE, entry removed
+
+**Resolved (2026-10-28):** npm audit no longer reports this advisory against the current root
+lockfile. The allowlist entry has been removed from `.audit-ci.json`. Historical detail retained below.
 
 **Added: 2026-09-30** | **revisitBy: 2026-11-30**
 
-**Affected instances:**
+**Affected instances (historical):**
 - `node_modules/aws-cdk-lib/node_modules/brace-expansion@5.0.8` (`inBundle: true`; advisory range `4.0.0 - 5.0.11`, fix `5.0.12`)
 
 **Why remediation is blocked:**
@@ -140,17 +150,43 @@ Same bundled aws-cdk-lib copy. See GHSA-6j4f-fj2g-mc7p justification above.
 
 **Exposure & Risk Acceptance:** Same as GHSA-6j4f-fj2g-mc7p — build-time-only, DoS-only, minimal risk.
 
-## GHSA-qhr7-859c-m2p7 — brace-expansion (HIGH DoS via uncontrolled recursion on nested brace groups)
+## GHSA-qhr7-859c-m2p7 — brace-expansion (HIGH DoS via uncontrolled recursion on nested brace groups) — STALE, entry removed
+
+**Resolved (2026-10-28):** npm audit no longer reports this advisory against the current root
+lockfile. The allowlist entry has been removed from `.audit-ci.json`. Historical detail retained below.
 
 **Added: 2026-09-30** | **revisitBy: 2026-11-30**
 
-**Affected instances:**
+**Affected instances (historical):**
 - `node_modules/aws-cdk-lib/node_modules/brace-expansion@5.0.8` (`inBundle: true`; advisory range `4.0.0 - 5.0.11`, fix `5.0.12`)
 
 **Why remediation is blocked:**
 Same bundled aws-cdk-lib copy. See GHSA-6j4f-fj2g-mc7p justification above.
 
 **Exposure & Risk Acceptance:** Same as GHSA-6j4f-fj2g-mc7p — build-time-only, DoS-only, minimal risk.
+
+## GHSA-gcqx-w48m-w2h4 — deepmerge (LOW prototype poisoning via mergeObject)
+
+**Added: 2026-10-28** | **revisitBy: 2027-01-28**
+
+**Affected instances:**
+- `node_modules/deepmerge@4.3.1` (transitive via `jest-config@30.5.2`)
+- `frontend/node_modules/deepmerge@4.3.1` (same chain, frontend lockfile)
+
+**Advisory:** `deepmerge >=4.2.0 <=4.3.1` — `mergeObject()` allows prototype poisoning of returned objects. LOW severity (CVSS 5.3).
+
+**Why remediation is blocked:**
+`deepmerge@4.3.1` is the latest release in the 4.x line. The advisory covers all versions `>=4.2.0 <=4.3.1` with no fixed version published. `jest-config@30.5.2` (bundled with jest@30.5.2) depends on `deepmerge@^4.2.0`. `npm audit fix` (without `--force`) cannot resolve it; `--force` would downgrade jest to 25.1.0, a semver-major breaking change that would break all test suites.
+
+**Exposure & Risk Acceptance:**
+- `deepmerge` is a **devDependency-only** transitive via `jest-config`. It is never deployed to production runtime and is only exercised during test execution.
+- The prototype-poisoning attack vector requires crafted JSON input to `mergeObject()`, which in jest-config is only called internally to merge jest configuration objects authored by developers — not exposed to untrusted external input.
+- Acceptance: risk is minimal; no remediation path until upstream jest drops deepmerge or a patched version is published.
+
+**Recommended follow-ups:**
+1. Check for a jest release that removes or upgrades deepmerge past the vulnerable range.
+2. Check for a deepmerge release beyond 4.3.1 that patches the advisory.
+3. When resolved, remove this entry from both `.audit-ci.json` and `frontend/.audit-ci.json`.
 
 ## GHSA-rj75-hqrm-r3gf — postcss-selector-parser (MODERATE quadratic complexity in flat selector parsing)
 
