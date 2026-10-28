@@ -27,9 +27,8 @@
  *    linked project row is org-less (project-resolver writes `organization:
  *    userOrganization || undefined`), the org falls back to the project
  *    owner's UserOrgMembership row (the authoritative user↔org link,
- *    decision 00d40a31 — never the Cognito attribute), then to the same
- *    literal an org-less caller produces on the Cognito-auth path (see
- *    resolveOrgId).
+ *    decision 00d40a31 — never the Cognito attribute); if neither resolves,
+ *    `OrgUnresolvedError` is thrown (fail-closed — see resolveOrgId).
  *  - Logging is restricted to identifiers (field, correlationId, ids) — no
  *    argument payloads are ever logged, so credentials cannot leak by
  *    construction.
@@ -42,7 +41,7 @@ import {
   ScanCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { getUserId } from "../utils/appsync";
-import { CrossOrgAccessError } from "../utils/auth-event";
+import { CrossOrgAccessError, OrgUnresolvedError } from "../utils/auth-event";
 import { lookupOwnerOrganization } from "../utils/org-membership";
 import { ValidationError, sanitizeString } from "../utils/validation";
 import {
@@ -54,7 +53,6 @@ import {
   ensureAppAgentBindings,
   findAppBySourceProjectId,
 } from "./registry-agent-record-resolver";
-import { ORGLESS_CALLER_ORG } from "./utils/org-sentinel";
 import {
   createWorkflow,
   publishWorkflow,
@@ -250,7 +248,7 @@ async function deriveSessionContext(
 }
 
 /**
- * Org derivation fallback chain (self-healing — no data patch needed):
+ * Org derivation fallback chain (fail-closed — no 'default' sentinel):
  *  1. `project.organization` when the project row carries it.
  *  2. The project owner's UserOrgMembership row (utils/org-membership.ts,
  *     GetItem by `sub` — `Project.owner` IS the creator's Cognito sub, see
@@ -260,8 +258,7 @@ async function deriveSessionContext(
  *     owner is the durable pointer back to the org they belong to today.
  *     Decision 00d40a31: the membership table is authoritative; the Cognito
  *     `custom:organization` attribute is never consulted.
- *  3. `'default'` — exactly what an org-less caller produces on the
- *     Cognito-auth createApp/createWorkflow paths (see ORGLESS_CALLER_ORG).
+ *  3. Throws `OrgUnresolvedError` — callers must not catch and fall back.
  */
 async function resolveOrgId(ctx: SessionContext): Promise<string> {
   if (ctx.orgId) {
@@ -276,8 +273,8 @@ async function resolveOrgId(ctx: SessionContext): Promise<string> {
       return ownerOrg;
     }
   }
-  log("resolveOrgId", ctx.sessionId, { orgSource: "orglessCallerDefault" });
-  return ORGLESS_CALLER_ORG;
+  log("resolveOrgId", ctx.sessionId, { orgSource: "unresolved" });
+  throw new OrgUnresolvedError();
 }
 
 /**

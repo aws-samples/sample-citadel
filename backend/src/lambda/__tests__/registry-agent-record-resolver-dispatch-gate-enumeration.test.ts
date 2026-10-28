@@ -401,12 +401,10 @@ describe("registry-agent-record-resolver — dispatch enumeration completeness",
         expect(target.some((c) => callReceivesBareEvent(c.node))).toBe(true);
       });
 
-      test(`${meta.fn}'s body calls extractOrgFromEvent to derive the caller's org`, () => {
+      test(`${meta.fn}'s body calls requireCallerOrg to derive the caller's org (fail-closed)`, () => {
         const fn = findTopLevelFunction(sf, meta.fn);
         const calls = collectCalls(functionBody(fn), sf);
-        expect(calls.some((c) => c.callee === "extractOrgFromEvent")).toBe(
-          true,
-        );
+        expect(calls.some((c) => c.callee === "requireCallerOrg")).toBe(true);
       });
     },
   );
