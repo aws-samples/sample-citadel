@@ -33,18 +33,24 @@ jest.mock("@aws-sdk/lib-dynamodb", () => ({
 // ── Auth mocks ──────────────────────────────────────────────────────────
 const mockExtractOrg =
   jest.fn<(...args: unknown[]) => Promise<string | null>>();
+const mockRequireCallerOrg = jest.fn<(...args: unknown[]) => Promise<string>>();
 jest.mock("../../utils/auth-event", () => ({
   extractOrgFromEvent: (...args: unknown[]) => mockExtractOrg(...args),
+  requireCallerOrg: (...args: unknown[]) => mockRequireCallerOrg(...args),
+  OrgUnresolvedError: class OrgUnresolvedError extends Error {
+    constructor(
+      message = "Organisation could not be determined for this account",
+    ) {
+      super(message);
+      this.name = "OrgUnresolvedError";
+    }
+  },
 }));
 
 const mockLookupOwnerOrg =
   jest.fn<(...args: unknown[]) => Promise<string | null>>();
 jest.mock("../../utils/org-membership", () => ({
   lookupOwnerOrganization: (...args: unknown[]) => mockLookupOwnerOrg(...args),
-}));
-
-jest.mock("../utils/org-sentinel", () => ({
-  ORGLESS_CALLER_ORG: "default",
 }));
 
 // ── Env ─────────────────────────────────────────────────────────────────
@@ -60,6 +66,13 @@ function makeEvent(
   org: string | null = "org-1",
 ): AppSyncResolverEvent<Record<string, unknown>> {
   mockExtractOrg.mockResolvedValue(org);
+  if (org) {
+    mockRequireCallerOrg.mockResolvedValue(org);
+  } else {
+    mockRequireCallerOrg.mockRejectedValue(
+      new Error("Organisation could not be determined for this account"),
+    );
+  }
   return {
     arguments: args,
     identity: { claims: { sub: "user-1", "custom:organization": org ?? "" } },
@@ -167,7 +180,7 @@ describe("intake-consent-resolver", () => {
     expect(mockLookupOwnerOrg).toHaveBeenCalledWith("owner-sub");
   });
 
-  it("falls back to ORGLESS_CALLER_ORG for orgless callers and orgless projects", async () => {
+  it("rejects an org-less caller (fail-closed, no 'default' sentinel)", async () => {
     mockSend.mockImplementation(async (cmd: unknown) => {
       const tag = (cmd as Record<string, unknown>)?._tag;
       if (tag === "Scan") return { Items: [] };
@@ -177,10 +190,51 @@ describe("intake-consent-resolver", () => {
     });
     mockLookupOwnerOrg.mockResolvedValue(null);
 
-    // Caller also has no org → both resolve to "default" → match
-    const result = await handler(
-      makeEvent({ projectId: "proj-1", action: "activate_agents" }, null),
-    );
-    expect((result as Record<string, unknown>).ok).toBe(true);
+    // Caller has no org → requireCallerOrg throws
+    await expect(
+      handler(
+        makeEvent({ projectId: "proj-1", action: "activate_agents" }, null),
+      ),
+    ).rejects.toThrow(/organisation could not be determined/i);
+  });
+
+  it("rejects an org-less session even when the caller has an org", async () => {
+    mockSend.mockImplementation(async (cmd: unknown) => {
+      const tag = (cmd as Record<string, unknown>)?._tag;
+      if (tag === "Scan") return { Items: [] };
+      if (tag === "Get") return { Item: { id: "proj-1" } }; // no org, no owner
+      if (tag === "Put") return {};
+      return {};
+    });
+    mockLookupOwnerOrg.mockResolvedValue(null);
+
+    // Caller has org-1 but session org is unresolvable → OrgUnresolvedError
+    await expect(
+      handler(
+        makeEvent({ projectId: "proj-1", action: "activate_agents" }, "org-1"),
+      ),
+    ).rejects.toThrow(/organisation could not be determined/i);
+  });
+
+  // ─── cross-org isolation ──────────────────────────────────────────────
+
+  it("rejects org-A caller writing consent for org-B session", async () => {
+    // Session belongs to org-B; caller belongs to org-A.
+    mockSend.mockImplementation(async (cmd: unknown) => {
+      const tag = (cmd as Record<string, unknown>)?._tag;
+      if (tag === "Scan") return { Items: [] };
+      if (tag === "Get")
+        return {
+          Item: { id: "proj-1", organization: "org-B", owner: "user-B" },
+        };
+      if (tag === "Put") return {};
+      return {};
+    });
+
+    await expect(
+      handler(
+        makeEvent({ projectId: "proj-1", action: "activate_agents" }, "org-A"),
+      ),
+    ).rejects.toThrow("Access denied");
   });
 });

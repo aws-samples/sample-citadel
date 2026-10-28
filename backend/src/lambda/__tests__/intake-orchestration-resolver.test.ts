@@ -340,11 +340,9 @@ describe("intake-orchestration-resolver", () => {
         .on(ScanCommand, { TableName: "citadel-conversations-test" })
         .resolvesOnce({ Items: [], LastEvaluatedKey: lastKey })
         .resolvesOnce({ Items: [{ projectId: PROJECT_ID }] });
-      ddbMock
-        .on(GetCommand, { TableName: "citadel-projects-test" })
-        .resolves({
-          Item: { id: PROJECT_ID, name: "Alpha", organization: ORG_ID },
-        });
+      ddbMock.on(GetCommand, { TableName: "citadel-projects-test" }).resolves({
+        Item: { id: PROJECT_ID, name: "Alpha", organization: ORG_ID },
+      });
       activateMock
         .mockResolvedValueOnce({ activated: [], failed: [], alreadyActive: [] })
         .mockResolvedValueOnce({
@@ -440,13 +438,7 @@ describe("intake-orchestration-resolver", () => {
       );
     });
 
-    test("falls back to 'default' when the owner has no membership row (the Cognito attribute is NOT consulted)", async () => {
-      // Terminal behavior mirrors the Cognito-auth path for an org-less
-      // caller: createApp (registry-agent-record-resolver.ts) never derives
-      // or validates org, and the frontend sends the literal fallback
-      // `selectedOrganization || 'default'` (AppBuilderWizard.tsx). A hard
-      // throw here would make intake STRICTER than the UI path it delegates
-      // to, which is exactly the dev failure being fixed.
+    test("throws OrgUnresolvedError when the owner has no membership row (fail-closed, no 'default' sentinel)", async () => {
       mockSessionLinkage({
         project: { id: PROJECT_ID, name: "Alpha", owner: OWNER_SUB },
       });
@@ -456,26 +448,30 @@ describe("intake-orchestration-resolver", () => {
           { Name: "custom:organization", Value: "org-evil-mirror" },
         ],
       });
-      createAppMock.mockResolvedValueOnce({ appId: "rec123456789" });
 
-      await invoke(
-        makeEvent("intakeCreateApp", { sessionId: SESSION_ID, name: "My App" }),
-      );
+      await expect(
+        invoke(
+          makeEvent("intakeCreateApp", {
+            sessionId: SESSION_ID,
+            name: "My App",
+          }),
+        ),
+      ).rejects.toThrow(/organisation could not be determined/i);
 
       expect(cognitoMock.commandCalls(AdminGetUserCommand)).toHaveLength(0);
-      expect(createAppMock).toHaveBeenCalledWith(
-        expect.objectContaining({ orgId: "default" }),
-        expect.any(String),
-      );
     });
 
-    test("falls back to 'default' without any owner lookup when the project row has no owner", async () => {
+    test("throws OrgUnresolvedError when the project row has no owner and no org", async () => {
       mockSessionLinkage({ project: { id: PROJECT_ID, name: "Alpha" } });
-      createAppMock.mockResolvedValueOnce({ appId: "rec123456789" });
 
-      await invoke(
-        makeEvent("intakeCreateApp", { sessionId: SESSION_ID, name: "My App" }),
-      );
+      await expect(
+        invoke(
+          makeEvent("intakeCreateApp", {
+            sessionId: SESSION_ID,
+            name: "My App",
+          }),
+        ),
+      ).rejects.toThrow(/organisation could not be determined/i);
 
       expect(
         ddbMock
@@ -483,10 +479,6 @@ describe("intake-orchestration-resolver", () => {
           .filter((c) => c.args[0].input.TableName === MEMBERSHIP_TABLE),
       ).toHaveLength(0);
       expect(cognitoMock.commandCalls(AdminGetUserCommand)).toHaveLength(0);
-      expect(createAppMock).toHaveBeenCalledWith(
-        expect.objectContaining({ orgId: "default" }),
-        expect.any(String),
-      );
     });
 
     test("makes no owner lookup when the project row already carries an organization", async () => {
@@ -509,7 +501,7 @@ describe("intake-orchestration-resolver", () => {
       );
     });
 
-    test("falls back to 'default' when the membership-table read itself fails", async () => {
+    test("throws OrgUnresolvedError when the membership-table read itself fails", async () => {
       mockSessionLinkage({
         project: { id: PROJECT_ID, name: "Alpha", owner: OWNER_SUB },
       });
@@ -519,16 +511,15 @@ describe("intake-orchestration-resolver", () => {
           Key: { sub: OWNER_SUB },
         })
         .rejects(new Error("ProvisionedThroughputExceededException"));
-      createAppMock.mockResolvedValueOnce({ appId: "rec123456789" });
 
-      await invoke(
-        makeEvent("intakeCreateApp", { sessionId: SESSION_ID, name: "My App" }),
-      );
-
-      expect(createAppMock).toHaveBeenCalledWith(
-        expect.objectContaining({ orgId: "default" }),
-        expect.any(String),
-      );
+      await expect(
+        invoke(
+          makeEvent("intakeCreateApp", {
+            sessionId: SESSION_ID,
+            name: "My App",
+          }),
+        ),
+      ).rejects.toThrow(/organisation could not be determined/i);
     });
 
     test("throws a validation error when name is missing", async () => {
@@ -830,38 +821,21 @@ describe("intake-orchestration-resolver", () => {
 
     // ── org reconciliation (IAM caller → session-derived org) ──────────
 
-    test("publishes when session org is the orgless-caller default and the created row matches", async () => {
-      // IAM callers have no Cognito org claim; resolveOrgId falls back to
-      // 'default' when the project row is org-less and the owner has no
-      // membership row. publishWorkflow's assertRowOrg check must still
-      // pass because the event is patched with the resolved org.
+    test("throws OrgUnresolvedError when session org is unresolvable (fail-closed, no 'default' sentinel)", async () => {
+      // IAM callers have no Cognito org claim; resolveOrgId now throws
+      // OrgUnresolvedError when the project row is org-less and the owner
+      // has no membership row (fail-closed instead of stamping 'default').
       mockSessionLinkage({ project: { id: PROJECT_ID, name: "Alpha" } });
-      createWorkflowMock.mockResolvedValueOnce({
-        workflowId: "wf-1",
-        orgId: "default",
-        status: "DRAFT",
-      });
-      publishWorkflowMock.mockResolvedValueOnce({
-        workflowId: "wf-1",
-        status: "PUBLISHED",
-      });
 
-      const result = await invoke(
-        makeEvent("intakeCreateBlueprint", {
-          sessionId: SESSION_ID,
-          name: "BP",
-          definition: DEFINITION_OBJ,
-        }),
-      );
-
-      expect(result).toMatchObject({ ok: true, status: "PUBLISHED" });
-      // publishWorkflow receives the patched event carrying the derived org.
-      const patchedEvent = publishWorkflowMock.mock.calls[0][2] as Record<
-        string,
-        unknown
-      >;
-      const patchedIdentity = patchedEvent.identity as Record<string, unknown>;
-      expect(patchedIdentity["custom:organization"]).toBe("default");
+      await expect(
+        invoke(
+          makeEvent("intakeCreateBlueprint", {
+            sessionId: SESSION_ID,
+            name: "BP",
+            definition: DEFINITION_OBJ,
+          }),
+        ),
+      ).rejects.toThrow(/organisation could not be determined/i);
     });
 
     test("throws CrossOrgAccessError when the created row orgId mismatches the session org", async () => {

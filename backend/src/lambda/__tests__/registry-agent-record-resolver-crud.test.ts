@@ -532,7 +532,7 @@ describe("registry-agent-record-resolver — CRUD", () => {
       ).rejects.toThrow(/org/i);
     });
 
-    test("accepts the ORGLESS_CALLER_ORG 'default' sentinel for an org-less Cognito caller", async () => {
+    test("rejects an org-less Cognito caller with OrgUnresolvedError (fail-closed)", async () => {
       const orglessEvent = {
         info: { fieldName: "createApp" },
         arguments: {
@@ -541,20 +541,23 @@ describe("registry-agent-record-resolver — CRUD", () => {
         identity: { sub: "user-1", claims: { sub: "user-1" } },
       } as unknown as HandlerEvent;
 
-      const result = await invokeHandler(orglessEvent);
-      expect(result).toMatchObject({ orgId: "default" });
+      await expect(invokeHandler(orglessEvent)).rejects.toThrow(
+        /organisation could not be determined/i,
+      );
     });
 
-    test("rejects a non-default orgId claim from an org-less Cognito caller", async () => {
+    test("rejects an org-less Cognito caller even without an orgId claim", async () => {
       const orglessEvent = {
         info: { fieldName: "createApp" },
         arguments: {
-          input: { name: "Orgless App Claiming Org", orgId: "org-99" },
+          input: { name: "Orgless App No Claim" },
         },
         identity: { sub: "user-1", claims: { sub: "user-1" } },
       } as unknown as HandlerEvent;
 
-      await expect(invokeHandler(orglessEvent)).rejects.toThrow(/org/i);
+      await expect(invokeHandler(orglessEvent)).rejects.toThrow(
+        /organisation could not be determined/i,
+      );
     });
 
     test("intake-style internal call (no event) still trusts input.orgId verbatim", async () => {
@@ -566,6 +569,40 @@ describe("registry-agent-record-resolver — CRUD", () => {
         "user-123",
       );
       expect(result).toMatchObject({ orgId: "intake-org" });
+    });
+
+    // ─── cross-org isolation (sentinel removal) ─────────────────────
+
+    test("org-A caller cannot create an app stamped with org-B", async () => {
+      await expect(
+        invokeHandler(
+          makeOrgEvent(
+            "createApp",
+            { input: { name: "Smuggled App", orgId: "org-B" } },
+            "org-A",
+          ),
+        ),
+      ).rejects.toThrow(/org/i);
+    });
+
+    test("admin caller with an org still stamps the admin's resolved org", async () => {
+      // An admin who also has a custom:organization claim creates apps under
+      // that org — requireCallerOrg reads the claim for admins too.
+      const adminWithOrg = {
+        info: { fieldName: "createApp" },
+        arguments: { input: { name: "Admin App" } },
+        identity: {
+          sub: "user-123",
+          "cognito:groups": ["admin"],
+          claims: {
+            sub: "user-123",
+            "custom:organization": "org-admin",
+            "cognito:groups": ["admin"],
+          },
+        },
+      } as unknown as HandlerEvent;
+      const result = await invokeHandler(adminWithOrg);
+      expect(result).toMatchObject({ orgId: "org-admin" });
     });
   });
 

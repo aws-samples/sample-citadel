@@ -25,9 +25,8 @@ import {
   PutCommand,
   ScanCommand,
 } from "@aws-sdk/lib-dynamodb";
-import { extractOrgFromEvent } from "../utils/auth-event";
+import { requireCallerOrg, OrgUnresolvedError } from "../utils/auth-event";
 import { lookupOwnerOrganization } from "../utils/org-membership";
-import { ORGLESS_CALLER_ORG } from "./utils/org-sentinel";
 
 const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -126,7 +125,7 @@ async function resolveSessionOrg(sessionId: string): Promise<string> {
     if (ownerOrg) return ownerOrg;
   }
 
-  return ORGLESS_CALLER_ORG;
+  throw new OrgUnresolvedError();
 }
 
 function log(detail: Record<string, unknown>): void {
@@ -149,9 +148,10 @@ export const handler = async (event: ConsentEvent): Promise<unknown> => {
     );
   }
 
-  // Cognito org guard: derive the caller's org from the event identity and
-  // the session's org from the project linkage, then compare.
-  const callerOrg = (await extractOrgFromEvent(event)) ?? ORGLESS_CALLER_ORG;
+  // Cognito org guard: derive the caller's org from the event identity
+  // (fail-closed — org-less callers are denied) and the session's org from
+  // the project linkage, then compare.
+  const callerOrg = await requireCallerOrg(event, "IntakeConsentResolver");
   const sessionOrg = await resolveSessionOrg(projectId);
 
   if (callerOrg !== sessionOrg) {

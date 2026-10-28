@@ -38,7 +38,7 @@
  * sole reader/writer of the manifest surface.
  */
 import type { AppSyncResolverHandler } from "aws-lambda";
-import { ORGLESS_CALLER_ORG as SENTINEL_ORGLESS_CALLER_ORG } from "./utils/org-sentinel";
+
 import { getGovernanceEnforce } from "../utils/governance-flag";
 import { assertRecordApprovedForAction } from "./record-approval-check";
 import {
@@ -75,7 +75,11 @@ import { v4 as uuidv4 } from "uuid";
 import Ajv from "ajv";
 import addFormats from "ajv-formats";
 import { getUserId } from "../utils/appsync";
-import { isAdminFromEvent, extractOrgFromEvent } from "../utils/auth-event";
+import {
+  isAdminFromEvent,
+  extractOrgFromEvent,
+  requireCallerOrg,
+} from "../utils/auth-event";
 import { publishAppStatusEvent as publishAppStatusSubscription } from "../utils/appsync-publish";
 import {
   RegistryService,
@@ -1077,15 +1081,9 @@ async function emitEvent(eventType: string, detail: unknown): Promise<void> {
 // Entry point — single handler dispatched on event.info.fieldName
 // ---------------------------------------------------------------------------
 
-/**
- * Org value an org-less Cognito caller lands on. Re-exported from
- * utils/org-sentinel.ts (the single source of truth for this literal — see
- * that module's doc comment) so both the AppSync-direct path (this file's
- * `createApp`) and the intake conversational path
- * (intake-orchestration-resolver.ts) agree on one literal without either
- * side hardcoding a second copy.
- */
-export const ORGLESS_CALLER_ORG = SENTINEL_ORGLESS_CALLER_ORG;
+// ---------------------------------------------------------------------------
+// Entry point — single handler dispatched on event.info.fieldName
+// ---------------------------------------------------------------------------
 
 export interface CreateAppInput {
   orgId: string;
@@ -1581,16 +1579,8 @@ export async function findAppBySourceProjectId(
 //
 // `event` is OPTIONAL (finding 13ffaca1 / board task a6ff10ff, ITEM2). When
 // supplied (the AppSync dispatch path always supplies it), the caller's org
-// is derived server-side via `extractOrgFromEvent` and `input.orgId` is
-// validated against it rather than trusted outright:
-//   - callerOrg resolves to a real org: a mismatching `input.orgId` is
-//     rejected; the resolved callerOrg is stamped regardless of what the
-//     client sent.
-//   - callerOrg is null (org-less Cognito caller): the client-supplied
-//     `input.orgId` must be the `ORGLESS_CALLER_ORG` sentinel ('default')
-//     or absent — anything else is rejected. This matches the UI's own
-//     `selectedOrganization || 'default'` fallback (AppBuilderWizard.tsx)
-//     and the same sentinel intake's `resolveOrgId` falls back to.
+// is derived server-side via `requireCallerOrg` which FAILS CLOSED when
+// the claim is absent (no stamping a 'default' sentinel).
 // When `event` is omitted (the intake-orchestration-resolver internal
 // path), `input.orgId` is trusted verbatim — intake resolves org
 // server-side upstream of this call (see `resolveOrgId`,
@@ -1606,25 +1596,16 @@ export async function createApp(
 
   let resolvedOrgId = input.orgId;
   if (event !== undefined) {
-    const callerOrgId = await extractOrgFromEvent(event);
-    if (callerOrgId) {
-      if (input.orgId !== undefined && input.orgId !== callerOrgId) {
-        throw new Error(
-          "ValidationError: orgId does not match caller organization",
-        );
-      }
-      resolvedOrgId = callerOrgId;
-    } else {
-      // Org-less caller — only the ORGLESS_CALLER_ORG sentinel ('default')
-      // or an absent orgId is accepted; anything else claims an org the
-      // caller cannot substantiate.
-      if (input.orgId !== undefined && input.orgId !== ORGLESS_CALLER_ORG) {
-        throw new Error(
-          "ValidationError: orgId does not match caller organization",
-        );
-      }
-      resolvedOrgId = ORGLESS_CALLER_ORG;
+    const callerOrgId = await requireCallerOrg(
+      event,
+      "RegistryAgentRecordResolver",
+    );
+    if (input.orgId !== undefined && input.orgId !== callerOrgId) {
+      throw new Error(
+        "ValidationError: orgId does not match caller organization",
+      );
     }
+    resolvedOrgId = callerOrgId;
   }
 
   // The AgentCore Registry API requires description length >= 1. The Import
