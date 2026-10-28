@@ -22,6 +22,10 @@ import {
   GetCommand,
   ScanCommand,
 } from "@aws-sdk/lib-dynamodb";
+import {
+  CloudWatchClient,
+  PutMetricDataCommand,
+} from "@aws-sdk/client-cloudwatch";
 
 jest.mock("../../services/registry-service", () => {
   const actual = jest.requireActual("../../services/registry-service");
@@ -48,10 +52,13 @@ import {
 } from "../../../scripts/reconcile-approval-cache";
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
+const cwMock = mockClient(CloudWatchClient);
 const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
 beforeEach(() => {
   ddbMock.reset();
+  cwMock.reset();
+  cwMock.on(PutMetricDataCommand).resolves({});
   jest.spyOn(console, "log").mockImplementation();
   jest.spyOn(console, "warn").mockImplementation();
   jest.spyOn(console, "error").mockImplementation();
@@ -72,13 +79,14 @@ describe("syncNameKeyedRow", () => {
         TableName: "test-agents-table",
         Key: { agentId: "MyAgent" },
       })
-      .resolves({ Item: { agentId: "MyAgent" } });
+      .resolves({ Item: { agentId: "MyAgent", orgId: "Alpha" } });
     ddbMock.on(UpdateCommand).resolves({});
 
     await syncNameKeyedRow("test-agents-table", "rec123456789", {
       name: "MyAgent",
       status: "APPROVED",
       recordId: "rec123456789",
+      orgId: "Alpha",
     });
 
     const updateCalls = ddbMock.commandCalls(UpdateCommand);
@@ -92,6 +100,7 @@ describe("syncNameKeyedRow", () => {
       "rec123456789",
     );
     expect(input.ConditionExpression).toContain("attribute_exists");
+    expect(input.ConditionExpression).toContain("#orgId = :recordOrg");
   });
 
   test("skips when name equals registryRecordId", async () => {
@@ -124,19 +133,22 @@ describe("syncNameKeyedRow", () => {
     await syncNameKeyedRow("test-agents-table", "rec123456789", {
       name: "MissingAgent",
       status: "APPROVED",
+      orgId: "Alpha",
     });
 
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
   });
 
   test("includes decidedBy when provided", async () => {
-    ddbMock.on(GetCommand).resolves({ Item: { agentId: "MyAgent" } });
+    ddbMock
+      .on(GetCommand)
+      .resolves({ Item: { agentId: "MyAgent", orgId: "Alpha" } });
     ddbMock.on(UpdateCommand).resolves({});
 
     await syncNameKeyedRow(
       "test-agents-table",
       "rec123456789",
-      { name: "MyAgent", status: "APPROVED" },
+      { name: "MyAgent", status: "APPROVED", orgId: "Alpha" },
       "admin-user",
     );
 
@@ -146,7 +158,9 @@ describe("syncNameKeyedRow", () => {
   });
 
   test("swallows ConditionalCheckFailedException gracefully", async () => {
-    ddbMock.on(GetCommand).resolves({ Item: { agentId: "MyAgent" } });
+    ddbMock
+      .on(GetCommand)
+      .resolves({ Item: { agentId: "MyAgent", orgId: "Alpha" } });
     const ccfError = new Error("CCF");
     ccfError.name = "ConditionalCheckFailedException";
     ddbMock.on(UpdateCommand).rejects(ccfError);
@@ -155,7 +169,291 @@ describe("syncNameKeyedRow", () => {
     await syncNameKeyedRow("test-agents-table", "rec123456789", {
       name: "MyAgent",
       status: "APPROVED",
+      orgId: "Alpha",
     });
+
+    // Should emit NameKeyCollision metric on conditional failure
+    const metricCalls = cwMock.commandCalls(PutMetricDataCommand);
+    expect(metricCalls).toHaveLength(1);
+    const metricInput = metricCalls[0].args[0].input;
+    expect(metricInput.Namespace).toBe("Citadel/RegistrySync");
+    expect(metricInput.MetricData![0].MetricName).toBe("NameKeyCollision");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// syncNameKeyedRow — C16 org guard
+// ---------------------------------------------------------------------------
+
+describe("syncNameKeyedRow org guard (C16)", () => {
+  test("same-org update proceeds and writes to the name-keyed row", async () => {
+    ddbMock
+      .on(GetCommand, {
+        TableName: "test-agents-table",
+        Key: { agentId: "my-agent" },
+      })
+      .resolves({
+        Item: {
+          agentId: "my-agent",
+          orgId: "Alpha",
+          registryRecordId: "rec-alpha",
+        },
+      });
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await syncNameKeyedRow("test-agents-table", "rec-alpha", {
+      name: "my-agent",
+      status: "APPROVED",
+      orgId: "Alpha",
+    });
+
+    const updateCalls = ddbMock.commandCalls(UpdateCommand);
+    expect(updateCalls).toHaveLength(1);
+    const input = updateCalls[0].args[0].input;
+    expect(input.Key).toEqual({ agentId: "my-agent" });
+    expect(input.ExpressionAttributeValues![":registryStatus"]).toBe(
+      "APPROVED",
+    );
+    // ConditionExpression includes the atomic org guard
+    expect(input.ConditionExpression).toContain("#orgId = :recordOrg");
+    expect(input.ExpressionAttributeValues![":recordOrg"]).toBe("Alpha");
+    // No collision metric
+    expect(cwMock.commandCalls(PutMetricDataCommand)).toHaveLength(0);
+  });
+
+  test("foreign-org row is untouched and NameKeyCollision metric is emitted", async () => {
+    ddbMock
+      .on(GetCommand, {
+        TableName: "test-agents-table",
+        Key: { agentId: "my-agent" },
+      })
+      .resolves({
+        Item: {
+          agentId: "my-agent",
+          orgId: "Alpha",
+          registryRecordId: "rec-alpha",
+        },
+      });
+
+    await syncNameKeyedRow("test-agents-table", "rec-beta", {
+      name: "my-agent",
+      status: "APPROVED",
+      orgId: "Beta",
+    });
+
+    // No UpdateCommand issued — write was refused
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+
+    // WARN log emitted with both orgs and record id
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining("org mismatch"),
+    );
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining("row=Alpha"),
+    );
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining("record=Beta"),
+    );
+
+    // NameKeyCollision metric emitted
+    const metricCalls = cwMock.commandCalls(PutMetricDataCommand);
+    expect(metricCalls).toHaveLength(1);
+    const metricInput = metricCalls[0].args[0].input;
+    expect(metricInput.Namespace).toBe("Citadel/RegistrySync");
+    expect(metricInput.MetricData![0].MetricName).toBe("NameKeyCollision");
+    const dims = metricInput.MetricData![0].Dimensions!;
+    expect(dims).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ Name: "NameKey", Value: "my-agent" }),
+        expect.objectContaining({ Name: "ExistingOrg", Value: "Alpha" }),
+        expect.objectContaining({ Name: "IncomingOrg", Value: "Beta" }),
+      ]),
+    );
+  });
+
+  test("'All Organizations' system row cannot be claimed by a tenant org", async () => {
+    ddbMock
+      .on(GetCommand, {
+        TableName: "test-agents-table",
+        Key: { agentId: "system-agent" },
+      })
+      .resolves({
+        Item: {
+          agentId: "system-agent",
+          orgId: "All Organizations",
+          registryRecordId: "rec-system",
+        },
+      });
+
+    await syncNameKeyedRow("test-agents-table", "rec-tenant", {
+      name: "system-agent",
+      status: "APPROVED",
+      orgId: "Beta",
+    });
+
+    // No UpdateCommand — system row protected
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining("All Organizations"),
+    );
+
+    // Metric emitted
+    const metricCalls = cwMock.commandCalls(PutMetricDataCommand);
+    expect(metricCalls).toHaveLength(1);
+    expect(metricCalls[0].args[0].input.MetricData![0].MetricName).toBe(
+      "NameKeyCollision",
+    );
+  });
+
+  test("'All Organizations' row update proceeds when record is also system-scoped", async () => {
+    // An "All Organizations" record updating its own "All Organizations" row
+    // should NOT be blocked — the org guard allows same-org = same-org.
+    // However "All Organizations" == "All Organizations" passes the
+    // rowOrgId !== recordOrgId check (they are equal), so it proceeds.
+    ddbMock
+      .on(GetCommand, {
+        TableName: "test-agents-table",
+        Key: { agentId: "system-agent" },
+      })
+      .resolves({
+        Item: {
+          agentId: "system-agent",
+          orgId: "All Organizations",
+          registryRecordId: "rec-system",
+        },
+      });
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await syncNameKeyedRow("test-agents-table", "rec-system", {
+      name: "system-agent",
+      status: "APPROVED",
+      orgId: "All Organizations",
+    });
+
+    // Update proceeds
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(1);
+    expect(cwMock.commandCalls(PutMetricDataCommand)).toHaveLength(0);
+  });
+
+  test("row with no orgId and different registryRecordId treated as collision", async () => {
+    // Pre-migration legacy row: no orgId, but belongs to a different record.
+    ddbMock
+      .on(GetCommand, {
+        TableName: "test-agents-table",
+        Key: { agentId: "legacy-agent" },
+      })
+      .resolves({
+        Item: {
+          agentId: "legacy-agent",
+          orgId: "",
+          registryRecordId: "rec-old",
+        },
+      });
+
+    await syncNameKeyedRow("test-agents-table", "rec-new", {
+      name: "legacy-agent",
+      status: "APPROVED",
+      orgId: "Beta",
+    });
+
+    // Treated as collision — no update
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "row has no orgId but belongs to a different record",
+      ),
+    );
+    expect(cwMock.commandCalls(PutMetricDataCommand)).toHaveLength(1);
+  });
+
+  test("row with no orgId and same registryRecordId proceeds (stamps org)", async () => {
+    // Same record updating its own legacy (org-less) name-keyed row.
+    ddbMock
+      .on(GetCommand, {
+        TableName: "test-agents-table",
+        Key: { agentId: "my-agent" },
+      })
+      .resolves({
+        Item: {
+          agentId: "my-agent",
+          orgId: "",
+          registryRecordId: "rec-alpha",
+        },
+      });
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await syncNameKeyedRow("test-agents-table", "rec-alpha", {
+      name: "my-agent",
+      status: "APPROVED",
+      orgId: "Alpha",
+    });
+
+    // Update proceeds — same record, just no org yet
+    const updateCalls = ddbMock.commandCalls(UpdateCommand);
+    expect(updateCalls).toHaveLength(1);
+    expect(cwMock.commandCalls(PutMetricDataCommand)).toHaveLength(0);
+  });
+
+  test("conditional failure path emits metric and does not throw", async () => {
+    // Row exists with matching org in the Get, but a race changes it before
+    // the Update — the ConditionExpression catches it.
+    ddbMock
+      .on(GetCommand, {
+        TableName: "test-agents-table",
+        Key: { agentId: "race-agent" },
+      })
+      .resolves({
+        Item: {
+          agentId: "race-agent",
+          orgId: "Alpha",
+          registryRecordId: "rec-a",
+        },
+      });
+    const ccfError = new Error("CCF");
+    ccfError.name = "ConditionalCheckFailedException";
+    ddbMock.on(UpdateCommand).rejects(ccfError);
+
+    // Should not throw
+    await syncNameKeyedRow("test-agents-table", "rec-a", {
+      name: "race-agent",
+      status: "APPROVED",
+      orgId: "Alpha",
+    });
+
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining("conditional check failed"),
+    );
+    const metricCalls = cwMock.commandCalls(PutMetricDataCommand);
+    expect(metricCalls).toHaveLength(1);
+    expect(metricCalls[0].args[0].input.MetricData![0].MetricName).toBe(
+      "NameKeyCollision",
+    );
+  });
+
+  test("row with no orgId and no registryRecordId proceeds (untagged legacy)", async () => {
+    // Completely untagged legacy row — no orgId, no registryRecordId.
+    // The different-registryRecordId guard doesn't fire because the field
+    // is absent. Org guard proceeds to the Update with the atomic
+    // ConditionExpression as the safety net.
+    ddbMock
+      .on(GetCommand, {
+        TableName: "test-agents-table",
+        Key: { agentId: "untagged-agent" },
+      })
+      .resolves({
+        Item: { agentId: "untagged-agent" },
+      });
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await syncNameKeyedRow("test-agents-table", "rec-new", {
+      name: "untagged-agent",
+      status: "APPROVED",
+      orgId: "Alpha",
+    });
+
+    // Proceeds — untagged row can be updated (ConditionExpression covers it)
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(1);
+    expect(cwMock.commandCalls(PutMetricDataCommand)).toHaveLength(0);
   });
 });
 

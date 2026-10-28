@@ -1963,6 +1963,7 @@ async function updateApp(
             name: typeof recordName === "string" ? recordName : undefined,
             status: input.status,
             recordId: input.appId,
+            orgId: existingProjection.orgId,
           },
           callerUserId,
         );

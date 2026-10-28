@@ -1004,11 +1004,32 @@ function buildGaMergeFields(
  * Conditional on existence: NEVER creates a new name-keyed row. The row
  * must already have been created during agent registration for this update
  * to land.
+ *
+ * Org guard (C16): refuses to overwrite a name-keyed row that belongs to a
+ * different organisation.  Uses a ConditionExpression on the UpdateItem for
+ * atomicity and emits a Citadel/RegistrySync NameKeyCollision metric on
+ * collision.  "All Organizations" rows are system rows and cannot be claimed
+ * by a tenant org.
  */
+
+/**
+ * Extracts `orgId` from a RegistryRecord's customDescriptorContent metadata.
+ * Returns `undefined` when the descriptor is absent or does not contain an orgId.
+ */
+export function extractOrgIdFromRecord(
+  record: RegistryRecord,
+): string | undefined {
+  const meta = deserializeCustomMetadata(
+    record.customDescriptorContent ?? null,
+    AGENT_METADATA_DEFAULTS,
+  );
+  return isPresentNonEmpty(meta.orgId) ? meta.orgId : undefined;
+}
+
 export async function syncNameKeyedRow(
   tableName: string,
   registryRecordId: string,
-  record: { name?: string; status?: string; recordId?: string },
+  record: { name?: string; status?: string; recordId?: string; orgId?: string },
   decidedBy?: string,
 ): Promise<void> {
   const nameKey =
@@ -1017,14 +1038,14 @@ export async function syncNameKeyedRow(
       : undefined;
   if (!nameKey || nameKey === registryRecordId) return;
 
-  // Check if the name-keyed row exists
+  // Check if the name-keyed row exists and read its orgId for the org guard.
   let existing: Record<string, unknown> | undefined;
   try {
     const result = await docClient.send(
       new GetCommand({
         TableName: tableName,
         Key: { agentId: nameKey },
-        ProjectionExpression: "agentId",
+        ProjectionExpression: "agentId, orgId, registryRecordId",
       }),
     );
     existing = result.Item as Record<string, unknown> | undefined;
@@ -1037,12 +1058,81 @@ export async function syncNameKeyedRow(
   }
   if (!existing) return;
 
+  // -----------------------------------------------------------------------
+  // Org guard (C16): refuse to overwrite a name-keyed row that belongs to a
+  // different organisation.  The ConditionExpression on the UpdateItem below
+  // makes the check atomic, but we pre-flight here for a clear log message
+  // and metric before even attempting the write.
+  // -----------------------------------------------------------------------
+  const ALL_ORGS = "All Organizations";
+  const rowOrgId =
+    typeof existing.orgId === "string" && existing.orgId !== ""
+      ? existing.orgId
+      : undefined;
+  const recordOrgId =
+    typeof record.orgId === "string" && record.orgId !== ""
+      ? record.orgId
+      : undefined;
+
+  // If the existing row has an orgId that is NOT "All Organizations" and
+  // differs from the incoming record's org, skip the write.  An existing
+  // "All Organizations" row is a system row — it must NOT be claimed by a
+  // tenant org, so we also skip when the record org differs from ALL_ORGS.
+  if (
+    rowOrgId &&
+    recordOrgId &&
+    rowOrgId !== recordOrgId &&
+    rowOrgId !== ALL_ORGS
+  ) {
+    console.warn(
+      `syncNameKeyedRow: skipping update for name-key "${nameKey}" — ` +
+        `org mismatch (row=${rowOrgId}, record=${recordOrgId}, ` +
+        `recordId="${registryRecordId}")`,
+    );
+    await emitNameKeyCollisionMetric(nameKey, rowOrgId, recordOrgId);
+    return;
+  }
+
+  // When the existing row has no orgId but belongs to a DIFFERENT record,
+  // treat it as a collision — the row was created before org tagging and
+  // should not be silently claimed.
+  if (
+    !rowOrgId &&
+    typeof existing.registryRecordId === "string" &&
+    existing.registryRecordId !== registryRecordId
+  ) {
+    console.warn(
+      `syncNameKeyedRow: skipping update for name-key "${nameKey}" — ` +
+        `row has no orgId but belongs to a different record ` +
+        `(row.registryRecordId="${existing.registryRecordId}", ` +
+        `incoming="${registryRecordId}")`,
+    );
+    await emitNameKeyCollisionMetric(
+      nameKey,
+      "unknown",
+      recordOrgId ?? "unknown",
+    );
+    return;
+  }
+
+  // If the existing row IS an "All Organizations" (system) row, no tenant
+  // record may overwrite it — skip.
+  if (rowOrgId === ALL_ORGS && recordOrgId && recordOrgId !== ALL_ORGS) {
+    console.warn(
+      `syncNameKeyedRow: skipping update for name-key "${nameKey}" — ` +
+        `row belongs to "${ALL_ORGS}", cannot be claimed by org="${recordOrgId}"`,
+    );
+    await emitNameKeyCollisionMetric(nameKey, ALL_ORGS, recordOrgId);
+    return;
+  }
+
   const now = new Date().toISOString();
   const names: Record<string, string> = {
     "#agentId": "agentId",
     "#registryStatus": "registryStatus",
     "#statusUpdatedAt": "statusUpdatedAt",
     "#registryRecordId": "registryRecordId",
+    "#orgId": "orgId",
   };
   const values: Record<string, unknown> = {
     ":registryStatus": record.status,
@@ -1058,12 +1148,30 @@ export async function syncNameKeyedRow(
     updateExpr += ", #decidedBy = :decidedBy";
   }
 
+  // Atomic org guard: only proceed if the row's orgId is absent, matches
+  // the record's org, or is the "All Organizations" sentinel.
+  // This catches races where the pre-flight check passed but another writer
+  // changed the row's orgId between our Get and this Update.
+  const orgConditionParts = [
+    "attribute_not_exists(#orgId)",
+    "#orgId = :emptyStr",
+  ];
+  values[":emptyStr"] = "";
+  if (recordOrgId) {
+    orgConditionParts.push("#orgId = :recordOrg");
+    values[":recordOrg"] = recordOrgId;
+  }
+  orgConditionParts.push("#orgId = :allOrgs");
+  values[":allOrgs"] = ALL_ORGS;
+
+  const conditionExpression = `attribute_exists(#agentId) AND (${orgConditionParts.join(" OR ")})`;
+
   try {
     await docClient.send(
       new UpdateCommand({
         TableName: tableName,
         Key: { agentId: nameKey },
-        ConditionExpression: "attribute_exists(#agentId)",
+        ConditionExpression: conditionExpression,
         UpdateExpression: updateExpr,
         ExpressionAttributeNames: names,
         ExpressionAttributeValues: values,
@@ -1077,13 +1185,55 @@ export async function syncNameKeyedRow(
       err instanceof Error &&
       err.name === "ConditionalCheckFailedException"
     ) {
-      // Row was deleted between Get and Update — benign race.
+      // Row was deleted between Get and Update, or org mismatch (race).
+      console.warn(
+        `syncNameKeyedRow: conditional check failed for name-key "${nameKey}" ` +
+          `(row deleted or org mismatch race, recordId="${registryRecordId}")`,
+      );
+      await emitNameKeyCollisionMetric(
+        nameKey,
+        "conditional-failure",
+        recordOrgId ?? "unknown",
+      );
       return;
     }
     console.error(
       `syncNameKeyedRow: UpdateItem for name-key "${nameKey}" failed:`,
       err,
     );
+  }
+}
+
+/**
+ * Emits a CloudWatch `NameKeyCollision` metric when a name-keyed cache write
+ * is refused because the existing row belongs to a different organisation.
+ */
+async function emitNameKeyCollisionMetric(
+  nameKey: string,
+  existingOrg: string,
+  incomingOrg: string,
+): Promise<void> {
+  try {
+    await cwClient.send(
+      new PutMetricDataCommand({
+        Namespace: "Citadel/RegistrySync",
+        MetricData: [
+          {
+            MetricName: "NameKeyCollision",
+            Value: 1,
+            Unit: "Count",
+            Timestamp: new Date(),
+            Dimensions: [
+              { Name: "NameKey", Value: nameKey },
+              { Name: "ExistingOrg", Value: existingOrg },
+              { Name: "IncomingOrg", Value: incomingOrg },
+            ],
+          },
+        ],
+      }),
+    );
+  } catch (metricErr) {
+    console.error("Failed to emit NameKeyCollision metric:", metricErr);
   }
 }
 
@@ -1513,7 +1663,13 @@ async function handleGaEvent(event: RegistryEvent): Promise<void> {
     // and a name-keyed row exists, propagate approval fields to it so the
     // dispatch gate (which reads by name) sees the current status.
     if (resourceType === "agent") {
-      await syncNameKeyedRow(tableName, registryRecordId, record);
+      // Extract orgId from the record's descriptor metadata so
+      // syncNameKeyedRow can enforce the cross-org guard (C16).
+      const gaOrgId = extractOrgIdFromRecord(record);
+      await syncNameKeyedRow(tableName, registryRecordId, {
+        ...record,
+        orgId: gaOrgId,
+      });
     }
   } catch (err: unknown) {
     if (
