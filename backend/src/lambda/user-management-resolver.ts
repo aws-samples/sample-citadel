@@ -5,6 +5,7 @@ import {
   AdminUpdateUserAttributesCommand,
   AdminUserGlobalSignOutCommand,
   AdminGetUserCommand,
+  AdminDeleteUserCommand,
   ListUsersCommand,
   AdminListGroupsForUserCommand,
   ListGroupsCommand,
@@ -760,6 +761,85 @@ async function adminCreateUser(
     );
 
     console.log(`Successfully created user ${email}`);
+
+    // decision 00d40a31 (option A): the UserOrgMembership table is the
+    // AUTHORITATIVE source of the user's organization — the
+    // pre-token-generation trigger mints the `custom:organization` claim
+    // from it. Write the membership row immediately so the user's very
+    // first token carries the correct claim. The shape mirrors
+    // assignUserRole's PutCommand (sub, orgName, updatedAt, updatedBy).
+    if (USER_ORG_MEMBERSHIP_TABLE) {
+      // Look up the newly created user's sub for the membership row key.
+      const lookupResult = await cognitoClient.send(
+        new AdminGetUserCommand({
+          UserPoolId: USER_POOL_ID,
+          Username: email,
+        }),
+      );
+      const newUserSub = lookupResult.UserAttributes?.find(
+        (a) => a.Name === "sub",
+      )?.Value;
+
+      if (!newUserSub) {
+        // Cannot write membership without a sub. Compensate: delete the
+        // Cognito user so we don't leave a half-created user whose first
+        // token will have no org claim (finding H20).
+        console.error(
+          "adminCreateUser: created user but could not retrieve sub — compensating",
+        );
+        await cognitoClient.send(
+          new AdminDeleteUserCommand({
+            UserPoolId: USER_POOL_ID,
+            Username: email,
+          }),
+        );
+        return {
+          success: false,
+          message:
+            "User created in Cognito but the sub attribute could not be resolved. " +
+            "The Cognito user has been removed. Please retry.",
+        };
+      }
+
+      try {
+        await dynamoClient.send(
+          new PutCommand({
+            TableName: USER_ORG_MEMBERSHIP_TABLE,
+            Item: {
+              sub: newUserSub,
+              orgName: organization,
+              updatedAt: new Date().toISOString(),
+              updatedBy: callerUsername ?? "adminCreateUser",
+            },
+          }),
+        );
+      } catch (membershipError: unknown) {
+        // Membership write failed. Compensate: delete the Cognito user so
+        // we don't leave a user whose first token will carry no org claim.
+        console.error(
+          "adminCreateUser: membership write failed — compensating by deleting Cognito user",
+          membershipError,
+        );
+        try {
+          await cognitoClient.send(
+            new AdminDeleteUserCommand({
+              UserPoolId: USER_POOL_ID,
+              Username: email,
+            }),
+          );
+        } catch (deleteError: unknown) {
+          console.error(
+            "adminCreateUser: compensation AdminDeleteUser also failed",
+            deleteError,
+          );
+        }
+        throw new Error(
+          "User created in Cognito but the organization membership could not be " +
+            "written. The Cognito user has been removed to prevent a broken state. " +
+            "Please retry.",
+        );
+      }
+    }
 
     return {
       success: true,
