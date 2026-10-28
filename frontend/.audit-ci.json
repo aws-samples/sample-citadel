@@ -5,9 +5,10 @@
   "high": true,
   "critical": true,
   "allowlist": [
-    "GHSA-rj75-hqrm-r3gf"
+    "GHSA-rj75-hqrm-r3gf",
+    "GHSA-gcqx-w48m-w2h4"
   ],
   "report": true,
   "skip-dev": false,
-  "_comment": "Frontend-scoped audit-ci gate (finding 9c287884). Carries GHSA-rj75-hqrm-r3gf (postcss-selector-parser, moderate; transitive via @tailwindcss/typography, fix requires semver-major downgrade of typography). See ../audit-ci-allowlist-justifications.md for details."
+  "_comment": "Frontend-scoped audit-ci gate (finding 9c287884). Carries GHSA-rj75-hqrm-r3gf (postcss-selector-parser, moderate; transitive via @tailwindcss/typography, fix requires semver-major downgrade of typography) and GHSA-gcqx-w48m-w2h4 (deepmerge >=4.2.0 <=4.3.1 prototype poisoning, LOW; dev-only transitive via jest-config, no runtime exposure, no fix version available). See ../audit-ci-allowlist-justifications.md for details."
 }
