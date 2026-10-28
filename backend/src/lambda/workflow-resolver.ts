@@ -21,6 +21,8 @@ import {
   extractOrgFromEvent,
   isAdminFromEvent,
   assertRowOrg,
+  requireCallerOrg,
+  CrossOrgAccessError,
 } from "../utils/auth-event";
 import { PermissionError } from "./adapters/errors";
 
@@ -136,7 +138,7 @@ export const handler: AppSyncResolverHandler<
       case "listWorkflows":
         return await listWorkflows(args.orgId, args.status, userId, event);
       case "listBlueprints":
-        return await listBlueprints(args.category);
+        return await listBlueprints(args.category, event);
       case "createWorkflow":
         return await createWorkflow(args.input, userId, event);
       case "updateWorkflow":
@@ -261,8 +263,14 @@ async function listWorkflows(
   };
 }
 
+// Org-scoping (finding C19): non-admin callers see only blueprints whose
+// orgId matches their own org OR the shared 'system' sentinel. Admin
+// callers see all blueprints (unchanged behaviour). The BlueprintIndex
+// query is kept as-is; org-filtering is applied server-side after the
+// query to avoid a second GSI.
 async function listBlueprints(
-  category?: string,
+  category: string | undefined,
+  event: unknown,
 ): Promise<{ items: unknown[]; nextToken?: string }> {
   const params: QueryCommandInput = {
     TableName: WORKFLOWS_TABLE,
@@ -276,6 +284,16 @@ async function listBlueprints(
 
   const result = await docClient.send(new QueryCommand(params));
   let items = result.Items || [];
+
+  // Org filter: non-admin callers see only their own org's blueprints plus
+  // the shared 'system' blueprints. Admins see everything.
+  if (!isAdminFromEvent(event)) {
+    const callerOrg = await requireCallerOrg(event, "WorkflowResolver");
+    items = items.filter((item) => {
+      const rowOrg = typeof item.orgId === "string" ? item.orgId : undefined;
+      return rowOrg === callerOrg || rowOrg === "system";
+    });
+  }
 
   if (category) {
     items = items.filter((item) => {
@@ -699,15 +717,23 @@ function validateDefinition(definitionJson: string): {
 
 /**
  * Verifies that every node's agentId resolves to an existing agent in the
- * agents table. This is the async companion to validateDefinition's pure checks:
- * validateDefinition rejects missing/placeholder agentIds, while this confirms the
- * referenced agents actually exist before a workflow may transition to PUBLISHED.
+ * agents table AND that the agent belongs to the workflow's org or to the
+ * shared 'All Organizations' sentinel.  This is the async companion to
+ * validateDefinition's pure checks: validateDefinition rejects
+ * missing/placeholder agentIds, while this confirms the referenced agents
+ * actually exist and are org-accessible before a workflow may transition to
+ * PUBLISHED.
  *
- * Returns the list of { nodeId, agentId } references that do NOT resolve. An empty
- * list means every referenced agent exists.
+ * Org-scoping (finding H21): agents whose orgId differs from the
+ * workflow's orgId AND is not 'All Organizations' are treated as missing
+ * (reported as absent rather than foreign to avoid an existence oracle).
+ *
+ * Returns the list of { nodeId, agentId } references that do NOT resolve.
+ * An empty list means every referenced agent exists and is org-accessible.
  */
 async function verifyAgentsExist(
   definitionJson: string,
+  workflowOrgId: string,
 ): Promise<{ ok: boolean; missing: { nodeId: string; agentId: string }[] }> {
   let definition: ParsedWorkflowDefinition;
   try {
@@ -747,7 +773,15 @@ async function verifyAgentsExist(
     );
     for (const item of result.Responses?.[agentConfigTable] || []) {
       if (item && typeof item.agentId === "string") {
-        existing.add(item.agentId);
+        // Org-scoping (finding H21): the agent must belong to the
+        // workflow's own org or to the shared 'All Organizations'
+        // sentinel.  Agents from a foreign org are treated as missing
+        // (no existence oracle).
+        const agentOrg =
+          typeof item.orgId === "string" ? item.orgId : undefined;
+        if (agentOrg === workflowOrgId || agentOrg === "All Organizations") {
+          existing.add(item.agentId);
+        }
       }
     }
   }
@@ -787,7 +821,10 @@ export async function publishWorkflow(
 
   // A workflow cannot reach PUBLISHED until every node's agentId resolves to an
   // existing agent. If any reference is unresolved, reject and stay DRAFT.
-  const existence = await verifyAgentsExist(workflow.definition);
+  const existence = await verifyAgentsExist(
+    workflow.definition,
+    workflow.orgId,
+  );
   if (!existence.ok) {
     const details = existence.missing
       .map((m) => `node '${m.nodeId}' -> agentId '${m.agentId}'`)
@@ -917,12 +954,22 @@ export async function importBlueprint(
   );
 
   const blueprint = blueprintResult.Item;
-  if (!blueprint) {
-    throw new Error("Blueprint not found");
-  }
 
-  if (blueprint.status !== "PUBLISHED") {
-    throw new Error("Only published blueprints can be imported");
+  // Org-scoping (finding C17): the source blueprint must exist, be
+  // PUBLISHED, and belong to the caller's org OR be a shared 'system'
+  // blueprint.  Missing and foreign blueprints return the same
+  // CrossOrgAccessError to avoid an existence oracle.  Admin callers
+  // bypass the org check (they may import from any org's blueprint).
+  if (!blueprint || blueprint.status !== "PUBLISHED") {
+    throw new CrossOrgAccessError("Access denied");
+  }
+  if (!isAdminFromEvent(event)) {
+    const callerOrg = await extractOrgFromEvent(event);
+    const bpOrg =
+      typeof blueprint.orgId === "string" ? blueprint.orgId : undefined;
+    if (!callerOrg || !bpOrg || (bpOrg !== callerOrg && bpOrg !== "system")) {
+      throw new CrossOrgAccessError("Access denied");
+    }
   }
 
   // Get the target app

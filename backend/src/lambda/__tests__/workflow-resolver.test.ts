@@ -363,6 +363,7 @@ describe("workflow-resolver", () => {
         {
           workflowId: "bp-1",
           isBlueprint: "true",
+          orgId: "system",
           metadata: JSON.stringify({ category: "data-processing" }),
         },
       ];
@@ -937,8 +938,8 @@ describe("workflow-resolver", () => {
       ddbMock.on(BatchGetCommand).resolves({
         Responses: {
           "citadel-agents-test": [
-            { agentId: "agent-1" },
-            { agentId: "agent-2" },
+            { agentId: "agent-1", orgId: "org-1" },
+            { agentId: "agent-2", orgId: "org-1" },
           ],
         },
       });
@@ -1021,8 +1022,8 @@ describe("workflow-resolver", () => {
       ddbMock.on(BatchGetCommand).resolves({
         Responses: {
           "citadel-agents-test": [
-            { agentId: "a1b2c3d4e5f6" },
-            { agentId: "z9y8x7w6v5u4" },
+            { agentId: "a1b2c3d4e5f6", orgId: "org-1" },
+            { agentId: "z9y8x7w6v5u4", orgId: "org-1" },
           ],
         },
       });
@@ -1089,7 +1090,9 @@ describe("workflow-resolver", () => {
       });
       // Only real-agent-1 exists; ghost-agent is absent from the agents table
       ddbMock.on(BatchGetCommand).resolves({
-        Responses: { "citadel-agents-test": [{ agentId: "real-agent-1" }] },
+        Responses: {
+          "citadel-agents-test": [{ agentId: "real-agent-1", orgId: "org-1" }],
+        },
       });
 
       await expect(
@@ -1120,8 +1123,8 @@ describe("workflow-resolver", () => {
       ddbMock.on(BatchGetCommand).resolves({
         Responses: {
           "citadel-agents-test": [
-            { agentId: "real-agent-1" },
-            { agentId: "real-agent-2" },
+            { agentId: "real-agent-1", orgId: "org-1" },
+            { agentId: "real-agent-2", orgId: "org-1" },
           ],
         },
       });
@@ -1237,7 +1240,10 @@ describe("workflow-resolver", () => {
       });
       ddbMock.on(BatchGetCommand).resolves({
         Responses: {
-          "citadel-agents-test": [{ agentId: "a1" }, { agentId: "a2" }],
+          "citadel-agents-test": [
+            { agentId: "a1", orgId: "org-1" },
+            { agentId: "a2", orgId: "org-1" },
+          ],
         },
       });
       ddbMock.on(UpdateCommand).resolves({
@@ -1399,7 +1405,7 @@ describe("workflow-resolver", () => {
             appId: "app-1",
           }),
         ),
-      ).rejects.toThrow(/published/i);
+      ).rejects.toThrow(/Access denied/i);
     });
 
     test("rejects wrong orgId (throws Access denied)", async () => {
@@ -1947,6 +1953,370 @@ describe("workflow-resolver", () => {
       expect(result.version).toBe(2);
       expect(result.definition).toBe(oldDef);
       expect(result.workflowId).toBe("wf-1");
+    });
+  });
+
+  // ─── C19: listBlueprints org-scoping ─────────────────────────────
+  // Finding C19: non-admin callers must see only their own org + 'system'
+  // blueprints. Admin callers see all.
+
+  describe("listBlueprints org-scoping (C19)", () => {
+    const systemBp = {
+      workflowId: "bp-system",
+      isBlueprint: "true",
+      orgId: "system",
+      name: "System Blueprint",
+    };
+    const ownOrgBp = {
+      workflowId: "bp-own",
+      isBlueprint: "true",
+      orgId: "org-1",
+      name: "Own Org Blueprint",
+    };
+    const foreignOrgBp = {
+      workflowId: "bp-foreign",
+      isBlueprint: "true",
+      orgId: "org-foreign",
+      name: "Foreign Org Blueprint",
+    };
+
+    test("non-admin sees own org + system blueprints, NOT foreign org blueprints", async () => {
+      ddbMock.on(QueryCommand).resolves({
+        Items: [systemBp, ownOrgBp, foreignOrgBp],
+      });
+
+      const result = await invoke(makeEvent("listBlueprints", {}));
+
+      expect(result.items).toHaveLength(2);
+      const ids = result.items.map(
+        (i: Record<string, unknown>) => i.workflowId,
+      );
+      expect(ids).toContain("bp-system");
+      expect(ids).toContain("bp-own");
+      expect(ids).not.toContain("bp-foreign");
+    });
+
+    test("admin sees all blueprints regardless of orgId", async () => {
+      ddbMock.on(QueryCommand).resolves({
+        Items: [systemBp, ownOrgBp, foreignOrgBp],
+      });
+
+      const adminEvent = {
+        info: { fieldName: "listBlueprints" },
+        arguments: {},
+        identity: {
+          sub: "admin-1",
+          claims: { sub: "admin-1", "cognito:groups": ["admin"] },
+        },
+      } as unknown as HandlerEvent;
+
+      const result = await invoke(adminEvent);
+      expect(result.items).toHaveLength(3);
+    });
+
+    test("non-admin caller with no resolvable org is denied", async () => {
+      mockCallerOrgUnresolvable();
+      ddbMock.on(QueryCommand).resolves({ Items: [systemBp] });
+
+      await expect(invoke(makeEvent("listBlueprints", {}))).rejects.toThrow(
+        /organisation|org/i,
+      );
+    });
+  });
+
+  // ─── C17: importBlueprint source-blueprint org-scoping ─────────
+  // Finding C17: the source blueprint must be PUBLISHED AND belong to the
+  // caller's org or be orgId='system'. Missing and foreign blueprints
+  // return the same CrossOrgAccessError (no existence oracle).
+
+  describe("importBlueprint source-blueprint org-scoping (C17)", () => {
+    const blueprintDef = JSON.stringify({
+      nodes: [{ id: "n1", agentId: "agent-1", type: "agent" }],
+      edges: [],
+    });
+
+    test("non-admin can import a system blueprint into own-org app", async () => {
+      ddbMock
+        .on(GetCommand)
+        .resolvesOnce({
+          Item: {
+            workflowId: "bp-sys",
+            orgId: "system",
+            name: "System BP",
+            status: "PUBLISHED",
+            isBlueprint: "true",
+            definition: blueprintDef,
+            version: 2,
+          },
+        })
+        .resolvesOnce({
+          Item: {
+            appId: "app-1",
+            orgId: "org-1",
+            name: "My App",
+            workflowIds: [],
+            version: 1,
+          },
+        });
+      ddbMock.on(PutCommand).resolves({});
+      ddbMock.on(UpdateCommand).resolves({});
+
+      const result = await invoke(
+        makeEvent("importBlueprint", { blueprintId: "bp-sys", appId: "app-1" }),
+      );
+
+      expect(result.status).toBe("DRAFT");
+      expect(result.orgId).toBe("org-1");
+    });
+
+    test("non-admin CANNOT import a foreign-org blueprint (throws Access denied, identical to missing)", async () => {
+      ddbMock.on(GetCommand).resolvesOnce({
+        Item: {
+          workflowId: "bp-foreign",
+          orgId: "org-other",
+          name: "Foreign BP",
+          status: "PUBLISHED",
+          isBlueprint: "true",
+          definition: blueprintDef,
+          version: 2,
+        },
+      });
+
+      await expect(
+        invoke(
+          makeEvent("importBlueprint", {
+            blueprintId: "bp-foreign",
+            appId: "app-1",
+          }),
+        ),
+      ).rejects.toThrow(/Access denied/i);
+      // No writes should have occurred
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    });
+
+    test("missing blueprint throws same Access denied as foreign (no existence oracle)", async () => {
+      ddbMock.on(GetCommand).resolvesOnce({ Item: undefined });
+
+      await expect(
+        invoke(
+          makeEvent("importBlueprint", {
+            blueprintId: "bp-nonexistent",
+            appId: "app-1",
+          }),
+        ),
+      ).rejects.toThrow(/Access denied/i);
+    });
+
+    test("non-admin can import own-org PUBLISHED blueprint", async () => {
+      ddbMock
+        .on(GetCommand)
+        .resolvesOnce({
+          Item: {
+            workflowId: "bp-own",
+            orgId: "org-1",
+            name: "Own BP",
+            status: "PUBLISHED",
+            isBlueprint: "true",
+            definition: blueprintDef,
+            version: 2,
+          },
+        })
+        .resolvesOnce({
+          Item: {
+            appId: "app-1",
+            orgId: "org-1",
+            name: "My App",
+            workflowIds: [],
+            version: 1,
+          },
+        });
+      ddbMock.on(PutCommand).resolves({});
+      ddbMock.on(UpdateCommand).resolves({});
+
+      const result = await invoke(
+        makeEvent("importBlueprint", { blueprintId: "bp-own", appId: "app-1" }),
+      );
+
+      expect(result.status).toBe("DRAFT");
+    });
+
+    test("admin can import a foreign-org blueprint (admin bypass)", async () => {
+      ddbMock
+        .on(GetCommand)
+        .resolvesOnce({
+          Item: {
+            workflowId: "bp-foreign",
+            orgId: "org-other",
+            name: "Foreign BP",
+            status: "PUBLISHED",
+            isBlueprint: "true",
+            definition: blueprintDef,
+            version: 2,
+          },
+        })
+        .resolvesOnce({
+          Item: {
+            appId: "app-1",
+            orgId: "org-other",
+            name: "Other App",
+            workflowIds: [],
+            version: 1,
+          },
+        });
+      ddbMock.on(PutCommand).resolves({});
+      ddbMock.on(UpdateCommand).resolves({});
+
+      const adminEvent = {
+        info: { fieldName: "importBlueprint" },
+        arguments: { blueprintId: "bp-foreign", appId: "app-1" },
+        identity: {
+          sub: "admin-1",
+          claims: { sub: "admin-1", "cognito:groups": ["admin"] },
+        },
+      } as unknown as HandlerEvent;
+
+      const result = await invoke(adminEvent);
+      expect(result.orgId).toBe("org-other");
+    });
+  });
+
+  // ─── H21: verifyAgentsExist org-scoping ────────────────────────
+  // Finding H21: agents whose orgId differs from the workflow's orgId
+  // (and is not 'All Organizations') are treated as missing.
+
+  describe("verifyAgentsExist org-scoping (H21)", () => {
+    test("agent with 'All Organizations' orgId passes for any workflow org", async () => {
+      const def = JSON.stringify({
+        nodes: [{ id: "n1", agentId: "shared-agent", type: "agent" }],
+        edges: [],
+      });
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          workflowId: "wf-1",
+          orgId: "org-1",
+          status: "DRAFT",
+          definition: def,
+          version: 1,
+        },
+      });
+      ddbMock.on(BatchGetCommand).resolves({
+        Responses: {
+          "citadel-agents-test": [
+            { agentId: "shared-agent", orgId: "All Organizations" },
+          ],
+        },
+      });
+      ddbMock.on(UpdateCommand).resolves({
+        Attributes: {
+          workflowId: "wf-1",
+          orgId: "org-1",
+          status: "PUBLISHED",
+          version: 2,
+        },
+      });
+
+      const result = await invoke(
+        makeEvent("publishWorkflow", { workflowId: "wf-1" }),
+      );
+      expect(result.status).toBe("PUBLISHED");
+    });
+
+    test("agent from a foreign org is treated as missing (not foreign — no existence oracle)", async () => {
+      const def = JSON.stringify({
+        nodes: [
+          { id: "n1", agentId: "own-agent", type: "agent" },
+          { id: "n2", agentId: "foreign-agent", type: "agent" },
+        ],
+        edges: [{ id: "e1", source: "n1", target: "n2" }],
+      });
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          workflowId: "wf-1",
+          orgId: "org-1",
+          status: "DRAFT",
+          definition: def,
+          version: 1,
+        },
+      });
+      // foreign-agent exists but belongs to org-other
+      ddbMock.on(BatchGetCommand).resolves({
+        Responses: {
+          "citadel-agents-test": [
+            { agentId: "own-agent", orgId: "org-1" },
+            { agentId: "foreign-agent", orgId: "org-other" },
+          ],
+        },
+      });
+
+      await expect(
+        invoke(makeEvent("publishWorkflow", { workflowId: "wf-1" })),
+      ).rejects.toThrow(/foreign-agent/i);
+      // Must remain DRAFT
+      expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    });
+
+    test("mix of own-org, All Organizations, and foreign-org agents: only foreign fails", async () => {
+      const def = JSON.stringify({
+        nodes: [
+          { id: "n1", agentId: "own-agent", type: "agent" },
+          { id: "n2", agentId: "shared-agent", type: "agent" },
+          { id: "n3", agentId: "foreign-agent", type: "agent" },
+        ],
+        edges: [
+          { id: "e1", source: "n1", target: "n2" },
+          { id: "e2", source: "n2", target: "n3" },
+        ],
+      });
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          workflowId: "wf-1",
+          orgId: "org-1",
+          status: "DRAFT",
+          definition: def,
+          version: 1,
+        },
+      });
+      ddbMock.on(BatchGetCommand).resolves({
+        Responses: {
+          "citadel-agents-test": [
+            { agentId: "own-agent", orgId: "org-1" },
+            { agentId: "shared-agent", orgId: "All Organizations" },
+            { agentId: "foreign-agent", orgId: "org-other" },
+          ],
+        },
+      });
+
+      await expect(
+        invoke(makeEvent("publishWorkflow", { workflowId: "wf-1" })),
+      ).rejects.toThrow(/foreign-agent/i);
+      expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+    });
+
+    test("agent record with no orgId is treated as missing", async () => {
+      const def = JSON.stringify({
+        nodes: [{ id: "n1", agentId: "no-org-agent", type: "agent" }],
+        edges: [],
+      });
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          workflowId: "wf-1",
+          orgId: "org-1",
+          status: "DRAFT",
+          definition: def,
+          version: 1,
+        },
+      });
+      ddbMock.on(BatchGetCommand).resolves({
+        Responses: {
+          "citadel-agents-test": [
+            { agentId: "no-org-agent" }, // no orgId field
+          ],
+        },
+      });
+
+      await expect(
+        invoke(makeEvent("publishWorkflow", { workflowId: "wf-1" })),
+      ).rejects.toThrow(/no-org-agent/i);
     });
   });
 
