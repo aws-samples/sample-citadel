@@ -30,6 +30,10 @@ import {
 import { getUserId } from "../utils/appsync";
 import { assertProjectAccess } from "../utils/project-access";
 import { getKbIds, pollStatuses } from "./document-ingestion-shared";
+import {
+  resolveProjectDocumentKey,
+  DocumentKeyError,
+} from "../utils/document-key";
 
 const s3Client = new S3Client({});
 const bedrockAgentClient = new BedrockAgentClient({});
@@ -238,9 +242,7 @@ async function listProjectDocuments(
  * falling back to a direct Bedrock KB query when the row is absent or the table
  * read fails.
  */
-async function getDocumentIngestionStatus(
-  documentKey: string,
-): Promise<{
+async function getDocumentIngestionStatus(documentKey: string): Promise<{
   documentKey: string;
   status: string;
   statusReason?: string;
@@ -285,26 +287,55 @@ async function getDocumentIngestionStatus(
 }
 
 /**
- * Delete a document from S3 and Bedrock KB
+ * Delete a document from S3 and Bedrock KB.
+ *
+ * Security (findings C13 + H13): never delete the raw client-supplied key.
+ * Instead, resolve it against the project prefix, look up the authoritative
+ * document row in DynamoDB (proving the document belongs to this project),
+ * and delete the key stored in that row.
  */
 async function deleteDocument(
   projectId: string,
   documentKey: string,
 ): Promise<{ documentKey: string; status: string }> {
+  const canonicalKey = resolveProjectDocumentKey(projectId, documentKey);
+
+  // Look up the ingestion-jobs row as proof-of-ownership. The table must be
+  // configured and the row must exist and belong to this project.
+  const tableName = process.env.INGESTION_TABLE;
+  if (!tableName) {
+    throw new Error(
+      "INGESTION_TABLE not configured — cannot verify document ownership for delete",
+    );
+  }
+  const resp = await ddb.send(
+    new GetCommand({
+      TableName: tableName,
+      Key: { projectId, documentKey: canonicalKey },
+    }),
+  );
+  if (!resp.Item) {
+    throw new DocumentKeyError(
+      `Document not found for project ${projectId}: ${canonicalKey}`,
+    );
+  }
+  // Use the key from the authoritative row — never the client string.
+  const storedKey = resp.Item.documentKey as string;
+
   const { kbId, dsId } = await getKbIds();
   await bedrockAgentClient.send(
     new DeleteKnowledgeBaseDocumentsCommand({
       knowledgeBaseId: kbId,
       dataSourceId: dsId,
       documentIdentifiers: [
-        { dataSourceType: "CUSTOM", custom: { id: documentKey } },
+        { dataSourceType: "CUSTOM", custom: { id: storedKey } },
       ],
     }),
   );
   await s3Client.send(
-    new DeleteObjectCommand({ Bucket: DOCUMENT_BUCKET, Key: documentKey }),
+    new DeleteObjectCommand({ Bucket: DOCUMENT_BUCKET, Key: storedKey }),
   );
-  return { documentKey, status: "DELETED" };
+  return { documentKey: storedKey, status: "DELETED" };
 }
 
 /**
@@ -352,7 +383,9 @@ export const handler: AppSyncResolverHandler<
         return await listProjectDocuments(args.projectId);
       case "getDocumentIngestionStatus":
         await assertProjectAccess(args.projectId, userId, event);
-        return await getDocumentIngestionStatus(args.documentKey);
+        return await getDocumentIngestionStatus(
+          resolveProjectDocumentKey(args.projectId, args.documentKey),
+        );
       case "deleteDocument":
         await assertProjectAccess(args.projectId, userId, event);
         return await deleteDocument(args.projectId, args.documentKey);

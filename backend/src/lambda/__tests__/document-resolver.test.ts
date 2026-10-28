@@ -185,4 +185,83 @@ describe("document-resolver", () => {
       "Unknown field",
     );
   });
+
+  describe("document-key prefix binding (findings C13 + H13)", () => {
+    const PROJECT_A = "35e479a1-8324-4d87-b0e5-da0531d2e773";
+    const PROJECT_B = "c8f1e204-91ab-4d3c-b6f7-1a2b3c4d5e6f";
+
+    beforeEach(() => {
+      assertProjectAccessMock.mockResolvedValue(undefined);
+    });
+
+    test("getProjectDocument builds S3 key under the project prefix", async () => {
+      s3Mock.on(GetObjectCommand).resolves({
+        Body: {
+          transformToString: async () => "content",
+        } as unknown as never,
+        VersionId: "v1",
+        LastModified: new Date("2026-01-01T00:00:00Z"),
+      });
+
+      await invokeHandler(
+        makeEvent("getProjectDocument", {
+          projectId: PROJECT_A,
+          documentKey: "design/technical_design.md",
+        }),
+      );
+
+      const s3Call = s3Mock.commandCalls(GetObjectCommand)[0];
+      expect(s3Call.args[0].input.Key).toBe(
+        `${PROJECT_A}/design/technical_design.md`,
+      );
+    });
+
+    test("project A cannot read project B's doc via traversal", async () => {
+      await expect(
+        invokeHandler(
+          makeEvent("getProjectDocument", {
+            projectId: PROJECT_A,
+            documentKey: `../${PROJECT_B}/secret.md`,
+          }),
+        ),
+      ).rejects.toThrow(/must not contain "\.\."/);
+
+      expect(s3Mock.commandCalls(GetObjectCommand)).toHaveLength(0);
+    });
+
+    test("project A cannot read project B's doc by passing B's full key", async () => {
+      // resolveProjectDocumentKey(PROJECT_A, `${PROJECT_B}/x.md`) produces
+      // `${PROJECT_A}/${PROJECT_B}/x.md` — a path under A, NOT under B.
+      s3Mock.on(GetObjectCommand).resolves({
+        Body: {
+          transformToString: async () => "nope",
+        } as unknown as never,
+      });
+
+      await invokeHandler(
+        makeEvent("getProjectDocument", {
+          projectId: PROJECT_A,
+          documentKey: `${PROJECT_B}/secret.md`,
+        }),
+      );
+
+      // The S3 key must be under PROJECT_A — never under PROJECT_B.
+      const s3Call = s3Mock.commandCalls(GetObjectCommand)[0];
+      expect(s3Call.args[0].input.Key).toMatch(new RegExp(`^${PROJECT_A}/`));
+      expect(s3Call.args[0].input.Key).not.toBe(`${PROJECT_B}/secret.md`);
+    });
+
+    test("rejects control characters in documentKey", async () => {
+      await expect(
+        invokeHandler(
+          makeEvent("getProjectDocument", {
+            projectId: PROJECT_A,
+            documentKey: "design\x00.md",
+          }),
+        ),
+      ).rejects.toThrow(/control characters/);
+
+      expect(s3Mock.commandCalls(GetObjectCommand)).toHaveLength(0);
+    });
+  });
 });

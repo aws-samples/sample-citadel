@@ -13,15 +13,17 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
 import { getUserId } from "../utils/appsync";
 import { assertProjectAccess } from "../utils/project-access";
+import { resolveProjectDocumentKey } from "../utils/document-key";
 
 const s3 = new S3Client({});
 const lambda = new LambdaClient({});
 const SESSION_BUCKET = process.env.SESSION_BUCKET!;
 const PDF_GENERATOR_FUNCTION = process.env.PDF_GENERATOR_FUNCTION!;
 
-// Map projectId + documentKey → S3 key: {projectId}/{documentKey}
+// Map projectId + documentKey → canonical S3 key via the shared helper
+// that rejects traversal, double slashes, control chars, etc.
 function s3Key(projectId: string, documentKey: string): string {
-  return `${projectId}/${documentKey}`;
+  return resolveProjectDocumentKey(projectId, documentKey);
 }
 
 async function getProjectDocument(
