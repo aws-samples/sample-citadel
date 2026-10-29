@@ -95,6 +95,32 @@ describe("assertSecretRefInOrgNamespace — path-style", () => {
       ref: `/citadel/agents/any-org/secret`,
       org: "",
     },
+    // Adversarial vectors — traversal, whitespace, missing leading slash
+    {
+      label: "path traversal ../orgB escapes org namespace",
+      ref: `/citadel/agents/${ORG_A}/../${ORG_B}/secret-x`,
+      org: ORG_A,
+    },
+    {
+      label: "missing leading slash",
+      ref: `citadel/agents/${ORG_A}/secret-123`,
+      org: ORG_A,
+    },
+    {
+      label: "trailing newline in ref",
+      ref: `/citadel/agents/${ORG_A}/secret-123\n`,
+      org: ORG_A,
+    },
+    {
+      label: "trailing space in ref",
+      ref: `/citadel/agents/${ORG_A}/secret-123 `,
+      org: ORG_A,
+    },
+    {
+      label: "tab character in ref",
+      ref: `/citadel/agents/${ORG_A}/secret\t123`,
+      org: ORG_A,
+    },
   ];
 
   it.each(rejections)("rejects: $label", ({ ref, org, type }) => {

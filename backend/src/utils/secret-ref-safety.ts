@@ -67,6 +67,13 @@ export function assertSecretRefInOrgNamespace(
   if (typeof callerOrg !== "string" || !callerOrg)
     throw new SecretRefRejectedError();
 
+  // Reject refs with whitespace or control characters — no trimming, just refuse.
+  // eslint-disable-next-line no-control-regex
+  if (/[\s\x00-\x1f\x7f-\x9f]/.test(ref)) throw new SecretRefRejectedError();
+
+  // Reject path traversal: ".." anywhere in the ref.
+  if (ref.includes("..")) throw new SecretRefRejectedError();
+
   if (ref.startsWith(CITADEL_PREFIX)) {
     assertPathStyleRef(ref, callerOrg, opts);
   } else if (ref.startsWith(SM_ARN_PREFIX)) {

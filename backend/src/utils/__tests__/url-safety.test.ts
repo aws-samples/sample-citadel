@@ -80,6 +80,11 @@ describe("classifyIpv6", () => {
     { ip: "::ffff:169.254.169.254", expected: "metadata" },
     { ip: "::ffff:10.0.0.1", expected: "private" },
     { ip: "::ffff:8.8.8.8", expected: "public" },
+    // Hex-form IPv4-mapped: 0:0:0:0:0:ffff:HHHH:HHHH
+    { ip: "0:0:0:0:0:ffff:a9fe:a9fe", expected: "metadata" },
+    { ip: "::ffff:7f00:1", expected: "loopback" },
+    { ip: "::ffff:0a00:1", expected: "private" },
+    { ip: "::ffff:c0a8:101", expected: "private" },
     { ip: "2001:db8::1", expected: "public" },
     { ip: "2600:1f18::1", expected: "public" },
   ];
@@ -257,6 +262,18 @@ describe("parsePublicHttpsUrl", () => {
     { label: "shorthand IP 127.1", url: "https://127.1/" },
     { label: "garbage", url: "not-a-url" },
     { label: "empty", url: "" },
+    // Adversarial vectors — IPv4-mapped hex, octal, numeric, authority confusion
+    {
+      label: "IPv4-mapped IPv6 hex metadata",
+      url: "https://[0:0:0:0:0:ffff:a9fe:a9fe]/",
+    },
+    { label: "octal IP 0177.0.0.1", url: "https://0177.0.0.1/" },
+    { label: "octal long-form 017700000001", url: "https://017700000001/" },
+    {
+      label: "userinfo authority confusion @metadata",
+      url: "https://evil.com@169.254.169.254/",
+    },
+    { label: "loopback on port 443", url: "https://127.0.0.1:443/" },
   ];
 
   it.each(rejections)("rejects: $label", ({ url }) => {

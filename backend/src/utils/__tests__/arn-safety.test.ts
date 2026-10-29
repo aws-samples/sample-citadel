@@ -215,6 +215,11 @@ describe("assertCrossAccountRole", () => {
       opts: { platformAccountId: PLATFORM, externalId: "" },
     },
     {
+      label: "whitespace-only externalId",
+      arn: `arn:aws:iam::${FOREIGN}:role/cross-role`,
+      opts: { platformAccountId: PLATFORM, externalId: "   " },
+    },
+    {
       label: "malformed ARN",
       arn: "arn:aws:iam::bad:role/cross-role",
       opts: { platformAccountId: PLATFORM, externalId: "ext-123" },

@@ -138,9 +138,25 @@ export function classifyIpv6(ip: string): IpClass {
   // Loopback
   if (norm === "::1") return "loopback";
 
-  // IPv4-mapped ::ffff:x.x.x.x
+  // IPv4-mapped ::ffff:x.x.x.x (dotted-quad form)
   const v4mapped = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(norm);
   if (v4mapped) return classifyIpv4(v4mapped[1]);
+
+  // IPv4-mapped in hex form: ::ffff:HHHH:HHHH or 0:0:0:0:0:ffff:HHHH:HHHH
+  // where each H-group is a 16-bit big-endian pair of the IPv4 octets.
+  const v4hex =
+    /^(?:0:){0,4}0{0,4}:0{0,4}:ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(
+      norm,
+    ) ?? /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(norm);
+  if (v4hex) {
+    const hi = parseInt(v4hex[1], 16);
+    const lo = parseInt(v4hex[2], 16);
+    const a = (hi >> 8) & 0xff;
+    const b = hi & 0xff;
+    const c = (lo >> 8) & 0xff;
+    const d = lo & 0xff;
+    return classifyIpv4(`${a}.${b}.${c}.${d}`);
+  }
 
   // Expand enough to check the first 16-bit group.
   const firstGroup = norm.split(":")[0];

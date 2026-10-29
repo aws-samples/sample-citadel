@@ -126,6 +126,6 @@ export function assertCrossAccountRole(
   if (parsed.service !== "iam") throw new ArnRejectedError();
   if (!parsed.resource.startsWith("role/")) throw new ArnRejectedError();
   if (parsed.accountId === opts.platformAccountId) throw new ArnRejectedError();
-  if (!opts.externalId) throw new ArnRejectedError();
+  if (!opts.externalId || !opts.externalId.trim()) throw new ArnRejectedError();
   return { parsed, externalId: opts.externalId };
 }
