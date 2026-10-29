@@ -273,6 +273,8 @@ Every resolver operation follows the same pattern:
 
 Admins see all organizations; non-admins see only their own.
 
+See [TENANCY.md](./TENANCY.md) for the full organisation model: org resolution per caller type, fail-closed rules, guard primitives, sentinels, backfill scripts, and metrics.
+
 ### App-Level RBAC
 
 Published apps support owner/editor/viewer roles via the `grantAppAccess` / `revokeAppAccess` mutations, stored in the Registry record manifest's `access` map. The `assertManifestAccess` gate in `registry-agent-record-resolver.ts` enforces these roles on app-specific operations, including `listAppAccessEntries` (viewer-and-above).
