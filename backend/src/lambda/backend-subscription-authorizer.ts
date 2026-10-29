@@ -47,10 +47,6 @@ async function authorizeWorkflowProgress(
     return null;
   }
 
-  if (isAdminFromEvent(event)) {
-    return null;
-  }
-
   const executionsTable = process.env.EXECUTIONS_TABLE;
   if (!executionsTable) {
     throw new BackendSubscriptionError();
