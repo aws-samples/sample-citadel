@@ -130,6 +130,7 @@ Prerequisites: AWS CLI, Node.js 24+, Python 3.14+, CDK 2.100+, and Finch (or Doc
 - **[docs/AGENT_PERMISSIONS.md](docs/AGENT_PERMISSIONS.md)** - Agent scoped credentials
 - **[docs/MODEL_SELECTION.md](docs/MODEL_SELECTION.md)** - Configurable per-agent model selection (catalog sync, runtime resolution, operator UI)
 - **[docs/POLICY_MANAGER.md](docs/POLICY_MANAGER.md)** - IAM policy management
+- **[docs/TENANCY.md](docs/TENANCY.md)** - Organisation model, tenant isolation guards, sentinels, and metrics
 - **[docs/INTEGRATION_SETUP.md](docs/INTEGRATION_SETUP.md)** - Integration types setup
 - **[docs/FRONTEND_TESTING_GUIDE.md](docs/FRONTEND_TESTING_GUIDE.md)** - Frontend integration testing
 

@@ -35,12 +35,6 @@ const eventBridgeClient = new EventBridgeClient({});
 
 const PROJECTS_TABLE = process.env.PROJECTS_TABLE!;
 const EVENT_BUS_NAME = process.env.EVENT_BUS_NAME!;
-
-// DEFAULT_ORGANIZATION removed (CIT-252 C15): org-less callers are now
-// refused by requireCallerOrg instead of being pooled into a shared
-// "Default" org. The constant remains in backfill-project-org.ts (migration
-// script, independent constant) where it is still needed.
-
 interface Project {
   id: string;
   name: string;

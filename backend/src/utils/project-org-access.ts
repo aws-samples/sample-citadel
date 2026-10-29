@@ -16,7 +16,7 @@
  *
  * (see `getProject` in project-resolver.ts). project.organization is the
  * server-derived tenant boundary stamped onto the row at createProject time
- * from the caller's `custom:organization` claim (or DEFAULT_ORGANIZATION) —
+ * from the caller's `custom:organization` claim —
  * never a client-suppliable value. project-resolver.ts is not imported
  * here to avoid pulling its EventBridge/S3/lifecycle dependencies into
  * every governance module; instead the identical GetCommand-against-
