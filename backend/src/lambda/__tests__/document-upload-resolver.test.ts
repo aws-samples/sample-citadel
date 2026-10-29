@@ -363,6 +363,7 @@ describe("document-upload-resolver", () => {
 
       const result = await invoke<IngestionStatusResult>(
         makeEvent("getDocumentIngestionStatus", {
+          projectId: "proj-1",
           documentKey: "proj-1/a.pdf",
         }),
       );
@@ -387,6 +388,7 @@ describe("document-upload-resolver", () => {
 
       const result = await invoke<IngestionStatusResult>(
         makeEvent("getDocumentIngestionStatus", {
+          projectId: "proj-1",
           documentKey: "proj-1/a.pdf",
         }),
       );
@@ -499,6 +501,127 @@ describe("document-upload-resolver", () => {
         expect.anything(),
       );
       expect(getSignedUrl).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("deleteDocument — project-prefix binding (findings C13 + H13)", () => {
+    const PROJECT_A = "35e479a1-8324-4d87-b0e5-da0531d2e773";
+    const PROJECT_B = "c8f1e204-91ab-4d3c-b6f7-1a2b3c4d5e6f";
+    /** Real key shape from the documents table. */
+    const KEY_A = `${PROJECT_A}/quarterly-report.pdf`;
+
+    beforeEach(() => {
+      assertProjectAccessMock.mockResolvedValue(undefined);
+      process.env.INGESTION_TABLE = "citadel-document-ingestion-test";
+    });
+
+    test("deletes using the row's stored key when basename is supplied", async () => {
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          projectId: PROJECT_A,
+          documentKey: KEY_A,
+          status: "INDEXED",
+        },
+      });
+
+      const result = await invoke<{ documentKey: string; status: string }>(
+        makeEvent("deleteDocument", {
+          projectId: PROJECT_A,
+          documentKey: "quarterly-report.pdf",
+        }),
+      );
+
+      expect(result.status).toBe("DELETED");
+      expect(result.documentKey).toBe(KEY_A);
+      // S3 delete used the row's stored key, not the raw client string.
+      const deleteCall = s3Mock.commandCalls(DeleteObjectCommand)[0];
+      expect(deleteCall.args[0].input.Key).toBe(KEY_A);
+    });
+
+    test("deletes using the row's stored key when full key is supplied", async () => {
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          projectId: PROJECT_A,
+          documentKey: KEY_A,
+          status: "INDEXED",
+        },
+      });
+
+      const result = await invoke<{ documentKey: string; status: string }>(
+        makeEvent("deleteDocument", {
+          projectId: PROJECT_A,
+          documentKey: KEY_A,
+        }),
+      );
+
+      expect(result.status).toBe("DELETED");
+      expect(result.documentKey).toBe(KEY_A);
+    });
+
+    test("rejects when the document row does not exist for the project", async () => {
+      ddbMock.on(GetCommand).resolves({ Item: undefined });
+
+      await expect(
+        invokeHandler(
+          makeEvent("deleteDocument", {
+            projectId: PROJECT_A,
+            documentKey: "nonexistent.pdf",
+          }),
+        ),
+      ).rejects.toThrow(/Document not found/);
+
+      // No S3 or KB delete should have occurred.
+      expect(s3Mock.commandCalls(DeleteObjectCommand)).toHaveLength(0);
+      expect(
+        bedrockMock.commandCalls(DeleteKnowledgeBaseDocumentsCommand),
+      ).toHaveLength(0);
+    });
+
+    test("project A cannot delete project B's doc by passing B's full key", async () => {
+      const keyB = `${PROJECT_B}/secret.pdf`;
+      // resolveProjectDocumentKey(PROJECT_A, keyB) will produce
+      // `${PROJECT_A}/${PROJECT_B}/secret.pdf` — the DynamoDB lookup for
+      // that canonical key against PROJECT_A will find no row.
+      ddbMock.on(GetCommand).resolves({ Item: undefined });
+
+      await expect(
+        invokeHandler(
+          makeEvent("deleteDocument", {
+            projectId: PROJECT_A,
+            documentKey: keyB,
+          }),
+        ),
+      ).rejects.toThrow(/Document not found/);
+
+      expect(s3Mock.commandCalls(DeleteObjectCommand)).toHaveLength(0);
+    });
+
+    test("project A cannot delete project B's doc via traversal", async () => {
+      await expect(
+        invokeHandler(
+          makeEvent("deleteDocument", {
+            projectId: PROJECT_A,
+            documentKey: `../${PROJECT_B}/secret.pdf`,
+          }),
+        ),
+      ).rejects.toThrow(/must not contain "\.\."/);
+
+      expect(s3Mock.commandCalls(DeleteObjectCommand)).toHaveLength(0);
+    });
+
+    test("rejects when INGESTION_TABLE is not configured", async () => {
+      delete process.env.INGESTION_TABLE;
+
+      await expect(
+        invokeHandler(
+          makeEvent("deleteDocument", {
+            projectId: PROJECT_A,
+            documentKey: "quarterly-report.pdf",
+          }),
+        ),
+      ).rejects.toThrow(/INGESTION_TABLE not configured/);
+
+      expect(s3Mock.commandCalls(DeleteObjectCommand)).toHaveLength(0);
     });
   });
 });
