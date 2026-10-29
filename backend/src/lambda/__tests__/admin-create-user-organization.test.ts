@@ -30,13 +30,20 @@
  */
 process.env.USER_POOL_ID = "us-east-1_testpool";
 process.env.ORGANISATION_TABLE = "test-orgs";
+process.env.USER_ORG_MEMBERSHIP_TABLE = "test-user-org-membership";
 
 import {
   CognitoIdentityProviderClient,
   AdminCreateUserCommand,
+  AdminGetUserCommand,
+  AdminDeleteUserCommand,
   AdminListGroupsForUserCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
-import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  PutCommand,
+} from "@aws-sdk/lib-dynamodb";
 import { mockClient } from "aws-sdk-client-mock";
 
 const cognitoMock = mockClient(CognitoIdentityProviderClient);
@@ -64,6 +71,15 @@ beforeEach(() => {
     .on(AdminListGroupsForUserCommand, { Username: "admin-user" })
     .resolves({ Groups: [{ GroupName: "admin" }] });
 
+  // AdminGetUserCommand returns a sub for the newly created user so the
+  // membership-table write (decision 00d40a31 / finding H20) succeeds.
+  cognitoMock.on(AdminGetUserCommand).resolves({
+    UserAttributes: [
+      { Name: "sub", Value: "new-user-sub-123" },
+      { Name: "email", Value: "new.user@example.com" },
+    ],
+  });
+
   // Write-boundary org validation (Wave-3B design item 1) does a point
   // GetItem on the NAME# reservation row before any Cognito write. Stub a
   // live name_reservation row so the pre-existing happy-path tests in this
@@ -79,6 +95,7 @@ beforeEach(() => {
       createdAt: new Date().toISOString(),
     },
   });
+  ddbMock.on(PutCommand).resolves({});
 });
 
 describe("adminCreateUser — organization is required and wired into custom:organization", () => {
@@ -202,5 +219,193 @@ describe("adminCreateUser — organization is required and wired into custom:org
 
     await expect(handler(event)).rejects.toThrow(/administrators/i);
     expect(cognitoMock.commandCalls(AdminCreateUserCommand)).toHaveLength(0);
+  });
+});
+
+describe("adminCreateUser — membership table write (finding H20 / decision 00d40a31)", () => {
+  test("writes UserOrgMembership row with the INPUT organization, not the caller's org", async () => {
+    cognitoMock.on(AdminCreateUserCommand).resolves({});
+
+    const event = buildEvent(
+      "adminCreateUser",
+      { username: "admin-user" },
+      {
+        input: {
+          email: "alpha.user@example.com",
+          givenName: "Alpha",
+          familyName: "User",
+          organization: "Alpha",
+        },
+      },
+    );
+
+    // Stub the org-name reservation for "Alpha"
+    ddbMock.reset();
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        orgId: "NAME#Alpha",
+        itemType: "name_reservation",
+        name: "Alpha",
+        createdAt: new Date().toISOString(),
+      },
+    });
+    ddbMock.on(PutCommand).resolves({});
+
+    const result = (await handler(event)) as { success: boolean };
+    expect(result.success).toBe(true);
+
+    const putCalls = ddbMock.commandCalls(PutCommand);
+    expect(putCalls).toHaveLength(1);
+    const putItem = putCalls[0].args[0].input.Item;
+    expect(putItem).toMatchObject({
+      sub: "new-user-sub-123",
+      orgName: "Alpha",
+    });
+    expect(putItem?.updatedBy).toBe("admin-user");
+    expect(putItem?.updatedAt).toBeDefined();
+    expect(putCalls[0].args[0].input.TableName).toBe(
+      "test-user-org-membership",
+    );
+  });
+
+  test("invalid organization is refused with no Cognito call", async () => {
+    ddbMock.reset();
+    // No reservation row → assertOrgNameExists throws
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    ddbMock.on(PutCommand).resolves({});
+
+    const event = buildEvent(
+      "adminCreateUser",
+      { username: "admin-user" },
+      {
+        input: {
+          email: "bad-org@example.com",
+          givenName: "Bad",
+          familyName: "Org",
+          organization: "NonExistent",
+        },
+      },
+    );
+
+    await expect(handler(event)).rejects.toThrow(/does not exist/i);
+    expect(cognitoMock.commandCalls(AdminCreateUserCommand)).toHaveLength(0);
+  });
+
+  test("membership PutCommand failure compensates by deleting the Cognito user", async () => {
+    cognitoMock.on(AdminCreateUserCommand).resolves({});
+    cognitoMock.on(AdminDeleteUserCommand).resolves({});
+
+    ddbMock.reset();
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        orgId: "NAME#Engineering",
+        itemType: "name_reservation",
+        name: "Engineering",
+        createdAt: new Date().toISOString(),
+      },
+    });
+    ddbMock.on(PutCommand).rejects(new Error("DynamoDB throttle"));
+
+    const event = buildEvent(
+      "adminCreateUser",
+      { username: "admin-user" },
+      {
+        input: {
+          email: "fail-put@example.com",
+          givenName: "Fail",
+          familyName: "Put",
+          organization: "Engineering",
+        },
+      },
+    );
+
+    const result = (await handler(event)) as {
+      success: boolean;
+      message?: string;
+    };
+    expect(result.success).toBe(false);
+    expect(result.message).toMatch(/membership/i);
+
+    // Verify compensation: AdminDeleteUserCommand was called
+    const deleteCalls = cognitoMock.commandCalls(AdminDeleteUserCommand);
+    expect(deleteCalls).toHaveLength(1);
+    expect(deleteCalls[0].args[0].input.Username).toBe("fail-put@example.com");
+  });
+
+  test("missing sub after AdminCreateUser compensates by deleting the Cognito user", async () => {
+    cognitoMock.on(AdminCreateUserCommand).resolves({});
+    cognitoMock.on(AdminDeleteUserCommand).resolves({});
+    // AdminGetUserCommand returns NO sub
+    cognitoMock.on(AdminGetUserCommand).resolves({
+      UserAttributes: [{ Name: "email", Value: "no-sub@example.com" }],
+    });
+
+    ddbMock.reset();
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        orgId: "NAME#Engineering",
+        itemType: "name_reservation",
+        name: "Engineering",
+        createdAt: new Date().toISOString(),
+      },
+    });
+    ddbMock.on(PutCommand).resolves({});
+
+    const event = buildEvent(
+      "adminCreateUser",
+      { username: "admin-user" },
+      {
+        input: {
+          email: "no-sub@example.com",
+          givenName: "No",
+          familyName: "Sub",
+          organization: "Engineering",
+        },
+      },
+    );
+
+    const result = (await handler(event)) as {
+      success: boolean;
+      message?: string;
+    };
+    expect(result.success).toBe(false);
+    expect(result.message).toMatch(/sub/i);
+
+    // Verify compensation
+    const deleteCalls = cognitoMock.commandCalls(AdminDeleteUserCommand);
+    expect(deleteCalls).toHaveLength(1);
+
+    // No PutCommand should have been attempted
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+  });
+
+  test("removeUserRole does not touch the membership table (role-only mutation)", async () => {
+    // removeUserRole removes a group but has no membership side-effects —
+    // audited in finding H20's sibling check. This test verifies the
+    // negative: no PutCommand or DeleteCommand issued for membership.
+    cognitoMock
+      .on(AdminListGroupsForUserCommand, { Username: "admin-user" })
+      .resolves({ Groups: [{ GroupName: "admin" }] });
+    cognitoMock
+      .on(AdminListGroupsForUserCommand, { Username: "target-user" })
+      .resolves({ Groups: [{ GroupName: "developer" }] });
+    const { AdminRemoveUserFromGroupCommand } =
+      await import("@aws-sdk/client-cognito-identity-provider");
+    cognitoMock.on(AdminRemoveUserFromGroupCommand).resolves({});
+
+    ddbMock.reset();
+    ddbMock.on(PutCommand).resolves({});
+
+    const event = buildEvent(
+      "removeUserRole",
+      { username: "admin-user" },
+      { userId: "target-user", role: "developer" },
+    );
+
+    const result = (await handler(event)) as { success: boolean };
+    expect(result.success).toBe(true);
+
+    // No membership writes
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
   });
 });
