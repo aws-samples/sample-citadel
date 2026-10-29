@@ -1047,6 +1047,65 @@ export class ProjectsStack extends cdk.Stack {
     );
 
     // ============================================================
+    // Project Subscription Authorizer (CIT-253)
+    // ============================================================
+    // Shared connect-time gate for the 4 project-keyed subscription fields
+    // that were previously ungated: onAgentStatusUpdate,
+    // onConversationMessage, onProjectProgress, onAssessmentCompleted.
+    // Same assertProjectAccess gate as onDesignProgress but handled by a
+    // single Lambda with a field-name switch.
+    const projectSubscriptionAuthorizerFunction = new lambda.Function(
+      this,
+      "ProjectSubscriptionAuthorizerFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "project-subscription-authorizer.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          PROJECTS_TABLE: props.projectsTable.tableName,
+          USER_POOL_ID: props.userPool.userPoolId,
+        },
+        timeout: cdk.Duration.seconds(10),
+        logGroup: new logs.LogGroup(
+          this,
+          "ProjectSubscriptionAuthorizerFunctionLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
+      },
+    );
+
+    props.projectsTable.grantReadData(projectSubscriptionAuthorizerFunction);
+    projectSubscriptionAuthorizerFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["cognito-idp:AdminGetUser"],
+        resources: [props.userPool.userPoolArn],
+      }),
+    );
+
+    const projectSubscriptionAuthorizerDataSource = makeLambdaDataSource(
+      "ProjectSubscriptionAuthorizer",
+      projectSubscriptionAuthorizerFunction,
+    );
+
+    for (const field of [
+      "onAgentStatusUpdate",
+      "onConversationMessage",
+      "onProjectProgress",
+      "onAssessmentCompleted",
+    ] as const) {
+      makeResolver(
+        `${field.charAt(0).toUpperCase() + field.slice(1)}SubscriptionAuthorizerResolver`,
+        "Subscription",
+        field,
+        projectSubscriptionAuthorizerDataSource,
+      );
+    }
+
+    // ============================================================
     // Report Download URL Generator
     // ============================================================
 

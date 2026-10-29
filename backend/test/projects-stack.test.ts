@@ -188,16 +188,16 @@ describe("ProjectsStack — backend-stack-split phase 1", () => {
   });
 
   // --- Resolver count ---
-  test("defines exactly 27 AppSync resolvers (matching the move manifest + updateAgentStatus, finding 0018a6d7, + wave-2a OnChatterSubscriptionAuthorizerResolver, finding 87a171ad, + OnDesignProgressSubscriptionAuthorizerResolver, finding 195b2a58, + RecordIntakeConsentResolver)", () => {
+  test("defines exactly 31 AppSync resolvers (matching the move manifest + updateAgentStatus, finding 0018a6d7, + wave-2a OnChatterSubscriptionAuthorizerResolver, finding 87a171ad, + OnDesignProgressSubscriptionAuthorizerResolver, finding 195b2a58, + RecordIntakeConsentResolver, + CIT-253 4 project-subscription-authorizer resolvers)", () => {
     const resolvers = template.findResources("AWS::AppSync::Resolver");
-    expect(Object.keys(resolvers)).toHaveLength(27);
+    expect(Object.keys(resolvers)).toHaveLength(31);
   });
 
-  test("defines exactly 13 AppSync Lambda data sources", () => {
+  test("defines exactly 14 AppSync Lambda data sources", () => {
     const dataSources = template.findResources("AWS::AppSync::DataSource", {
       Properties: Match.objectLike({ Type: "AWS_LAMBDA" }),
     });
-    expect(Object.keys(dataSources)).toHaveLength(13);
+    expect(Object.keys(dataSources)).toHaveLength(14);
   });
 
   const expectedFields: Array<[string, string]> = [
@@ -226,6 +226,10 @@ describe("ProjectsStack — backend-stack-split phase 1", () => {
     ["Mutation", "recordIntakeConsent"],
     ["Mutation", "publishDesignProgress"],
     ["Subscription", "onDesignProgress"],
+    ["Subscription", "onAgentStatusUpdate"],
+    ["Subscription", "onConversationMessage"],
+    ["Subscription", "onProjectProgress"],
+    ["Subscription", "onAssessmentCompleted"],
     ["Query", "generateReportDownloadUrl"],
   ];
 
@@ -366,9 +370,9 @@ describe("ProjectsStack — backend-stack-split phase 1", () => {
   });
 
   // --- moved constructs present ---
-  test("defines exactly 17 Lambda functions (the moved set + DesignProgressSubscriptionAuthorizerFunction, finding 195b2a58, + IntakeConsentResolverFunction)", () => {
+  test("defines exactly 18 Lambda functions (the moved set + DesignProgressSubscriptionAuthorizerFunction, finding 195b2a58, + IntakeConsentResolverFunction, + CIT-253 ProjectSubscriptionAuthorizerFunction)", () => {
     const fns = template.findResources("AWS::Lambda::Function");
-    expect(Object.keys(fns)).toHaveLength(17);
+    expect(Object.keys(fns)).toHaveLength(18);
   });
 
   test("defines exactly 2 CloudWatch alarms (ProjectResolver error + throttle)", () => {
@@ -414,8 +418,8 @@ describe("ProjectsStack — backend-stack-split phase 1", () => {
         }),
       }),
     });
-    // 13 Lambda data sources -> 13 appsync-assumable roles.
-    expect(Object.keys(roles)).toHaveLength(13);
+    // 14 Lambda data sources -> 14 appsync-assumable roles.
+    expect(Object.keys(roles)).toHaveLength(14);
   });
 });
 

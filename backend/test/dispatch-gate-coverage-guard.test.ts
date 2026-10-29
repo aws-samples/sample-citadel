@@ -133,6 +133,25 @@ const DOCUMENTED_EXEMPTIONS: ReadonlyMap<string, string> = new Map([
       "Org-guard and TTL assertions are covered in " +
       "intake-consent-resolver.test.ts.",
   ],
+  [
+    "project-subscription-authorizer",
+    "Connect-time subscription authorizer (CIT-253) for 4 project-keyed " +
+      "Subscription fields (onAgentStatusUpdate, onConversationMessage, " +
+      "onProjectProgress, onAssessmentCompleted), not a field resolver " +
+      "with a dispatch to enumerate; its fail-closed legs " +
+      "(assertProjectAccess gate, CrossProjectSubscriptionError, " +
+      "unknown-field rejection) and CDK wiring in projects-stack.ts are " +
+      "pinned in project-subscription-authorizer.test.ts.",
+  ],
+  [
+    "backend-subscription-authorizer",
+    "Connect-time subscription authorizer (CIT-253) for " +
+      "Subscription.onWorkflowProgress and Subscription.onAppStatusChange, " +
+      "not a field resolver with a dispatch to enumerate; its fail-closed " +
+      "legs (assertRowOrg gate for both, BackendSubscriptionError, " +
+      "unknown-field rejection) and CDK wiring in backend-stack.ts are " +
+      "pinned in backend-subscription-authorizer.test.ts.",
+  ],
 ]);
 
 /** Mutations whose IAM-only schema directive an exemption reason relies on. */

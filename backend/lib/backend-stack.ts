@@ -3180,7 +3180,63 @@ export class BackendStack extends cdk.Stack {
       },
     );
 
-    // Subscription resolvers (handled by AppSync automatically with proper schema)
+    // --- CIT-253: Backend Subscription Authorizer ---
+    // Shared connect-time gate for onWorkflowProgress (executionId-keyed)
+    // and onAppStatusChange (appId-keyed). Each looks up the row in its
+    // respective table and delegates to assertRowOrg (org-scoped, admin
+    // bypass). Least-privilege: GetItem only on the tables read.
+    const backendSubscriptionAuthorizerFunction = new lambda.Function(
+      this,
+      "BackendSubscriptionAuthorizerFunction",
+      {
+        runtime: lambda.Runtime.NODEJS_24_X,
+        handler: "backend-subscription-authorizer.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          EXECUTIONS_TABLE: this.executionsTable.tableName,
+          APPS_TABLE: this.appsTable.tableName,
+        },
+        timeout: cdk.Duration.seconds(10),
+        logGroup: new logs.LogGroup(
+          this,
+          "BackendSubscriptionAuthorizerFunctionLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
+      },
+    );
+
+    this.executionsTable.grant(
+      backendSubscriptionAuthorizerFunction,
+      "dynamodb:GetItem",
+    );
+    this.appsTable.grant(
+      backendSubscriptionAuthorizerFunction,
+      "dynamodb:GetItem",
+    );
+
+    const backendSubAuthDataSource = this.appSyncApi.addLambdaDataSource(
+      "BackendSubscriptionAuthorizerDataSource",
+      backendSubscriptionAuthorizerFunction,
+    );
+
+    backendSubAuthDataSource.createResolver(
+      "OnWorkflowProgressSubscriptionAuthorizerResolver",
+      {
+        typeName: "Subscription",
+        fieldName: "onWorkflowProgress",
+      },
+    );
+
+    backendSubAuthDataSource.createResolver(
+      "OnAppStatusChangeSubscriptionAuthorizerResolver",
+      {
+        typeName: "Subscription",
+        fieldName: "onAppStatusChange",
+      },
+    );
 
     // --- Workflow, App, Execution AppSync Data Sources & Resolvers ---
 

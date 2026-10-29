@@ -1715,6 +1715,60 @@ export const EXPECTED_NEW_FIELDS: AllowlistEntry[] = [
       "post-fabrication actions. Wired in citadel-projects-dev " +
       "(projects-stack.ts). Not a backend-template addition.",
   },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // CIT-253 — Connect-time subscription authorization for 6 previously
+  // ungated fields. 4 wired in citadel-projects-dev (project-keyed, via
+  // assertProjectAccess), 2 wired in citadel-backend-dev (execution/app
+  // lookup + assertRowOrg). Logical IDs from `cdk synth`.
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    logicalId: "Subscription.onAgentStatusUpdate",
+    justification:
+      "CIT-253: connect-time authorization resolver for " +
+      "onAgentStatusUpdate(projectId) in citadel-projects-dev " +
+      "(project-subscription-authorizer.ts, assertProjectAccess gate). " +
+      "Previously this field had NO CfnResolver. Satellite-only addition.",
+  },
+  {
+    logicalId: "Subscription.onConversationMessage",
+    justification:
+      "CIT-253: connect-time authorization resolver for " +
+      "onConversationMessage(projectId) in citadel-projects-dev. " +
+      "Same handler and rationale as Subscription.onAgentStatusUpdate.",
+  },
+  {
+    logicalId: "Subscription.onProjectProgress",
+    justification:
+      "CIT-253: connect-time authorization resolver for " +
+      "onProjectProgress(projectId) in citadel-projects-dev. " +
+      "Same handler and rationale as Subscription.onAgentStatusUpdate.",
+  },
+  {
+    logicalId: "Subscription.onAssessmentCompleted",
+    justification:
+      "CIT-253: connect-time authorization resolver for " +
+      "onAssessmentCompleted(projectId) in citadel-projects-dev. " +
+      "Same handler and rationale as Subscription.onAgentStatusUpdate.",
+  },
+  {
+    logicalId: "Subscription.onWorkflowProgress",
+    justification:
+      "CIT-253: connect-time authorization resolver for " +
+      "onWorkflowProgress(executionId) in citadel-backend-dev " +
+      "(backend-subscription-authorizer.ts, execution lookup + " +
+      "assertRowOrg gate). See ADDITION_ALLOWLIST entry " +
+      "AgenticAIApiOnWorkflowProgressSubscriptionAuthorizerResolver66CD72C6.",
+  },
+  {
+    logicalId: "Subscription.onAppStatusChange",
+    justification:
+      "CIT-253: connect-time authorization resolver for " +
+      "onAppStatusChange(appId) in citadel-backend-dev " +
+      "(backend-subscription-authorizer.ts, app lookup + assertRowOrg " +
+      "gate). See ADDITION_ALLOWLIST entry " +
+      "AgenticAIApiOnAppStatusChangeSubscriptionAuthorizerResolver27AF0234.",
+  },
 ];
 
 /**
@@ -2032,6 +2086,69 @@ export const ADDITION_ALLOWLIST: AllowlistEntry[] = [
     justification:
       "Execution approval API: Query.listAwaitingApprovals on the existing " +
       "ExecutionLambdaDataSource (backend-stack.ts).",
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // CIT-253 — BackendSubscriptionAuthorizerFunction + its AppSync data
+  // source, resolvers, IAM role, and log group. 9 logical IDs confirmed
+  // via `cdk synth citadel-backend-dev`.
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    logicalId: "BackendSubscriptionAuthorizerFunctionA8B7FC29",
+    justification:
+      "CIT-253: Lambda for connect-time subscription authorization " +
+      "(onWorkflowProgress + onAppStatusChange). GetItem-only grants " +
+      "on ExecutionsTable + AppsTable.",
+  },
+  {
+    logicalId: "BackendSubscriptionAuthorizerFunctionServiceRole6D8B83A5",
+    justification:
+      "CIT-253: execution role for BackendSubscriptionAuthorizerFunction.",
+  },
+  {
+    logicalId:
+      "BackendSubscriptionAuthorizerFunctionServiceRoleDefaultPolicy3AA930ED",
+    justification:
+      "CIT-253: DefaultPolicy for BackendSubscriptionAuthorizerFunction " +
+      "(dynamodb:GetItem on ExecutionsTable + AppsTable).",
+  },
+  {
+    logicalId: "BackendSubscriptionAuthorizerFunctionLogs99108047",
+    justification:
+      "CIT-253: CloudWatch LogGroup for BackendSubscriptionAuthorizerFunction.",
+  },
+  {
+    logicalId: "AgenticAIApiBackendSubscriptionAuthorizerDataSource0D84A645",
+    justification:
+      "CIT-253: AppSync Lambda data source for " +
+      "BackendSubscriptionAuthorizerFunction.",
+  },
+  {
+    logicalId:
+      "AgenticAIApiBackendSubscriptionAuthorizerDataSourceServiceRoleEA34C80E",
+    justification:
+      "CIT-253: appsync.amazonaws.com-assumable role for the data source.",
+  },
+  {
+    logicalId:
+      "AgenticAIApiBackendSubscriptionAuthorizerDataSourceServiceRoleDefaultPolicyE587775A",
+    justification:
+      "CIT-253: DefaultPolicy (lambda:InvokeFunction grant) for the " +
+      "data source role.",
+  },
+  {
+    logicalId:
+      "AgenticAIApiOnWorkflowProgressSubscriptionAuthorizerResolver66CD72C6",
+    justification:
+      "CIT-253: Subscription.onWorkflowProgress resolver in " +
+      "citadel-backend-dev.",
+  },
+  {
+    logicalId:
+      "AgenticAIApiOnAppStatusChangeSubscriptionAuthorizerResolver27AF0234",
+    justification:
+      "CIT-253: Subscription.onAppStatusChange resolver in " +
+      "citadel-backend-dev.",
   },
 ];
 
