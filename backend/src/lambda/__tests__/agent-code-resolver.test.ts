@@ -70,6 +70,14 @@ function mockAuthorizedAgent(agentId: string): void {
   });
 }
 
+/** Helper to create a readable S3 Body stream. */
+function s3Body(content: string) {
+  const stream = new Readable();
+  stream.push(content);
+  stream.push(null);
+  return sdkStreamMixin(stream);
+}
+
 describe("agent-code-resolver", () => {
   beforeEach(() => {
     dynamoMock.reset();
@@ -98,19 +106,14 @@ describe("agent-code-resolver", () => {
     }) as unknown as HandlerEvent;
 
   describe("getAgentCode", () => {
-    test("returns code from S3 using filename from config", async () => {
+    test("returns code from S3 using scoped key (agents/{agentId}/{basename})", async () => {
       mockAuthorizedAgent("a1");
       dynamoMock.on(GetCommand).resolves({
         Item: { agentId: "a1", config: { filename: "my_agent.py" } },
       });
 
-      const stream = new Readable();
-      stream.push("def handler(): pass");
-      stream.push(null);
-      const sdkStream = sdkStreamMixin(stream);
-
       s3Mock.on(GetObjectCommand).resolves({
-        Body: sdkStream,
+        Body: s3Body("def handler(): pass"),
         VersionId: "v1",
         LastModified: new Date("2025-01-01"),
       });
@@ -122,9 +125,41 @@ describe("agent-code-resolver", () => {
       expect(result.agentId).toBe("a1");
       expect(result.code).toBe("def handler(): pass");
       expect(result.version).toBe("v1");
+
+      // Verify scoped key was used
+      const getCalls = s3Mock.commandCalls(GetObjectCommand);
+      expect(getCalls[0].args[0].input.Key).toBe("agents/a1/my_agent.py");
     });
 
-    test("returns default code when S3 key not found", async () => {
+    test("falls back to legacy key when scoped key returns NoSuchKey", async () => {
+      mockAuthorizedAgent("a1");
+      dynamoMock.on(GetCommand).resolves({
+        Item: { agentId: "a1", config: { filename: "my_agent.py" } },
+      });
+
+      const noSuchKeyError = new Error("NoSuchKey");
+      noSuchKeyError.name = "NoSuchKey";
+
+      // First call (scoped key) fails, second call (legacy) succeeds
+      s3Mock
+        .on(GetObjectCommand, { Key: "agents/a1/my_agent.py" })
+        .rejects(noSuchKeyError)
+        .on(GetObjectCommand, { Key: "agents/my_agent.py" })
+        .resolves({
+          Body: s3Body("# legacy code"),
+          VersionId: "v0",
+          LastModified: new Date("2024-06-01"),
+        });
+
+      const result = await invoke(
+        makeEvent("getAgentCode", { agentId: "a1" }, READER_IDENTITY),
+      );
+
+      expect(result.code).toBe("# legacy code");
+      expect(result.version).toBe("v0");
+    });
+
+    test("returns default code when both scoped and legacy S3 keys not found", async () => {
       mockAuthorizedAgent("a1");
       dynamoMock.on(GetCommand).resolves({
         Item: { agentId: "a1", config: { filename: "missing.py" } },
@@ -143,7 +178,7 @@ describe("agent-code-resolver", () => {
       expect(result.version).toBeNull();
     });
 
-    test("falls back to agentId.py in S3 when no DynamoDB config exists (registry-based agent)", async () => {
+    test("falls back to agentId.py when no DynamoDB config exists (registry-based agent)", async () => {
       mockAuthorizedAgent("missing");
       dynamoMock.on(GetCommand).resolves({});
 
@@ -159,13 +194,40 @@ describe("agent-code-resolver", () => {
       expect(result.code).toContain("def handler");
       expect(result.version).toBeNull();
 
+      // First call is scoped key, second is legacy key
       const getCalls = s3Mock.commandCalls(GetObjectCommand);
-      expect(getCalls[0].args[0].input.Key).toBe("agents/missing.py");
+      expect(getCalls[0].args[0].input.Key).toBe("agents/missing/missing.py");
+      expect(getCalls[1].args[0].input.Key).toBe("agents/missing.py");
+    });
+
+    test("extracts basename from subdirectory filename (arbiter-agent/arbiter_agent.py)", async () => {
+      mockAuthorizedAgent("a2");
+      dynamoMock.on(GetCommand).resolves({
+        Item: {
+          agentId: "a2",
+          config: { filename: "arbiter-agent/arbiter_agent.py" },
+        },
+      });
+
+      s3Mock.on(GetObjectCommand).resolves({
+        Body: s3Body("# arbiter code"),
+        VersionId: "v1",
+      });
+
+      const result = await invoke(
+        makeEvent("getAgentCode", { agentId: "a2" }, READER_IDENTITY),
+      );
+
+      expect(result.code).toBe("# arbiter code");
+
+      // Scoped key uses basename only, not the subdirectory
+      const getCalls = s3Mock.commandCalls(GetObjectCommand);
+      expect(getCalls[0].args[0].input.Key).toBe("agents/a2/arbiter_agent.py");
     });
   });
 
   describe("updateAgentCode", () => {
-    test("writes code to S3", async () => {
+    test("writes code to S3 using scoped key", async () => {
       mockAuthorizedAgent("a1");
       dynamoMock.on(GetCommand).resolves({
         Item: { agentId: "a1", config: { filename: "my_agent.py" } },
@@ -185,10 +247,11 @@ describe("agent-code-resolver", () => {
 
       const putCalls = s3Mock.commandCalls(PutObjectCommand);
       expect(putCalls).toHaveLength(1);
-      expect(putCalls[0].args[0].input.Key).toBe("agents/my_agent.py");
+      // Writes always go to the scoped key
+      expect(putCalls[0].args[0].input.Key).toBe("agents/a1/my_agent.py");
     });
 
-    test("falls back to agentId.py in S3 when no DynamoDB config exists (registry-based agent)", async () => {
+    test("falls back to agentId.py in scoped key when no DynamoDB config exists (registry-based agent)", async () => {
       mockAuthorizedAgent("missing");
       dynamoMock.on(GetCommand).resolves({});
       s3Mock.on(PutObjectCommand).resolves({ VersionId: "v3" });
@@ -205,7 +268,8 @@ describe("agent-code-resolver", () => {
       expect(result.code).toBe("x");
 
       const putCalls = s3Mock.commandCalls(PutObjectCommand);
-      expect(putCalls[0].args[0].input.Key).toBe("agents/missing.py");
+      // Write goes to scoped key, not legacy flat key
+      expect(putCalls[0].args[0].input.Key).toBe("agents/missing/missing.py");
     });
   });
 
