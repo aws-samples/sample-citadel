@@ -14,7 +14,7 @@ import {
   GetPolicyCommand,
   ListFunctionUrlConfigsCommand,
   ListEventSourceMappingsCommand,
-} from '@aws-sdk/client-lambda';
+} from "@aws-sdk/client-lambda";
 import type {
   ListFunctionsCommandOutput,
   GetFunctionConfigurationCommandOutput,
@@ -23,8 +23,8 @@ import type {
   ListFunctionUrlConfigsCommandOutput,
   ListEventSourceMappingsCommandOutput,
   FunctionUrlConfig,
-} from '@aws-sdk/client-lambda';
-import type { AgentSourceAdapter, AgentRef } from './base';
+} from "@aws-sdk/client-lambda";
+import type { AgentSourceAdapter, AgentRef } from "./base";
 import type {
   AgentCandidate,
   AgentCapabilityDescriptor,
@@ -36,18 +36,23 @@ import type {
   InvokeRequest,
   InvokeResponse,
   VendedCredentials,
-} from './base';
-import type { AgentInvocationMode } from '../../services/registry-service';
-import type { CommandSender } from './invoke-support';
+} from "./base";
+import type { AgentInvocationMode } from "../../services/registry-service";
+import type { CommandSender } from "./invoke-support";
 import {
   NO_RESPONSE_TEXT,
   bytesToString,
   extractTextOutput,
   vendImportCredentials,
-} from './invoke-support';
-import type { AdapterCredentialProvider } from './invoke-support';
+} from "./invoke-support";
+import type { AdapterCredentialProvider } from "./invoke-support";
+import {
+  ArnRejectedError,
+  emitArnRefused,
+  parseArn as parseArnSafety,
+} from "../../utils/arn-safety";
 
-const DEFAULT_REGION = process.env.AWS_REGION || 'ap-southeast-2';
+const DEFAULT_REGION = process.env.AWS_REGION || "ap-southeast-2";
 
 /** Timeout (seconds) at/above which describe() infers async_callback mode. */
 const ASYNC_TIMEOUT_THRESHOLD_SECONDS = 60;
@@ -81,7 +86,7 @@ export interface LambdaInvokeAdapterDeps {
 }
 
 export class LambdaInvokeAdapter implements AgentSourceAdapter {
-  public readonly protocol: AgentInvocationProtocol = 'LAMBDA_INVOKE';
+  public readonly protocol: AgentInvocationProtocol = "LAMBDA_INVOKE";
 
   /**
    * @param sender Optional data-plane sender for invoke() (tests inject a fake).
@@ -97,7 +102,52 @@ export class LambdaInvokeAdapter implements AgentSourceAdapter {
     descriptor: AgentCapabilityDescriptor,
   ): Promise<InvokeResponse> {
     const { target, region, mode } = descriptor.invocation;
-    const invocationType = mode === 'async_callback' ? 'Event' : 'RequestResponse';
+
+    // CIT-254 H11: validate invocationTarget before invoking.
+    // - If no cross-account credentials are provided, the target must be a
+    //   Lambda function ARN (or bare function name) in the platform account.
+    // - If cross-account credentials are provided (credentialProvider), the
+    //   target ARN account must equal the vended role's account.
+    const platformAccount =
+      this.deps.defaultAccount ?? process.env.AWS_ACCOUNT_ID ?? "";
+    if (target.startsWith("arn:")) {
+      try {
+        const parsed = parseArnSafety(target);
+        if (parsed.service !== "lambda") throw new ArnRejectedError();
+
+        if (this.deps.credentialProvider) {
+          // Cross-account: verify the target ARN account matches the
+          // descriptor's declared account (the vended role's account).
+          const invokeAccount = descriptor.invocation.account;
+          if (invokeAccount && parsed.accountId !== invokeAccount) {
+            throw new ArnRejectedError();
+          }
+        } else if (platformAccount) {
+          // Same-account: target must belong to the platform account.
+          if (parsed.accountId !== platformAccount) {
+            throw new ArnRejectedError();
+          }
+        }
+        // When platformAccount is empty (not resolvable), we still enforce
+        // that the ARN is a well-formed Lambda ARN — the account check is
+        // best-effort.
+      } catch (e) {
+        if (e instanceof ArnRejectedError) {
+          emitArnRefused("lambda-invoke-adapter.invoke");
+        }
+        throw new Error("Invalid resource reference");
+      }
+    }
+    // Bare function names (no ARN) are only accepted without cross-account creds
+    // (i.e. same-account invocation by name). With cross-account creds, an ARN
+    // is required so we can verify the target account.
+    if (!target.startsWith("arn:") && this.deps.credentialProvider) {
+      emitArnRefused("lambda-invoke-adapter.invoke");
+      throw new Error("Invalid resource reference");
+    }
+
+    const invocationType =
+      mode === "async_callback" ? "Event" : "RequestResponse";
 
     const command = new InvokeCommand({
       FunctionName: target,
@@ -115,18 +165,26 @@ export class LambdaInvokeAdapter implements AgentSourceAdapter {
       ? await this.sender.send(command)
       : await new LambdaClient(
           this.deps.credentialProvider
-            ? { region: region || DEFAULT_REGION, credentials: this.deps.credentialProvider }
+            ? {
+                region: region || DEFAULT_REGION,
+                credentials: this.deps.credentialProvider,
+              }
             : { region: region || DEFAULT_REGION },
         ).send(command);
 
     // Async ('Event') invocations return no payload (HTTP 202); the real
     // result arrives later out-of-band, so there is no synchronous text.
-    if (invocationType === 'Event') {
-      return { output: '', raw: response };
+    if (invocationType === "Event") {
+      return { output: "", raw: response };
     }
 
-    const payloadText = bytesToString((response as { Payload?: unknown }).Payload);
-    return { output: extractTextOutput(payloadText) || NO_RESPONSE_TEXT, raw: response };
+    const payloadText = bytesToString(
+      (response as { Payload?: unknown }).Payload,
+    );
+    return {
+      output: extractTextOutput(payloadText) || NO_RESPONSE_TEXT,
+      raw: response,
+    };
   }
 
   /**
@@ -149,18 +207,21 @@ export class LambdaInvokeAdapter implements AgentSourceAdapter {
       for (const fn of out.Functions ?? []) {
         const arn = fn.FunctionArn;
         if (!arn) continue;
-        if (s.tagKey && !(await this.tagMatches(sender, arn, s.tagKey, s.tagValue))) {
+        if (
+          s.tagKey &&
+          !(await this.tagMatches(sender, arn, s.tagKey, s.tagValue))
+        ) {
           continue;
         }
         const parsed = parseArn(arn);
         candidates.push({
           origin: {
             sourceArn: arn,
-            substrate: 'lambda',
+            substrate: "lambda",
             region: parsed.region ?? region,
             account: parsed.account ?? this.deps.defaultAccount,
             discoveredAt,
-            ownership: 'external',
+            ownership: "external",
           },
           displayName: fn.FunctionName ?? arn,
           reference: arn,
@@ -202,51 +263,65 @@ export class LambdaInvokeAdapter implements AgentSourceAdapter {
     const tags = await this.fetchTags(sender, functionArn);
     const policy = await this.fetchPolicy(sender, functionArn);
     const urlConfigs = await this.fetchUrlConfigs(sender, functionArn);
-    const asyncTriggers = await this.countEventSourceMappings(sender, functionArn);
+    const asyncTriggers = await this.countEventSourceMappings(
+      sender,
+      functionArn,
+    );
 
     const threshold =
       this.deps.asyncTimeoutThresholdSeconds ?? ASYNC_TIMEOUT_THRESHOLD_SECONDS;
     const timeout = config.Timeout ?? 0;
     const mode: AgentInvocationMode =
-      timeout >= threshold || asyncTriggers > 0 ? 'async_callback' : 'sync';
+      timeout >= threshold || asyncTriggers > 0 ? "async_callback" : "sync";
 
-    const tagName = firstTag(tags, ['Name', 'name', 'citadel:name']);
-    const tagDesc = firstTag(tags, ['Description', 'description', 'citadel:description']);
+    const tagName = firstTag(tags, ["Name", "name", "citadel:name"]);
+    const tagDesc = firstTag(tags, [
+      "Description",
+      "description",
+      "citadel:description",
+    ]);
     const name = tagName ?? config.FunctionName ?? functionArn;
-    const baseDescription = tagDesc ?? config.Description ?? '';
+    const baseDescription = tagDesc ?? config.Description ?? "";
     const categories = splitTag(
-      firstTag(tags, ['Category', 'Categories', 'categories', 'citadel:category']),
+      firstTag(tags, [
+        "Category",
+        "Categories",
+        "categories",
+        "citadel:category",
+      ]),
     );
-    const skills = splitTag(firstTag(tags, ['Skills', 'skills', 'citadel:skills']));
+    const skills = splitTag(
+      firstTag(tags, ["Skills", "skills", "citadel:skills"]),
+    );
 
     // Surface import-time governance facts (public-URL exposure, resource-policy
     // grants) in the human-readable description — the normalized Tier-1 shape has
     // no dedicated field; a later story maps them structurally.
     const exposure = describeExposure(urlConfigs, policy);
     const description = exposure
-      ? `${baseDescription}${baseDescription ? ' ' : ''}${exposure}`
+      ? `${baseDescription}${baseDescription ? " " : ""}${exposure}`
       : baseDescription;
 
     const fieldConfidence: Record<string, Confidence> = {
-      name: tagName ? 'low' : 'medium',
-      description: tagDesc ? 'low' : 'medium',
-      version: 'medium',
-      skills: 'low',
-      categories: 'low',
+      name: tagName ? "low" : "medium",
+      description: tagDesc ? "low" : "medium",
+      version: "medium",
+      skills: "low",
+      categories: "low",
     };
 
     const origin: AgentOrigin = {
       sourceArn: functionArn,
-      substrate: 'lambda',
+      substrate: "lambda",
       region: fnRegion,
       account,
       discoveredAt: new Date().toISOString(),
-      ownership: 'external',
+      ownership: "external",
     };
     const invocation: AgentInvocationBlock = {
-      protocol: 'LAMBDA_INVOKE',
+      protocol: "LAMBDA_INVOKE",
       target: functionArn,
-      auth: { mode: 'SIGV4' },
+      auth: { mode: "SIGV4" },
       mode,
       region: fnRegion,
       account,
@@ -255,7 +330,7 @@ export class LambdaInvokeAdapter implements AgentSourceAdapter {
     return {
       name,
       description,
-      version: config.Version ?? '$LATEST',
+      version: config.Version ?? "$LATEST",
       skills,
       categories,
       inputSchema: {},
@@ -276,7 +351,9 @@ export class LambdaInvokeAdapter implements AgentSourceAdapter {
       parseArn(functionRef).region ?? this.deps.defaultRegion ?? DEFAULT_REGION;
     const sender = this.managementClient(region);
     try {
-      await sender.send(new GetFunctionConfigurationCommand({ FunctionName: functionRef }));
+      await sender.send(
+        new GetFunctionConfigurationCommand({ FunctionName: functionRef }),
+      );
       return { reachable: true };
     } catch (err) {
       if (isResourceNotFound(err)) {
@@ -286,7 +363,9 @@ export class LambdaInvokeAdapter implements AgentSourceAdapter {
     }
   }
 
-  async vendCredentials(invocation: AgentInvocationBlock): Promise<VendedCredentials> {
+  async vendCredentials(
+    invocation: AgentInvocationBlock,
+  ): Promise<VendedCredentials> {
     return vendImportCredentials(invocation);
   }
 
@@ -360,28 +439,35 @@ export class LambdaInvokeAdapter implements AgentSourceAdapter {
 // --- management-path helpers (ARN parsing / scope / tags / errors) ---------
 
 function readScope(scope: unknown): LambdaDiscoverScope {
-  if (typeof scope !== 'object' || scope === null) return {};
+  if (typeof scope !== "object" || scope === null) return {};
   const o = scope as Record<string, unknown>;
   const str = (v: unknown): string | undefined =>
-    typeof v === 'string' ? v : undefined;
-  return { region: str(o.region), tagKey: str(o.tagKey), tagValue: str(o.tagValue) };
+    typeof v === "string" ? v : undefined;
+  return {
+    region: str(o.region),
+    tagKey: str(o.tagKey),
+    tagValue: str(o.tagValue),
+  };
 }
 
 function refToString(ref: AgentRef): string {
-  return typeof ref === 'string' ? ref : ref.reference;
+  return typeof ref === "string" ? ref : ref.reference;
 }
 
 /** Parse the standard ARN layout `arn:partition:service:region:account:resource`. */
 function parseArn(arn: string): { region?: string; account?: string } {
-  const parts = arn.split(':');
-  if (parts[0] !== 'arn' || parts.length < 6) return {};
+  const parts = arn.split(":");
+  if (parts[0] !== "arn" || parts.length < 6) return {};
   return { region: parts[3] || undefined, account: parts[4] || undefined };
 }
 
 function isResourceNotFound(err: unknown): boolean {
-  if (typeof err !== 'object' || err === null) return false;
+  if (typeof err !== "object" || err === null) return false;
   const e = err as { name?: unknown; $metadata?: { httpStatusCode?: unknown } };
-  return e.name === 'ResourceNotFoundException' || e.$metadata?.httpStatusCode === 404;
+  return (
+    e.name === "ResourceNotFoundException" ||
+    e.$metadata?.httpStatusCode === 404
+  );
 }
 
 function errMessage(err: unknown): string {
@@ -389,10 +475,13 @@ function errMessage(err: unknown): string {
 }
 
 /** First non-empty tag value among the candidate keys (case variants). */
-function firstTag(tags: Record<string, string>, keys: string[]): string | undefined {
+function firstTag(
+  tags: Record<string, string>,
+  keys: string[],
+): string | undefined {
   for (const k of keys) {
     const v = tags[k];
-    if (typeof v === 'string' && v.length > 0) return v;
+    if (typeof v === "string" && v.length > 0) return v;
   }
   return undefined;
 }
@@ -400,7 +489,10 @@ function firstTag(tags: Record<string, string>, keys: string[]): string | undefi
 /** Split a comma-separated tag value into a trimmed, non-empty list. */
 function splitTag(value: string | undefined): string[] {
   return value
-    ? value.split(',').map((s) => s.trim()).filter((s) => s.length > 0)
+    ? value
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
     : [];
 }
 
@@ -415,12 +507,12 @@ function describeExposure(
 ): string {
   const notes: string[] = [];
   if (urlConfigs.length > 0) {
-    const authTypes = urlConfigs.map((u) => u.AuthType ?? 'UNKNOWN').join(',');
+    const authTypes = urlConfigs.map((u) => u.AuthType ?? "UNKNOWN").join(",");
     notes.push(`functionUrl:${urlConfigs.length}(${authTypes})`);
   }
   const statements = countPolicyStatements(policy);
   if (statements > 0) notes.push(`resourcePolicy:${statements}`);
-  return notes.length > 0 ? `[import ${notes.join(' ')}]` : '';
+  return notes.length > 0 ? `[import ${notes.join(" ")}]` : "";
 }
 
 /** Count statements in a Lambda resource policy JSON document. */

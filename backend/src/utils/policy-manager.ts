@@ -20,6 +20,12 @@ import {
 } from "@aws-sdk/client-sts";
 import { PolicyStatement } from "../adapters/base";
 import { PermissionError } from "../adapters/errors";
+import {
+  assertCrossAccountRole,
+  assertSameAccountArn,
+  ArnRejectedError,
+  emitArnRefused,
+} from "./arn-safety";
 
 export type PolicyScope = "datastore" | "integration" | "agent" | "eval";
 
@@ -148,12 +154,53 @@ export class PolicyManager {
 
     const principals: string[] = [lambdaRoleArn];
     if (crossArn) {
+      // CIT-254 C21: cross-account principals MUST be parsed IAM role ARNs
+      // with a non-blank externalId. Same-account IAM ARNs are also accepted
+      // (e.g. health-monitor role). No raw string ever reaches the trust policy.
+      try {
+        const platformAccountId = callerIdentity.Account!;
+        // Try same-account first (iam service, same account)
+        try {
+          assertSameAccountArn(crossArn, {
+            platformAccountId,
+            allowedServices: ["iam"],
+          });
+        } catch {
+          // Not same-account IAM — must be cross-account role with externalId
+          assertCrossAccountRole(crossArn, {
+            platformAccountId,
+            externalId: externalId ?? "",
+          });
+        }
+      } catch (e) {
+        if (e instanceof ArnRejectedError) {
+          emitArnRefused("policy-manager.ensureRole");
+        }
+        throw e instanceof ArnRejectedError
+          ? new PermissionError("Invalid resource reference")
+          : e;
+      }
       principals.push(crossArn);
     }
     // Add any additional trusted principals (e.g. health monitor role)
     if (additionalTrustedPrincipals) {
+      const platformAccountId = callerIdentity.Account!;
       for (const p of additionalTrustedPrincipals) {
         if (p && !principals.includes(p)) {
+          // CIT-254 C21: every additional principal must be a valid IAM ARN.
+          try {
+            assertSameAccountArn(p, {
+              platformAccountId,
+              allowedServices: ["iam"],
+            });
+          } catch (e) {
+            if (e instanceof ArnRejectedError) {
+              emitArnRefused("policy-manager.ensureRole.additionalPrincipal");
+            }
+            throw e instanceof ArnRejectedError
+              ? new PermissionError("Invalid resource reference")
+              : e;
+          }
           principals.push(p);
         }
       }

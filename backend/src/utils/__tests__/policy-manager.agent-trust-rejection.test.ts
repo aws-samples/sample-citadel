@@ -66,6 +66,8 @@ describe("PolicyManager.ensureRole -- citadel-agent-* trust rejection", () => {
       "123456789012",
       "integration",
       "arn:aws:iam::999999999999:role/CrossAccountRole",
+      undefined,
+      "ext-id-123",
     );
 
     const createCalls = iamMock.commandCalls(CreateRoleCommand);
