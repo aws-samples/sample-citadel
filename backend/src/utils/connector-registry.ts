@@ -1,17 +1,17 @@
 /**
  * Backend Connector Registry
- * 
+ *
  * Defines validation rules, authentication configs, and credential structures
  * for all supported connector types.
  */
 
 export enum AuthenticationMethod {
-  API_KEY = 'API_KEY',
-  OAUTH2 = 'OAUTH2',
-  BASIC_AUTH = 'BASIC_AUTH',
-  BEARER_TOKEN = 'BEARER_TOKEN',
-  IAM_ROLE = 'IAM_ROLE',
-  CONFIGURABLE = 'CONFIGURABLE'
+  API_KEY = "API_KEY",
+  OAUTH2 = "OAUTH2",
+  BASIC_AUTH = "BASIC_AUTH",
+  BEARER_TOKEN = "BEARER_TOKEN",
+  IAM_ROLE = "IAM_ROLE",
+  CONFIGURABLE = "CONFIGURABLE",
 }
 
 export interface AuthenticationConfig {
@@ -32,7 +32,14 @@ export interface ConnectorSpec {
   authentication: AuthenticationConfig;
   configuration: ConfigurationSchema;
   testEndpoint?: string;
-  gatewayTargetType?: 'lambda' | 'smithyModel' | 'mcpServer';
+  gatewayTargetType?: "lambda" | "smithyModel" | "mcpServer";
+  /**
+   * Glob-style hostname pattern for vendor-fixed SaaS hosts.
+   * When set, {@link parsePublicHttpsUrl} enforces the caller-supplied URL's
+   * hostname matches this pattern IN ADDITION to the standard SSRF checks.
+   * Examples: `*.atlassian.net`, `*.service-now.com`, `*.pagerduty.com`.
+   */
+  hostPattern?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -42,28 +49,23 @@ export interface ConnectorSpec {
 // AgentCore Identity (uppercase, underscore-separated). They are NOT the
 // lowercase / hyphenated forms used by some IdPs at the wire level.
 export type McpServerGrantType =
-  | 'CLIENT_CREDENTIALS'
-  | 'AUTHORIZATION_CODE'
-  | 'TOKEN_EXCHANGE';
+  "CLIENT_CREDENTIALS" | "AUTHORIZATION_CODE" | "TOKEN_EXCHANGE";
 
 // RFC 6749 §2.3.1 client authentication methods supported by the spec.
 export type McpServerClientAuthenticationMethod =
-  | 'CLIENT_SECRET_BASIC'
-  | 'CLIENT_SECRET_POST';
+  "CLIENT_SECRET_BASIC" | "CLIENT_SECRET_POST";
 
 export const MCP_SERVER_GRANT_TYPES: readonly McpServerGrantType[] = [
-  'CLIENT_CREDENTIALS',
-  'AUTHORIZATION_CODE',
-  'TOKEN_EXCHANGE'
+  "CLIENT_CREDENTIALS",
+  "AUTHORIZATION_CODE",
+  "TOKEN_EXCHANGE",
 ];
 
-export const MCP_SERVER_CLIENT_AUTH_METHODS: readonly McpServerClientAuthenticationMethod[] = [
-  'CLIENT_SECRET_BASIC',
-  'CLIENT_SECRET_POST'
-];
+export const MCP_SERVER_CLIENT_AUTH_METHODS: readonly McpServerClientAuthenticationMethod[] =
+  ["CLIENT_SECRET_BASIC", "CLIENT_SECRET_POST"];
 
 export const DEFAULT_MCP_SERVER_CLIENT_AUTH_METHOD: McpServerClientAuthenticationMethod =
-  'CLIENT_SECRET_BASIC';
+  "CLIENT_SECRET_BASIC";
 
 /**
  * MCP_SERVER credentials shape when `authMethod === 'OAUTH2'`.
@@ -73,7 +75,7 @@ export const DEFAULT_MCP_SERVER_CLIENT_AUTH_METHOD: McpServerClientAuthenticatio
  * on the integration record, not in user input.
  */
 export interface McpServerOauth2Config {
-  authMethod: 'OAUTH2';
+  authMethod: "OAUTH2";
   grantType: McpServerGrantType;
   clientId: string;
   clientSecret: string;
@@ -86,217 +88,224 @@ export interface McpServerOauth2Config {
 
 /** MCP_SERVER credentials shape when `authMethod === 'API_KEY'`. */
 export interface McpServerApiKeyConfig {
-  authMethod: 'API_KEY';
+  authMethod: "API_KEY";
   apiKey: string;
 }
 
 /** Discriminated union of all MCP_SERVER credential shapes. */
-export type McpServerCredentials = McpServerOauth2Config | McpServerApiKeyConfig;
+export type McpServerCredentials =
+  McpServerOauth2Config | McpServerApiKeyConfig;
 
 export const BACKEND_CONNECTOR_REGISTRY: Record<string, ConnectorSpec> = {
   CONFLUENCE: {
-    type: 'CONFLUENCE',
-    provider: 'Atlassian',
+    type: "CONFLUENCE",
+    provider: "Atlassian",
     authentication: {
       method: AuthenticationMethod.API_KEY,
-      fields: ['email', 'apiToken'],
+      fields: ["email", "apiToken"],
       secretStructure: {
-        email: 'string',
-        apiToken: 'string',
-        baseUrl: 'string'
-      }
+        email: "string",
+        apiToken: "string",
+        baseUrl: "string",
+      },
     },
     configuration: {
-      required: ['baseUrl'],
-      optional: ['spaceKeys', 'enabledFeatures'],
-      ssmParameters: ['base-url', 'space-keys']
+      required: ["baseUrl"],
+      optional: ["spaceKeys", "enabledFeatures"],
+      ssmParameters: ["base-url", "space-keys"],
     },
-    testEndpoint: '/wiki/api/v2/spaces?limit=1'
+    testEndpoint: "/wiki/api/v2/spaces?limit=1",
+    hostPattern: "*.atlassian.net",
   },
   SERVICENOW: {
-    type: 'SERVICENOW',
-    provider: 'ServiceNow',
+    type: "SERVICENOW",
+    provider: "ServiceNow",
     authentication: {
       method: AuthenticationMethod.BASIC_AUTH,
-      fields: ['username', 'password'],
+      fields: ["username", "password"],
       secretStructure: {
-        username: 'string',
-        password: 'string',
-        instanceUrl: 'string'
-      }
+        username: "string",
+        password: "string",
+        instanceUrl: "string",
+      },
     },
     configuration: {
-      required: ['instanceUrl'],
+      required: ["instanceUrl"],
       optional: [],
-      ssmParameters: ['instance-url']
+      ssmParameters: ["instance-url"],
     },
-    testEndpoint: '/api/now/table/sys_user?sysparm_limit=1'
+    testEndpoint: "/api/now/table/sys_user?sysparm_limit=1",
+    hostPattern: "*.service-now.com",
   },
   JIRA: {
-    type: 'JIRA',
-    provider: 'Atlassian',
+    type: "JIRA",
+    provider: "Atlassian",
     authentication: {
       method: AuthenticationMethod.API_KEY,
-      fields: ['email', 'apiToken'],
+      fields: ["email", "apiToken"],
       secretStructure: {
-        email: 'string',
-        apiToken: 'string',
-        baseUrl: 'string'
-      }
+        email: "string",
+        apiToken: "string",
+        baseUrl: "string",
+      },
     },
     configuration: {
-      required: ['baseUrl'],
-      optional: ['projectKeys'],
-      ssmParameters: ['base-url', 'project-keys']
+      required: ["baseUrl"],
+      optional: ["projectKeys"],
+      ssmParameters: ["base-url", "project-keys"],
     },
-    testEndpoint: '/rest/api/3/myself'
+    testEndpoint: "/rest/api/3/myself",
+    hostPattern: "*.atlassian.net",
   },
   SLACK: {
-    type: 'SLACK',
-    provider: 'Slack Technologies',
+    type: "SLACK",
+    provider: "Slack Technologies",
     authentication: {
       method: AuthenticationMethod.OAUTH2,
-      fields: ['clientId', 'clientSecret'],
+      fields: ["clientId", "clientSecret"],
       secretStructure: {
-        clientId: 'string',
-        clientSecret: 'string',
-        workspaceId: 'string'
-      }
+        clientId: "string",
+        clientSecret: "string",
+        workspaceId: "string",
+      },
     },
     configuration: {
-      required: ['workspaceId'],
+      required: ["workspaceId"],
       optional: [],
-      ssmParameters: ['workspace-id']
+      ssmParameters: ["workspace-id"],
     },
-    testEndpoint: '/api/auth.test'
+    testEndpoint: "/api/auth.test",
+    hostPattern: "*.slack.com",
   },
   MICROSOFT: {
-    type: 'MICROSOFT',
-    provider: 'Microsoft',
+    type: "MICROSOFT",
+    provider: "Microsoft",
     authentication: {
       method: AuthenticationMethod.OAUTH2,
-      fields: ['clientId', 'clientSecret', 'tenantId'],
+      fields: ["clientId", "clientSecret", "tenantId"],
       secretStructure: {
-        clientId: 'string',
-        clientSecret: 'string',
-        tenantId: 'string'
-      }
+        clientId: "string",
+        clientSecret: "string",
+        tenantId: "string",
+      },
     },
     configuration: {
-      required: ['tenantId'],
+      required: ["tenantId"],
       optional: [],
-      ssmParameters: ['tenant-id']
+      ssmParameters: ["tenant-id"],
     },
-    testEndpoint: '/v1.0/me'
+    testEndpoint: "/v1.0/me",
   },
   ZENDESK: {
-    type: 'ZENDESK',
-    provider: 'Zendesk',
+    type: "ZENDESK",
+    provider: "Zendesk",
     authentication: {
       method: AuthenticationMethod.API_KEY,
-      fields: ['email', 'apiToken'],
+      fields: ["email", "apiToken"],
       secretStructure: {
-        email: 'string',
-        apiToken: 'string',
-        subdomain: 'string'
-      }
+        email: "string",
+        apiToken: "string",
+        subdomain: "string",
+      },
     },
     configuration: {
-      required: ['subdomain'],
+      required: ["subdomain"],
       optional: [],
-      ssmParameters: ['subdomain']
+      ssmParameters: ["subdomain"],
     },
-    testEndpoint: '/api/v2/users/me.json'
+    testEndpoint: "/api/v2/users/me.json",
+    hostPattern: "*.zendesk.com",
   },
   PAGERDUTY: {
-    type: 'PAGERDUTY',
-    provider: 'PagerDuty',
+    type: "PAGERDUTY",
+    provider: "PagerDuty",
     authentication: {
       method: AuthenticationMethod.BEARER_TOKEN,
-      fields: ['apiToken'],
+      fields: ["apiToken"],
       secretStructure: {
-        apiToken: 'string'
-      }
+        apiToken: "string",
+      },
     },
     configuration: {
       required: [],
       optional: [],
-      ssmParameters: []
+      ssmParameters: [],
     },
-    testEndpoint: '/users/me'
+    testEndpoint: "/users/me",
+    hostPattern: "*.pagerduty.com",
   },
   // AgentCore integration types
   AWS_LAMBDA: {
-    type: 'AWS_LAMBDA',
-    provider: 'Amazon Web Services',
+    type: "AWS_LAMBDA",
+    provider: "Amazon Web Services",
     authentication: {
       method: AuthenticationMethod.IAM_ROLE,
-      fields: ['executionRoleArn'],
+      fields: ["executionRoleArn"],
       secretStructure: {
-        executionRoleArn: 'string'
-      }
+        executionRoleArn: "string",
+      },
     },
     configuration: {
-      required: ['lambdaArn', 'toolSchema', 'region'],
+      required: ["lambdaArn", "toolSchema", "region"],
       optional: [],
-      ssmParameters: ['lambda-arn', 'tool-schema', 'region']
+      ssmParameters: ["lambda-arn", "tool-schema", "region"],
     },
-    gatewayTargetType: 'lambda'
+    gatewayTargetType: "lambda",
   },
   AWS_SMITHY: {
-    type: 'AWS_SMITHY',
-    provider: 'Amazon Web Services',
+    type: "AWS_SMITHY",
+    provider: "Amazon Web Services",
     authentication: {
       method: AuthenticationMethod.IAM_ROLE,
-      fields: ['executionRoleArn'],
+      fields: ["executionRoleArn"],
       secretStructure: {
-        executionRoleArn: 'string'
-      }
+        executionRoleArn: "string",
+      },
     },
     configuration: {
-      required: ['serviceType', 'region'],
+      required: ["serviceType", "region"],
       optional: [],
-      ssmParameters: ['service-type', 'region']
+      ssmParameters: ["service-type", "region"],
     },
-    gatewayTargetType: 'smithyModel'
+    gatewayTargetType: "smithyModel",
   },
   MCP_SERVER: {
-    type: 'MCP_SERVER',
-    provider: 'External',
+    type: "MCP_SERVER",
+    provider: "External",
     authentication: {
       method: AuthenticationMethod.CONFIGURABLE,
       fields: [
-        'authMethod',
-        'apiKey',
-        'clientId',
-        'clientSecret',
-        'grantType',
-        'discoveryUrl',
-        'authorizationUrl',
-        'tokenUrl',
-        'scopes',
-        'clientAuthenticationMethod'
+        "authMethod",
+        "apiKey",
+        "clientId",
+        "clientSecret",
+        "grantType",
+        "discoveryUrl",
+        "authorizationUrl",
+        "tokenUrl",
+        "scopes",
+        "clientAuthenticationMethod",
       ],
       secretStructure: {
-        authMethod: 'string',
-        apiKey: 'string',
-        clientId: 'string',
-        clientSecret: 'string',
-        grantType: 'string',
-        discoveryUrl: 'string',
-        authorizationUrl: 'string',
-        tokenUrl: 'string',
-        scopes: 'string[]',
-        clientAuthenticationMethod: 'string'
-      }
+        authMethod: "string",
+        apiKey: "string",
+        clientId: "string",
+        clientSecret: "string",
+        grantType: "string",
+        discoveryUrl: "string",
+        authorizationUrl: "string",
+        tokenUrl: "string",
+        scopes: "string[]",
+        clientAuthenticationMethod: "string",
+      },
     },
     configuration: {
-      required: ['serverUrl'],
+      required: ["serverUrl"],
       optional: [],
-      ssmParameters: ['server-url']
+      ssmParameters: ["server-url"],
     },
-    gatewayTargetType: 'mcpServer'
-  }
+    gatewayTargetType: "mcpServer",
+  },
 };
 
 export interface ValidationResult {
@@ -314,29 +323,34 @@ export function getConnectorSpec(type: string): ConnectorSpec | undefined {
 /**
  * Validate credentials against connector specification
  */
-export function validateCredentials(type: string, credentials: unknown): ValidationResult {
+export function validateCredentials(
+  type: string,
+  credentials: unknown,
+): ValidationResult {
   const creds = credentials as Record<string, unknown>;
   const spec = getConnectorSpec(type);
-  
+
   if (!spec) {
     return {
       valid: false,
-      errors: [`Unknown connector type: ${type}`]
+      errors: [`Unknown connector type: ${type}`],
     };
   }
-  
+
   const errors: string[] = [];
-  
+
   // For CONFIGURABLE auth method (MCP_SERVER), only authMethod is required
   // Other fields are conditionally required based on authMethod value
   if (spec.authentication.method === AuthenticationMethod.CONFIGURABLE) {
     if (!creds.authMethod) {
-      errors.push('Missing required field: authMethod');
+      errors.push("Missing required field: authMethod");
     } else {
       // Validate conditional fields based on authMethod
-      if (creds.authMethod === 'API_KEY' && !creds.apiKey) {
-        errors.push('Missing required field: apiKey for API_KEY authentication');
-      } else if (creds.authMethod === 'OAUTH2') {
+      if (creds.authMethod === "API_KEY" && !creds.apiKey) {
+        errors.push(
+          "Missing required field: apiKey for API_KEY authentication",
+        );
+      } else if (creds.authMethod === "OAUTH2") {
         const oauth2Result = validateMcpServerOauth2Config(credentials);
         if (!oauth2Result.valid) {
           errors.push(...oauth2Result.errors);
@@ -352,39 +366,42 @@ export function validateCredentials(type: string, credentials: unknown): Validat
       }
     }
   }
-  
+
   return {
     valid: errors.length === 0,
-    errors
+    errors,
   };
 }
 
 /**
  * Validate configuration against connector specification
  */
-export function validateConfiguration(type: string, config: unknown): ValidationResult {
+export function validateConfiguration(
+  type: string,
+  config: unknown,
+): ValidationResult {
   const cfg = config as Record<string, unknown>;
   const spec = getConnectorSpec(type);
-  
+
   if (!spec) {
     return {
       valid: false,
-      errors: [`Unknown connector type: ${type}`]
+      errors: [`Unknown connector type: ${type}`],
     };
   }
-  
+
   const errors: string[] = [];
-  
+
   // Check all required configuration fields are present
   for (const field of spec.configuration.required) {
     if (!cfg[field]) {
       errors.push(`Missing required field: ${field}`);
     }
   }
-  
+
   return {
     valid: errors.length === 0,
-    errors
+    errors,
   };
 }
 
@@ -416,17 +433,19 @@ export interface McpServerOauth2ValidationResult extends ValidationResult {
   normalized?: McpServerOauth2Config;
 }
 
-const MCP_SERVER_GRANT_TYPES_SET: ReadonlySet<string> = new Set(MCP_SERVER_GRANT_TYPES);
+const MCP_SERVER_GRANT_TYPES_SET: ReadonlySet<string> = new Set(
+  MCP_SERVER_GRANT_TYPES,
+);
 const MCP_SERVER_CLIENT_AUTH_METHODS_SET: ReadonlySet<string> = new Set(
-  MCP_SERVER_CLIENT_AUTH_METHODS
+  MCP_SERVER_CLIENT_AUTH_METHODS,
 );
 
 function isHttpsUrl(value: unknown): boolean {
-  if (typeof value !== 'string' || value.length === 0) {
+  if (typeof value !== "string" || value.length === 0) {
     return false;
   }
   try {
-    return new URL(value).protocol === 'https:';
+    return new URL(value).protocol === "https:";
   } catch {
     return false;
   }
@@ -446,34 +465,48 @@ function isHttpsUrl(value: unknown): boolean {
  *     (defaults to CLIENT_SECRET_BASIC on the normalized output when omitted)
  */
 export function validateMcpServerOauth2Config(
-  credentials: unknown
+  credentials: unknown,
 ): McpServerOauth2ValidationResult {
-  if (!credentials || typeof credentials !== 'object') {
-    return { valid: false, errors: ['Credentials must be an object'] };
+  if (!credentials || typeof credentials !== "object") {
+    return { valid: false, errors: ["Credentials must be an object"] };
   }
   const creds = credentials as Record<string, unknown>;
 
   const errors: string[] = [];
 
-  if (creds.authMethod !== 'OAUTH2') {
-    errors.push("Field 'authMethod' must be 'OAUTH2' for MCP_SERVER OAuth2 config");
+  if (creds.authMethod !== "OAUTH2") {
+    errors.push(
+      "Field 'authMethod' must be 'OAUTH2' for MCP_SERVER OAuth2 config",
+    );
   }
 
-  if (typeof creds.clientId !== 'string' || creds.clientId.length === 0) {
-    errors.push('Missing required field: clientId for OAUTH2 authentication');
+  if (typeof creds.clientId !== "string" || creds.clientId.length === 0) {
+    errors.push("Missing required field: clientId for OAUTH2 authentication");
   }
-  if (typeof creds.clientSecret !== 'string' || creds.clientSecret.length === 0) {
-    errors.push('Missing required field: clientSecret for OAUTH2 authentication');
+  if (
+    typeof creds.clientSecret !== "string" ||
+    creds.clientSecret.length === 0
+  ) {
+    errors.push(
+      "Missing required field: clientSecret for OAUTH2 authentication",
+    );
   }
 
   // grantType
   const grantTypeRaw = creds.grantType;
   let grantType: McpServerGrantType | undefined;
-  if (grantTypeRaw === undefined || grantTypeRaw === null || grantTypeRaw === '') {
-    errors.push('Missing required field: grantType for OAUTH2 authentication');
-  } else if (typeof grantTypeRaw !== 'string' || !MCP_SERVER_GRANT_TYPES_SET.has(grantTypeRaw)) {
+  if (
+    grantTypeRaw === undefined ||
+    grantTypeRaw === null ||
+    grantTypeRaw === ""
+  ) {
+    errors.push("Missing required field: grantType for OAUTH2 authentication");
+  } else if (
+    typeof grantTypeRaw !== "string" ||
+    !MCP_SERVER_GRANT_TYPES_SET.has(grantTypeRaw)
+  ) {
     errors.push(
-      `Invalid grantType '${String(grantTypeRaw)}' for OAUTH2 authentication; expected one of: ${MCP_SERVER_GRANT_TYPES.join(', ')}`
+      `Invalid grantType '${String(grantTypeRaw)}' for OAUTH2 authentication; expected one of: ${MCP_SERVER_GRANT_TYPES.join(", ")}`,
     );
   } else {
     grantType = grantTypeRaw as McpServerGrantType;
@@ -482,27 +515,32 @@ export function validateMcpServerOauth2Config(
   // scopes
   if (!Array.isArray(creds.scopes)) {
     errors.push(
-      'Missing required field: scopes for OAUTH2 authentication (must be a non-empty string array)'
+      "Missing required field: scopes for OAUTH2 authentication (must be a non-empty string array)",
     );
   } else if (creds.scopes.length < 1) {
-    errors.push('Field scopes must be a non-empty array for OAUTH2 authentication');
-  } else if (!creds.scopes.every((s: unknown) => typeof s === 'string' && s.length > 0)) {
-    errors.push('Field scopes must contain only non-empty strings');
+    errors.push(
+      "Field scopes must be a non-empty array for OAUTH2 authentication",
+    );
+  } else if (
+    !creds.scopes.every((s: unknown) => typeof s === "string" && s.length > 0)
+  ) {
+    errors.push("Field scopes must contain only non-empty strings");
   }
 
   // URL fields (presence + https://)
-  const hasDiscovery = creds.discoveryUrl != null && creds.discoveryUrl !== '';
-  const hasToken = creds.tokenUrl != null && creds.tokenUrl !== '';
-  const hasAuthorization = creds.authorizationUrl != null && creds.authorizationUrl !== '';
+  const hasDiscovery = creds.discoveryUrl != null && creds.discoveryUrl !== "";
+  const hasToken = creds.tokenUrl != null && creds.tokenUrl !== "";
+  const hasAuthorization =
+    creds.authorizationUrl != null && creds.authorizationUrl !== "";
 
   if (hasDiscovery && !isHttpsUrl(creds.discoveryUrl)) {
-    errors.push('Field discoveryUrl must be a valid https:// URL');
+    errors.push("Field discoveryUrl must be a valid https:// URL");
   }
   if (hasToken && !isHttpsUrl(creds.tokenUrl)) {
-    errors.push('Field tokenUrl must be a valid https:// URL');
+    errors.push("Field tokenUrl must be a valid https:// URL");
   }
   if (hasAuthorization && !isHttpsUrl(creds.authorizationUrl)) {
-    errors.push('Field authorizationUrl must be a valid https:// URL');
+    errors.push("Field authorizationUrl must be a valid https:// URL");
   }
 
   // Endpoint discovery requirement:
@@ -511,11 +549,11 @@ export function validateMcpServerOauth2Config(
   if (!hasDiscovery) {
     if (!hasToken) {
       errors.push(
-        'Either discoveryUrl or tokenUrl is required for OAUTH2 authentication'
+        "Either discoveryUrl or tokenUrl is required for OAUTH2 authentication",
       );
-    } else if (grantType === 'AUTHORIZATION_CODE' && !hasAuthorization) {
+    } else if (grantType === "AUTHORIZATION_CODE" && !hasAuthorization) {
       errors.push(
-        "Field authorizationUrl is required when grantType='AUTHORIZATION_CODE' and discoveryUrl is not provided"
+        "Field authorizationUrl is required when grantType='AUTHORIZATION_CODE' and discoveryUrl is not provided",
       );
     }
   }
@@ -523,13 +561,16 @@ export function validateMcpServerOauth2Config(
   // clientAuthenticationMethod (optional, default applied on success)
   let clientAuthenticationMethod: McpServerClientAuthenticationMethod =
     DEFAULT_MCP_SERVER_CLIENT_AUTH_METHOD;
-  if (creds.clientAuthenticationMethod !== undefined && creds.clientAuthenticationMethod !== null) {
+  if (
+    creds.clientAuthenticationMethod !== undefined &&
+    creds.clientAuthenticationMethod !== null
+  ) {
     if (
-      typeof creds.clientAuthenticationMethod !== 'string' ||
+      typeof creds.clientAuthenticationMethod !== "string" ||
       !MCP_SERVER_CLIENT_AUTH_METHODS_SET.has(creds.clientAuthenticationMethod)
     ) {
       errors.push(
-        `Invalid clientAuthenticationMethod '${String(creds.clientAuthenticationMethod)}'; expected one of: ${MCP_SERVER_CLIENT_AUTH_METHODS.join(', ')}`
+        `Invalid clientAuthenticationMethod '${String(creds.clientAuthenticationMethod)}'; expected one of: ${MCP_SERVER_CLIENT_AUTH_METHODS.join(", ")}`,
       );
     } else {
       clientAuthenticationMethod =
@@ -543,12 +584,12 @@ export function validateMcpServerOauth2Config(
 
   // All checks passed — build the normalized config with defaults applied.
   const normalized: McpServerOauth2Config = {
-    authMethod: 'OAUTH2',
+    authMethod: "OAUTH2",
     grantType: grantType as McpServerGrantType,
     clientId: creds.clientId as string,
     clientSecret: creds.clientSecret as string,
     scopes: [...(creds.scopes as string[])],
-    clientAuthenticationMethod
+    clientAuthenticationMethod,
   };
   if (hasDiscovery) {
     normalized.discoveryUrl = creds.discoveryUrl as string;

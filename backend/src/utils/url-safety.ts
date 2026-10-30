@@ -404,7 +404,171 @@ export async function safeHttpsRequest(
 }
 
 // ---------------------------------------------------------------------------
+// safeFetch — high-level pinned-address fetch replacing bare `fetch()` calls
+// ---------------------------------------------------------------------------
+
+/**
+ * Low-level transport that performs an HTTPS request to an already-resolved
+ * (pinned) IP address.  Tests inject a fake that records the connection
+ * parameters; production uses the default implementation backed by
+ * {@link safeHttpsRequest}.
+ */
+export type SafeFetchTransport = (
+  url: string,
+  init: { method?: string; headers?: Record<string, string>; body?: string },
+  deps: SafeHttpsRequestOptions,
+) => Promise<SafeResponse>;
+
+/** Options for {@link safeFetch}. */
+export interface SafeFetchOptions {
+  /** Injectable DNS lookup. */
+  lookup?: DnsLookupFn;
+  /** Request timeout in ms (default 10 000). */
+  timeoutMs?: number;
+  /** Maximum response body bytes (default 1 MiB). */
+  maxBodyBytes?: number;
+  /**
+   * Transport override for tests.  When omitted, uses the built-in
+   * {@link safeHttpsRequest} which connects to the pinned IP.
+   */
+  transport?: SafeFetchTransport;
+}
+
+/**
+ * Response-like object returned by {@link safeFetch}.
+ *
+ * Intentionally NOT the global `Response` — the pinned-address request is
+ * made over `node:https`, so we expose only the subset callers actually use.
+ */
+export interface SafeFetchResponse {
+  status: number;
+  ok: boolean;
+  statusText: string;
+  headers: Record<string, string | undefined>;
+  text(): Promise<string>;
+  json(): Promise<unknown>;
+}
+
+/**
+ * Fetch a caller-controlled URL connecting to its DNS-pinned IP address.
+ *
+ * Replaces every bare `fetch(url)` / `fetchFn(url)` call in code that
+ * handles caller-supplied URLs.  The URL is validated (HTTPS, public-IP),
+ * DNS-resolved once, and the actual TCP connection goes to the pinned IP
+ * with the original `Host` header and SNI `servername`.  Redirects (3xx)
+ * are refused.
+ *
+ * @throws {UrlRejectedError} on non-HTTPS, private IP, redirect, timeout,
+ *   or body overflow.
+ */
+export async function safeFetch(
+  url: string,
+  init: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+  } = {},
+  opts: SafeFetchOptions = {},
+): Promise<SafeFetchResponse> {
+  const transport: SafeFetchTransport = opts.transport ?? safeHttpsRequest;
+  const deps: SafeHttpsRequestOptions = {
+    lookup: opts.lookup,
+    timeoutMs: opts.timeoutMs,
+    maxBodyBytes: opts.maxBodyBytes,
+  };
+  const raw = await transport(url, init, deps);
+  return toFetchResponse(raw);
+}
+
+function toFetchResponse(raw: SafeResponse): SafeFetchResponse {
+  const bodyStr = raw.body.toString("utf-8");
+  return {
+    status: raw.status,
+    ok: raw.status >= 200 && raw.status < 300,
+    statusText: `${raw.status}`,
+    headers: raw.headers,
+    text: async () => bodyStr,
+    json: async () => JSON.parse(bodyStr),
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Match a hostname against a glob-style `hostPattern` (e.g. `*.atlassian.net`).
+ *
+ * Only the simple `*.suffix` form is supported (case-insensitive).
+ */
+export function matchesHostPattern(hostname: string, pattern: string): boolean {
+  const h = hostname.toLowerCase();
+  const p = pattern.toLowerCase();
+
+  if (p.startsWith("*.")) {
+    const suffix = p.slice(1); // ".atlassian.net"
+    return h.endsWith(suffix) && h.length > suffix.length;
+  }
+  return h === p;
+}
+
+/**
+ * Emit a `Citadel/Egress UrlRefused` metric via CloudWatch EMF.
+ * Never throws — best-effort only.
+ */
+export function emitUrlRefused(site: string): void {
+  try {
+    console.log(
+      JSON.stringify({
+        _aws: {
+          Timestamp: Date.now(),
+          CloudWatchMetrics: [
+            {
+              Namespace: "Citadel/Egress",
+              Dimensions: [["Site"]],
+              Metrics: [{ Name: "UrlRefused", Unit: "Count" }],
+            },
+          ],
+        },
+        Site: site,
+        UrlRefused: 1,
+      }),
+    );
+  } catch {
+    // metrics must never break the caller
+  }
+}
+
+/**
+ * Validate a URL as safe for outbound HTTPS AND enforce a vendor hostPattern
+ * when provided.
+ *
+ * Combines {@link parsePublicHttpsUrl} + optional hostPattern matching.
+ * Used at write-path mutation time to reject early.
+ *
+ * @throws {UrlRejectedError} on any violation.
+ */
+export function parseAndEnforceUrl(
+  url: string,
+  opts: ParseUrlOptions & { hostPattern?: string; site?: string } = {},
+): URL {
+  const parsed = parsePublicHttpsUrl(url, opts);
+
+  if (
+    opts.hostPattern &&
+    !matchesHostPattern(parsed.hostname, opts.hostPattern)
+  ) {
+    emitUrlRefused(opts.site ?? "unknown");
+    throw new UrlRejectedError(
+      "hostname does not match expected vendor pattern",
+    );
+  }
+
+  return parsed;
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers (numeric encoding)
 // ---------------------------------------------------------------------------
 
 /**
