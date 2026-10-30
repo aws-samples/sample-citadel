@@ -71,17 +71,6 @@ const SSM_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 type SigV4Credentials = Awaited<ReturnType<ReturnType<typeof defaultProvider>>>;
 let _cachedCredentials: SigV4Credentials | null = null;
 
-// ── Agent-source adapter registry (import dispatch) ─────────────────
-// Lazily built so the legacy path pays nothing when import is disabled.
-let _agentSourceRegistry: AgentSourceAdapterRegistry | null = null;
-
-function getAgentSourceRegistry(): AgentSourceAdapterRegistry {
-  if (!_agentSourceRegistry) {
-    _agentSourceRegistry = buildImportRegistry();
-  }
-  return _agentSourceRegistry;
-}
-
 /**
  * Build an agent-source registry wired with the invoke-side secret resolver
  * and, optionally, CROSS-ACCOUNT invoke credentials threaded into the AWS-native
@@ -188,7 +177,6 @@ export function isImportEnabled(): boolean {
 export function _resetCaches(): void {
   _agentConfigCache = {};
   _cachedCredentials = null;
-  _agentSourceRegistry = null;
 }
 
 export async function getCredentials(): Promise<SigV4Credentials> {
