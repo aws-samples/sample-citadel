@@ -353,7 +353,7 @@ describe('probeAgentCandidate — transient secret handling (never persisted/log
     );
     const deps = mockBuildRegistry.mock.calls[0][0] as { resolveSecret?: (ref: string) => Promise<string> };
     await expect(deps.resolveSecret!('arn:aws:secretsmanager:::secret:ref')).resolves.toBe('resolved-from-ref');
-    expect(mockGetAgentInvocationSecret).toHaveBeenCalledWith('arn:aws:secretsmanager:::secret:ref');
+    expect(mockGetAgentInvocationSecret).toHaveBeenCalledWith('arn:aws:secretsmanager:::secret:ref', ORG);
   });
 
   it('persists NOTHING (no secret store, no Registry create/update)', async () => {

@@ -1499,7 +1499,7 @@ describe('getAgentInvocationSecret', () => {
       SecretString: 'raw-invocation-secret',
     });
 
-    const value = await getAgentInvocationSecret(secretRef);
+    const value = await getAgentInvocationSecret(secretRef, 'org-1');
 
     expect(value).toBe('raw-invocation-secret');
     const calls = secretsManagerMock.commandCalls(GetSecretValueCommand);
@@ -1513,7 +1513,7 @@ describe('getAgentInvocationSecret', () => {
       SecretString: '{"not":"parsed"}',
     });
 
-    const value = await getAgentInvocationSecret('secret/opaque');
+    const value = await getAgentInvocationSecret('/citadel/agents/org-1/opaque', 'org-1');
 
     expect(value).toBe('{"not":"parsed"}');
   });
@@ -1521,7 +1521,7 @@ describe('getAgentInvocationSecret', () => {
   it('throws when the secret has no string value (binary-only / empty)', async () => {
     secretsManagerMock.on(GetSecretValueCommand).resolves({});
 
-    await expect(getAgentInvocationSecret('secret/missing')).rejects.toThrow(
+    await expect(getAgentInvocationSecret('/citadel/agents/org-1/missing', 'org-1')).rejects.toThrow(
       /no string value/i,
     );
   });

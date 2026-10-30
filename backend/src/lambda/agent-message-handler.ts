@@ -99,6 +99,7 @@ function getAgentSourceRegistry(): AgentSourceAdapterRegistry {
  */
 function buildImportRegistry(
   credentialProvider?: InvokeCredentials,
+  recordOrgId?: string,
 ): AgentSourceAdapterRegistry {
   // Lazy require keeps credential-manager out of the cold-start path — hoisting to a
   // top-level import would load it on every invocation. User-approved suppression (2026-07-19).
@@ -106,7 +107,13 @@ function buildImportRegistry(
     // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
     require("../utils/credential-manager") as typeof import("../utils/credential-manager");
   return buildDefaultAgentSourceRegistry({
-    resolveSecret: (ref: string) => getAgentInvocationSecret(ref),
+    // CIT-254 H24: bind secret reads to the owning org's namespace.
+    // When recordOrgId is absent (legacy agents without orgId), the
+    // assertSecretRefInOrgNamespace guard inside getAgentInvocationSecret
+    // will reject — which is correct: a record with no org MUST NOT resolve
+    // secrets scoped to any org.
+    resolveSecret: (ref: string) =>
+      getAgentInvocationSecret(ref, recordOrgId ?? ""),
     credentialProvider,
   });
 }
@@ -128,10 +135,12 @@ function buildImportRegistry(
 async function resolveImportRegistry(
   invocation: AgentInvocationBlock,
   agentId: string,
+  recordOrgId?: string,
 ): Promise<AgentSourceAdapterRegistry> {
   const roleArn = invocation.roleArn;
   if (!roleArn || !isCrossAccountRoleArn(roleArn, process.env.ACCOUNT_ID)) {
-    return getAgentSourceRegistry();
+    // Same-account path: rebuild per-invocation so org-scoping is applied.
+    return buildImportRegistry(undefined, recordOrgId);
   }
 
   let credentialProvider: InvokeCredentials | undefined;
@@ -168,7 +177,7 @@ async function resolveImportRegistry(
     );
   }
 
-  return buildImportRegistry(credentialProvider);
+  return buildImportRegistry(credentialProvider, recordOrgId);
 }
 
 /** True only when the agent-import dispatcher is explicitly enabled. */
@@ -681,6 +690,7 @@ async function dispatchImportedInvocation(
   let invocation: AgentInvocationBlock | undefined;
   let origin: AgentOrigin | undefined;
   let descriptorName = agentId;
+  let recordOrgId: string | undefined;
   try {
     const region = process.env.AWS_REGION || "ap-southeast-2";
     const registryService = new RegistryService({ registryId, region });
@@ -693,6 +703,7 @@ async function dispatchImportedInvocation(
     invocation = meta.invocation;
     origin = meta.origin;
     descriptorName = record.name || agentId;
+    recordOrgId = meta.orgId;
   } catch (error) {
     // A Registry read failure must not break an import-unaware agent.
     console.error(
@@ -721,7 +732,7 @@ async function dispatchImportedInvocation(
   // assumed credentials here. Cross-account wiring for the test-invoke
   // (testImportedAgent), cross-account discovery, and HTTP/MCP SIGV4
   // cross-account signing are deliberate follow-ups.
-  const registry = await resolveImportRegistry(invocation, agentId);
+  const registry = await resolveImportRegistry(invocation, agentId, recordOrgId);
 
   // Explicit invocation block: resolve the protocol adapter. An unknown
   // protocol is a real configuration error, so log a structured error and
