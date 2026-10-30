@@ -30,6 +30,13 @@ import {
   ResourceNotFoundError,
   ValidationError,
 } from "./adapters/errors";
+import {
+  assertCrossAccountRole,
+  assertSameAccountArn,
+  ArnRejectedError,
+  emitArnRefused,
+} from "../utils/arn-safety";
+import { computeTrustPath } from "../utils/trust-path";
 
 // --- Clients ---
 
@@ -447,6 +454,51 @@ async function listAvailableDataSources(orgId: string, usage?: string) {
 
 // --- Mutations ---
 
+/**
+ * CIT-254 C12: validate `config.crossAccountRoleArn` at mutation time.
+ *
+ * Same-account ARNs must match the platform account (from STS, not caller).
+ * Cross-account ARNs require a non-blank externalId. Non-IAM or malformed
+ * ARNs are rejected. Returns `{ externalId }` on success for cross-account,
+ * or `undefined` for same-account / absent.
+ */
+async function validateCrossAccountConfig(
+  config: Record<string, unknown>,
+  pm: PolicyManager,
+): Promise<string | undefined> {
+  const crossAccountRoleArn = config.crossAccountRoleArn;
+  if (!crossAccountRoleArn || typeof crossAccountRoleArn !== "string") {
+    return undefined;
+  }
+
+  const { accountId: platformAccountId } = await pm.getAccountContext();
+  const externalId =
+    typeof config.externalId === "string" ? config.externalId : "";
+
+  try {
+    // Try same-account first — must exactly equal platform account
+    try {
+      assertSameAccountArn(crossAccountRoleArn, {
+        platformAccountId,
+        allowedServices: ["iam"],
+      });
+      return undefined; // same-account, no externalId needed
+    } catch {
+      // Not same-account — must be cross-account role with externalId
+      assertCrossAccountRole(crossAccountRoleArn, {
+        platformAccountId,
+        externalId,
+      });
+      return externalId;
+    }
+  } catch (e) {
+    if (e instanceof ArnRejectedError) {
+      emitArnRefused("datastore-resolver");
+    }
+    throw new ValidationError("Invalid resource reference");
+  }
+}
+
 async function createDataStore(
   input: CreateDataStoreInput,
   createdBy: string,
@@ -614,6 +666,11 @@ async function createDataStore(
 
     let scopedCredentials: ScopedCredentials | undefined;
     if (policies.length > 0) {
+      // CIT-254 C12: validate crossAccountRoleArn at write time + trust-path probe
+      const crossAccountExternalId = await validateCrossAccountConfig(
+        config,
+        policyManager,
+      );
       const roleTagInput: RoleTagInput = {
         orgId: callerOrgId,
         agentId: dataStoreId,
@@ -625,9 +682,29 @@ async function createDataStore(
         "datastore",
         config.crossAccountRoleArn,
         await getAdditionalTrustedPrincipals(),
-        undefined,
+        crossAccountExternalId,
         roleTagInput,
       );
+      // Trust-path probe (soft gate — log findings, do not block)
+      if (config.crossAccountRoleArn) {
+        try {
+          const dsRoleArn = `arn:aws:iam::${accountId}:role/citadel-ds-${dataStoreId}`;
+          const tp = await computeTrustPath(dsRoleArn, {
+            crossAccountRoleArn: config.crossAccountRoleArn as string,
+          });
+          if (!tp.clean) {
+            console.warn("createDataStore: trust-path probe findings", {
+              dataStoreId,
+              findings: tp.findings,
+            });
+          }
+        } catch (e) {
+          console.warn(
+            "createDataStore: trust-path probe error (non-fatal)",
+            e,
+          );
+        }
+      }
       // IAM is eventually consistent — wait for role/policy propagation
       await new Promise((resolve) => setTimeout(resolve, 10000));
       const creds = await policyManager.assumeScopedRole(
@@ -635,6 +712,7 @@ async function createDataStore(
         accountId,
         "datastore",
         config.crossAccountRoleArn,
+        crossAccountExternalId,
       );
       scopedCredentials = creds;
     }
@@ -920,6 +998,11 @@ async function connectDataStore(dataStoreId: string, event: unknown) {
     let scopedCredentials: ScopedCredentials | undefined;
 
     if (policies.length > 0) {
+      // CIT-254 C12: validate crossAccountRoleArn at connect time + trust-path probe
+      const crossAccountExternalId = await validateCrossAccountConfig(
+        config,
+        policyManager,
+      );
       const roleTagInput: RoleTagInput = {
         orgId: existing.orgId as string | undefined,
         agentId: dataStoreId,
@@ -931,9 +1014,29 @@ async function connectDataStore(dataStoreId: string, event: unknown) {
         "datastore",
         config.crossAccountRoleArn,
         await getAdditionalTrustedPrincipals(),
-        undefined,
+        crossAccountExternalId,
         roleTagInput,
       );
+      // Trust-path probe (soft gate — log findings, do not block)
+      if (config.crossAccountRoleArn) {
+        try {
+          const dsRoleArn = `arn:aws:iam::${accountId}:role/citadel-ds-${dataStoreId}`;
+          const tp = await computeTrustPath(dsRoleArn, {
+            crossAccountRoleArn: config.crossAccountRoleArn as string,
+          });
+          if (!tp.clean) {
+            console.warn("connectDataStore: trust-path probe findings", {
+              dataStoreId,
+              findings: tp.findings,
+            });
+          }
+        } catch (e) {
+          console.warn(
+            "connectDataStore: trust-path probe error (non-fatal)",
+            e,
+          );
+        }
+      }
       // IAM is eventually consistent — wait for policy propagation
       await new Promise((resolve) => setTimeout(resolve, 5000));
       scopedCredentials = await policyManager.assumeScopedRole(
@@ -941,6 +1044,7 @@ async function connectDataStore(dataStoreId: string, event: unknown) {
         accountId,
         "datastore",
         config.crossAccountRoleArn,
+        crossAccountExternalId,
       );
     }
 

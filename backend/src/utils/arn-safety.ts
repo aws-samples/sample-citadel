@@ -55,6 +55,37 @@ export class ArnRejectedError extends Error {
 }
 
 // ---------------------------------------------------------------------------
+// Metric
+// ---------------------------------------------------------------------------
+
+/**
+ * Emit a `Citadel/Arn Refused` CloudWatch EMF metric for the given call site.
+ * Never throws — metrics must never break the caller.
+ */
+export function emitArnRefused(site: string): void {
+  try {
+    console.log(
+      JSON.stringify({
+        _aws: {
+          Timestamp: Date.now(),
+          CloudWatchMetrics: [
+            {
+              Namespace: "Citadel/Arn",
+              Dimensions: [["Site"]],
+              Metrics: [{ Name: "Refused", Unit: "Count" }],
+            },
+          ],
+        },
+        Site: site,
+        Refused: 1,
+      }),
+    );
+  } catch {
+    // metrics must never break the caller
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
