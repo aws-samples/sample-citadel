@@ -159,6 +159,7 @@ function recordWithInvocation(invocation: Record<string, unknown>) {
     categories: [],
     icon: "",
     state: "active",
+    orgId: "org-1",
     invocation,
   };
   return {

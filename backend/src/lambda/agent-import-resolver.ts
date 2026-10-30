@@ -1899,7 +1899,8 @@ export async function publishImportToGateway(
     // credential provider. The provider name derives from integrationId=importId
     // (`integration-<importId>-api-key`), matching the unpublish teardown so the
     // same provider is deleted later.
-    const secret = await getAgentInvocationSecret(secretRef);
+    if (!meta.orgId) throw new Error("Access denied");
+    const secret = await getAgentInvocationSecret(secretRef, meta.orgId);
     const provider = await createOrUpsertApiKeyProvider({
       integrationId: importId,
       apiKey: secret,
@@ -2248,10 +2249,12 @@ export async function testImportedAgent(
     // verbatim (ref ignored); else a provided ref is fetched on demand; else no
     // resolver is wired (the adapter invokes without an auth header).
     let resolveSecret: ((ref: string) => Promise<string>) | undefined;
+    const callerOrgId = await extractOrgFromEvent(event);
     if (rawSecret) {
       resolveSecret = async () => rawSecret;
     } else if (secretRef) {
-      resolveSecret = (ref: string) => getAgentInvocationSecret(ref);
+      if (!callerOrgId) throw new Error("Access denied");
+      resolveSecret = (ref: string) => getAgentInvocationSecret(ref, callerOrgId);
     }
 
     // Build the candidate's invocation descriptor first so its (possibly
@@ -2408,10 +2411,12 @@ export async function probeAgentCandidate(
   // a RAW secret is returned verbatim (ref ignored); else a provided ref is
   // fetched on demand; else no resolver is wired.
   let resolveSecret: ((ref: string) => Promise<string>) | undefined;
+  const callerOrgId = await extractOrgFromEvent(event);
   if (rawSecret) {
     resolveSecret = async () => rawSecret;
   } else if (secretRef) {
-    resolveSecret = (ref: string) => getAgentInvocationSecret(ref);
+    if (!callerOrgId) throw new Error("Access denied");
+    resolveSecret = (ref: string) => getAgentInvocationSecret(ref, callerOrgId);
   }
 
   // Base registry for the static describe() — runs under this Lambda's identity.

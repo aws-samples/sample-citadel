@@ -401,6 +401,7 @@ describe('publishImportToGateway — auth offload', () => {
 
       expect(mockGetAgentInvocationSecret).toHaveBeenCalledWith(
         'arn:aws:secretsmanager:us-east-1:1:secret:/citadel/agents/x',
+        ORG,
       );
       expect(mockCreateOrUpsertApiKeyProvider).toHaveBeenCalledWith(
         expect.objectContaining({ integrationId: 'imp-1', apiKey: SECRET_VALUE }),

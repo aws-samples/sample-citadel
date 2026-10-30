@@ -24,6 +24,7 @@ import {
   emitUrlRefused,
   UrlRejectedError,
 } from "./url-safety";
+import { assertSecretRefInOrgNamespace } from "./secret-ref-safety";
 
 const secretsManager = new SecretsManagerClient({});
 const ssm = new SSMClient({});
@@ -206,21 +207,34 @@ export async function storeAgentInvocationSecret(
  *
  * The returned value is sensitive: callers MUST NOT log it.
  *
+ * **Security (CIT-254 H24):** The caller MUST supply the `callerOrgId` that
+ * owns the secret. {@link assertSecretRefInOrgNamespace} validates that
+ * `secretRef` resides under `/citadel/{type}/{callerOrgId}/…` before the
+ * GetSecretValue call is made. A mismatch produces an opaque "Access denied"
+ * error and emits the `Citadel/Secrets RefRefused` metric so the refusal is
+ * observable in CloudWatch. This prevents one tenant from reading another
+ * tenant's invocation secrets even if the secretRef is known.
+ *
  * @param secretRef - the Secrets Manager ARN or name from the Registry record.
+ * @param callerOrgId - the organisation that owns the secret (server-derived,
+ *   NEVER caller-supplied). Typically the record's `meta.orgId`.
  * @returns the raw secret string.
+ * @throws {SecretRefRejectedError} if the ref is outside the caller's namespace.
  * @throws if the secret has no string value (binary-only or empty) — the caller
  *   treats this as a hard failure rather than invoking unauthenticated.
  */
 export async function getAgentInvocationSecret(
   secretRef: string,
+  callerOrgId: string,
 ): Promise<string> {
+  assertSecretRefInOrgNamespace(secretRef, callerOrgId);
   const response = await secretsManager.send(
     new GetSecretValueCommand({
       SecretId: secretRef,
     }),
   );
   if (!response.SecretString) {
-    throw new Error(`Agent invocation secret ${secretRef} has no string value`);
+    throw new Error(`Agent invocation secret has no string value`);
   }
   return response.SecretString;
 }
