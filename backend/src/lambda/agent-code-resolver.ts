@@ -12,6 +12,11 @@ import {
   hasRoleFromEvent,
 } from "../utils/auth-event";
 import { RegistryService } from "../services/registry-service";
+import {
+  resolveRecordScopedAgentCodeKey,
+  AgentCodeKeyError,
+  emitAgentCodeKeyRefused,
+} from "../utils/agent-code-key";
 
 const s3Client = new S3Client({});
 const dynamoClient = new DynamoDBClient({});
@@ -166,7 +171,7 @@ async function getAgentCode(args: GetAgentCodeArgs, event: unknown) {
 
     const configResponse = await docClient.send(getConfigCommand);
 
-    let filename: string;
+    let filename: string | undefined;
     if (configResponse.Item) {
       // Parse config to get filename
       let config = configResponse.Item.config;
@@ -177,36 +182,73 @@ async function getAgentCode(args: GetAgentCodeArgs, event: unknown) {
           config = {};
         }
       }
-      filename = config.filename || `${agentId}.py`;
-    } else {
-      // Registry-based agent: DynamoDB has no record.
-      // Try using agentId directly as filename.
-      filename = `${agentId}.py`;
+      filename = config.filename;
     }
 
-    const key = `agents/${filename}`;
+    // Derive record-scoped key (finding C10). The key is bound to the
+    // record's own id — a sibling record cannot address this agent's code.
+    let keys;
+    try {
+      keys = resolveRecordScopedAgentCodeKey(agentId, filename);
+    } catch (err) {
+      if (err instanceof AgentCodeKeyError) {
+        emitAgentCodeKeyRefused("getAgentCode");
+        throw new Error("Access denied");
+      }
+      throw err;
+    }
 
-    // Get code from S3
-    const s3Command = new GetObjectCommand({
-      Bucket: AGENT_BUCKET_NAME,
-      Key: key,
-    });
+    // Try scoped key first; fall back to legacy key for pre-scoped agents.
+    try {
+      const s3Response = await s3Client.send(
+        new GetObjectCommand({
+          Bucket: AGENT_BUCKET_NAME,
+          Key: keys.scopedKey,
+        }),
+      );
+      const code = await s3Response.Body?.transformToString();
 
-    const s3Response = await s3Client.send(s3Command);
-    const code = await s3Response.Body?.transformToString();
-
-    return {
-      agentId,
-      code: code || "# Agent code not found\n",
-      version: s3Response.VersionId,
-      lastModified: s3Response.LastModified?.toISOString(),
-    };
-  } catch (error: unknown) {
-    if (error instanceof Error && error.name === "NoSuchKey") {
-      // Return default code if file doesn't exist
       return {
         agentId,
-        code: `# Agent: ${agentId}
+        code: code || "# Agent code not found\n",
+        version: s3Response.VersionId,
+        lastModified: s3Response.LastModified?.toISOString(),
+      };
+    } catch (error: unknown) {
+      if (error instanceof Error && error.name === "NoSuchKey") {
+        // Scoped key not found — try legacy flat key (seeder/pre-scoped agents).
+        console.log(
+          JSON.stringify({
+            level: "INFO",
+            action: "legacy_code_key_fallback",
+            scopedKey: keys.scopedKey,
+            legacyKey: keys.legacyKey,
+          }),
+        );
+        try {
+          const s3Response = await s3Client.send(
+            new GetObjectCommand({
+              Bucket: AGENT_BUCKET_NAME,
+              Key: keys.legacyKey,
+            }),
+          );
+          const code = await s3Response.Body?.transformToString();
+
+          return {
+            agentId,
+            code: code || "# Agent code not found\n",
+            version: s3Response.VersionId,
+            lastModified: s3Response.LastModified?.toISOString(),
+          };
+        } catch (legacyError: unknown) {
+          if (
+            legacyError instanceof Error &&
+            legacyError.name === "NoSuchKey"
+          ) {
+            // Neither scoped nor legacy key exists — return default code.
+            return {
+              agentId,
+              code: `# Agent: ${agentId}
 # Add your agent code here
 
 def handler(event, context):
@@ -222,9 +264,19 @@ def handler(event, context):
     """
     pass
 `,
-        version: null,
-        lastModified: null,
-      };
+              version: null,
+              lastModified: null,
+            };
+          }
+          throw legacyError;
+        }
+      }
+      throw error;
+    }
+  } catch (error: unknown) {
+    // Re-throw AgentCodeKeyError-originated "Access denied" as-is.
+    if (error instanceof Error && error.message === "Access denied") {
+      throw error;
     }
     console.error("Error getting agent code:", error);
     throw error;
@@ -249,7 +301,7 @@ async function updateAgentCode(args: UpdateAgentCodeArgs, event: unknown) {
 
     const configResponse = await docClient.send(getConfigCommand);
 
-    let filename: string;
+    let filename: string | undefined;
     if (configResponse.Item) {
       // Parse config to get filename
       let config = configResponse.Item.config;
@@ -260,18 +312,27 @@ async function updateAgentCode(args: UpdateAgentCodeArgs, event: unknown) {
           config = {};
         }
       }
-      filename = config.filename || `${agentId}.py`;
-    } else {
-      // Registry-based agent: DynamoDB has no record.
-      filename = `${agentId}.py`;
+      filename = config.filename;
     }
 
-    const key = `agents/${filename}`;
+    // Derive record-scoped key (finding C10). Writes ALWAYS go to the
+    // scoped key — never the legacy flat key — so new code lands under
+    // the record's own prefix.
+    let keys;
+    try {
+      keys = resolveRecordScopedAgentCodeKey(agentId, filename);
+    } catch (err) {
+      if (err instanceof AgentCodeKeyError) {
+        emitAgentCodeKeyRefused("updateAgentCode");
+        throw new Error("Access denied");
+      }
+      throw err;
+    }
 
-    // Update code in S3
+    // Update code in S3 — always at the scoped key.
     const s3Command = new PutObjectCommand({
       Bucket: AGENT_BUCKET_NAME,
-      Key: key,
+      Key: keys.scopedKey,
       Body: code,
       ContentType: "text/x-python",
     });
@@ -285,6 +346,10 @@ async function updateAgentCode(args: UpdateAgentCodeArgs, event: unknown) {
       lastModified: new Date().toISOString(),
     };
   } catch (error: unknown) {
+    // Re-throw AgentCodeKeyError-originated "Access denied" as-is.
+    if (error instanceof Error && error.message === "Access denied") {
+      throw error;
+    }
     console.error("Error updating agent code:", error);
     throw new Error(
       `Failed to update agent code: ${error instanceof Error ? error.message : String(error)}`,
