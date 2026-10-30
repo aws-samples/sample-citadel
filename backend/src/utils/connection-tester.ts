@@ -12,12 +12,12 @@ import {
 import { NotImplementedError } from "../adapters/errors";
 import {
   parsePublicHttpsUrl,
-  resolveAndPin,
   emitUrlRefused,
   parseAndEnforceUrl,
+  safeFetch,
   UrlRejectedError,
 } from "./url-safety";
-import type { DnsLookupFn } from "./url-safety";
+import type { DnsLookupFn, SafeFetchTransport } from "./url-safety";
 
 export interface TestResult {
   success: boolean;
@@ -124,7 +124,7 @@ export async function testApiKeyConnection(
   connectorType: string,
   credentials: ConnectionBag,
   spec: ConnectorSpec,
-  opts?: { dnsLookup?: DnsLookupFn },
+  opts?: { dnsLookup?: DnsLookupFn; transport?: SafeFetchTransport },
 ): Promise<TestResult> {
   console.log(`Testing ${connectorType} connection...`);
 
@@ -167,21 +167,18 @@ export async function testApiKeyConnection(
   console.log(`Testing connection to: ${testUrl}`);
 
   try {
-    // DNS-resolve and reject private IPs before connecting.
-    if (opts?.dnsLookup) {
-      const testParsed = parsePublicHttpsUrl(testUrl);
-      await resolveAndPin(testParsed, { lookup: opts.dnsLookup });
-    }
-
-    const response = await fetch(testUrl, {
-      headers: {
-        Authorization: `Basic ${authHeader}`,
-        Accept: "application/json",
+    const response = await safeFetch(
+      testUrl,
+      {
+        headers: {
+          Authorization: `Basic ${authHeader}`,
+          Accept: "application/json",
+        },
       },
-      redirect: "error",
-    });
+      { lookup: opts?.dnsLookup, transport: opts?.transport },
+    );
 
-    console.log(`Response status: ${response.status} ${response.statusText}`);
+    console.log(`Response status: ${response.status}`);
 
     if (response.ok) {
       return {
@@ -195,12 +192,9 @@ export async function testApiKeyConnection(
       };
     } else {
       const errorText = await response.text();
-      console.error(
-        `Connection test failed: ${response.status} ${response.statusText}`,
-        errorText,
-      );
+      console.error(`Connection test failed: ${response.status}`, errorText);
 
-      let message = `Connection failed: ${response.statusText}`;
+      let message = `Connection failed: HTTP ${response.status}`;
       if (response.status === 404 && connectorType === "CONFLUENCE") {
         message =
           "Connection failed: API endpoint not found. Please verify:\n" +
@@ -249,7 +243,7 @@ export async function testBasicAuthConnection(
   connectorType: string,
   credentials: ConnectionBag,
   spec: ConnectorSpec,
-  opts?: { dnsLookup?: DnsLookupFn },
+  opts?: { dnsLookup?: DnsLookupFn; transport?: SafeFetchTransport },
 ): Promise<TestResult> {
   const authHeader = Buffer.from(
     `${credentials.username}:${credentials.password}`,
@@ -284,18 +278,16 @@ export async function testBasicAuthConnection(
   const testUrl = `${instanceUrl}${spec.testEndpoint}`;
 
   try {
-    if (opts?.dnsLookup) {
-      const testParsed = parsePublicHttpsUrl(testUrl);
-      await resolveAndPin(testParsed, { lookup: opts.dnsLookup });
-    }
-
-    const response = await fetch(testUrl, {
-      headers: {
-        Authorization: `Basic ${authHeader}`,
-        Accept: "application/json",
+    const response = await safeFetch(
+      testUrl,
+      {
+        headers: {
+          Authorization: `Basic ${authHeader}`,
+          Accept: "application/json",
+        },
       },
-      redirect: "error",
-    });
+      { lookup: opts?.dnsLookup, transport: opts?.transport },
+    );
 
     if (response.ok) {
       return {
@@ -310,7 +302,7 @@ export async function testBasicAuthConnection(
       const errorText = await response.text();
       return {
         success: false,
-        message: `Connection failed: ${response.statusText}`,
+        message: `Connection failed: HTTP ${response.status}`,
         details: {
           status: response.status,
           error: errorText,
@@ -386,7 +378,7 @@ export async function testBearerTokenConnection(
   connectorType: string,
   credentials: ConnectionBag,
   spec: ConnectorSpec,
-  opts?: { dnsLookup?: DnsLookupFn },
+  opts?: { dnsLookup?: DnsLookupFn; transport?: SafeFetchTransport },
 ): Promise<TestResult> {
   if (!credentials.apiToken) {
     return {
@@ -399,18 +391,16 @@ export async function testBearerTokenConnection(
   const baseUrl = `https://api.pagerduty.com${spec.testEndpoint}`;
 
   try {
-    if (opts?.dnsLookup) {
-      const testParsed = parsePublicHttpsUrl(baseUrl);
-      await resolveAndPin(testParsed, { lookup: opts.dnsLookup });
-    }
-
-    const response = await fetch(baseUrl, {
-      headers: {
-        Authorization: `Token token=${credentials.apiToken}`,
-        Accept: "application/vnd.pagerduty+json;version=2",
+    const response = await safeFetch(
+      baseUrl,
+      {
+        headers: {
+          Authorization: `Token token=${credentials.apiToken}`,
+          Accept: "application/vnd.pagerduty+json;version=2",
+        },
       },
-      redirect: "error",
-    });
+      { lookup: opts?.dnsLookup, transport: opts?.transport },
+    );
 
     if (response.ok) {
       return {
@@ -425,7 +415,7 @@ export async function testBearerTokenConnection(
       const errorText = await response.text();
       return {
         success: false,
-        message: `Connection failed: ${response.statusText}`,
+        message: `Connection failed: HTTP ${response.status}`,
         details: {
           status: response.status,
           error: errorText,
@@ -796,7 +786,7 @@ export async function testSmithyConnection(
 export async function testMCPServerConnection(
   config: ConnectionBag | undefined,
   credentials: ConnectionBag | undefined,
-  opts?: { dnsLookup?: DnsLookupFn },
+  opts?: { dnsLookup?: DnsLookupFn; transport?: SafeFetchTransport },
 ): Promise<TestResult> {
   try {
     // Validate required configuration
@@ -868,28 +858,28 @@ export async function testMCPServerConnection(
       params: {},
     });
 
-    // DNS-resolve and reject private IPs before connecting.
-    if (opts?.dnsLookup) {
-      const mcpParsed = parsePublicHttpsUrl(mcpUrl);
-      await resolveAndPin(mcpParsed, { lookup: opts.dnsLookup });
-    }
-
-    const response = await fetch(mcpUrl, {
-      method: "POST",
-      headers,
-      body,
-      redirect: "error",
-    });
+    const response = await safeFetch(
+      mcpUrl,
+      {
+        method: "POST",
+        headers,
+        body,
+      },
+      { lookup: opts?.dnsLookup, transport: opts?.transport },
+    );
 
     if (response.ok) {
-      const data = await response.json();
+      const data = (await response.json()) as Record<string, unknown>;
+      const result = data.result as Record<string, unknown> | undefined;
       return {
         success: true,
         message: "MCP server connection successful",
         details: {
           status: response.status,
           serverUrl: config.serverUrl,
-          toolCount: data.result?.tools?.length || 0,
+          toolCount: Array.isArray(result?.tools)
+            ? (result.tools as unknown[]).length
+            : 0,
           authMethod: credentials.authMethod,
         },
       };
@@ -899,7 +889,6 @@ export async function testMCPServerConnection(
         message: "MCP server authentication failed",
         details: {
           status: response.status,
-          statusText: response.statusText,
           serverUrl: config.serverUrl,
         },
       };
@@ -909,7 +898,6 @@ export async function testMCPServerConnection(
         message: `MCP server returned status ${response.status}`,
         details: {
           status: response.status,
-          statusText: response.statusText,
           serverUrl: config.serverUrl,
         },
       };

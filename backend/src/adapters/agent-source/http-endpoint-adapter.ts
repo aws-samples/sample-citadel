@@ -40,11 +40,11 @@ import {
 import type { AuthHeader } from "./invoke-support";
 import {
   parsePublicHttpsUrl,
-  resolveAndPin,
   emitUrlRefused,
+  safeFetch,
   UrlRejectedError,
 } from "../../utils/url-safety";
-import type { DnsLookupFn } from "../../utils/url-safety";
+import type { DnsLookupFn, SafeFetchTransport } from "../../utils/url-safety";
 
 const DEFAULT_REGION = process.env.AWS_REGION || "ap-southeast-2";
 
@@ -58,7 +58,8 @@ export interface HttpSigner {
 export type HttpSignerFactory = (region: string) => HttpSigner;
 
 export interface HttpEndpointAdapterDeps {
-  fetchFn?: typeof fetch;
+  /** Transport injected into safeFetch (tests inject a fake). */
+  transport?: SafeFetchTransport;
   signerFactory?: HttpSignerFactory;
   /** Auth applied to the describe() invocation block (from the import scope). */
   auth?: AuthBlock;
@@ -87,15 +88,13 @@ const defaultSignerFactory: HttpSignerFactory = (
 
 export class HttpEndpointAdapter implements AgentSourceAdapter {
   public readonly protocol: AgentInvocationProtocol = "HTTP_ENDPOINT";
-  private readonly fetchFn: typeof fetch;
+  private readonly transport?: SafeFetchTransport;
   private readonly signerFactory: HttpSignerFactory;
   private readonly resolveSecret?: (secretRef: string) => Promise<string>;
   private readonly dnsLookup?: DnsLookupFn;
 
   constructor(private readonly deps: HttpEndpointAdapterDeps = {}) {
-    // Late-bind to the current global fetch so test stubs are honoured.
-    this.fetchFn =
-      deps.fetchFn ?? ((input, init) => globalThis.fetch(input, init));
+    this.transport = deps.transport;
     this.signerFactory = deps.signerFactory ?? defaultSignerFactory;
     this.resolveSecret = deps.resolveSecret;
     this.dnsLookup = deps.dnsLookup;
@@ -119,19 +118,6 @@ export class HttpEndpointAdapter implements AgentSourceAdapter {
     } catch (err) {
       emitUrlRefused("http-endpoint-adapter:invoke");
       throw err;
-    }
-
-    // DNS-resolve and reject private IPs. Only runs when an explicit
-    // dnsLookup is injected — production relies on the VPC/NAT gateway and
-    // the URL parse check above for literal IP rejection. Test doubles inject
-    // a lookup returning private IPs to prove the refusal path.
-    if (this.dnsLookup) {
-      try {
-        await resolveAndPin(parsed, { lookup: this.dnsLookup });
-      } catch (err) {
-        emitUrlRefused("http-endpoint-adapter:invoke");
-        throw err;
-      }
     }
 
     const url = parsed;
@@ -166,12 +152,15 @@ export class HttpEndpointAdapter implements AgentSourceAdapter {
       }
     }
 
-    const response = await this.fetchFn(target, {
-      method: "POST",
-      headers: requestHeaders,
-      body,
-      redirect: "error",
-    });
+    const response = await safeFetch(
+      target,
+      {
+        method: "POST",
+        headers: requestHeaders,
+        body,
+      },
+      { lookup: this.dnsLookup, transport: this.transport },
+    );
     const text = await response.text();
     return { output: extractTextOutput(text) || NO_RESPONSE_TEXT, raw: text };
   }
@@ -310,13 +299,14 @@ export class HttpEndpointAdapter implements AgentSourceAdapter {
   async healthCheck(ref: AgentRef): Promise<HealthCheckResult> {
     const url = refToString(ref);
     try {
-      // SSRF gate: validate URL (HTTPS, no private IP literals).
-      const parsed = parsePublicHttpsUrl(url);
-      if (this.dnsLookup) {
-        await resolveAndPin(parsed, { lookup: this.dnsLookup });
-      }
-
-      const res = await this.fetchFn(url, { method: "GET", redirect: "error" });
+      const res = await safeFetch(
+        url,
+        { method: "GET" },
+        {
+          lookup: this.dnsLookup,
+          transport: this.transport,
+        },
+      );
       if (res.ok) return { reachable: true };
       return { reachable: false, detail: `HTTP ${res.status}` };
     } catch (err) {
@@ -339,15 +329,14 @@ export class HttpEndpointAdapter implements AgentSourceAdapter {
   ): Promise<Record<string, unknown> | undefined> {
     try {
       const apiUrl = openApiUrl(url);
-      const parsed = parsePublicHttpsUrl(apiUrl);
-      if (this.dnsLookup) {
-        await resolveAndPin(parsed, { lookup: this.dnsLookup });
-      }
-
-      const res = await this.fetchFn(apiUrl, {
-        method: "GET",
-        redirect: "error",
-      });
+      const res = await safeFetch(
+        apiUrl,
+        { method: "GET" },
+        {
+          lookup: this.dnsLookup,
+          transport: this.transport,
+        },
+      );
       if (!res.ok) return undefined;
       const parsed2 = tryParseJson(await res.text());
       return isObject(parsed2) ? parsed2 : undefined;

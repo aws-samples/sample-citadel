@@ -88,6 +88,25 @@ jest.mock("../../services/registry-service", () => ({
   })),
 }));
 
+// ── safeFetch: bridge to global.fetch so existing stubs still work ──────────
+jest.mock("../../utils/url-safety", () => {
+  const actual = jest.requireActual("../../utils/url-safety");
+  return {
+    ...actual,
+    safeFetch: async (url: string, init: Record<string, unknown> = {}) => {
+      const res = await global.fetch(url, init as RequestInit);
+      return {
+        ok: res.ok,
+        status: res.status,
+        statusText: String(res.status),
+        headers: {},
+        text: async () => res.text(),
+        json: async () => res.json(),
+      };
+    },
+  };
+});
+
 const SSM_ARN =
   "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/legacy-agent";
 

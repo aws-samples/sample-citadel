@@ -28,9 +28,10 @@
 import {
   parsePublicHttpsUrl,
   emitUrlRefused,
+  safeFetch,
   UrlRejectedError,
 } from "./url-safety";
-import type { DnsLookupFn } from "./url-safety";
+import type { DnsLookupFn, SafeFetchTransport } from "./url-safety";
 
 export interface OAuthAuthorizationServerMetadata {
   /** Required by RFC 8414 §2 — issuer identifier URL. */
@@ -61,8 +62,11 @@ export interface DiscoverOptions {
   requireAuthorizationCodePKCE?: boolean;
   /** Override the in-memory cache TTL (default 15 minutes). For tests. */
   cacheTtlMs?: number;
-  /** Custom fetch (for tests / DI). Defaults to global `fetch`. */
-  fetchFn?: typeof fetch;
+  /**
+   * Transport override injected into safeFetch (for tests).
+   * In production safeFetch uses its default HTTPS transport.
+   */
+  transport?: SafeFetchTransport;
   /** Time source override for cache expiry tests. Defaults to Date.now. */
   now?: () => number;
   /** Injectable DNS lookup for SSRF-safe address resolution (test seam). */
@@ -218,7 +222,6 @@ export async function discoverOAuthEndpoints(
   discoveryUrl: string,
   opts: DiscoverOptions = {},
 ): Promise<OAuthAuthorizationServerMetadata | null> {
-  const fetchFn = opts.fetchFn ?? fetch;
   const now = opts.now ?? Date.now;
   const ttlMs = opts.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
   const requirePKCE = opts.requireAuthorizationCodePKCE === true;
@@ -249,52 +252,39 @@ export async function discoverOAuthEndpoints(
     );
   }
 
-  // DNS-resolve and reject private IPs when an explicit lookup is provided.
-  if (opts.dnsLookup) {
-    try {
-      const parsed = new URL(discoveryUrl);
-      const { resolveAndPin: doResolve } = await import("./url-safety");
-      await doResolve(parsed, { lookup: opts.dnsLookup });
-    } catch (err) {
-      if (err instanceof UrlRejectedError) {
-        emitUrlRefused("oauth-metadata:discovery");
-        logError("oauth metadata fetch SSRF-rejected", {
-          discoveryUrl: key,
-          error: (err as Error).message,
-        });
-        throw new OAuthMetadataError(
-          `OAuth metadata fetch rejected: ${(err as Error).message}`,
-          "URL_REJECTED",
-        );
-      }
-      // Non-SSRF DNS error — fall through to NETWORK_ERROR below.
-    }
-  }
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-
-  let response: Response;
+  let response;
   try {
-    response = await fetchFn(discoveryUrl, {
-      method: "GET",
-      headers: { Accept: "application/json" },
-      signal: controller.signal,
-    });
+    response = await safeFetch(
+      discoveryUrl,
+      {
+        method: "GET",
+        headers: { Accept: "application/json" },
+      },
+      {
+        lookup: opts.dnsLookup,
+        transport: opts.transport,
+        timeoutMs: FETCH_TIMEOUT_MS,
+      },
+    );
   } catch (err) {
-    clearTimeout(timer);
-    const isAbort = err instanceof Error && err.name === "AbortError";
-    const message = isAbort
-      ? `OAuth metadata fetch timed out after ${FETCH_TIMEOUT_MS}ms`
-      : `OAuth metadata fetch failed: ${err instanceof Error ? err.message : String(err)}`;
+    if (err instanceof UrlRejectedError) {
+      emitUrlRefused("oauth-metadata:discovery");
+      logError("oauth metadata fetch SSRF-rejected", {
+        discoveryUrl: key,
+        error: (err as Error).message,
+      });
+      throw new OAuthMetadataError(
+        `OAuth metadata fetch rejected: ${(err as Error).message}`,
+        "URL_REJECTED",
+      );
+    }
+    const message = `OAuth metadata fetch failed: ${err instanceof Error ? err.message : String(err)}`;
     logError("oauth metadata fetch failed", {
       discoveryUrl: key,
-      timeout: isAbort,
       error: message,
     });
     throw new OAuthMetadataError(message, "NETWORK_ERROR");
   }
-  clearTimeout(timer);
 
   if (response.status === 404) {
     logInfo("oauth metadata 404 — caller should use explicit URLs", {
