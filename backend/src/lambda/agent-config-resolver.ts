@@ -43,6 +43,7 @@ import {
   CloudWatchClient,
   PutMetricDataCommand,
 } from "@aws-sdk/client-cloudwatch";
+import { parsePublicHttpsUrl, UrlRejectedError } from "../utils/url-safety";
 
 /** Trust-path summary persisted into governanceAttestation by the activation path. */
 interface TrustPathAttestationSummary {
@@ -1926,6 +1927,35 @@ export function validateImportDescriptor(descriptor: unknown): {
   const target = invocation?.target;
   if (typeof target !== "string" || target.trim() === "") {
     errors.push("invocation.target is required and must be a non-empty string");
+  }
+
+  // Write-path URL validation: reject private-network targets at mutation
+  // time for HTTP_ENDPOINT and MCP protocols (belt-and-suspenders with the
+  // runtime SSRF gate in resolveAndPin). Other protocols (Lambda, SQS,
+  // A2A, …) are ARN-based and validated by arn-safety, not URL parsing.
+  // Only applies when the target parses as a URL — non-URL strings (like
+  // bare ARNs) are left to protocol-specific validation.
+  if (
+    typeof target === "string" &&
+    target.trim() !== "" &&
+    typeof protocol === "string" &&
+    (protocol === "HTTP_ENDPOINT" || protocol === "MCP")
+  ) {
+    try {
+      const u = new URL(target);
+      // Only enforce HTTPS + private-IP checks on values that parse as URLs.
+      // A non-URL target (e.g. a hostname) won't reach here.
+      if (u.protocol === "http:" || u.protocol === "https:") {
+        parsePublicHttpsUrl(target);
+      }
+    } catch (err) {
+      if (err instanceof UrlRejectedError) {
+        errors.push(
+          "invocation.target must be a valid public HTTPS URL for HTTP_ENDPOINT/MCP protocols",
+        );
+      }
+      // URL parse failure for non-URL targets is acceptable — skip.
+    }
   }
 
   if (origin?.ownership !== "external") {

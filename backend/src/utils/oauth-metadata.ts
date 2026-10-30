@@ -25,6 +25,13 @@
  *   requirement before merging Phase 2.
  */
 
+import {
+  parsePublicHttpsUrl,
+  emitUrlRefused,
+  UrlRejectedError,
+} from "./url-safety";
+import type { DnsLookupFn } from "./url-safety";
+
 export interface OAuthAuthorizationServerMetadata {
   /** Required by RFC 8414 §2 — issuer identifier URL. */
   issuer: string;
@@ -58,21 +65,24 @@ export interface DiscoverOptions {
   fetchFn?: typeof fetch;
   /** Time source override for cache expiry tests. Defaults to Date.now. */
   now?: () => number;
+  /** Injectable DNS lookup for SSRF-safe address resolution (test seam). */
+  dnsLookup?: DnsLookupFn;
 }
 
 export class OAuthMetadataError extends Error {
   constructor(
     message: string,
     public readonly code:
-      | 'NETWORK_ERROR'
-      | 'NOT_FOUND'
-      | 'INVALID_JSON'
-      | 'INVALID_METADATA'
-      | 'PKCE_S256_REQUIRED',
+      | "NETWORK_ERROR"
+      | "NOT_FOUND"
+      | "INVALID_JSON"
+      | "INVALID_METADATA"
+      | "PKCE_S256_REQUIRED"
+      | "URL_REJECTED",
     public readonly statusCode?: number,
   ) {
     super(message);
-    this.name = 'OAuthMetadataError';
+    this.name = "OAuthMetadataError";
   }
 }
 
@@ -97,7 +107,7 @@ function canonicaliseUrl(url: string): string {
   const trimmed = url.trim();
   try {
     const u = new URL(trimmed);
-    u.hash = '';
+    u.hash = "";
     return u.toString();
   } catch {
     return trimmed;
@@ -107,8 +117,8 @@ function canonicaliseUrl(url: string): string {
 function logInfo(message: string, fields: Record<string, unknown>): void {
   console.log(
     JSON.stringify({
-      level: 'INFO',
-      source: 'oauth-metadata',
+      level: "INFO",
+      source: "oauth-metadata",
       message,
       ...fields,
     }),
@@ -118,8 +128,8 @@ function logInfo(message: string, fields: Record<string, unknown>): void {
 function logError(message: string, fields: Record<string, unknown>): void {
   console.error(
     JSON.stringify({
-      level: 'ERROR',
-      source: 'oauth-metadata',
+      level: "ERROR",
+      source: "oauth-metadata",
       message,
       ...fields,
     }),
@@ -127,12 +137,12 @@ function logError(message: string, fields: Record<string, unknown>): void {
 }
 
 function isNonEmptyString(v: unknown): v is string {
-  return typeof v === 'string' && v.trim() !== '';
+  return typeof v === "string" && v.trim() !== "";
 }
 
 function asStringArray(v: unknown): string[] | undefined {
   if (!Array.isArray(v)) return undefined;
-  if (v.every((x) => typeof x === 'string')) return v as string[];
+  if (v.every((x) => typeof x === "string")) return v as string[];
   return undefined;
 }
 
@@ -143,40 +153,40 @@ function asStringArray(v: unknown): string[] | undefined {
 function projectMetadata(
   raw: Record<string, unknown>,
 ): OAuthAuthorizationServerMetadata {
-  if (!isNonEmptyString(raw['issuer'])) {
+  if (!isNonEmptyString(raw["issuer"])) {
     throw new OAuthMetadataError(
       "Invalid OAuth metadata: 'issuer' is required and must be a non-empty string",
-      'INVALID_METADATA',
+      "INVALID_METADATA",
     );
   }
-  if (!isNonEmptyString(raw['token_endpoint'])) {
+  if (!isNonEmptyString(raw["token_endpoint"])) {
     throw new OAuthMetadataError(
       "Invalid OAuth metadata: 'token_endpoint' is required and must be a non-empty string",
-      'INVALID_METADATA',
+      "INVALID_METADATA",
     );
   }
 
   const result: OAuthAuthorizationServerMetadata = {
-    issuer: raw['issuer'],
-    tokenEndpoint: raw['token_endpoint'],
+    issuer: raw["issuer"],
+    tokenEndpoint: raw["token_endpoint"],
     raw,
   };
 
-  if (isNonEmptyString(raw['authorization_endpoint'])) {
-    result.authorizationEndpoint = raw['authorization_endpoint'];
+  if (isNonEmptyString(raw["authorization_endpoint"])) {
+    result.authorizationEndpoint = raw["authorization_endpoint"];
   }
 
-  const scopes = asStringArray(raw['scopes_supported']);
+  const scopes = asStringArray(raw["scopes_supported"]);
   if (scopes !== undefined) result.scopesSupported = scopes;
 
-  const pkce = asStringArray(raw['code_challenge_methods_supported']);
+  const pkce = asStringArray(raw["code_challenge_methods_supported"]);
   if (pkce !== undefined) result.codeChallengeMethodsSupported = pkce;
 
-  const grants = asStringArray(raw['grant_types_supported']);
+  const grants = asStringArray(raw["grant_types_supported"]);
   if (grants !== undefined) result.grantTypesSupported = grants;
 
   const authMethods = asStringArray(
-    raw['token_endpoint_auth_methods_supported'],
+    raw["token_endpoint_auth_methods_supported"],
   );
   if (authMethods !== undefined) {
     result.tokenEndpointAuthMethodsSupported = authMethods;
@@ -187,10 +197,10 @@ function projectMetadata(
 
 function enforcePKCE(metadata: OAuthAuthorizationServerMetadata): void {
   const methods = metadata.codeChallengeMethodsSupported;
-  if (!Array.isArray(methods) || !methods.includes('S256')) {
+  if (!Array.isArray(methods) || !methods.includes("S256")) {
     throw new OAuthMetadataError(
       "OAuth Authorization Code flow requires 'S256' in code_challenge_methods_supported",
-      'PKCE_S256_REQUIRED',
+      "PKCE_S256_REQUIRED",
     );
   }
 }
@@ -221,7 +231,45 @@ export async function discoverOAuthEndpoints(
     return cached.value;
   }
 
-  logInfo('oauth metadata cache miss; fetching', { discoveryUrl: key });
+  logInfo("oauth metadata cache miss; fetching", { discoveryUrl: key });
+
+  // SSRF gate: validate the discoveryUrl before any network I/O.
+  try {
+    parsePublicHttpsUrl(discoveryUrl);
+  } catch (err) {
+    emitUrlRefused("oauth-metadata:discovery");
+    const detail = err instanceof Error ? err.message : String(err);
+    logError("oauth metadata URL rejected", {
+      discoveryUrl: key,
+      error: detail,
+    });
+    throw new OAuthMetadataError(
+      `OAuth discovery URL rejected: ${detail}`,
+      "URL_REJECTED",
+    );
+  }
+
+  // DNS-resolve and reject private IPs when an explicit lookup is provided.
+  if (opts.dnsLookup) {
+    try {
+      const parsed = new URL(discoveryUrl);
+      const { resolveAndPin: doResolve } = await import("./url-safety");
+      await doResolve(parsed, { lookup: opts.dnsLookup });
+    } catch (err) {
+      if (err instanceof UrlRejectedError) {
+        emitUrlRefused("oauth-metadata:discovery");
+        logError("oauth metadata fetch SSRF-rejected", {
+          discoveryUrl: key,
+          error: (err as Error).message,
+        });
+        throw new OAuthMetadataError(
+          `OAuth metadata fetch rejected: ${(err as Error).message}`,
+          "URL_REJECTED",
+        );
+      }
+      // Non-SSRF DNS error — fall through to NETWORK_ERROR below.
+    }
+  }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -229,27 +277,27 @@ export async function discoverOAuthEndpoints(
   let response: Response;
   try {
     response = await fetchFn(discoveryUrl, {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
+      method: "GET",
+      headers: { Accept: "application/json" },
       signal: controller.signal,
     });
   } catch (err) {
     clearTimeout(timer);
-    const isAbort = err instanceof Error && err.name === 'AbortError';
+    const isAbort = err instanceof Error && err.name === "AbortError";
     const message = isAbort
       ? `OAuth metadata fetch timed out after ${FETCH_TIMEOUT_MS}ms`
       : `OAuth metadata fetch failed: ${err instanceof Error ? err.message : String(err)}`;
-    logError('oauth metadata fetch failed', {
+    logError("oauth metadata fetch failed", {
       discoveryUrl: key,
       timeout: isAbort,
       error: message,
     });
-    throw new OAuthMetadataError(message, 'NETWORK_ERROR');
+    throw new OAuthMetadataError(message, "NETWORK_ERROR");
   }
   clearTimeout(timer);
 
   if (response.status === 404) {
-    logInfo('oauth metadata 404 — caller should use explicit URLs', {
+    logInfo("oauth metadata 404 — caller should use explicit URLs", {
       discoveryUrl: key,
     });
     return null;
@@ -257,11 +305,11 @@ export async function discoverOAuthEndpoints(
 
   if (response.status < 200 || response.status >= 300) {
     const message = `OAuth metadata fetch returned non-success status ${response.status}`;
-    logError('oauth metadata non-success status', {
+    logError("oauth metadata non-success status", {
       discoveryUrl: key,
       statusCode: response.status,
     });
-    throw new OAuthMetadataError(message, 'NETWORK_ERROR', response.status);
+    throw new OAuthMetadataError(message, "NETWORK_ERROR", response.status);
   }
 
   let body: unknown;
@@ -269,21 +317,21 @@ export async function discoverOAuthEndpoints(
     body = await response.json();
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    logError('oauth metadata invalid JSON', {
+    logError("oauth metadata invalid JSON", {
       discoveryUrl: key,
       error: detail,
     });
     throw new OAuthMetadataError(
       `OAuth metadata response is not valid JSON: ${detail}`,
-      'INVALID_JSON',
+      "INVALID_JSON",
     );
   }
 
-  if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    logError('oauth metadata not a JSON object', { discoveryUrl: key });
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    logError("oauth metadata not a JSON object", { discoveryUrl: key });
     throw new OAuthMetadataError(
-      'OAuth metadata response is not a JSON object',
-      'INVALID_METADATA',
+      "OAuth metadata response is not a JSON object",
+      "INVALID_METADATA",
     );
   }
 
@@ -292,7 +340,7 @@ export async function discoverOAuthEndpoints(
     metadata = projectMetadata(body as Record<string, unknown>);
   } catch (err) {
     if (err instanceof OAuthMetadataError) {
-      logError('oauth metadata validation failed', {
+      logError("oauth metadata validation failed", {
         discoveryUrl: key,
         code: err.code,
         error: err.message,
@@ -306,7 +354,7 @@ export async function discoverOAuthEndpoints(
       enforcePKCE(metadata);
     } catch (err) {
       if (err instanceof OAuthMetadataError) {
-        logError('oauth metadata pkce check failed', {
+        logError("oauth metadata pkce check failed", {
           discoveryUrl: key,
           code: err.code,
           error: err.message,

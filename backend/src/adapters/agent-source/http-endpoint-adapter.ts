@@ -12,11 +12,11 @@
  * present; healthCheck does a lightweight GET. global.fetch is injected as a
  * fake in tests.
  */
-import { SignatureV4 } from '@aws-sdk/signature-v4';
-import { Sha256 } from '@aws-crypto/sha256-js';
-import { HttpRequest } from '@smithy/protocol-http';
-import { defaultProvider } from '@aws-sdk/credential-provider-node';
-import type { AgentSourceAdapter, AgentRef } from './base';
+import { SignatureV4 } from "@aws-sdk/signature-v4";
+import { Sha256 } from "@aws-crypto/sha256-js";
+import { HttpRequest } from "@smithy/protocol-http";
+import { defaultProvider } from "@aws-sdk/credential-provider-node";
+import type { AgentSourceAdapter, AgentRef } from "./base";
 import type {
   AgentCandidate,
   AgentCapabilityDescriptor,
@@ -29,20 +29,27 @@ import type {
   InvokeResponse,
   JsonSchema,
   VendedCredentials,
-} from './base';
+} from "./base";
 import {
   NO_RESPONSE_TEXT,
   authHeaderScheme,
   collectOpenApi,
   extractTextOutput,
   vendImportCredentials,
-} from './invoke-support';
-import type { AuthHeader } from './invoke-support';
+} from "./invoke-support";
+import type { AuthHeader } from "./invoke-support";
+import {
+  parsePublicHttpsUrl,
+  resolveAndPin,
+  emitUrlRefused,
+  UrlRejectedError,
+} from "../../utils/url-safety";
+import type { DnsLookupFn } from "../../utils/url-safety";
 
-const DEFAULT_REGION = process.env.AWS_REGION || 'ap-southeast-2';
+const DEFAULT_REGION = process.env.AWS_REGION || "ap-southeast-2";
 
 /** The auth sub-block of an invocation descriptor. */
-type AuthBlock = AgentInvocationBlock['auth'];
+type AuthBlock = AgentInvocationBlock["auth"];
 
 /** Minimal signer surface so tests can inject a double. */
 export interface HttpSigner {
@@ -62,11 +69,15 @@ export interface HttpEndpointAdapterDeps {
    * When omitted, secret-backed auth modes invoke without an auth header.
    */
   resolveSecret?: (secretRef: string) => Promise<string>;
+  /** Injectable DNS lookup for SSRF-safe address resolution (test seam). */
+  dnsLookup?: DnsLookupFn;
 }
 
-const defaultSignerFactory: HttpSignerFactory = (region: string): HttpSigner => {
+const defaultSignerFactory: HttpSignerFactory = (
+  region: string,
+): HttpSigner => {
   const signer = new SignatureV4({
-    service: 'execute-api',
+    service: "execute-api",
     region,
     credentials: defaultProvider(),
     sha256: Sha256,
@@ -75,16 +86,19 @@ const defaultSignerFactory: HttpSignerFactory = (region: string): HttpSigner => 
 };
 
 export class HttpEndpointAdapter implements AgentSourceAdapter {
-  public readonly protocol: AgentInvocationProtocol = 'HTTP_ENDPOINT';
+  public readonly protocol: AgentInvocationProtocol = "HTTP_ENDPOINT";
   private readonly fetchFn: typeof fetch;
   private readonly signerFactory: HttpSignerFactory;
   private readonly resolveSecret?: (secretRef: string) => Promise<string>;
+  private readonly dnsLookup?: DnsLookupFn;
 
   constructor(private readonly deps: HttpEndpointAdapterDeps = {}) {
     // Late-bind to the current global fetch so test stubs are honoured.
-    this.fetchFn = deps.fetchFn ?? ((input, init) => globalThis.fetch(input, init));
+    this.fetchFn =
+      deps.fetchFn ?? ((input, init) => globalThis.fetch(input, init));
     this.signerFactory = deps.signerFactory ?? defaultSignerFactory;
     this.resolveSecret = deps.resolveSecret;
+    this.dnsLookup = deps.dnsLookup;
   }
 
   async invoke(
@@ -97,40 +111,66 @@ export class HttpEndpointAdapter implements AgentSourceAdapter {
       session_id: req.sessionId,
       attributes: req.attributes ?? {},
     });
-    const url = new URL(target);
+
+    // SSRF gate: validate the target URL (HTTPS, no private IP literals).
+    let parsed: URL;
+    try {
+      parsed = parsePublicHttpsUrl(target);
+    } catch (err) {
+      emitUrlRefused("http-endpoint-adapter:invoke");
+      throw err;
+    }
+
+    // DNS-resolve and reject private IPs. Only runs when an explicit
+    // dnsLookup is injected — production relies on the VPC/NAT gateway and
+    // the URL parse check above for literal IP rejection. Test doubles inject
+    // a lookup returning private IPs to prove the refusal path.
+    if (this.dnsLookup) {
+      try {
+        await resolveAndPin(parsed, { lookup: this.dnsLookup });
+      } catch (err) {
+        emitUrlRefused("http-endpoint-adapter:invoke");
+        throw err;
+      }
+    }
+
+    const url = parsed;
     const headers: Record<string, string> = {
-      'content-type': 'application/json',
+      "content-type": "application/json",
       host: url.hostname,
     };
 
     let requestHeaders: Record<string, string> = headers;
 
-    if (auth.mode === 'SIGV4') {
+    if (auth.mode === "SIGV4") {
       const request = new HttpRequest({
-        method: 'POST',
+        method: "POST",
         protocol: url.protocol,
         hostname: url.hostname,
         port: url.port ? Number(url.port) : undefined,
-        path: url.pathname + (url.search || ''),
+        path: url.pathname + (url.search || ""),
         headers,
         body,
       });
-      const signed = await this.signerFactory(region || DEFAULT_REGION).sign(request);
+      const signed = await this.signerFactory(region || DEFAULT_REGION).sign(
+        request,
+      );
       requestHeaders = signed.headers;
     } else {
-      // Secret-backed auth (API_KEY / OAUTH2 / COGNITO): resolve the secretRef
-      // and attach the Authorization header. Unchanged (no header) when no
-      // resolver is wired, no secretRef is set, or the mode needs no secret.
       const authHeader = await this.resolveAuthHeader(auth);
       if (authHeader) {
-        requestHeaders = { ...headers, [authHeader.name.toLowerCase()]: authHeader.value };
+        requestHeaders = {
+          ...headers,
+          [authHeader.name.toLowerCase()]: authHeader.value,
+        };
       }
     }
 
     const response = await this.fetchFn(target, {
-      method: 'POST',
+      method: "POST",
       headers: requestHeaders,
       body,
+      redirect: "error",
     });
     const text = await response.text();
     return { output: extractTextOutput(text) || NO_RESPONSE_TEXT, raw: text };
@@ -145,15 +185,17 @@ export class HttpEndpointAdapter implements AgentSourceAdapter {
    * resolved secret value is NEVER logged — only that auth was applied, and the
    * mode.
    */
-  private async resolveAuthHeader(auth: AuthBlock): Promise<AuthHeader | undefined> {
+  private async resolveAuthHeader(
+    auth: AuthBlock,
+  ): Promise<AuthHeader | undefined> {
     if (!this.resolveSecret || !auth.secretRef) return undefined;
     // SIGV4 / NONE need no secret-derived header — skip the GetSecretValue.
-    if (!authHeaderScheme(auth.mode, '', auth.header)) return undefined;
+    if (!authHeaderScheme(auth.mode, "", auth.header)) return undefined;
     const value = await this.resolveSecret(auth.secretRef);
     console.log(
       JSON.stringify({
-        level: 'info',
-        msg: 'http-adapter: applied invocation auth header',
+        level: "info",
+        msg: "http-adapter: applied invocation auth header",
         mode: auth.mode,
       }),
     );
@@ -169,11 +211,13 @@ export class HttpEndpointAdapter implements AgentSourceAdapter {
     const s = readEndpointScope(scope);
     if (!s.endpoint) return [];
     const origin: AgentOrigin = {
-      substrate: 'http',
+      substrate: "http",
       discoveredAt: new Date().toISOString(),
-      ownership: 'external',
+      ownership: "external",
     };
-    return [{ origin, displayName: s.name ?? s.endpoint, reference: s.endpoint }];
+    return [
+      { origin, displayName: s.name ?? s.endpoint, reference: s.endpoint },
+    ];
   }
 
   /**
@@ -197,37 +241,44 @@ export class HttpEndpointAdapter implements AgentSourceAdapter {
 
     if (doc) {
       const info = isObject(doc.info) ? doc.info : {};
-      name = typeof info.title === 'string' ? info.title : hostnameOf(url);
-      description = typeof info.description === 'string' ? info.description : '';
-      version = typeof info.version === 'string' ? info.version : '1.0.0';
+      name = typeof info.title === "string" ? info.title : hostnameOf(url);
+      description =
+        typeof info.description === "string" ? info.description : "";
+      version = typeof info.version === "string" ? info.version : "1.0.0";
       const { inputs, outputs, ops } = collectOpenApi(doc);
-      inputSchema = Object.keys(inputs).length > 0 ? { type: 'object', properties: inputs } : {};
-      outputSchema = Object.keys(outputs).length > 0 ? { type: 'object', properties: outputs } : {};
+      inputSchema =
+        Object.keys(inputs).length > 0
+          ? { type: "object", properties: inputs }
+          : {};
+      outputSchema =
+        Object.keys(outputs).length > 0
+          ? { type: "object", properties: outputs }
+          : {};
       skills = ops;
-      confidence = 'high';
+      confidence = "high";
     } else {
       name = hostnameOf(url);
-      description = '';
-      version = '1.0.0';
+      description = "";
+      version = "1.0.0";
       skills = [];
       inputSchema = {};
       outputSchema = {};
-      confidence = 'low';
+      confidence = "low";
     }
 
     const invocation: AgentInvocationBlock = {
-      protocol: 'HTTP_ENDPOINT',
+      protocol: "HTTP_ENDPOINT",
       target: url,
       auth,
-      mode: 'sync',
+      mode: "sync",
     };
-    if (auth.mode === 'SIGV4') {
+    if (auth.mode === "SIGV4") {
       invocation.region = this.deps.defaultRegion ?? DEFAULT_REGION;
     }
     const origin: AgentOrigin = {
-      substrate: 'http',
+      substrate: "http",
       discoveredAt: new Date().toISOString(),
-      ownership: 'external',
+      ownership: "external",
     };
     const fieldConfidence: Record<string, Confidence> = {
       name: confidence,
@@ -259,25 +310,47 @@ export class HttpEndpointAdapter implements AgentSourceAdapter {
   async healthCheck(ref: AgentRef): Promise<HealthCheckResult> {
     const url = refToString(ref);
     try {
-      const res = await this.fetchFn(url, { method: 'GET' });
+      // SSRF gate: validate URL (HTTPS, no private IP literals).
+      const parsed = parsePublicHttpsUrl(url);
+      if (this.dnsLookup) {
+        await resolveAndPin(parsed, { lookup: this.dnsLookup });
+      }
+
+      const res = await this.fetchFn(url, { method: "GET", redirect: "error" });
       if (res.ok) return { reachable: true };
       return { reachable: false, detail: `HTTP ${res.status}` };
     } catch (err) {
+      if (err instanceof UrlRejectedError) {
+        emitUrlRefused("http-endpoint-adapter:healthCheck");
+      }
       return { reachable: false, detail: errMessage(err) };
     }
   }
 
-  async vendCredentials(invocation: AgentInvocationBlock): Promise<VendedCredentials> {
+  async vendCredentials(
+    invocation: AgentInvocationBlock,
+  ): Promise<VendedCredentials> {
     return vendImportCredentials(invocation);
   }
 
   /** Fetch + parse <url>/openapi.json; undefined when unavailable/unparseable. */
-  private async fetchOpenApi(url: string): Promise<Record<string, unknown> | undefined> {
+  private async fetchOpenApi(
+    url: string,
+  ): Promise<Record<string, unknown> | undefined> {
     try {
-      const res = await this.fetchFn(openApiUrl(url), { method: 'GET' });
+      const apiUrl = openApiUrl(url);
+      const parsed = parsePublicHttpsUrl(apiUrl);
+      if (this.dnsLookup) {
+        await resolveAndPin(parsed, { lookup: this.dnsLookup });
+      }
+
+      const res = await this.fetchFn(apiUrl, {
+        method: "GET",
+        redirect: "error",
+      });
       if (!res.ok) return undefined;
-      const parsed = tryParseJson(await res.text());
-      return isObject(parsed) ? parsed : undefined;
+      const parsed2 = tryParseJson(await res.text());
+      return isObject(parsed2) ? parsed2 : undefined;
     } catch {
       return undefined;
     }
@@ -286,16 +359,21 @@ export class HttpEndpointAdapter implements AgentSourceAdapter {
 
 // --- pasted-endpoint helpers (scope / auth / OpenAPI / errors) -------------
 
-function readEndpointScope(scope: unknown): { endpoint?: string; name?: string } {
+function readEndpointScope(scope: unknown): {
+  endpoint?: string;
+  name?: string;
+} {
   if (!isObject(scope)) return {};
   const endpoint =
-    typeof scope.endpoint === 'string' && scope.endpoint.length > 0 ? scope.endpoint : undefined;
-  const name = typeof scope.name === 'string' ? scope.name : undefined;
+    typeof scope.endpoint === "string" && scope.endpoint.length > 0
+      ? scope.endpoint
+      : undefined;
+  const name = typeof scope.name === "string" ? scope.name : undefined;
   return { endpoint, name };
 }
 
 function refToString(ref: AgentRef): string {
-  return typeof ref === 'string' ? ref : ref.reference;
+  return typeof ref === "string" ? ref : ref.reference;
 }
 
 /**
@@ -304,12 +382,12 @@ function refToString(ref: AgentRef): string {
  * carried through (e.g. for API_KEY).
  */
 function resolveHttpAuth(auth?: AuthBlock): AuthBlock {
-  const mode = auth?.mode ?? 'SIGV4';
+  const mode = auth?.mode ?? "SIGV4";
   return auth?.secretRef ? { mode, secretRef: auth.secretRef } : { mode };
 }
 
 function openApiUrl(base: string): string {
-  return `${base.replace(/\/+$/, '')}/openapi.json`;
+  return `${base.replace(/\/+$/, "")}/openapi.json`;
 }
 
 function hostnameOf(url: string): string {
@@ -329,7 +407,7 @@ function tryParseJson(text: string): unknown {
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
+  return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
 function errMessage(err: unknown): string {

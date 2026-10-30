@@ -408,6 +408,81 @@ export async function safeHttpsRequest(
 // ---------------------------------------------------------------------------
 
 /**
+ * Match a hostname against a glob-style `hostPattern` (e.g. `*.atlassian.net`).
+ *
+ * Only the simple `*.suffix` form is supported (case-insensitive).
+ */
+export function matchesHostPattern(hostname: string, pattern: string): boolean {
+  const h = hostname.toLowerCase();
+  const p = pattern.toLowerCase();
+
+  if (p.startsWith("*.")) {
+    const suffix = p.slice(1); // ".atlassian.net"
+    return h.endsWith(suffix) && h.length > suffix.length;
+  }
+  return h === p;
+}
+
+/**
+ * Emit a `Citadel/Egress UrlRefused` metric via CloudWatch EMF.
+ * Never throws — best-effort only.
+ */
+export function emitUrlRefused(site: string): void {
+  try {
+    console.log(
+      JSON.stringify({
+        _aws: {
+          Timestamp: Date.now(),
+          CloudWatchMetrics: [
+            {
+              Namespace: "Citadel/Egress",
+              Dimensions: [["Site"]],
+              Metrics: [{ Name: "UrlRefused", Unit: "Count" }],
+            },
+          ],
+        },
+        Site: site,
+        UrlRefused: 1,
+      }),
+    );
+  } catch {
+    // metrics must never break the caller
+  }
+}
+
+/**
+ * Validate a URL as safe for outbound HTTPS AND enforce a vendor hostPattern
+ * when provided.
+ *
+ * Combines {@link parsePublicHttpsUrl} + optional hostPattern matching.
+ * Used at write-path mutation time to reject early.
+ *
+ * @throws {UrlRejectedError} on any violation.
+ */
+export function parseAndEnforceUrl(
+  url: string,
+  opts: ParseUrlOptions & { hostPattern?: string; site?: string } = {},
+): URL {
+  const parsed = parsePublicHttpsUrl(url, opts);
+
+  if (
+    opts.hostPattern &&
+    !matchesHostPattern(parsed.hostname, opts.hostPattern)
+  ) {
+    emitUrlRefused(opts.site ?? "unknown");
+    throw new UrlRejectedError(
+      "hostname does not match expected vendor pattern",
+    );
+  }
+
+  return parsed;
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers (numeric encoding)
+// ---------------------------------------------------------------------------
+
+/**
  * Detect numeric IP encoding tricks (decimal, octal, hex, shorthand) that
  * bypass the standard dotted-quad regex.
  *
