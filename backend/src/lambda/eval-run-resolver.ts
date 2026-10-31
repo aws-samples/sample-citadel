@@ -57,6 +57,13 @@ const EVAL_SUITES_TABLE = process.env.EVAL_SUITES_TABLE!;
 const EVAL_CASES_TABLE = process.env.EVAL_CASES_TABLE!;
 const EVAL_RUNS_TABLE = process.env.EVAL_RUNS_TABLE!;
 const EVAL_RUN_CASE_RESULTS_TABLE = process.env.EVAL_RUN_CASE_RESULTS_TABLE!;
+const AGENT_CONFIGS_TABLE = process.env.AGENT_CONFIGS_TABLE!;
+
+/**
+ * Sentinel org value for system-seeded / shared records.
+ * Matches TENANCY.md §Sentinels and CIT-252 backfill.
+ */
+const ALL_ORGANIZATIONS = "All Organizations";
 
 /**
  * Fixed namespace UUID for the deterministic evalRunId derivation
@@ -170,6 +177,33 @@ function isConditionalCheckFailed(err: unknown): boolean {
 }
 
 /**
+ * Resolve the orgId of an agent target by its agentId key in the
+ * agent-configs DynamoDB table. Returns the orgId string or null when
+ * the target row does not exist (double-miss from registry + DDB is
+ * possible for a deleted/never-created agent).
+ *
+ * C14: this is the eval-specific agent-target org resolver. It reads
+ * AGENT_CONFIGS_TABLE (partition key: agentId). The registry-first
+ * lookup is intentionally omitted to keep the Lambda's IAM surface
+ * minimal — the agent-configs table carries orgId for both natively
+ * created and backfilled agents post-CIT-252.
+ */
+async function resolveAgentTargetOrg(
+  agentTargetId: string,
+): Promise<string | null> {
+  const res = await docClient.send(
+    new GetCommand({
+      TableName: AGENT_CONFIGS_TABLE,
+      Key: { agentId: agentTargetId },
+      ProjectionExpression: "orgId",
+    }),
+  );
+  if (!res.Item) return null;
+  const orgId = res.Item.orgId;
+  return typeof orgId === "string" && orgId ? orgId : null;
+}
+
+/**
  * startEvalRun — create an EvalRun + one PENDING EvalRunCaseResult per case
  * of the target (FROZEN-only) suite. Idempotent per
  * (suiteId, suiteVersion, agentTargetVersion, idempotencyKey): a retry with
@@ -193,6 +227,22 @@ export async function startEvalRun(
   if (event) {
     await assertRowOrg(suite, event);
   }
+
+  // C14: resolve the agent target's org and verify it matches the
+  // suite's org or is the "All Organizations" sentinel. Identical error
+  // for missing and foreign targets — no existence oracle. Admin bypass
+  // is NOT applied: an admin targeting a cross-org agent should be
+  // explicit, not implicit (unlike assertRowOrg which has an admin
+  // bypass, this gate protects the DISPATCH target, not the caller's
+  // relationship with the suite).
+  const targetOrg = await resolveAgentTargetOrg(input.agentTargetId);
+  if (
+    !targetOrg ||
+    (targetOrg !== suite.orgId && targetOrg !== ALL_ORGANIZATIONS)
+  ) {
+    throw new Error("ValidationError: agentTargetId not found");
+  }
+
   if (suite.status !== "FROZEN") {
     throw new Error(
       `ValidationError: eval suite ${input.suiteId} must be FROZEN to start a run (status=${suite.status})`,

@@ -110,11 +110,11 @@ describe("executeTool — org scoping (finding 615aa5bb)", () => {
     expect(deps.executeCode).not.toHaveBeenCalled();
   });
 
-  it("allows execution of an org-less (shared) tool config for any authenticated org", async () => {
-    // Legacy/shared tool configs may have no orgId — treated as visible to
-    // every org-scoped caller, mirroring getToolConfigRegistry's
-    // `mapped.orgId && mapped.orgId !== callerOrgId` guard (only enforced
-    // when the config actually carries an orgId).
+  it("rejects an org-less tool config (fail-closed, H19)", async () => {
+    // H19: Legacy/shared tool configs with no orgId are now REJECTED
+    // under fail-closed semantics — absent orgId is NOT shared.
+    // Post-CIT-252 backfill, system-seeded tools carry
+    // orgId: "All Organizations" instead.
     const deps = makeDeps({ state: "active" } as SandboxToolConfig);
 
     const result = await executeTool(
@@ -125,7 +125,93 @@ describe("executeTool — org scoping (finding 615aa5bb)", () => {
       deps,
     );
 
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("Tool not found");
+  });
+});
+
+describe("executeTool — H19 fail-closed org guard", () => {
+  it("rejects tool with empty-string orgId", async () => {
+    const deps = makeDeps({ orgId: "", state: "active" } as unknown as SandboxToolConfig);
+
+    const result = await executeTool(
+      "tool-empty-org",
+      { a: 1 },
+      makeAuthContext({ roles: ["architect"] }),
+      "org-any",
+      deps,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("Tool not found");
+  });
+
+  it('accepts tool with orgId "All Organizations" for any caller', async () => {
+    const deps = makeDeps({
+      orgId: "All Organizations",
+      state: "active",
+    } as unknown as SandboxToolConfig);
+
+    const result = await executeTool(
+      "tool-system",
+      { a: 1 },
+      makeAuthContext({ roles: ["architect"] }),
+      "org-any",
+      deps,
+    );
+
     expect(result.success).toBe(true);
+  });
+
+  it('rejects tool with orgId "all organizations" (case-sensitive sentinel)', async () => {
+    const deps = makeDeps({
+      orgId: "all organizations",
+      state: "active",
+    } as unknown as SandboxToolConfig);
+
+    const result = await executeTool(
+      "tool-case",
+      { a: 1 },
+      makeAuthContext({ roles: ["architect"] }),
+      "org-any",
+      deps,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe("Tool not found");
+  });
+
+  it("produces identical error for missing tool vs absent orgId vs cross-org", async () => {
+    const missingDeps = makeDeps(null);
+    const missingResult = await executeTool(
+      "missing",
+      {},
+      makeAuthContext({ roles: ["architect"] }),
+      "org-a",
+      missingDeps,
+    );
+
+    const noOrgDeps = makeDeps({ state: "active" } as SandboxToolConfig);
+    const noOrgResult = await executeTool(
+      "no-org",
+      {},
+      makeAuthContext({ roles: ["architect"] }),
+      "org-a",
+      noOrgDeps,
+    );
+
+    const crossOrgDeps = makeDeps({ orgId: "org-b", state: "active" } as unknown as SandboxToolConfig);
+    const crossOrgResult = await executeTool(
+      "cross",
+      {},
+      makeAuthContext({ roles: ["architect"] }),
+      "org-a",
+      crossOrgDeps,
+    );
+
+    expect(missingResult.error).toBe("Tool not found");
+    expect(noOrgResult.error).toBe("Tool not found");
+    expect(crossOrgResult.error).toBe("Tool not found");
   });
 });
 

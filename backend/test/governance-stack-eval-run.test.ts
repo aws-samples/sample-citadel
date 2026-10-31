@@ -235,6 +235,7 @@ function createTestStack(): { stack: GovernanceStack; template: Template } {
       "UserOrgMembership",
       "citadel-user-org-membership-test",
     ),
+    agentConfigTable: mockTable(backendStack, "AgentConfig", "citadel-agents-test"),
     promotionPolicyConfigWriterRole,
   });
 

@@ -27,6 +27,7 @@ process.env.EVAL_RUNS_TABLE = "citadel-eval-runs-test";
 process.env.EVAL_RUN_CASE_RESULTS_TABLE = "citadel-eval-run-case-results-test";
 process.env.EVAL_CASES_TABLE = "citadel-eval-cases-test";
 process.env.EVENT_BUS_NAME = "citadel-agents-test";
+process.env.AGENT_CONFIGS_TABLE = "citadel-agents-test";
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 

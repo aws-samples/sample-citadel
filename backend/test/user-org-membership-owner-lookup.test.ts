@@ -229,6 +229,7 @@ describe("CIT-216 — release resolver reads UserOrgMembershipTable", () => {
       promotionPolicyConfigWriterRole: lambdaRole(
         "PromotionPolicyConfigWriterRole",
       ),
+      agentConfigTable: mockTable(backendStack, "AgentConfig"),
       userOrgMembershipTable: table,
     });
     governanceTemplate = Template.fromStack(stack);

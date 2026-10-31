@@ -26,6 +26,12 @@ const s3 = new S3Client({});
 
 const TOOLS_BUCKET = process.env.TOOLS_BUCKET!;
 
+/**
+ * Sentinel org value for system-seeded / shared tool records.
+ * Matches TENANCY.md §Sentinels and CIT-252 backfill. Case-sensitive.
+ */
+const ALL_ORGANIZATIONS = "All Organizations";
+
 // --- Types ---
 
 export interface ToolTestResult {
@@ -169,11 +175,40 @@ export async function executeTool(
       };
     }
 
-    // ORG MATCH — enforced AFTER load since the lookup itself has no org
-    // filter available (no OrgIndex on ToolsConfigTable). A cross-org
-    // config is reported identically to a missing one (no existence
-    // disclosure across tenants).
-    if (toolConfig.orgId && toolConfig.orgId !== callerOrgId) {
+    // ORG MATCH — fail-closed (H19): absent/empty orgId → refuse. The
+    // "All Organizations" sentinel (CIT-252) is explicitly allowed so
+    // system-seeded tools remain accessible. Any other mismatch is
+    // reported identically to a missing tool (no existence disclosure
+    // across tenants).
+    if (
+      !toolConfig.orgId ||
+      (toolConfig.orgId !== callerOrgId &&
+        toolConfig.orgId !== ALL_ORGANIZATIONS)
+    ) {
+      // Best-effort CloudWatch metric so dashboards can track rejections
+      // caused by the fail-closed flip (tools with absent orgId that were
+      // previously silently allowed).
+      try {
+        const { CloudWatchClient, PutMetricDataCommand } = await import(
+          "@aws-sdk/client-cloudwatch"
+        );
+        const cw = new CloudWatchClient({});
+        await cw.send(
+          new PutMetricDataCommand({
+            Namespace: "Citadel/Sandbox",
+            MetricData: [
+              {
+                MetricName: "OrgRefused",
+                Value: 1,
+                Unit: "Count",
+                Dimensions: [{ Name: "toolId", Value: toolId }],
+              },
+            ],
+          }),
+        );
+      } catch {
+        // Best effort — metric failure must never block the deny path.
+      }
       return {
         success: false,
         error: "Tool not found",
@@ -302,37 +337,126 @@ function defaultDeps(): ExecuteToolDeps {
       return creds;
     },
 
-    executeCode: async (
-      code: string,
-      inputs: unknown,
-      credentials: Record<string, unknown>,
-    ) => {
-      // Execute tool code in an isolated VM context
-      const sandbox = {
-        module: { exports: {} as SandboxToolExports },
-        exports: {} as SandboxToolExports,
-        require: () => {
-          throw new Error("require is not allowed in sandbox");
-        },
-        console: { log: () => {}, error: () => {}, warn: () => {} },
-      };
-
-      const script = new vm.Script(code);
-      const context = vm.createContext(sandbox);
-      script.runInContext(context);
-
-      const handler = sandbox.module.exports;
-      if (typeof handler === "function") {
-        const output = await handler(inputs, credentials);
-        return { output };
-      } else if (typeof handler.handler === "function") {
-        const output = await handler.handler(inputs, credentials);
-        return { output };
-      }
-
-      throw new Error("Tool code does not export a valid handler function");
-    },
+    executeCode: sandboxExecuteCode,
   };
+}
+
+/**
+ * Execute tool code in an isolated VM context with timeout enforcement.
+ *
+ * SECURITY NOTE: vm.createContext is an accident guard, not a security
+ * boundary. The Node.js docs state: "The vm module is not a security
+ * mechanism. Do not use it to run untrusted code." Untrusted tool code
+ * requires process isolation (child_process / container / Lambda-in-
+ * Lambda) — deferred as a follow-up backlog item. The hardening below
+ * blocks the most common accidental escapes (direct process/require
+ * references, prototype pollution) but does NOT defeat a deliberately
+ * crafted escape (e.g. ({}).constructor.constructor('return this')()).
+ *
+ * Memory guard via --max-old-space-size is NOT applicable — it's a
+ * process-level V8 flag, not per-context. The 512 MB Lambda memory
+ * limit is the ceiling.
+ *
+ * Timeout strategy:
+ * - The DEFINITION pass (module-level code) runs under vm timeout.
+ * - The INVOCATION pass (calling the exported handler) runs under vm
+ *   timeout with the remaining budget. This bounds synchronous
+ *   spin-loops in the handler body.
+ * - Async handlers: the vm timeout bounds the synchronous preamble;
+ *   the async tail is bounded by executeTool's outer Promise.race.
+ *
+ * @param timeoutMs - VM timeout for the entire definition+invocation
+ *   budget (default 30_000). Tests pass a short value.
+ */
+export async function sandboxExecuteCode(
+  code: string,
+  inputs: unknown,
+  credentials: Record<string, unknown>,
+  timeoutMs: number = 30_000,
+): Promise<{ output: unknown }> {
+  const sandbox: Record<string, unknown> = {
+    module: { exports: {} as SandboxToolExports },
+    exports: {} as SandboxToolExports,
+    // Explicitly undefined — blocks trivial escape paths:
+    process: undefined,
+    require: (() => {
+      const fn = () => {
+        throw new Error("require is not allowed in sandbox");
+      };
+      return fn;
+    })(),
+    globalThis: undefined,
+    global: undefined,
+    // Stubbed console (existing)
+    console: { log: () => {}, error: () => {}, warn: () => {} },
+  };
+
+  const context = vm.createContext(sandbox);
+
+  // Freeze the context's prototype chain to block property injection
+  // via prototype pollution (e.g. Object.prototype.process = ...).
+  // This is best-effort — some paths may still reach the real
+  // prototype through constructor chains.
+  try {
+    const proto = Object.getPrototypeOf(sandbox);
+    if (proto) Object.freeze(proto);
+  } catch {
+    // Freeze failure is non-fatal — proceed with unfrozen prototype.
+  }
+
+  const VM_TIMEOUT_MS = timeoutMs;
+  const MAX_CODE_SIZE = 5 * 1024 * 1024; // 5 MB
+
+  if (code.length > MAX_CODE_SIZE) {
+    throw new Error(
+      `Tool code exceeds maximum size (${MAX_CODE_SIZE} bytes)`,
+    );
+  }
+
+  const script = new vm.Script(code);
+  const defStart = Date.now();
+  script.runInContext(context, { timeout: VM_TIMEOUT_MS });
+  const defElapsed = Date.now() - defStart;
+
+  const handler = sandbox.module as { exports: SandboxToolExports };
+  const exp = handler.exports;
+  if (typeof exp !== "function" && !(exp && typeof (exp as { handler?: SandboxToolFn }).handler === "function")) {
+    throw new Error("Tool code does not export a valid handler function");
+  }
+
+  // Inject inputs/credentials into the sandbox so the invoker script
+  // can reference them. These are host-provided values, not user code.
+  context.__inputs = inputs;
+  context.__creds = credentials;
+
+  // Build an invoker script that calls the exported handler INSIDE
+  // the VM context with a timeout. This bounds synchronous spin-loops
+  // in the handler body (the definition-pass timeout above only
+  // bounds the module-level code, not the exported function's body).
+  //
+  // For async handlers the invoker returns a Promise — the vm timeout
+  // bounds the synchronous preamble; the async tail is bounded by the
+  // outer Promise.race in executeTool. This is documented: vm timeout
+  // bounds synchronous work; async work is bounded by the race.
+  const invokerSrc = typeof exp === "function"
+    ? "(function(){ return module.exports(__inputs, __creds); })()"
+    : "(function(){ return module.exports.handler(__inputs, __creds); })()";
+
+  const remainingMs = Math.max(
+    100,
+    VM_TIMEOUT_MS - defElapsed,
+  );
+  const invoker = new vm.Script(invokerSrc);
+  const invokeResult = invoker.runInContext(context, {
+    timeout: remainingMs,
+    breakOnSigint: false,
+  });
+
+  // If the handler returned a promise (async handler), await it.
+  // The vm timeout above bounded the synchronous portion; the async
+  // tail is bounded by executeTool's Promise.race timeout.
+  const output = await Promise.resolve(invokeResult);
+  return { output };
 }
 
 // --- Structured logging ---
