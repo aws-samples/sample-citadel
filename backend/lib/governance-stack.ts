@@ -113,6 +113,10 @@ export interface GovernanceStackProps extends cdk.StackProps {
   // owner's `sub`) in BackendStack's UserOrgMembershipTable, replacing the
   // retired cognito-idp:AdminGetUser `custom:organization` lookup.
   userOrgMembershipTable: dynamodb.ITable;
+  /** Agent configs table — eval-run-resolver reads this (GetItem by
+   * agentId) to resolve the org of an agentTargetId before dispatching
+   * an eval run (C14 cross-org eval-target gate). Read-only grant. */
+  agentConfigTable: dynamodb.ITable;
   /** Shared SLO alarm topic (from BackendStack). REQUIRED (finding
    * e396a7ee): the auto-rollback evaluator's finding-write-failure alarm
    * (decision D6) AND the governance-notifier's durable CRITICAL-event
@@ -1209,6 +1213,7 @@ exports.handler = async (event) => {
           EXECUTIONS_TABLE: props.executionsTable.tableName,
           EVAL_DISPATCH_QUEUE_URL: evalDispatchQueue.queueUrl,
           EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+          AGENT_CONFIGS_TABLE: props.agentConfigTable.tableName,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, "EvalRunResolverFunctionLogs", {
@@ -1225,6 +1230,10 @@ exports.handler = async (event) => {
     props.executionsTable.grantReadWriteData(evalRunResolverFunction);
     props.agentEventBus.grantPutEventsTo(evalRunResolverFunction);
     evalDispatchQueue.grantSendMessages(evalRunResolverFunction);
+    // C14: eval-run-resolver reads the agent-config row to verify that
+    // agentTargetId belongs to the same org as the eval suite (or is the
+    // "All Organizations" sentinel). Read-only — no mutation.
+    props.agentConfigTable.grantReadData(evalRunResolverFunction);
 
     const evalRunDataSourceRole = new iam.Role(this, "EvalRunDataSourceRole", {
       assumedBy: new iam.ServicePrincipal("appsync.amazonaws.com"),

@@ -187,6 +187,11 @@ function buildProps(
       `UserOrgMembership${suffix}`,
       `citadel-user-org-membership-test-${suffix}`,
     ),
+    agentConfigTable: mockTable(
+      backendStack,
+      `AgentConfig${suffix}`,
+      `citadel-agents-test${suffix.toLowerCase()}`,
+    ),
     promotionPolicyConfigWriterRole,
     alarmTopic,
   };

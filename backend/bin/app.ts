@@ -203,6 +203,9 @@ const governanceStack = new GovernanceStack(
     // AgentRelease Resolver section.
     agentReleasesTable: backendStack.agentReleasesTable,
     agentReleaseWriterRole: backendStack.agentReleaseWriterRole,
+    // C14: eval-run-resolver reads the agent-config row by agentId to
+    // verify the target's org matches the suite's org.
+    agentConfigTable: backendStack.agentConfigTable,
     // Environment release pointer (follow-on to slices 1-2): separate
     // table + separate writer role from AgentReleasesTable above — see
     // backend-stack.ts's EnvironmentReleasePointersTable construction
