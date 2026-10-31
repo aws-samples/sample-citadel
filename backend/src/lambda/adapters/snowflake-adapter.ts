@@ -1,77 +1,109 @@
 import {
-  ConnectorAdapter, ConnectorCategory, ConnectorSpec, AuthenticationMethod,
-  RequiredPolicies, ProvisionResult, ConnectionTestResult, MetricsResult,
-} from '../../adapters/base';
-import { ProvisioningError, ConnectionError, PermissionError, ValidationError } from './errors';
-import { SdkError } from './sdk-types';
+  ConnectorAdapter,
+  ConnectorCategory,
+  ConnectorSpec,
+  AuthenticationMethod,
+  RequiredPolicies,
+  ProvisionResult,
+  ConnectionTestResult,
+  MetricsResult,
+} from "../../adapters/base";
+import {
+  ProvisioningError,
+  ConnectionError,
+  PermissionError,
+  ValidationError,
+} from "./errors";
+import { SdkError } from "./sdk-types";
 
-async function getSnowflakeSDK(): Promise<typeof import('snowflake-sdk')> {
+async function getSnowflakeSDK(): Promise<typeof import("snowflake-sdk")> {
   try {
-    return await import('snowflake-sdk');
+    return await import("snowflake-sdk");
   } catch {
-    throw new ConnectionError('snowflake-sdk is not installed. Install it to use the Snowflake adapter.');
+    throw new ConnectionError(
+      "snowflake-sdk is not installed. Install it to use the Snowflake adapter.",
+    );
   }
 }
 
 export class SnowflakeAdapter implements ConnectorAdapter {
-  readonly category: ConnectorCategory = 'datastore';
-  readonly spec: ConnectorSpec = { type: 'SNOWFLAKE', provider: 'Snowflake', category: 'datastore', authentication: { method: AuthenticationMethod.IAM_ROLE, fields: [], secretStructure: {} }, configuration: { required: ['accountIdentifier'], optional: [], ssmParameters: [] } };
-  private readonly kind = 'snowflake';
+  readonly category: ConnectorCategory = "datastore";
+  readonly spec: ConnectorSpec = {
+    type: "SNOWFLAKE",
+    provider: "Snowflake",
+    category: "datastore",
+    authentication: {
+      method: AuthenticationMethod.IAM_ROLE,
+      fields: [],
+      secretStructure: {},
+    },
+    configuration: {
+      required: ["accountIdentifier"],
+      optional: [],
+      ssmParameters: [],
+    },
+  };
+  private readonly kind = "snowflake";
 
   requiredPolicies(
     _config: Record<string, unknown>,
     _accountId: string,
-    _region: string
+    _region: string,
   ): RequiredPolicies {
     return { provision: [], connect: [] };
   }
 
   async provision(
     _config: Record<string, unknown>,
-    _credentials?: Record<string, unknown>
+    _credentials?: Record<string, unknown>,
   ): Promise<ProvisionResult> {
     throw new ProvisioningError(
-      `Provisioning is not supported for external ${this.kind} data stores`
+      `Provisioning is not supported for external ${this.kind} data stores`,
     );
   }
 
   async connect(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<void> {
     const result = await this.testConnection(config, credentials);
     if (!result.success) {
       throw new ConnectionError(
-        `Failed to connect to Snowflake: ${result.message}`
+        `Failed to connect to Snowflake: ${result.message}`,
       );
     }
   }
 
-  async disconnect(_config: Record<string, unknown>): Promise<void> {
+  async disconnect(
+    _config: Record<string, unknown>,
+    _credentials?: Record<string, unknown>,
+  ): Promise<void> {
     // No-op for external stores
   }
 
   async testConnection(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<ConnectionTestResult> {
     const missing: string[] = [];
-    if (!config.accountIdentifier) missing.push('accountIdentifier');
-    if (!config.warehouse) missing.push('warehouse');
-    if (!config.database) missing.push('database');
+    if (!config.accountIdentifier) missing.push("accountIdentifier");
+    if (!config.warehouse) missing.push("warehouse");
+    if (!config.database) missing.push("database");
 
     if (missing.length > 0) {
       throw new ValidationError(
-        `Missing required Snowflake config fields: ${missing.join(', ')}`
+        `Missing required Snowflake config fields: ${missing.join(", ")}`,
       );
     }
 
-    const username = (credentials?.username ?? config.username) as string | undefined;
-    const password = (credentials?.password ?? config.password) as string | undefined;
+    const username = (credentials?.username ?? config.username) as
+      string | undefined;
+    const password = (credentials?.password ?? config.password) as
+      string | undefined;
 
     if (!username || !password) {
       throw new ValidationError(
-        'Missing required Snowflake credentials: username and password'
+        "Missing required Snowflake credentials: username and password",
       );
     }
 
@@ -94,7 +126,7 @@ export class SnowflakeAdapter implements ConnectorAdapter {
       });
 
       connection.destroy((err) => {
-        if (err) console.error('Error destroying Snowflake connection:', err);
+        if (err) console.error("Error destroying Snowflake connection:", err);
       });
 
       return {
@@ -109,26 +141,27 @@ export class SnowflakeAdapter implements ConnectorAdapter {
     } catch (error) {
       const err = error as SdkError;
       if (
-        err.code === '390100' ||
-        err.message?.includes('Incorrect username or password')
+        err.code === "390100" ||
+        err.message?.includes("Incorrect username or password")
       ) {
         throw new PermissionError(
           `Authentication failed for Snowflake account ${config.accountIdentifier}`,
-          err
+          err,
         );
       }
       throw new ConnectionError(
         `Failed to connect to Snowflake account ${config.accountIdentifier}: ${err.message}`,
         true,
-        err
+        err,
       );
     }
   }
 
   async getMetrics(
     _config: Record<string, unknown>,
-    _resourceArn?: string
+    _resourceArn?: string,
+    _credentials?: Record<string, unknown>,
   ): Promise<MetricsResult> {
-    return { size: '0 MB', records: 0 };
+    return { size: "0 MB", records: 0 };
   }
 }

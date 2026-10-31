@@ -80,7 +80,10 @@ export class DatabricksAdapter implements ConnectorAdapter {
     }
   }
 
-  async disconnect(_config: Record<string, unknown>): Promise<void> {
+  async disconnect(
+    _config: Record<string, unknown>,
+    _credentials?: Record<string, unknown>,
+  ): Promise<void> {
     // No-op for external stores
   }
 
@@ -163,6 +166,7 @@ export class DatabricksAdapter implements ConnectorAdapter {
   async getMetrics(
     _config: Record<string, unknown>,
     _resourceArn?: string,
+    _credentials?: Record<string, unknown>,
   ): Promise<MetricsResult> {
     return { size: "0 MB", records: 0 };
   }

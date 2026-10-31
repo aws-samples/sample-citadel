@@ -1,110 +1,141 @@
-import { DocumentDBAdapter } from '../documentdb-adapter';
+import { DocumentDBAdapter } from "../documentdb-adapter";
 import {
   ProvisioningError,
   ConnectionError,
   PermissionError,
   ResourceNotFoundError,
   DataStoreError,
-} from '../errors';
-import { DocDBClient, CreateDBClusterCommand } from '@aws-sdk/client-docdb';
+} from "../errors";
+import { DocDBClient, CreateDBClusterCommand } from "@aws-sdk/client-docdb";
+import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
 
 const mockSend = jest.fn();
-jest.mock('@aws-sdk/client-docdb', () => {
+jest.mock("@aws-sdk/client-docdb", () => {
   return {
     DocDBClient: jest.fn().mockImplementation(() => ({ send: mockSend })),
-    CreateDBClusterCommand: jest.fn().mockImplementation((input) => ({ _type: 'CreateDBCluster', input })),
-    DescribeDBClustersCommand: jest.fn().mockImplementation((input) => ({ _type: 'DescribeDBClusters', input })),
+    CreateDBClusterCommand: jest
+      .fn()
+      .mockImplementation((input) => ({ _type: "CreateDBCluster", input })),
+    DescribeDBClustersCommand: jest
+      .fn()
+      .mockImplementation((input) => ({ _type: "DescribeDBClusters", input })),
   };
 });
 
-describe('DocumentDBAdapter', () => {
+describe("DocumentDBAdapter", () => {
   let adapter: DocumentDBAdapter;
-  const config = { dbClusterIdentifier: 'my-docdb-cluster' };
-  const creds = { masterUsername: 'admin', masterPassword: 'secret123' };
+  const config = { dbClusterIdentifier: "my-docdb-cluster" };
+  const creds = {
+    masterUsername: "admin",
+    masterPassword: "secret123",
+    ...MOCK_SCOPED_CREDENTIALS,
+  };
 
   beforeEach(() => {
     adapter = new DocumentDBAdapter();
     mockSend.mockReset();
   });
 
-  describe('requiredPolicies', () => {
-    it('returns provision policies for CreateDBCluster, DescribeDBClusters, AddTagsToResource', () => {
-      const policies = adapter.requiredPolicies(config, '123456789012', 'us-east-1');
+  describe("requiredPolicies", () => {
+    it("returns provision policies for CreateDBCluster, DescribeDBClusters, AddTagsToResource", () => {
+      const policies = adapter.requiredPolicies(
+        config,
+        "123456789012",
+        "us-east-1",
+      );
       expect(policies.provision).toHaveLength(1);
       expect(policies.provision[0].actions).toEqual([
-        'rds:CreateDBCluster',
-        'rds:DeleteDBCluster',
-        'rds:DescribeDBClusters',
-        'rds:AddTagsToResource',
+        "rds:CreateDBCluster",
+        "rds:DeleteDBCluster",
+        "rds:DescribeDBClusters",
+        "rds:AddTagsToResource",
       ]);
-      expect(policies.provision[0].resources).toEqual(['*']);
+      expect(policies.provision[0].resources).toEqual(["*"]);
     });
 
-    it('returns connect policies for DescribeDBClusters', () => {
-      const policies = adapter.requiredPolicies(config, '123456789012', 'us-east-1');
+    it("returns connect policies for DescribeDBClusters", () => {
+      const policies = adapter.requiredPolicies(
+        config,
+        "123456789012",
+        "us-east-1",
+      );
       expect(policies.connect).toHaveLength(1);
-      expect(policies.connect[0].actions).toEqual(['rds:DescribeDBClusters']);
+      expect(policies.connect[0].actions).toEqual(["rds:DescribeDBClusters"]);
     });
 
-    it('uses wildcard resource for provision', () => {
-      const policies = adapter.requiredPolicies({}, '123456789012', 'us-west-2');
-      expect(policies.provision[0].resources).toEqual(['*']);
+    it("uses wildcard resource for provision", () => {
+      const policies = adapter.requiredPolicies(
+        {},
+        "123456789012",
+        "us-west-2",
+      );
+      expect(policies.provision[0].resources).toEqual(["*"]);
     });
   });
 
-  describe('provision', () => {
-    it('creates a cluster with docdb engine and returns the ARN', async () => {
+  describe("provision", () => {
+    it("creates a cluster with docdb engine and returns the ARN", async () => {
       mockSend.mockResolvedValueOnce({
-        DBCluster: { DBClusterArn: 'arn:aws:rds:us-east-1:123:cluster:my-docdb-cluster' },
+        DBCluster: {
+          DBClusterArn: "arn:aws:rds:us-east-1:123:cluster:my-docdb-cluster",
+        },
       });
       const result = await adapter.provision(config, creds);
-      expect(result.resourceArn).toBe('arn:aws:rds:us-east-1:123:cluster:my-docdb-cluster');
-    });
-
-    it('uses docdb engine', async () => {
-      mockSend.mockResolvedValueOnce({ DBCluster: {} });
-      await adapter.provision(config, creds);
-      expect(CreateDBClusterCommand).toHaveBeenCalledWith(
-        expect.objectContaining({ Engine: 'docdb' })
+      expect(result.resourceArn).toBe(
+        "arn:aws:rds:us-east-1:123:cluster:my-docdb-cluster",
       );
     });
 
-    it('generates identifier with citadel-docdb prefix when not provided', async () => {
+    it("uses docdb engine", async () => {
+      mockSend.mockResolvedValueOnce({ DBCluster: {} });
+      await adapter.provision(config, creds);
+      expect(CreateDBClusterCommand).toHaveBeenCalledWith(
+        expect.objectContaining({ Engine: "docdb" }),
+      );
+    });
+
+    it("generates identifier with citadel-docdb prefix when not provided", async () => {
       mockSend.mockResolvedValueOnce({ DBCluster: {} });
       await adapter.provision({}, creds);
       expect(CreateDBClusterCommand).toHaveBeenCalledWith(
         expect.objectContaining({
           DBClusterIdentifier: expect.stringMatching(/^citadel-docdb-\d+$/),
-        })
+        }),
       );
     });
 
-    it('throws ProvisioningError when credentials are missing', async () => {
-      await expect(adapter.provision(config, {})).rejects.toThrow(ProvisioningError);
+    it("throws CredentialMissingError when scoped credentials are missing", async () => {
+      const { CredentialMissingError } =
+        await import("../../../adapters/errors");
+      await expect(adapter.provision(config, {})).rejects.toThrow(
+        CredentialMissingError,
+      );
     });
 
-    it('handles DBClusterAlreadyExistsFault as idempotent success', async () => {
-      const sdkError = new Error('Already exists');
-      sdkError.name = 'DBClusterAlreadyExistsFault';
+    it("handles DBClusterAlreadyExistsFault as idempotent success", async () => {
+      const sdkError = new Error("Already exists");
+      sdkError.name = "DBClusterAlreadyExistsFault";
       mockSend.mockRejectedValueOnce(sdkError);
       const result = await adapter.provision(config, creds);
-      expect(result.resourceArn).toContain('my-docdb-cluster');
+      expect(result.resourceArn).toContain("my-docdb-cluster");
     });
 
-    it('wraps AccessDeniedException in PermissionError', async () => {
-      const sdkError = new Error('Access Denied');
-      sdkError.name = 'AccessDeniedException';
+    it("wraps AccessDeniedException in PermissionError", async () => {
+      const sdkError = new Error("Access Denied");
+      sdkError.name = "AccessDeniedException";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.provision(config, creds)).rejects.toThrow(PermissionError);
+      await expect(adapter.provision(config, creds)).rejects.toThrow(
+        PermissionError,
+      );
     });
 
-    it('wraps unknown SDK errors in ProvisioningError with cause', async () => {
-      const sdkError = new Error('Something broke');
-      sdkError.name = 'InternalError';
+    it("wraps unknown SDK errors in ProvisioningError with cause", async () => {
+      const sdkError = new Error("Something broke");
+      sdkError.name = "InternalError";
       mockSend.mockRejectedValueOnce(sdkError);
       try {
         await adapter.provision(config, creds);
-        fail('Expected ProvisioningError');
+        fail("Expected ProvisioningError");
       } catch (err) {
         expect(err).toBeInstanceOf(ProvisioningError);
         expect((err as DataStoreError).cause).toBe(sdkError);
@@ -112,42 +143,50 @@ describe('DocumentDBAdapter', () => {
     });
   });
 
-  describe('connect', () => {
-    it('succeeds when cluster status is available', async () => {
+  describe("connect", () => {
+    it("succeeds when cluster status is available", async () => {
       mockSend.mockResolvedValueOnce({
-        DBClusters: [{ Status: 'available' }],
+        DBClusters: [{ Status: "available" }],
       });
-      await expect(adapter.connect(config)).resolves.toBeUndefined();
+      await expect(
+        adapter.connect(config, MOCK_SCOPED_CREDENTIALS),
+      ).resolves.toBeUndefined();
     });
 
-    it('throws ConnectionError when cluster is not available', async () => {
+    it("throws ConnectionError when cluster is not available", async () => {
       mockSend.mockResolvedValueOnce({
-        DBClusters: [{ Status: 'creating' }],
+        DBClusters: [{ Status: "creating" }],
       });
-      await expect(adapter.connect(config)).rejects.toThrow(ConnectionError);
+      await expect(
+        adapter.connect(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(ConnectionError);
     });
 
-    it('throws ResourceNotFoundError when cluster does not exist', async () => {
-      const sdkError = new Error('Not found');
-      sdkError.name = 'DBClusterNotFoundFault';
+    it("throws ResourceNotFoundError when cluster does not exist", async () => {
+      const sdkError = new Error("Not found");
+      sdkError.name = "DBClusterNotFoundFault";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.connect(config)).rejects.toThrow(ResourceNotFoundError);
+      await expect(
+        adapter.connect(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(ResourceNotFoundError);
     });
 
-    it('throws PermissionError on AccessDeniedException', async () => {
-      const sdkError = new Error('Forbidden');
-      sdkError.name = 'AccessDeniedException';
+    it("throws PermissionError on AccessDeniedException", async () => {
+      const sdkError = new Error("Forbidden");
+      sdkError.name = "AccessDeniedException";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.connect(config)).rejects.toThrow(PermissionError);
+      await expect(
+        adapter.connect(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(PermissionError);
     });
 
-    it('wraps other errors in ConnectionError with cause', async () => {
-      const sdkError = new Error('Network issue');
-      sdkError.name = 'NetworkingError';
+    it("wraps other errors in ConnectionError with cause", async () => {
+      const sdkError = new Error("Network issue");
+      sdkError.name = "NetworkingError";
       mockSend.mockRejectedValueOnce(sdkError);
       try {
-        await adapter.connect(config);
-        fail('Expected ConnectionError');
+        await adapter.connect(config, MOCK_SCOPED_CREDENTIALS);
+        fail("Expected ConnectionError");
       } catch (err) {
         expect(err).toBeInstanceOf(ConnectionError);
         expect((err as DataStoreError).cause).toBe(sdkError);
@@ -155,83 +194,106 @@ describe('DocumentDBAdapter', () => {
     });
   });
 
-  describe('disconnect', () => {
-    it('is a no-op', async () => {
-      await expect(adapter.disconnect(config)).resolves.toBeUndefined();
+  describe("disconnect", () => {
+    it("is a no-op", async () => {
+      await expect(
+        adapter.disconnect(config, MOCK_SCOPED_CREDENTIALS),
+      ).resolves.toBeUndefined();
     });
   });
 
-  describe('testConnection', () => {
-    it('returns success with cluster status, endpoint, and port', async () => {
+  describe("testConnection", () => {
+    it("returns success with cluster status, endpoint, and port", async () => {
       mockSend.mockResolvedValueOnce({
-        DBClusters: [{
-          Status: 'available',
-          Endpoint: 'my-docdb.cluster-abc.us-east-1.docdb.amazonaws.com',
-          Port: 27017,
-        }],
+        DBClusters: [
+          {
+            Status: "available",
+            Endpoint: "my-docdb.cluster-abc.us-east-1.docdb.amazonaws.com",
+            Port: 27017,
+          },
+        ],
       });
-      const result = await adapter.testConnection(config);
+      const result = await adapter.testConnection(
+        config,
+        MOCK_SCOPED_CREDENTIALS,
+      );
       expect(result.success).toBe(true);
-      expect(result.details?.status).toBe('available');
-      expect(result.details?.endpoint).toBe('my-docdb.cluster-abc.us-east-1.docdb.amazonaws.com');
+      expect(result.details?.status).toBe("available");
+      expect(result.details?.endpoint).toBe(
+        "my-docdb.cluster-abc.us-east-1.docdb.amazonaws.com",
+      );
       expect(result.details?.port).toBe(27017);
     });
 
-    it('does not include engine in details (unlike Aurora)', async () => {
+    it("does not include engine in details (unlike Aurora)", async () => {
       mockSend.mockResolvedValueOnce({
-        DBClusters: [{ Status: 'available', Endpoint: 'ep', Port: 27017 }],
+        DBClusters: [{ Status: "available", Endpoint: "ep", Port: 27017 }],
       });
-      const result = await adapter.testConnection(config);
-      expect(result.details).not.toHaveProperty('engine');
+      const result = await adapter.testConnection(
+        config,
+        MOCK_SCOPED_CREDENTIALS,
+      );
+      expect(result.details).not.toHaveProperty("engine");
     });
 
-    it('returns failure when DescribeDBClusters fails', async () => {
-      mockSend.mockRejectedValueOnce(new Error('Not Found'));
-      const result = await adapter.testConnection(config);
+    it("returns failure when DescribeDBClusters fails", async () => {
+      mockSend.mockRejectedValueOnce(new Error("Not Found"));
+      const result = await adapter.testConnection(
+        config,
+        MOCK_SCOPED_CREDENTIALS,
+      );
       expect(result.success).toBe(false);
     });
   });
 
-  describe('getMetrics', () => {
-    it('returns allocated storage and zero records', async () => {
+  describe("getMetrics", () => {
+    it("returns allocated storage and zero records", async () => {
       mockSend.mockResolvedValueOnce({
         DBClusters: [{ AllocatedStorage: 50 }],
       });
-      const result = await adapter.getMetrics(config);
-      expect(result.size).toBe('50 GB');
+      const result = await adapter.getMetrics(
+        config,
+        undefined,
+        MOCK_SCOPED_CREDENTIALS,
+      );
+      expect(result.size).toBe("50 GB");
       expect(result.records).toBe(0);
     });
 
-    it('wraps AccessDeniedException in PermissionError', async () => {
-      const sdkError = new Error('Access Denied');
-      sdkError.name = 'AccessDeniedException';
+    it("wraps AccessDeniedException in PermissionError", async () => {
+      const sdkError = new Error("Access Denied");
+      sdkError.name = "AccessDeniedException";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.getMetrics(config)).rejects.toThrow(PermissionError);
+      await expect(
+        adapter.getMetrics(config, undefined, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(PermissionError);
     });
 
-    it('wraps other errors in ConnectionError', async () => {
-      const sdkError = new Error('Timeout');
-      sdkError.name = 'RequestTimeout';
+    it("wraps other errors in ConnectionError", async () => {
+      const sdkError = new Error("Timeout");
+      sdkError.name = "RequestTimeout";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.getMetrics(config)).rejects.toThrow(ConnectionError);
+      await expect(
+        adapter.getMetrics(config, undefined, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(ConnectionError);
     });
   });
 
-  describe('scoped credentials', () => {
-    it('constructs client with provided credentials', async () => {
+  describe("scoped credentials", () => {
+    it("constructs client with provided credentials", async () => {
       mockSend.mockResolvedValueOnce({
-        DBClusters: [{ Status: 'available' }],
+        DBClusters: [{ Status: "available" }],
       });
       await adapter.connect(config, {
-        accessKeyId: 'AKIA...',
-        secretAccessKey: 'secret',
-        sessionToken: 'token',
+        accessKeyId: "AKIA...",
+        secretAccessKey: "secret",
+        sessionToken: "token",
       });
       expect(DocDBClient).toHaveBeenCalledWith({
         credentials: {
-          accessKeyId: 'AKIA...',
-          secretAccessKey: 'secret',
-          sessionToken: 'token',
+          accessKeyId: "AKIA...",
+          secretAccessKey: "secret",
+          sessionToken: "token",
         },
       });
     });

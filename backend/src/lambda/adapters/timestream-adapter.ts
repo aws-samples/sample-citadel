@@ -5,55 +5,81 @@ import {
   DeleteDatabaseCommand,
   DescribeDatabaseCommand,
   type RetentionProperties,
-} from '@aws-sdk/client-timestream-write';
-import { ConnectorAdapter, ConnectorCategory, ConnectorSpec, AuthenticationMethod, RequiredPolicies, ProvisionResult, ConnectionTestResult, MetricsResult } from '../../adapters/base';
-import { ProvisioningError, ConnectionError, PermissionError, ResourceNotFoundError } from './errors';
-import { SdkError, AwsCredentialFields } from './sdk-types';
+} from "@aws-sdk/client-timestream-write";
+import {
+  ConnectorAdapter,
+  ConnectorCategory,
+  ConnectorSpec,
+  AuthenticationMethod,
+  RequiredPolicies,
+  ProvisionResult,
+  ConnectionTestResult,
+  MetricsResult,
+} from "../../adapters/base";
+import {
+  ProvisioningError,
+  ConnectionError,
+  PermissionError,
+  ResourceNotFoundError,
+} from "./errors";
+import { SdkError } from "./sdk-types";
+import { requireScopedCredentials } from "./credential-guard";
 
 export class TimestreamAdapter implements ConnectorAdapter {
-  readonly category: ConnectorCategory = 'datastore';
-  readonly spec: ConnectorSpec = { type: 'TIMESTREAM', provider: 'Amazon Web Services', category: 'datastore', authentication: { method: AuthenticationMethod.IAM_ROLE, fields: [], secretStructure: {} }, configuration: { required: ['databaseName'], optional: [], ssmParameters: [] } };
-  private makeClient(creds?: Record<string, unknown>): TimestreamWriteClient {
-    const c = creds as AwsCredentialFields | undefined;
-    if (c?.accessKeyId && c?.secretAccessKey && c?.sessionToken) {
-      return new TimestreamWriteClient({
-        credentials: {
-          accessKeyId: c.accessKeyId,
-          secretAccessKey: c.secretAccessKey,
-          sessionToken: c.sessionToken,
-        },
-      });
-    }
-    return new TimestreamWriteClient({});
+  readonly category: ConnectorCategory = "datastore";
+  readonly spec: ConnectorSpec = {
+    type: "TIMESTREAM",
+    provider: "Amazon Web Services",
+    category: "datastore",
+    authentication: {
+      method: AuthenticationMethod.IAM_ROLE,
+      fields: [],
+      secretStructure: {},
+    },
+    configuration: {
+      required: ["databaseName"],
+      optional: [],
+      ssmParameters: [],
+    },
+  };
+  private makeClient(
+    creds: Record<string, unknown> | undefined,
+    op: string,
+  ): TimestreamWriteClient {
+    const credentials = requireScopedCredentials(creds, {
+      adapter: "TimestreamAdapter",
+      op,
+    });
+    return new TimestreamWriteClient({ credentials });
   }
 
   requiredPolicies(
     config: Record<string, unknown>,
     accountId: string,
-    region: string
+    region: string,
   ): RequiredPolicies {
-    const databaseArn = `arn:aws:timestream:${region}:${accountId}:database/${config.databaseName ?? '*'}`;
+    const databaseArn = `arn:aws:timestream:${region}:${accountId}:database/${config.databaseName ?? "*"}`;
 
     return {
       provision: [
         {
           actions: [
-            'timestream:CreateDatabase',
-            'timestream:DeleteDatabase',
-            'timestream:CreateTable',
-            'timestream:DescribeDatabase',
-            'timestream:DescribeEndpoints',
+            "timestream:CreateDatabase",
+            "timestream:DeleteDatabase",
+            "timestream:CreateTable",
+            "timestream:DescribeDatabase",
+            "timestream:DescribeEndpoints",
           ],
-          resources: ['*'],
+          resources: ["*"],
         },
       ],
       connect: [
         {
           actions: [
-            'timestream:DescribeDatabase',
-            'timestream:DescribeTable',
-            'timestream:WriteRecords',
-            'timestream:Select',
+            "timestream:DescribeDatabase",
+            "timestream:DescribeTable",
+            "timestream:WriteRecords",
+            "timestream:Select",
           ],
           resources: [databaseArn],
         },
@@ -63,20 +89,21 @@ export class TimestreamAdapter implements ConnectorAdapter {
 
   async provision(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<ProvisionResult> {
-    const client = this.makeClient(credentials);
+    const client = this.makeClient(credentials, "provision");
     const databaseName =
-      (config.databaseName as string | undefined) ?? `citadel-timestream-${Date.now()}`;
+      (config.databaseName as string | undefined) ??
+      `citadel-timestream-${Date.now()}`;
 
     try {
       const dbResult = await client.send(
-        new CreateDatabaseCommand({ DatabaseName: databaseName })
+        new CreateDatabaseCommand({ DatabaseName: databaseName }),
       );
 
       const resourceArn =
         dbResult.Database?.Arn ??
-        `arn:aws:timestream:${config.region ?? 'us-east-1'}:${config.accountId ?? '000000000000'}:database/${databaseName}`;
+        `arn:aws:timestream:${config.region ?? "us-east-1"}:${config.accountId ?? "000000000000"}:database/${databaseName}`;
 
       if (config.tableName) {
         try {
@@ -84,12 +111,13 @@ export class TimestreamAdapter implements ConnectorAdapter {
             new CreateTableCommand({
               DatabaseName: databaseName,
               TableName: config.tableName as string,
-              RetentionProperties: config.retentionProperties as RetentionProperties | undefined,
-            })
+              RetentionProperties: config.retentionProperties as
+                RetentionProperties | undefined,
+            }),
           );
         } catch (tableError) {
           const err = tableError as SdkError;
-          if (err.name !== 'ConflictException') {
+          if (err.name !== "ConflictException") {
             throw err;
           }
         }
@@ -98,47 +126,44 @@ export class TimestreamAdapter implements ConnectorAdapter {
       return { resourceArn };
     } catch (error) {
       const err = error as SdkError;
-      if (err.name === 'ConflictException') {
+      if (err.name === "ConflictException") {
         return {
-          resourceArn: `arn:aws:timestream:${config.region ?? 'us-east-1'}:${config.accountId ?? '000000000000'}:database/${databaseName}`,
+          resourceArn: `arn:aws:timestream:${config.region ?? "us-east-1"}:${config.accountId ?? "000000000000"}:database/${databaseName}`,
         };
       }
-      if (err.message?.includes('discover endpoint')) {
+      if (err.message?.includes("discover endpoint")) {
         throw new ProvisioningError(
           `Timestream is not available in this account/region. The endpoint discovery failed. Please check that Timestream for LiveAnalytics is enabled for your account.`,
-          err
+          err,
         );
       }
-      if (
-        err.name === 'AccessDenied' ||
-        err.name === 'AccessDeniedException'
-      ) {
+      if (err.name === "AccessDenied" || err.name === "AccessDeniedException") {
         throw new PermissionError(
           `Permission denied creating Timestream database ${databaseName}`,
-          err
+          err,
         );
       }
       throw new ProvisioningError(
         `Failed to create Timestream database ${databaseName}: ${err.message}`,
-        err
+        err,
       );
     }
   }
 
   async connect(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<void> {
-    const client = this.makeClient(credentials);
+    const client = this.makeClient(credentials, "connect");
     const databaseName = config.databaseName as string | undefined;
 
     try {
       const response = await client.send(
-        new DescribeDatabaseCommand({ DatabaseName: databaseName })
+        new DescribeDatabaseCommand({ DatabaseName: databaseName }),
       );
       if (!response.Database) {
         throw new ResourceNotFoundError(
-          `Timestream database ${databaseName} does not exist`
+          `Timestream database ${databaseName} does not exist`,
         );
       }
     } catch (error) {
@@ -146,47 +171,47 @@ export class TimestreamAdapter implements ConnectorAdapter {
       if (err instanceof ResourceNotFoundError) {
         throw err;
       }
-      if (err.name === 'ResourceNotFoundException') {
+      if (err.name === "ResourceNotFoundException") {
         throw new ResourceNotFoundError(
           `Timestream database ${databaseName} does not exist`,
-          err
+          err,
         );
       }
-      if (
-        err.name === 'AccessDenied' ||
-        err.name === 'AccessDeniedException'
-      ) {
+      if (err.name === "AccessDenied" || err.name === "AccessDeniedException") {
         throw new PermissionError(
           `Permission denied accessing Timestream database ${databaseName}`,
-          err
+          err,
         );
       }
       throw new ConnectionError(
         `Failed to connect to Timestream database ${databaseName}: ${err.message}`,
         true,
-        err
+        err,
       );
     }
   }
 
-  async disconnect(_config: Record<string, unknown>): Promise<void> {
+  async disconnect(
+    _config: Record<string, unknown>,
+    _credentials?: Record<string, unknown>,
+  ): Promise<void> {
     // No-op: disconnecting from Timestream doesn't require cleanup
   }
 
   async deprovision(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<void> {
-    const client = this.makeClient(credentials);
+    const client = this.makeClient(credentials, "deprovision");
     const databaseName = config.databaseName as string | undefined;
 
     try {
       await client.send(
-        new DeleteDatabaseCommand({ DatabaseName: databaseName })
+        new DeleteDatabaseCommand({ DatabaseName: databaseName }),
       );
     } catch (error) {
       const err = error as SdkError;
-      if (err.name === 'ResourceNotFoundException') {
+      if (err.name === "ResourceNotFoundException") {
         return; // Already gone
       }
       throw err;
@@ -195,14 +220,14 @@ export class TimestreamAdapter implements ConnectorAdapter {
 
   async testConnection(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<ConnectionTestResult> {
-    const client = this.makeClient(credentials);
+    const client = this.makeClient(credentials, "testConnection");
     const databaseName = config.databaseName as string | undefined;
 
     try {
       const response = await client.send(
-        new DescribeDatabaseCommand({ DatabaseName: databaseName })
+        new DescribeDatabaseCommand({ DatabaseName: databaseName }),
       );
       const database = response.Database;
       return {
@@ -225,36 +250,34 @@ export class TimestreamAdapter implements ConnectorAdapter {
 
   async getMetrics(
     config: Record<string, unknown>,
-    _resourceArn?: string
+    _resourceArn?: string,
+    credentials?: Record<string, unknown>,
   ): Promise<MetricsResult> {
-    const client = this.makeClient();
+    const client = this.makeClient(credentials, "getMetrics");
     const databaseName = config.databaseName as string | undefined;
 
     try {
       const response = await client.send(
-        new DescribeDatabaseCommand({ DatabaseName: databaseName })
+        new DescribeDatabaseCommand({ DatabaseName: databaseName }),
       );
       const tableCount = response.Database?.TableCount ?? 0;
 
       return {
-        size: '0 MB',
+        size: "0 MB",
         records: tableCount,
       };
     } catch (error) {
       const err = error as SdkError;
-      if (
-        err.name === 'AccessDenied' ||
-        err.name === 'AccessDeniedException'
-      ) {
+      if (err.name === "AccessDenied" || err.name === "AccessDeniedException") {
         throw new PermissionError(
           `Permission denied describing Timestream database ${databaseName}`,
-          err
+          err,
         );
       }
       throw new ConnectionError(
         `Failed to get metrics for Timestream database ${databaseName}: ${err.message}`,
         true,
-        err
+        err,
       );
     }
   }

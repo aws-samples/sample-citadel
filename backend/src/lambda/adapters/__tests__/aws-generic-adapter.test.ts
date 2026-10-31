@@ -11,131 +11,151 @@
  * serviceName so callers can identify which fallback failed.
  */
 
-import { AwsGenericAdapter } from '../aws-generic-adapter';
-import { NotImplementedError } from '../../../adapters/errors';
+import { AwsGenericAdapter } from "../aws-generic-adapter";
+import { NotImplementedError } from "../../../adapters/errors";
+import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
 
-describe('AwsGenericAdapter', () => {
+describe("AwsGenericAdapter", () => {
   let adapter: AwsGenericAdapter;
-  const config = { name: 'test-resource' };
+  const config = { name: "test-resource" };
 
   beforeEach(() => {
-    adapter = new AwsGenericAdapter('opensearch');
-    jest.spyOn(console, 'log').mockImplementation(() => {});
+    adapter = new AwsGenericAdapter("opensearch");
+    jest.spyOn(console, "log").mockImplementation(() => {});
   });
 
   afterEach(() => {
     jest.restoreAllMocks();
   });
 
-  describe('requiredPolicies', () => {
-    it('returns empty arrays for both provision and connect', () => {
-      const policies = adapter.requiredPolicies(config, '123456789012', 'us-east-1');
+  describe("requiredPolicies", () => {
+    it("returns empty arrays for both provision and connect", () => {
+      const policies = adapter.requiredPolicies(
+        config,
+        "123456789012",
+        "us-east-1",
+      );
       expect(policies.provision).toEqual([]);
       expect(policies.connect).toEqual([]);
     });
   });
 
-  describe('provision', () => {
-    it('throws NotImplementedError', async () => {
-      await expect(adapter.provision(config)).rejects.toBeInstanceOf(NotImplementedError);
+  describe("provision", () => {
+    it("throws NotImplementedError", async () => {
+      await expect(
+        adapter.provision(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toBeInstanceOf(NotImplementedError);
     });
 
-    it('error message contains the serviceName and method name', async () => {
+    it("error message contains the serviceName and method name", async () => {
       try {
-        await adapter.provision(config);
-        fail('Expected NotImplementedError');
+        await adapter.provision(config, MOCK_SCOPED_CREDENTIALS);
+        fail("Expected NotImplementedError");
       } catch (err) {
-        expect((err as Error).message).toContain('opensearch');
-        expect((err as Error).message).toContain('provision');
+        expect((err as Error).message).toContain("opensearch");
+        expect((err as Error).message).toContain("provision");
       }
     });
 
-    it('still logs the attempt before throwing', async () => {
-      const logSpy = jest.spyOn(console, 'log');
-      await adapter.provision(config).catch(() => {});
+    it("still logs the attempt before throwing", async () => {
+      const logSpy = jest.spyOn(console, "log");
+      await adapter.provision(config, MOCK_SCOPED_CREDENTIALS).catch(() => {});
       expect(logSpy).toHaveBeenCalledWith(
-        expect.stringContaining('[AwsGenericAdapter:opensearch] provision called'),
+        expect.stringContaining(
+          "[AwsGenericAdapter:opensearch] provision called",
+        ),
         config,
       );
     });
   });
 
-  describe('connect', () => {
-    it('throws NotImplementedError', async () => {
-      await expect(adapter.connect(config)).rejects.toBeInstanceOf(NotImplementedError);
+  describe("connect", () => {
+    it("throws NotImplementedError", async () => {
+      await expect(
+        adapter.connect(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toBeInstanceOf(NotImplementedError);
     });
 
-    it('error message contains the serviceName', async () => {
+    it("error message contains the serviceName", async () => {
       try {
-        await adapter.connect(config);
-        fail('Expected NotImplementedError');
+        await adapter.connect(config, MOCK_SCOPED_CREDENTIALS);
+        fail("Expected NotImplementedError");
       } catch (err) {
-        expect((err as Error).message).toContain('opensearch');
-        expect((err as Error).message).toContain('connect');
+        expect((err as Error).message).toContain("opensearch");
+        expect((err as Error).message).toContain("connect");
       }
     });
   });
 
-  describe('disconnect', () => {
-    it('throws NotImplementedError', async () => {
-      await expect(adapter.disconnect(config)).rejects.toBeInstanceOf(NotImplementedError);
+  describe("disconnect", () => {
+    it("throws NotImplementedError", async () => {
+      await expect(
+        adapter.disconnect(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toBeInstanceOf(NotImplementedError);
     });
 
-    it('error message contains the serviceName', async () => {
+    it("error message contains the serviceName", async () => {
       try {
-        await adapter.disconnect(config);
-        fail('Expected NotImplementedError');
+        await adapter.disconnect(config, MOCK_SCOPED_CREDENTIALS);
+        fail("Expected NotImplementedError");
       } catch (err) {
-        expect((err as Error).message).toContain('opensearch');
-        expect((err as Error).message).toContain('disconnect');
+        expect((err as Error).message).toContain("opensearch");
+        expect((err as Error).message).toContain("disconnect");
       }
     });
   });
 
-  describe('testConnection', () => {
-    it('throws NotImplementedError', async () => {
-      await expect(adapter.testConnection(config)).rejects.toBeInstanceOf(NotImplementedError);
+  describe("testConnection", () => {
+    it("throws NotImplementedError", async () => {
+      await expect(
+        adapter.testConnection(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toBeInstanceOf(NotImplementedError);
     });
 
-    it('error message contains the serviceName', async () => {
+    it("error message contains the serviceName", async () => {
       try {
-        await adapter.testConnection(config);
-        fail('Expected NotImplementedError');
+        await adapter.testConnection(config, MOCK_SCOPED_CREDENTIALS);
+        fail("Expected NotImplementedError");
       } catch (err) {
-        expect((err as Error).message).toContain('opensearch');
-        expect((err as Error).message).toContain('testConnection');
+        expect((err as Error).message).toContain("opensearch");
+        expect((err as Error).message).toContain("testConnection");
       }
     });
   });
 
-  describe('getMetrics', () => {
-    it('throws NotImplementedError', async () => {
-      await expect(adapter.getMetrics(config)).rejects.toBeInstanceOf(NotImplementedError);
+  describe("getMetrics", () => {
+    it("throws NotImplementedError", async () => {
+      await expect(
+        adapter.getMetrics(config, undefined, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toBeInstanceOf(NotImplementedError);
     });
 
-    it('error message contains the serviceName', async () => {
+    it("error message contains the serviceName", async () => {
       try {
-        await adapter.getMetrics(config);
-        fail('Expected NotImplementedError');
+        await adapter.getMetrics(config, undefined, MOCK_SCOPED_CREDENTIALS);
+        fail("Expected NotImplementedError");
       } catch (err) {
-        expect((err as Error).message).toContain('opensearch');
-        expect((err as Error).message).toContain('getMetrics');
+        expect((err as Error).message).toContain("opensearch");
+        expect((err as Error).message).toContain("getMetrics");
       }
     });
   });
 
-  describe('serviceName propagates through different instances', () => {
-    const services = ['qldb', 'aurora-postgresql', 'redshift'];
+  describe("serviceName propagates through different instances", () => {
+    const services = ["qldb", "aurora-postgresql", "redshift"];
 
-    test.each(services)('serviceName "%s" appears in NotImplementedError messages', async (svc) => {
-      const a = new AwsGenericAdapter(svc);
-      try {
-        await a.testConnection({});
-        fail('Expected NotImplementedError');
-      } catch (err) {
-        expect(err).toBeInstanceOf(NotImplementedError);
-        expect((err as Error).message).toContain(svc);
-      }
-    });
+    test.each(services)(
+      'serviceName "%s" appears in NotImplementedError messages',
+      async (svc) => {
+        const a = new AwsGenericAdapter(svc);
+        try {
+          await a.testConnection({});
+          fail("Expected NotImplementedError");
+        } catch (err) {
+          expect(err).toBeInstanceOf(NotImplementedError);
+          expect((err as Error).message).toContain(svc);
+        }
+      },
+    );
   });
 });

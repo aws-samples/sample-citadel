@@ -1,93 +1,118 @@
-import { SageMakerLakehouseAdapter } from '../sagemaker-lakehouse-adapter';
+import { SageMakerLakehouseAdapter } from "../sagemaker-lakehouse-adapter";
 import {
   ProvisioningError,
   ConnectionError,
   PermissionError,
   ResourceNotFoundError,
   DataStoreError,
-} from '../errors';
-import { SageMakerClient } from '@aws-sdk/client-sagemaker';
+} from "../errors";
+import { SageMakerClient } from "@aws-sdk/client-sagemaker";
+import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
 
 const mockSend = jest.fn();
-jest.mock('@aws-sdk/client-sagemaker', () => {
+jest.mock("@aws-sdk/client-sagemaker", () => {
   return {
     SageMakerClient: jest.fn().mockImplementation(() => ({ send: mockSend })),
-    CreateFeatureGroupCommand: jest.fn().mockImplementation((input) => ({ _type: 'CreateFeatureGroup', input })),
-    DescribeFeatureGroupCommand: jest.fn().mockImplementation((input) => ({ _type: 'DescribeFeatureGroup', input })),
+    CreateFeatureGroupCommand: jest
+      .fn()
+      .mockImplementation((input) => ({ _type: "CreateFeatureGroup", input })),
+    DescribeFeatureGroupCommand: jest
+      .fn()
+      .mockImplementation((input) => ({
+        _type: "DescribeFeatureGroup",
+        input,
+      })),
   };
 });
 
-describe('SageMakerLakehouseAdapter', () => {
+describe("SageMakerLakehouseAdapter", () => {
   let adapter: SageMakerLakehouseAdapter;
-  const config = { featureGroupName: 'my-feature-group' };
+  const config = { featureGroupName: "my-feature-group" };
 
   beforeEach(() => {
     adapter = new SageMakerLakehouseAdapter();
     mockSend.mockReset();
   });
 
-  describe('requiredPolicies', () => {
-    it('returns provision policies for sagemaker:CreateFeatureGroup, sagemaker:DescribeFeatureGroup', () => {
-      const policies = adapter.requiredPolicies(config, '123456789012', 'us-east-1');
+  describe("requiredPolicies", () => {
+    it("returns provision policies for sagemaker:CreateFeatureGroup, sagemaker:DescribeFeatureGroup", () => {
+      const policies = adapter.requiredPolicies(
+        config,
+        "123456789012",
+        "us-east-1",
+      );
       expect(policies.provision).toHaveLength(1);
       expect(policies.provision[0].actions).toEqual([
-        'sagemaker:CreateFeatureGroup',
-        'sagemaker:DescribeFeatureGroup',
+        "sagemaker:CreateFeatureGroup",
+        "sagemaker:DescribeFeatureGroup",
       ]);
       expect(policies.provision[0].resources).toEqual([
-        'arn:aws:sagemaker:us-east-1:123456789012:feature-group/*',
+        "arn:aws:sagemaker:us-east-1:123456789012:feature-group/*",
       ]);
     });
 
-    it('returns connect policies for sagemaker:DescribeFeatureGroup, sagemaker:GetRecord, sagemaker:PutRecord', () => {
-      const policies = adapter.requiredPolicies(config, '123456789012', 'us-east-1');
+    it("returns connect policies for sagemaker:DescribeFeatureGroup, sagemaker:GetRecord, sagemaker:PutRecord", () => {
+      const policies = adapter.requiredPolicies(
+        config,
+        "123456789012",
+        "us-east-1",
+      );
       expect(policies.connect).toHaveLength(1);
       expect(policies.connect[0].actions).toEqual([
-        'sagemaker:DescribeFeatureGroup',
-        'sagemaker:GetRecord',
-        'sagemaker:PutRecord',
+        "sagemaker:DescribeFeatureGroup",
+        "sagemaker:GetRecord",
+        "sagemaker:PutRecord",
       ]);
     });
 
-    it('uses wildcard resource ARN pattern', () => {
-      const policies = adapter.requiredPolicies({}, '123456789012', 'us-west-2');
+    it("uses wildcard resource ARN pattern", () => {
+      const policies = adapter.requiredPolicies(
+        {},
+        "123456789012",
+        "us-west-2",
+      );
       expect(policies.provision[0].resources).toEqual([
-        'arn:aws:sagemaker:us-west-2:123456789012:feature-group/*',
+        "arn:aws:sagemaker:us-west-2:123456789012:feature-group/*",
       ]);
     });
   });
 
-  describe('provision', () => {
-    it('creates a feature group and returns the ARN', async () => {
+  describe("provision", () => {
+    it("creates a feature group and returns the ARN", async () => {
       mockSend.mockResolvedValueOnce({
-        FeatureGroupArn: 'arn:aws:sagemaker:us-east-1:123:feature-group/my-feature-group',
+        FeatureGroupArn:
+          "arn:aws:sagemaker:us-east-1:123:feature-group/my-feature-group",
       });
-      const result = await adapter.provision(config);
-      expect(result.resourceArn).toBe('arn:aws:sagemaker:us-east-1:123:feature-group/my-feature-group');
+      const result = await adapter.provision(config, MOCK_SCOPED_CREDENTIALS);
+      expect(result.resourceArn).toBe(
+        "arn:aws:sagemaker:us-east-1:123:feature-group/my-feature-group",
+      );
     });
 
-    it('handles ResourceInUse as idempotent success', async () => {
-      const sdkError = new Error('Already exists');
-      sdkError.name = 'ResourceInUse';
+    it("handles ResourceInUse as idempotent success", async () => {
+      const sdkError = new Error("Already exists");
+      sdkError.name = "ResourceInUse";
       mockSend.mockRejectedValueOnce(sdkError);
-      const result = await adapter.provision(config);
-      expect(result.resourceArn).toContain('my-feature-group');
+      const result = await adapter.provision(config, MOCK_SCOPED_CREDENTIALS);
+      expect(result.resourceArn).toContain("my-feature-group");
     });
 
-    it('wraps AccessDeniedException in PermissionError', async () => {
-      const sdkError = new Error('Access Denied');
-      sdkError.name = 'AccessDeniedException';
+    it("wraps AccessDeniedException in PermissionError", async () => {
+      const sdkError = new Error("Access Denied");
+      sdkError.name = "AccessDeniedException";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.provision(config)).rejects.toThrow(PermissionError);
+      await expect(
+        adapter.provision(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(PermissionError);
     });
 
-    it('wraps unknown SDK errors in ProvisioningError with cause', async () => {
-      const sdkError = new Error('Something broke');
-      sdkError.name = 'InternalError';
+    it("wraps unknown SDK errors in ProvisioningError with cause", async () => {
+      const sdkError = new Error("Something broke");
+      sdkError.name = "InternalError";
       mockSend.mockRejectedValueOnce(sdkError);
       try {
-        await adapter.provision(config);
-        fail('Expected ProvisioningError');
+        await adapter.provision(config, MOCK_SCOPED_CREDENTIALS);
+        fail("Expected ProvisioningError");
       } catch (err) {
         expect(err).toBeInstanceOf(ProvisioningError);
         expect((err as DataStoreError).cause).toBe(sdkError);
@@ -95,44 +120,54 @@ describe('SageMakerLakehouseAdapter', () => {
     });
   });
 
-  describe('connect', () => {
-    it('succeeds when feature group status is Created', async () => {
+  describe("connect", () => {
+    it("succeeds when feature group status is Created", async () => {
       mockSend.mockResolvedValueOnce({
-        FeatureGroupStatus: 'Created',
-        FeatureGroupArn: 'arn:aws:sagemaker:us-east-1:123:feature-group/my-feature-group',
+        FeatureGroupStatus: "Created",
+        FeatureGroupArn:
+          "arn:aws:sagemaker:us-east-1:123:feature-group/my-feature-group",
       });
-      await expect(adapter.connect(config)).resolves.toBeUndefined();
+      await expect(
+        adapter.connect(config, MOCK_SCOPED_CREDENTIALS),
+      ).resolves.toBeUndefined();
     });
 
-    it('throws ConnectionError when feature group status is not Created', async () => {
+    it("throws ConnectionError when feature group status is not Created", async () => {
       mockSend.mockResolvedValueOnce({
-        FeatureGroupStatus: 'Creating',
-        FeatureGroupArn: 'arn:aws:sagemaker:us-east-1:123:feature-group/my-feature-group',
+        FeatureGroupStatus: "Creating",
+        FeatureGroupArn:
+          "arn:aws:sagemaker:us-east-1:123:feature-group/my-feature-group",
       });
-      await expect(adapter.connect(config)).rejects.toThrow(ConnectionError);
+      await expect(
+        adapter.connect(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(ConnectionError);
     });
 
-    it('throws ResourceNotFoundError when feature group does not exist', async () => {
-      const sdkError = new Error('Not found');
-      sdkError.name = 'ResourceNotFound';
+    it("throws ResourceNotFoundError when feature group does not exist", async () => {
+      const sdkError = new Error("Not found");
+      sdkError.name = "ResourceNotFound";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.connect(config)).rejects.toThrow(ResourceNotFoundError);
+      await expect(
+        adapter.connect(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(ResourceNotFoundError);
     });
 
-    it('throws PermissionError on AccessDeniedException', async () => {
-      const sdkError = new Error('Forbidden');
-      sdkError.name = 'AccessDeniedException';
+    it("throws PermissionError on AccessDeniedException", async () => {
+      const sdkError = new Error("Forbidden");
+      sdkError.name = "AccessDeniedException";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.connect(config)).rejects.toThrow(PermissionError);
+      await expect(
+        adapter.connect(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(PermissionError);
     });
 
-    it('wraps other errors in ConnectionError with cause', async () => {
-      const sdkError = new Error('Network issue');
-      sdkError.name = 'NetworkingError';
+    it("wraps other errors in ConnectionError with cause", async () => {
+      const sdkError = new Error("Network issue");
+      sdkError.name = "NetworkingError";
       mockSend.mockRejectedValueOnce(sdkError);
       try {
-        await adapter.connect(config);
-        fail('Expected ConnectionError');
+        await adapter.connect(config, MOCK_SCOPED_CREDENTIALS);
+        fail("Expected ConnectionError");
       } catch (err) {
         expect(err).toBeInstanceOf(ConnectionError);
         expect((err as DataStoreError).cause).toBe(sdkError);
@@ -140,75 +175,96 @@ describe('SageMakerLakehouseAdapter', () => {
     });
   });
 
-  describe('disconnect', () => {
-    it('is a no-op', async () => {
-      await expect(adapter.disconnect(config)).resolves.toBeUndefined();
+  describe("disconnect", () => {
+    it("is a no-op", async () => {
+      await expect(
+        adapter.disconnect(config, MOCK_SCOPED_CREDENTIALS),
+      ).resolves.toBeUndefined();
     });
   });
 
-  describe('testConnection', () => {
-    it('returns success with feature group details', async () => {
+  describe("testConnection", () => {
+    it("returns success with feature group details", async () => {
       mockSend.mockResolvedValueOnce({
-        FeatureGroupStatus: 'Created',
-        FeatureGroupArn: 'arn:aws:sagemaker:us-east-1:123:feature-group/my-feature-group',
-        RecordIdentifierFeatureName: 'record_id',
+        FeatureGroupStatus: "Created",
+        FeatureGroupArn:
+          "arn:aws:sagemaker:us-east-1:123:feature-group/my-feature-group",
+        RecordIdentifierFeatureName: "record_id",
       });
-      const result = await adapter.testConnection(config);
+      const result = await adapter.testConnection(
+        config,
+        MOCK_SCOPED_CREDENTIALS,
+      );
       expect(result.success).toBe(true);
-      expect(result.details?.status).toBe('Created');
-      expect(result.details?.arn).toBe('arn:aws:sagemaker:us-east-1:123:feature-group/my-feature-group');
-      expect(result.details?.recordIdentifierFeatureName).toBe('record_id');
+      expect(result.details?.status).toBe("Created");
+      expect(result.details?.arn).toBe(
+        "arn:aws:sagemaker:us-east-1:123:feature-group/my-feature-group",
+      );
+      expect(result.details?.recordIdentifierFeatureName).toBe("record_id");
     });
 
-    it('returns failure when DescribeFeatureGroup fails', async () => {
-      mockSend.mockRejectedValueOnce(new Error('Not Found'));
-      const result = await adapter.testConnection(config);
+    it("returns failure when DescribeFeatureGroup fails", async () => {
+      mockSend.mockRejectedValueOnce(new Error("Not Found"));
+      const result = await adapter.testConnection(
+        config,
+        MOCK_SCOPED_CREDENTIALS,
+      );
       expect(result.success).toBe(false);
     });
   });
 
-  describe('getMetrics', () => {
-    it('returns placeholder metrics', async () => {
+  describe("getMetrics", () => {
+    it("returns placeholder metrics", async () => {
       mockSend.mockResolvedValueOnce({
-        FeatureGroupStatus: 'Created',
-        FeatureGroupArn: 'arn:aws:sagemaker:us-east-1:123:feature-group/my-feature-group',
+        FeatureGroupStatus: "Created",
+        FeatureGroupArn:
+          "arn:aws:sagemaker:us-east-1:123:feature-group/my-feature-group",
       });
-      const result = await adapter.getMetrics(config);
-      expect(result.size).toBe('0 MB');
+      const result = await adapter.getMetrics(
+        config,
+        undefined,
+        MOCK_SCOPED_CREDENTIALS,
+      );
+      expect(result.size).toBe("0 MB");
       expect(result.records).toBe(0);
     });
 
-    it('wraps AccessDeniedException in PermissionError', async () => {
-      const sdkError = new Error('Access Denied');
-      sdkError.name = 'AccessDeniedException';
+    it("wraps AccessDeniedException in PermissionError", async () => {
+      const sdkError = new Error("Access Denied");
+      sdkError.name = "AccessDeniedException";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.getMetrics(config)).rejects.toThrow(PermissionError);
+      await expect(
+        adapter.getMetrics(config, undefined, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(PermissionError);
     });
 
-    it('wraps other errors in ConnectionError', async () => {
-      const sdkError = new Error('Timeout');
-      sdkError.name = 'RequestTimeout';
+    it("wraps other errors in ConnectionError", async () => {
+      const sdkError = new Error("Timeout");
+      sdkError.name = "RequestTimeout";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.getMetrics(config)).rejects.toThrow(ConnectionError);
+      await expect(
+        adapter.getMetrics(config, undefined, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(ConnectionError);
     });
   });
 
-  describe('scoped credentials', () => {
-    it('constructs client with provided credentials', async () => {
+  describe("scoped credentials", () => {
+    it("constructs client with provided credentials", async () => {
       mockSend.mockResolvedValueOnce({
-        FeatureGroupStatus: 'Created',
-        FeatureGroupArn: 'arn:aws:sagemaker:us-east-1:123:feature-group/my-feature-group',
+        FeatureGroupStatus: "Created",
+        FeatureGroupArn:
+          "arn:aws:sagemaker:us-east-1:123:feature-group/my-feature-group",
       });
       await adapter.connect(config, {
-        accessKeyId: 'AKIA...',
-        secretAccessKey: 'secret',
-        sessionToken: 'token',
+        accessKeyId: "AKIA...",
+        secretAccessKey: "secret",
+        sessionToken: "token",
       });
       expect(SageMakerClient).toHaveBeenCalledWith({
         credentials: {
-          accessKeyId: 'AKIA...',
-          secretAccessKey: 'secret',
-          sessionToken: 'token',
+          accessKeyId: "AKIA...",
+          secretAccessKey: "secret",
+          sessionToken: "token",
         },
       });
     });

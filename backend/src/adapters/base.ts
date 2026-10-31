@@ -6,15 +6,15 @@
  */
 
 export enum AuthenticationMethod {
-  API_KEY = 'API_KEY',
-  OAUTH2 = 'OAUTH2',
-  BASIC_AUTH = 'BASIC_AUTH',
-  BEARER_TOKEN = 'BEARER_TOKEN',
-  IAM_ROLE = 'IAM_ROLE',
-  CONFIGURABLE = 'CONFIGURABLE',
+  API_KEY = "API_KEY",
+  OAUTH2 = "OAUTH2",
+  BASIC_AUTH = "BASIC_AUTH",
+  BEARER_TOKEN = "BEARER_TOKEN",
+  IAM_ROLE = "IAM_ROLE",
+  CONFIGURABLE = "CONFIGURABLE",
 }
 
-export type ConnectorCategory = 'datastore' | 'integration';
+export type ConnectorCategory = "datastore" | "integration";
 
 export interface PolicyStatement {
   actions: string[];
@@ -62,7 +62,7 @@ export interface ConnectorSpec {
   authentication: AuthenticationConfig;
   configuration: ConfigurationSchema;
   testEndpoint?: string;
-  gatewayTargetType?: 'lambda' | 'smithyModel' | 'mcpServer';
+  gatewayTargetType?: "lambda" | "smithyModel" | "mcpServer";
 }
 
 export interface ValidationResult {
@@ -83,42 +83,46 @@ export interface ConnectorAdapter {
   requiredPolicies(
     config: Record<string, unknown>,
     accountId: string,
-    region: string
+    region: string,
   ): RequiredPolicies;
 
   testConnection(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<ConnectionTestResult>;
 
   connect(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<void>;
 
-  disconnect(config: Record<string, unknown>): Promise<void>;
+  disconnect(
+    config: Record<string, unknown>,
+    credentials?: Record<string, unknown>,
+  ): Promise<void>;
 
   /** DataStore-only: provision a new resource */
   provision?(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<ProvisionResult>;
 
   /** DataStore-only: destroy a provisioned resource */
   deprovision?(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<void>;
 
   /** DataStore-only: get resource metrics */
   getMetrics?(
     config: Record<string, unknown>,
-    resourceArn?: string
+    resourceArn?: string,
+    credentials?: Record<string, unknown>,
   ): Promise<MetricsResult>;
 
   /** Validate credentials and configuration against the spec */
   validate?(
     credentials: Record<string, unknown>,
-    config: Record<string, unknown>
+    config: Record<string, unknown>,
   ): ValidationResult;
 }

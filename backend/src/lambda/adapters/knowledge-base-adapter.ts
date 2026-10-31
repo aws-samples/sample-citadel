@@ -5,7 +5,7 @@ import {
   DeleteKnowledgeBaseCommand,
   type KnowledgeBaseConfiguration,
   type StorageConfiguration,
-} from '@aws-sdk/client-bedrock-agent';
+} from "@aws-sdk/client-bedrock-agent";
 import {
   OpenSearchServerlessClient,
   CreateSecurityPolicyCommand,
@@ -13,32 +13,58 @@ import {
   CreateCollectionCommand,
   DeleteCollectionCommand,
   BatchGetCollectionCommand,
-} from '@aws-sdk/client-opensearchserverless';
+} from "@aws-sdk/client-opensearchserverless";
 import {
   IAMClient,
   CreateRoleCommand,
   PutRolePolicyCommand,
   DeleteRolePolicyCommand,
   DeleteRoleCommand,
-} from '@aws-sdk/client-iam';
+} from "@aws-sdk/client-iam";
+import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import {
-  STSClient,
-  GetCallerIdentityCommand,
-} from '@aws-sdk/client-sts';
-import { ConnectorAdapter, ConnectorCategory, ConnectorSpec, AuthenticationMethod, RequiredPolicies, ProvisionResult, ConnectionTestResult, MetricsResult } from '../../adapters/base';
-import { ProvisioningError, ConnectionError, PermissionError, ResourceNotFoundError } from './errors';
-import { SdkError, AwsCredentialFields } from './sdk-types';
+  ConnectorAdapter,
+  ConnectorCategory,
+  ConnectorSpec,
+  AuthenticationMethod,
+  RequiredPolicies,
+  ProvisionResult,
+  ConnectionTestResult,
+  MetricsResult,
+} from "../../adapters/base";
+import {
+  ProvisioningError,
+  ConnectionError,
+  PermissionError,
+  ResourceNotFoundError,
+} from "./errors";
+import { SdkError } from "./sdk-types";
+import { requireScopedCredentials } from "./credential-guard";
 
-const DEFAULT_EMBEDDING_MODEL = 'amazon.titan-embed-text-v2:0';
-const SERVICE_ROLE_POLICY_NAME = 'BedrockKnowledgeBaseAccess';
-const VECTOR_INDEX_NAME = 'bedrock-knowledge-base-default-index';
-const VECTOR_FIELD = 'bedrock-knowledge-base-default-vector';
-const TEXT_FIELD = 'AMAZON_BEDROCK_TEXT_CHUNK';
-const METADATA_FIELD = 'AMAZON_BEDROCK_METADATA';
+const DEFAULT_EMBEDDING_MODEL = "amazon.titan-embed-text-v2:0";
+const SERVICE_ROLE_POLICY_NAME = "BedrockKnowledgeBaseAccess";
+const VECTOR_INDEX_NAME = "bedrock-knowledge-base-default-index";
+const VECTOR_FIELD = "bedrock-knowledge-base-default-vector";
+const TEXT_FIELD = "AMAZON_BEDROCK_TEXT_CHUNK";
+const METADATA_FIELD = "AMAZON_BEDROCK_METADATA";
 
 export class KnowledgeBaseAdapter implements ConnectorAdapter {
-  readonly category: ConnectorCategory = 'datastore';
-  readonly spec: ConnectorSpec = { type: 'KNOWLEDGE_BASE', provider: 'Amazon Web Services', category: 'datastore', authentication: { method: AuthenticationMethod.IAM_ROLE, fields: [], secretStructure: {} }, configuration: { required: ['knowledgeBaseId'], optional: [], ssmParameters: [] } };
+  readonly category: ConnectorCategory = "datastore";
+  readonly spec: ConnectorSpec = {
+    type: "KNOWLEDGE_BASE",
+    provider: "Amazon Web Services",
+    category: "datastore",
+    authentication: {
+      method: AuthenticationMethod.IAM_ROLE,
+      fields: [],
+      secretStructure: {},
+    },
+    configuration: {
+      required: ["knowledgeBaseId"],
+      optional: [],
+      ssmParameters: [],
+    },
+  };
 
   /** Delay (ms) after creating a service role to allow IAM propagation. Override in tests. */
   roleCreationDelayMs = 10000;
@@ -47,35 +73,72 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
   /** Maximum time (ms) to wait for AOSS collection to become ACTIVE. */
   collectionMaxWaitMs = 300000;
 
-  private makeClient(creds?: Record<string, unknown>): BedrockAgentClient {
-    const c = creds as AwsCredentialFields | undefined;
-    if (c?.accessKeyId && c?.secretAccessKey && c?.sessionToken) {
-      return new BedrockAgentClient({
-        credentials: {
-          accessKeyId: c.accessKeyId,
-          secretAccessKey: c.secretAccessKey,
-          sessionToken: c.sessionToken,
-        },
-      });
-    }
-    return new BedrockAgentClient({});
+  private makeClient(
+    creds: Record<string, unknown> | undefined,
+    op: string,
+  ): BedrockAgentClient {
+    const credentials = requireScopedCredentials(creds, {
+      adapter: "KnowledgeBaseAdapter",
+      op,
+    });
+    return new BedrockAgentClient({ credentials });
   }
 
-  private makeOssClient(): OpenSearchServerlessClient {
+  /**
+   * Create an OpenSearch Serverless client using scoped credentials.
+   * Data-plane OSS operations (index creation, queries) must use vended creds.
+   */
+  private makeOssClient(
+    creds: Record<string, unknown> | undefined,
+    op: string,
+  ): OpenSearchServerlessClient {
+    const credentials = requireScopedCredentials(creds, {
+      adapter: "KnowledgeBaseAdapter",
+      op,
+    });
+    return new OpenSearchServerlessClient({ credentials });
+  }
+
+  /**
+   * Create an OSS client using the Lambda execution role (platform credentials).
+   * ONLY for control-plane provisioning: creating AOSS security/access/network
+   * policies and collections. These operations run under the datastore-resolver
+   * Lambda's direct AOSS grants in CDK — not under the scoped citadel-ds-{id}
+   * role. Each call site is explicitly named so the guard test can allowlist it.
+   */
+  private platformOssClient(): OpenSearchServerlessClient {
     return new OpenSearchServerlessClient({});
+  }
+
+  /**
+   * Create an IAM client using the Lambda execution role (platform credentials).
+   * ONLY for control-plane: creating/deleting the Bedrock KB service role
+   * (citadel-ds-kb-svc-*). Runs under the datastore-resolver Lambda's direct
+   * IAM grants.
+   */
+  private platformIamClient(): IAMClient {
+    return new IAMClient({});
+  }
+
+  /**
+   * Create an STS client using the Lambda execution role (platform credentials).
+   * Used to discover the account ID and region — a read-only control-plane query.
+   */
+  private platformStsClient(): STSClient {
+    return new STSClient({});
   }
 
   requiredPolicies(
     _config: Record<string, unknown>,
     _accountId: string,
-    _region: string
+    _region: string,
   ): RequiredPolicies {
     const knowledgeBaseArn = `arn:aws:bedrock:${_region}:${_accountId}:knowledge-base/*`;
     return {
       provision: [],
       connect: [
         {
-          actions: ['bedrock:GetKnowledgeBase', 'bedrock:Retrieve'],
+          actions: ["bedrock:GetKnowledgeBase", "bedrock:Retrieve"],
           resources: [knowledgeBaseArn],
         },
       ],
@@ -85,74 +148,98 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
   /**
    * Get the AWS account ID and region from STS.
    */
-  private async getAccountContext(): Promise<{ accountId: string; region: string }> {
-    const stsClient = new STSClient({});
+  private async getAccountContext(): Promise<{
+    accountId: string;
+    region: string;
+  }> {
+    const stsClient = this.platformStsClient();
     const identity = await stsClient.send(new GetCallerIdentityCommand({}));
     const accountId = identity.Account!;
     const region = (await stsClient.config.region()) as string;
-    return { accountId, region: typeof region === 'string' ? region : 'us-east-1' };
+    return {
+      accountId,
+      region: typeof region === "string" ? region : "us-east-1",
+    };
   }
 
   /**
    * Create a Bedrock service role that Bedrock can assume to access resources,
    * including permissions for OpenSearch Serverless API access.
    */
-  private async createServiceRole(name: string, collectionArn: string): Promise<string> {
-    const iamClient = new IAMClient({});
+  private async createServiceRole(
+    name: string,
+    collectionArn: string,
+  ): Promise<string> {
+    const iamClient = this.platformIamClient();
     const { accountId } = await this.getAccountContext();
-    const roleName = `citadel-ds-kb-svc-${name.replace(/[^a-zA-Z0-9-]/g, '-').substring(0, 30)}`;
+    const roleName = `citadel-ds-kb-svc-${name.replace(/[^a-zA-Z0-9-]/g, "-").substring(0, 30)}`;
 
     const trustPolicy = {
-      Version: '2012-10-17',
-      Statement: [{
-        Effect: 'Allow',
-        Principal: { Service: 'bedrock.amazonaws.com' },
-        Action: 'sts:AssumeRole',
-      }],
+      Version: "2012-10-17",
+      Statement: [
+        {
+          Effect: "Allow",
+          Principal: { Service: "bedrock.amazonaws.com" },
+          Action: "sts:AssumeRole",
+        },
+      ],
     };
 
     try {
-      await iamClient.send(new CreateRoleCommand({
-        RoleName: roleName,
-        AssumeRolePolicyDocument: JSON.stringify(trustPolicy),
-        Tags: [
-          { Key: 'ManagedBy', Value: 'citadel' },
-          { Key: 'Purpose', Value: 'bedrock-knowledge-base-service-role' },
-        ],
-      }));
+      await iamClient.send(
+        new CreateRoleCommand({
+          RoleName: roleName,
+          AssumeRolePolicyDocument: JSON.stringify(trustPolicy),
+          Tags: [
+            { Key: "ManagedBy", Value: "citadel" },
+            { Key: "Purpose", Value: "bedrock-knowledge-base-service-role" },
+          ],
+        }),
+      );
     } catch (error) {
       const err = error as SdkError;
-      if (err.name !== 'EntityAlreadyExistsException') {
-        throw new ProvisioningError(`Failed to create Bedrock service role: ${err.message}`, err);
+      if (err.name !== "EntityAlreadyExistsException") {
+        throw new ProvisioningError(
+          `Failed to create Bedrock service role: ${err.message}`,
+          err,
+        );
       }
     }
 
     // Policy granting Bedrock access to foundation models AND OpenSearch Serverless
     const policyDocument = {
-      Version: '2012-10-17',
+      Version: "2012-10-17",
       Statement: [
         {
-          Effect: 'Allow',
-          Action: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
-          Resource: ['*'],
+          Effect: "Allow",
+          Action: [
+            "bedrock:InvokeModel",
+            "bedrock:InvokeModelWithResponseStream",
+          ],
+          Resource: ["*"],
         },
         {
-          Effect: 'Allow',
-          Action: ['aoss:APIAccessAll'],
+          Effect: "Allow",
+          Action: ["aoss:APIAccessAll"],
           Resource: [collectionArn],
         },
       ],
     };
 
     try {
-      await iamClient.send(new PutRolePolicyCommand({
-        RoleName: roleName,
-        PolicyName: SERVICE_ROLE_POLICY_NAME,
-        PolicyDocument: JSON.stringify(policyDocument),
-      }));
+      await iamClient.send(
+        new PutRolePolicyCommand({
+          RoleName: roleName,
+          PolicyName: SERVICE_ROLE_POLICY_NAME,
+          PolicyDocument: JSON.stringify(policyDocument),
+        }),
+      );
     } catch (error) {
       const err = error as SdkError;
-      throw new ProvisioningError(`Failed to attach policy to Bedrock service role: ${err.message}`, err);
+      throw new ProvisioningError(
+        `Failed to attach policy to Bedrock service role: ${err.message}`,
+        err,
+      );
     }
 
     return `arn:aws:iam::${accountId}:role/${roleName}`;
@@ -162,15 +249,17 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
    * Delete a Bedrock service role created during provisioning.
    */
   private async deleteServiceRole(roleName: string): Promise<void> {
-    const iamClient = new IAMClient({});
+    const iamClient = this.platformIamClient();
     try {
-      await iamClient.send(new DeleteRolePolicyCommand({
-        RoleName: roleName,
-        PolicyName: SERVICE_ROLE_POLICY_NAME,
-      }));
+      await iamClient.send(
+        new DeleteRolePolicyCommand({
+          RoleName: roleName,
+          PolicyName: SERVICE_ROLE_POLICY_NAME,
+        }),
+      );
     } catch (error) {
       const err = error as SdkError;
-      if (err.name !== 'NoSuchEntityException') {
+      if (err.name !== "NoSuchEntityException") {
         console.warn(`Failed to delete service role policy: ${err.message}`);
       }
     }
@@ -178,7 +267,7 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
       await iamClient.send(new DeleteRoleCommand({ RoleName: roleName }));
     } catch (error) {
       const err = error as SdkError;
-      if (err.name !== 'NoSuchEntityException') {
+      if (err.name !== "NoSuchEntityException") {
         console.warn(`Failed to delete service role: ${err.message}`);
       }
     }
@@ -193,79 +282,120 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
     serviceRoleArn: string,
     accountId: string,
   ): Promise<{ collectionArn: string; collectionId: string }> {
-    const ossClient = this.makeOssClient();
-    const collectionName = `aifkb-${name.replace(/[^a-z0-9-]/gi, '-').substring(0, 25).toLowerCase()}`;
+    const ossClient = this.platformOssClient();
+    const collectionName = `aifkb-${name
+      .replace(/[^a-z0-9-]/gi, "-")
+      .substring(0, 25)
+      .toLowerCase()}`;
     const policyName = `aifkb-${collectionName}`;
 
     // 1. Create encryption policy (required before collection creation)
     try {
-      await ossClient.send(new CreateSecurityPolicyCommand({
-        name: policyName,
-        type: 'encryption',
-        description: `Encryption policy for KB collection ${collectionName}`,
-        policy: JSON.stringify({
-          Rules: [{ ResourceType: 'collection', Resource: [`collection/${collectionName}`] }],
-          AWSOwnedKey: true,
+      await ossClient.send(
+        new CreateSecurityPolicyCommand({
+          name: policyName,
+          type: "encryption",
+          description: `Encryption policy for KB collection ${collectionName}`,
+          policy: JSON.stringify({
+            Rules: [
+              {
+                ResourceType: "collection",
+                Resource: [`collection/${collectionName}`],
+              },
+            ],
+            AWSOwnedKey: true,
+          }),
         }),
-      }));
+      );
     } catch (error) {
       const err = error as SdkError;
-      if (err.name !== 'ConflictException') {
-        throw new ProvisioningError(`Failed to create encryption policy: ${err.message}`, err);
+      if (err.name !== "ConflictException") {
+        throw new ProvisioningError(
+          `Failed to create encryption policy: ${err.message}`,
+          err,
+        );
       }
     }
 
     // 2. Create network policy (public access for Bedrock)
     try {
-      await ossClient.send(new CreateSecurityPolicyCommand({
-        name: policyName,
-        type: 'network',
-        description: `Network policy for KB collection ${collectionName}`,
-        policy: JSON.stringify([{
-          Description: `Public access for ${collectionName}`,
-          Rules: [
-            { ResourceType: 'dashboard', Resource: [`collection/${collectionName}`] },
-            { ResourceType: 'collection', Resource: [`collection/${collectionName}`] },
-          ],
-          AllowFromPublic: true,
-        }]),
-      }));
+      await ossClient.send(
+        new CreateSecurityPolicyCommand({
+          name: policyName,
+          type: "network",
+          description: `Network policy for KB collection ${collectionName}`,
+          policy: JSON.stringify([
+            {
+              Description: `Public access for ${collectionName}`,
+              Rules: [
+                {
+                  ResourceType: "dashboard",
+                  Resource: [`collection/${collectionName}`],
+                },
+                {
+                  ResourceType: "collection",
+                  Resource: [`collection/${collectionName}`],
+                },
+              ],
+              AllowFromPublic: true,
+            },
+          ]),
+        }),
+      );
     } catch (error) {
       const err = error as SdkError;
-      if (err.name !== 'ConflictException') {
-        throw new ProvisioningError(`Failed to create network policy: ${err.message}`, err);
+      if (err.name !== "ConflictException") {
+        throw new ProvisioningError(
+          `Failed to create network policy: ${err.message}`,
+          err,
+        );
       }
     }
 
     // 3. Create data access policy granting the Bedrock service role access
     try {
-      await ossClient.send(new CreateAccessPolicyCommand({
-        name: policyName,
-        type: 'data',
-        description: `Data access policy for KB collection ${collectionName}`,
-        policy: JSON.stringify([{
-          Rules: [
+      await ossClient.send(
+        new CreateAccessPolicyCommand({
+          name: policyName,
+          type: "data",
+          description: `Data access policy for KB collection ${collectionName}`,
+          policy: JSON.stringify([
             {
-              Resource: [`index/${collectionName}/*`],
-              Permission: [
-                'aoss:CreateIndex', 'aoss:DeleteIndex', 'aoss:UpdateIndex',
-                'aoss:DescribeIndex', 'aoss:ReadDocument', 'aoss:WriteDocument',
+              Rules: [
+                {
+                  Resource: [`index/${collectionName}/*`],
+                  Permission: [
+                    "aoss:CreateIndex",
+                    "aoss:DeleteIndex",
+                    "aoss:UpdateIndex",
+                    "aoss:DescribeIndex",
+                    "aoss:ReadDocument",
+                    "aoss:WriteDocument",
+                  ],
+                  ResourceType: "index",
+                },
+                {
+                  Resource: [`collection/${collectionName}`],
+                  Permission: [
+                    "aoss:CreateCollectionItems",
+                    "aoss:DescribeCollectionItems",
+                    "aoss:UpdateCollectionItems",
+                  ],
+                  ResourceType: "collection",
+                },
               ],
-              ResourceType: 'index',
+              Principal: [serviceRoleArn, `arn:aws:iam::${accountId}:root`],
             },
-            {
-              Resource: [`collection/${collectionName}`],
-              Permission: ['aoss:CreateCollectionItems', 'aoss:DescribeCollectionItems', 'aoss:UpdateCollectionItems'],
-              ResourceType: 'collection',
-            },
-          ],
-          Principal: [serviceRoleArn, `arn:aws:iam::${accountId}:root`],
-        }]),
-      }));
+          ]),
+        }),
+      );
     } catch (error) {
       const err = error as SdkError;
-      if (err.name !== 'ConflictException') {
-        throw new ProvisioningError(`Failed to create data access policy: ${err.message}`, err);
+      if (err.name !== "ConflictException") {
+        throw new ProvisioningError(
+          `Failed to create data access policy: ${err.message}`,
+          err,
+        );
       }
     }
 
@@ -273,54 +403,77 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
     let collectionId: string | undefined;
     let collectionArn: string | undefined;
     try {
-      const result = await ossClient.send(new CreateCollectionCommand({
-        name: collectionName,
-        type: 'VECTORSEARCH',
-        description: `Vector store for Bedrock Knowledge Base: ${name}`,
-      }));
+      const result = await ossClient.send(
+        new CreateCollectionCommand({
+          name: collectionName,
+          type: "VECTORSEARCH",
+          description: `Vector store for Bedrock Knowledge Base: ${name}`,
+        }),
+      );
       collectionId = result.createCollectionDetail?.id;
       collectionArn = result.createCollectionDetail?.arn;
     } catch (error) {
       const err = error as SdkError;
-      if (err.name === 'ConflictException') {
+      if (err.name === "ConflictException") {
         // Collection already exists — look it up
-        const existing = await ossClient.send(new BatchGetCollectionCommand({ names: [collectionName] }));
+        const existing = await ossClient.send(
+          new BatchGetCollectionCommand({ names: [collectionName] }),
+        );
         const detail = existing.collectionDetails?.[0];
         collectionId = detail?.id;
         collectionArn = detail?.arn;
       } else {
-        throw new ProvisioningError(`Failed to create AOSS collection: ${err.message}`, err);
+        throw new ProvisioningError(
+          `Failed to create AOSS collection: ${err.message}`,
+          err,
+        );
       }
     }
 
     if (!collectionArn || !collectionId) {
-      throw new ProvisioningError(`AOSS collection created but ARN/ID not returned for ${collectionName}`);
+      throw new ProvisioningError(
+        `AOSS collection created but ARN/ID not returned for ${collectionName}`,
+      );
     }
 
     // 5. Wait for collection to become ACTIVE
     let collectionEndpoint: string | undefined;
     const startTime = Date.now();
     while (Date.now() - startTime < this.collectionMaxWaitMs) {
-      const status = await ossClient.send(new BatchGetCollectionCommand({ ids: [collectionId] }));
+      const status = await ossClient.send(
+        new BatchGetCollectionCommand({ ids: [collectionId] }),
+      );
       const detail = status.collectionDetails?.[0];
-      if (detail?.status === 'ACTIVE') {
+      if (detail?.status === "ACTIVE") {
         collectionEndpoint = detail.collectionEndpoint;
         break;
       }
-      if (detail?.status === 'FAILED') {
-        throw new ProvisioningError(`AOSS collection ${collectionName} failed to create`);
+      if (detail?.status === "FAILED") {
+        throw new ProvisioningError(
+          `AOSS collection ${collectionName} failed to create`,
+        );
       }
-      await new Promise((resolve) => setTimeout(resolve, this.collectionPollIntervalMs));
+      await new Promise((resolve) =>
+        setTimeout(resolve, this.collectionPollIntervalMs),
+      );
     }
 
     if (!collectionEndpoint) {
-      throw new ProvisioningError(`Timed out waiting for AOSS collection ${collectionName} to become ACTIVE`);
+      throw new ProvisioningError(
+        `Timed out waiting for AOSS collection ${collectionName} to become ACTIVE`,
+      );
     }
 
     // 6. Create the vector index inside the collection.
     // Wait briefly for data access policies to propagate before creating the index.
-    await new Promise((resolve) => setTimeout(resolve, this.roleCreationDelayMs));
-    await this.createVectorIndex(collectionEndpoint, VECTOR_INDEX_NAME, VECTOR_FIELD);
+    await new Promise((resolve) =>
+      setTimeout(resolve, this.roleCreationDelayMs),
+    );
+    await this.createVectorIndex(
+      collectionEndpoint,
+      VECTOR_INDEX_NAME,
+      VECTOR_FIELD,
+    );
 
     return { collectionArn, collectionId };
   }
@@ -334,45 +487,46 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
     indexName: string,
     vectorField: string,
   ): Promise<void> {
-    const { SignatureV4 } = await import('@aws-sdk/signature-v4');
-    const { Sha256 } = await import('@aws-crypto/sha256-js');
-    const { HttpRequest } = await import('@smithy/protocol-http');
-    const { defaultProvider } = await import('@aws-sdk/credential-provider-node');
+    const { SignatureV4 } = await import("@aws-sdk/signature-v4");
+    const { Sha256 } = await import("@aws-crypto/sha256-js");
+    const { HttpRequest } = await import("@smithy/protocol-http");
+    const { defaultProvider } =
+      await import("@aws-sdk/credential-provider-node");
     const { region } = await this.getAccountContext();
-    const https = await import('https');
+    const https = await import("https");
 
-    const host = endpoint.replace('https://', '');
+    const host = endpoint.replace("https://", "");
     const body = JSON.stringify({
       settings: {
-        'index.knn': true,
+        "index.knn": true,
       },
       mappings: {
         properties: {
           [vectorField]: {
-            type: 'knn_vector',
+            type: "knn_vector",
             dimension: 1024,
-            method: { engine: 'faiss', name: 'hnsw', space_type: 'l2' },
+            method: { engine: "faiss", name: "hnsw", space_type: "l2" },
           },
-          [TEXT_FIELD]: { type: 'text' },
-          [METADATA_FIELD]: { type: 'text' },
+          [TEXT_FIELD]: { type: "text" },
+          [METADATA_FIELD]: { type: "text" },
         },
       },
     });
 
     const request = new HttpRequest({
-      method: 'PUT',
-      protocol: 'https:',
+      method: "PUT",
+      protocol: "https:",
       hostname: host,
       path: `/${indexName}`,
       headers: {
-        'Content-Type': 'application/json',
+        "Content-Type": "application/json",
         host,
       },
       body,
     });
 
     const signer = new SignatureV4({
-      service: 'aoss',
+      service: "aoss",
       region,
       credentials: defaultProvider(),
       sha256: Sha256,
@@ -385,26 +539,40 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
         {
           hostname: host,
           path: `/${indexName}`,
-          method: 'PUT',
+          method: "PUT",
           headers: signed.headers,
         },
         (res) => {
-          let data = '';
-          res.on('data', (chunk: Buffer) => { data += chunk; });
-          res.on('end', () => {
+          let data = "";
+          res.on("data", (chunk: Buffer) => {
+            data += chunk;
+          });
+          res.on("end", () => {
             if (res.statusCode === 200 || res.statusCode === 201) {
               resolve();
-            } else if (res.statusCode === 400 && data.includes('already_exists')) {
+            } else if (
+              res.statusCode === 400 &&
+              data.includes("already_exists")
+            ) {
               resolve(); // Index already exists
             } else {
-              reject(new ProvisioningError(
-                `Failed to create vector index: HTTP ${res.statusCode} - ${data}`
-              ));
+              reject(
+                new ProvisioningError(
+                  `Failed to create vector index: HTTP ${res.statusCode} - ${data}`,
+                ),
+              );
             }
           });
         },
       );
-      req.on('error', (err: Error) => reject(new ProvisioningError(`Failed to create vector index: ${err.message}`, err)));
+      req.on("error", (err: Error) =>
+        reject(
+          new ProvisioningError(
+            `Failed to create vector index: ${err.message}`,
+            err,
+          ),
+        ),
+      );
       req.write(body);
       req.end();
     });
@@ -412,9 +580,9 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
 
   async provision(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<ProvisionResult> {
-    const client = this.makeClient(credentials);
+    const client = this.makeClient(credentials, "provision");
     const name =
       (config.name as string | undefined) ??
       (config.resourceName as string | undefined) ??
@@ -432,22 +600,26 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
 
     if (config.storageConfiguration) {
       // Caller provided explicit storage config — use as-is
-      storageConfiguration = config.storageConfiguration as StorageConfiguration;
+      storageConfiguration =
+        config.storageConfiguration as StorageConfiguration;
       collectionArn =
         (config.storageConfiguration as StorageConfiguration | undefined)
-          ?.opensearchServerlessConfiguration?.collectionArn ?? '*';
+          ?.opensearchServerlessConfiguration?.collectionArn ?? "*";
     } else if (config.collectionArn) {
       // Caller provided a real collection ARN
       collectionArn = config.collectionArn as string;
       storageConfiguration = {
-        type: 'OPENSEARCH_SERVERLESS',
+        type: "OPENSEARCH_SERVERLESS",
         opensearchServerlessConfiguration: {
           collectionArn,
-          vectorIndexName: (config.vectorIndexName as string | undefined) ?? VECTOR_INDEX_NAME,
+          vectorIndexName:
+            (config.vectorIndexName as string | undefined) ?? VECTOR_INDEX_NAME,
           fieldMapping: {
-            vectorField: (config.vectorField as string | undefined) ?? VECTOR_FIELD,
+            vectorField:
+              (config.vectorField as string | undefined) ?? VECTOR_FIELD,
             textField: (config.textField as string | undefined) ?? TEXT_FIELD,
-            metadataField: (config.metadataField as string | undefined) ?? METADATA_FIELD,
+            metadataField:
+              (config.metadataField as string | undefined) ?? METADATA_FIELD,
           },
         },
       };
@@ -461,14 +633,20 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
       let roleArn = config.roleArn as string | undefined;
       if (!roleArn) {
         roleArn = await this.createServiceRole(name, tempCollectionArn);
-        await new Promise((resolve) => setTimeout(resolve, this.roleCreationDelayMs));
+        await new Promise((resolve) =>
+          setTimeout(resolve, this.roleCreationDelayMs),
+        );
       }
 
-      const vectorStore = await this.provisionVectorStore(name, roleArn, accountId);
+      const vectorStore = await this.provisionVectorStore(
+        name,
+        roleArn,
+        accountId,
+      );
       collectionArn = vectorStore.collectionArn;
 
       storageConfiguration = {
-        type: 'OPENSEARCH_SERVERLESS',
+        type: "OPENSEARCH_SERVERLESS",
         opensearchServerlessConfiguration: {
           collectionArn,
           vectorIndexName: VECTOR_INDEX_NAME,
@@ -486,27 +664,40 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
           new CreateKnowledgeBaseCommand({
             name,
             roleArn,
-            knowledgeBaseConfiguration: (config.knowledgeBaseConfiguration as KnowledgeBaseConfiguration | undefined) ?? {
-              type: 'VECTOR',
+            knowledgeBaseConfiguration: (config.knowledgeBaseConfiguration as
+              KnowledgeBaseConfiguration | undefined) ?? {
+              type: "VECTOR",
               vectorKnowledgeBaseConfiguration: { embeddingModelArn },
             },
             storageConfiguration,
-          })
+          }),
         );
 
         return {
-          resourceArn: result.knowledgeBase?.knowledgeBaseArn ??
+          resourceArn:
+            result.knowledgeBase?.knowledgeBaseArn ??
             `arn:aws:bedrock:${region}:${accountId}:knowledge-base/${result.knowledgeBase?.knowledgeBaseId ?? name}`,
         };
       } catch (error) {
         const err = error as SdkError;
-        if (err.name === 'ConflictException') {
-          return { resourceArn: `arn:aws:bedrock:${region}:${accountId}:knowledge-base/${name}` };
+        if (err.name === "ConflictException") {
+          return {
+            resourceArn: `arn:aws:bedrock:${region}:${accountId}:knowledge-base/${name}`,
+          };
         }
-        if (err.name === 'AccessDenied' || err.name === 'AccessDeniedException') {
-          throw new PermissionError(`Permission denied creating Bedrock knowledge base ${name}`, err);
+        if (
+          err.name === "AccessDenied" ||
+          err.name === "AccessDeniedException"
+        ) {
+          throw new PermissionError(
+            `Permission denied creating Bedrock knowledge base ${name}`,
+            err,
+          );
         }
-        throw new ProvisioningError(`Failed to create Bedrock knowledge base ${name}: ${err.message}`, err);
+        throw new ProvisioningError(
+          `Failed to create Bedrock knowledge base ${name}: ${err.message}`,
+          err,
+        );
       }
     }
 
@@ -514,7 +705,9 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
     let roleArn = config.roleArn as string | undefined;
     if (!roleArn) {
       roleArn = await this.createServiceRole(name, collectionArn);
-      await new Promise((resolve) => setTimeout(resolve, this.roleCreationDelayMs));
+      await new Promise((resolve) =>
+        setTimeout(resolve, this.roleCreationDelayMs),
+      );
     }
 
     try {
@@ -522,84 +715,105 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
         new CreateKnowledgeBaseCommand({
           name,
           roleArn,
-          knowledgeBaseConfiguration: (config.knowledgeBaseConfiguration as KnowledgeBaseConfiguration | undefined) ?? {
-            type: 'VECTOR',
+          knowledgeBaseConfiguration: (config.knowledgeBaseConfiguration as
+            KnowledgeBaseConfiguration | undefined) ?? {
+            type: "VECTOR",
             vectorKnowledgeBaseConfiguration: { embeddingModelArn },
           },
           storageConfiguration,
-        })
+        }),
       );
 
       return {
-        resourceArn: result.knowledgeBase?.knowledgeBaseArn ??
+        resourceArn:
+          result.knowledgeBase?.knowledgeBaseArn ??
           `arn:aws:bedrock:${region}:${accountId}:knowledge-base/${result.knowledgeBase?.knowledgeBaseId ?? name}`,
       };
     } catch (error) {
       const err = error as SdkError;
-      if (err.name === 'ConflictException') {
-        return { resourceArn: `arn:aws:bedrock:${region}:${accountId}:knowledge-base/${name}` };
+      if (err.name === "ConflictException") {
+        return {
+          resourceArn: `arn:aws:bedrock:${region}:${accountId}:knowledge-base/${name}`,
+        };
       }
-      if (err.name === 'AccessDenied' || err.name === 'AccessDeniedException') {
-        throw new PermissionError(`Permission denied creating Bedrock knowledge base ${name}`, err);
+      if (err.name === "AccessDenied" || err.name === "AccessDeniedException") {
+        throw new PermissionError(
+          `Permission denied creating Bedrock knowledge base ${name}`,
+          err,
+        );
       }
-      throw new ProvisioningError(`Failed to create Bedrock knowledge base ${name}: ${err.message}`, err);
+      throw new ProvisioningError(
+        `Failed to create Bedrock knowledge base ${name}: ${err.message}`,
+        err,
+      );
     }
   }
 
   async connect(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<void> {
-    const client = this.makeClient(credentials);
+    const client = this.makeClient(credentials, "connect");
     const knowledgeBaseId = config.knowledgeBaseId as string | undefined;
 
     try {
       const response = await client.send(
-        new GetKnowledgeBaseCommand({ knowledgeBaseId })
+        new GetKnowledgeBaseCommand({ knowledgeBaseId }),
       );
-      if (response.knowledgeBase?.status !== 'ACTIVE') {
+      if (response.knowledgeBase?.status !== "ACTIVE") {
         throw new ConnectionError(
           `Bedrock knowledge base ${knowledgeBaseId} is not ready (status: ${response.knowledgeBase?.status})`,
-          true
+          true,
         );
       }
     } catch (error) {
       const err = error as SdkError;
       if (err instanceof ConnectionError) throw err;
-      if (err.name === 'ResourceNotFoundException') {
+      if (err.name === "ResourceNotFoundException") {
         throw new ResourceNotFoundError(
-          `Bedrock knowledge base ${knowledgeBaseId} does not exist`, err
+          `Bedrock knowledge base ${knowledgeBaseId} does not exist`,
+          err,
         );
       }
-      if (err.name === 'AccessDenied' || err.name === 'AccessDeniedException') {
+      if (err.name === "AccessDenied" || err.name === "AccessDeniedException") {
         throw new PermissionError(
-          `Permission denied accessing Bedrock knowledge base ${knowledgeBaseId}`, err
+          `Permission denied accessing Bedrock knowledge base ${knowledgeBaseId}`,
+          err,
         );
       }
       throw new ConnectionError(
-        `Failed to connect to Bedrock knowledge base ${knowledgeBaseId}: ${err.message}`, true, err
+        `Failed to connect to Bedrock knowledge base ${knowledgeBaseId}: ${err.message}`,
+        true,
+        err,
       );
     }
   }
 
-  async disconnect(_config: Record<string, unknown>): Promise<void> {}
+  async disconnect(
+    _config: Record<string, unknown>,
+    _credentials?: Record<string, unknown>,
+  ): Promise<void> {}
 
   async deprovision(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<void> {
-    const client = this.makeClient(credentials);
+    const client = this.makeClient(credentials, "deprovision");
     const knowledgeBaseId = config.knowledgeBaseId as string | undefined;
 
     try {
       await client.send(new DeleteKnowledgeBaseCommand({ knowledgeBaseId }));
     } catch (error) {
       const err = error as SdkError;
-      if (err.name === 'ResourceNotFoundException') {
+      if (err.name === "ResourceNotFoundException") {
         // Already gone — continue to clean up
-      } else if (err.name === 'AccessDenied' || err.name === 'AccessDeniedException') {
+      } else if (
+        err.name === "AccessDenied" ||
+        err.name === "AccessDeniedException"
+      ) {
         throw new PermissionError(
-          `Permission denied deleting Bedrock knowledge base ${knowledgeBaseId}`, err
+          `Permission denied deleting Bedrock knowledge base ${knowledgeBaseId}`,
+          err,
         );
       } else {
         throw err;
@@ -609,11 +823,13 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
     // Clean up AOSS collection if one was provisioned
     if (config.collectionId) {
       try {
-        const ossClient = this.makeOssClient();
-        await ossClient.send(new DeleteCollectionCommand({ id: config.collectionId as string }));
+        const ossClient = this.platformOssClient();
+        await ossClient.send(
+          new DeleteCollectionCommand({ id: config.collectionId as string }),
+        );
       } catch (error) {
         const err = error as SdkError;
-        if (err.name !== 'ResourceNotFoundException') {
+        if (err.name !== "ResourceNotFoundException") {
           console.warn(`Failed to delete AOSS collection: ${err.message}`);
         }
       }
@@ -627,12 +843,14 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
 
   async testConnection(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<ConnectionTestResult> {
-    const client = this.makeClient(credentials);
+    const client = this.makeClient(credentials, "testConnection");
     const knowledgeBaseId = config.knowledgeBaseId as string | undefined;
     try {
-      const response = await client.send(new GetKnowledgeBaseCommand({ knowledgeBaseId }));
+      const response = await client.send(
+        new GetKnowledgeBaseCommand({ knowledgeBaseId }),
+      );
       return {
         success: true,
         message: `Successfully connected to Bedrock knowledge base ${knowledgeBaseId}`,
@@ -654,22 +872,26 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
 
   async getMetrics(
     config: Record<string, unknown>,
-    _resourceArn?: string
+    _resourceArn?: string,
+    credentials?: Record<string, unknown>,
   ): Promise<MetricsResult> {
-    const client = this.makeClient();
+    const client = this.makeClient(credentials, "getMetrics");
     const knowledgeBaseId = config.knowledgeBaseId as string | undefined;
     try {
       await client.send(new GetKnowledgeBaseCommand({ knowledgeBaseId }));
-      return { size: '0 MB', records: 0 };
+      return { size: "0 MB", records: 0 };
     } catch (error) {
       const err = error as SdkError;
-      if (err.name === 'AccessDenied' || err.name === 'AccessDeniedException') {
+      if (err.name === "AccessDenied" || err.name === "AccessDeniedException") {
         throw new PermissionError(
-          `Permission denied describing Bedrock knowledge base ${knowledgeBaseId}`, err
+          `Permission denied describing Bedrock knowledge base ${knowledgeBaseId}`,
+          err,
         );
       }
       throw new ConnectionError(
-        `Failed to get metrics for Bedrock knowledge base ${knowledgeBaseId}: ${err.message}`, true, err
+        `Failed to get metrics for Bedrock knowledge base ${knowledgeBaseId}: ${err.message}`,
+        true,
+        err,
       );
     }
   }

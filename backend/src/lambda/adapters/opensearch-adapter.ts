@@ -4,32 +4,58 @@ import {
   CreateSecurityPolicyCommand,
   DeleteCollectionCommand,
   BatchGetCollectionCommand,
-} from '@aws-sdk/client-opensearchserverless';
-import { ConnectorAdapter, ConnectorCategory, ConnectorSpec, AuthenticationMethod, RequiredPolicies, ProvisionResult, ConnectionTestResult, MetricsResult } from '../../adapters/base';
-import { ProvisioningError, ConnectionError, PermissionError, ResourceNotFoundError } from './errors';
-import { SdkError, AwsCredentialFields } from './sdk-types';
+} from "@aws-sdk/client-opensearchserverless";
+import {
+  ConnectorAdapter,
+  ConnectorCategory,
+  ConnectorSpec,
+  AuthenticationMethod,
+  RequiredPolicies,
+  ProvisionResult,
+  ConnectionTestResult,
+  MetricsResult,
+} from "../../adapters/base";
+import {
+  ProvisioningError,
+  ConnectionError,
+  PermissionError,
+  ResourceNotFoundError,
+} from "./errors";
+import { SdkError } from "./sdk-types";
+import { requireScopedCredentials } from "./credential-guard";
 
 export class OpenSearchAdapter implements ConnectorAdapter {
-  readonly category: ConnectorCategory = 'datastore';
-  readonly spec: ConnectorSpec = { type: 'OPENSEARCH', provider: 'Amazon Web Services', category: 'datastore', authentication: { method: AuthenticationMethod.IAM_ROLE, fields: [], secretStructure: {} }, configuration: { required: ['collectionName'], optional: [], ssmParameters: [] } };
-  private makeClient(creds?: Record<string, unknown>): OpenSearchServerlessClient {
-    const c = creds as AwsCredentialFields | undefined;
-    if (c?.accessKeyId && c?.secretAccessKey && c?.sessionToken) {
-      return new OpenSearchServerlessClient({
-        credentials: {
-          accessKeyId: c.accessKeyId,
-          secretAccessKey: c.secretAccessKey,
-          sessionToken: c.sessionToken,
-        },
-      });
-    }
-    return new OpenSearchServerlessClient({});
+  readonly category: ConnectorCategory = "datastore";
+  readonly spec: ConnectorSpec = {
+    type: "OPENSEARCH",
+    provider: "Amazon Web Services",
+    category: "datastore",
+    authentication: {
+      method: AuthenticationMethod.IAM_ROLE,
+      fields: [],
+      secretStructure: {},
+    },
+    configuration: {
+      required: ["collectionName"],
+      optional: [],
+      ssmParameters: [],
+    },
+  };
+  private makeClient(
+    creds: Record<string, unknown> | undefined,
+    op: string,
+  ): OpenSearchServerlessClient {
+    const credentials = requireScopedCredentials(creds, {
+      adapter: "OpenSearchAdapter",
+      op,
+    });
+    return new OpenSearchServerlessClient({ credentials });
   }
 
   requiredPolicies(
     _config: Record<string, unknown>,
     accountId: string,
-    region: string
+    region: string,
   ): RequiredPolicies {
     const collectionArn = `arn:aws:aoss:${region}:${accountId}:collection/*`;
 
@@ -37,25 +63,25 @@ export class OpenSearchAdapter implements ConnectorAdapter {
       provision: [
         {
           actions: [
-            'aoss:CreateCollection',
-            'aoss:DeleteCollection',
-            'aoss:BatchGetCollection',
+            "aoss:CreateCollection",
+            "aoss:DeleteCollection",
+            "aoss:BatchGetCollection",
           ],
           resources: [collectionArn],
         },
         {
           actions: [
-            'aoss:CreateSecurityPolicy',
-            'aoss:GetSecurityPolicy',
-            'aoss:CreateAccessPolicy',
-            'aoss:GetAccessPolicy',
+            "aoss:CreateSecurityPolicy",
+            "aoss:GetSecurityPolicy",
+            "aoss:CreateAccessPolicy",
+            "aoss:GetAccessPolicy",
           ],
-          resources: ['*'],
+          resources: ["*"],
         },
       ],
       connect: [
         {
-          actions: ['aoss:BatchGetCollection', 'aoss:APIAccessAll'],
+          actions: ["aoss:BatchGetCollection", "aoss:APIAccessAll"],
           resources: [collectionArn],
         },
       ],
@@ -64,150 +90,172 @@ export class OpenSearchAdapter implements ConnectorAdapter {
 
   async provision(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<ProvisionResult> {
-    const client = this.makeClient(credentials);
-    const name = (config.collectionName as string | undefined) ?? `citadel-os-${Date.now()}`;
-    const type = config.collectionType === 'VECTORSEARCH' ? 'VECTORSEARCH' : 'SEARCH';
+    const client = this.makeClient(credentials, "provision");
+    const name =
+      (config.collectionName as string | undefined) ??
+      `citadel-os-${Date.now()}`;
+    const type =
+      config.collectionType === "VECTORSEARCH" ? "VECTORSEARCH" : "SEARCH";
     const policyName = `aifos-${name.substring(0, 30)}`;
 
     // Create encryption policy (required before collection creation)
     try {
-      await client.send(new CreateSecurityPolicyCommand({
-        name: policyName,
-        type: 'encryption',
-        description: `Encryption policy for collection ${name}`,
-        policy: JSON.stringify({
-          Rules: [{ ResourceType: 'collection', Resource: [`collection/${name}`] }],
-          AWSOwnedKey: true,
+      await client.send(
+        new CreateSecurityPolicyCommand({
+          name: policyName,
+          type: "encryption",
+          description: `Encryption policy for collection ${name}`,
+          policy: JSON.stringify({
+            Rules: [
+              { ResourceType: "collection", Resource: [`collection/${name}`] },
+            ],
+            AWSOwnedKey: true,
+          }),
         }),
-      }));
+      );
     } catch (error) {
       const err = error as SdkError;
-      if (err.name !== 'ConflictException') {
-        throw new ProvisioningError(`Failed to create encryption policy for ${name}: ${err.message}`, err);
+      if (err.name !== "ConflictException") {
+        throw new ProvisioningError(
+          `Failed to create encryption policy for ${name}: ${err.message}`,
+          err,
+        );
       }
     }
 
     // Create network policy (public access)
     try {
-      await client.send(new CreateSecurityPolicyCommand({
-        name: policyName,
-        type: 'network',
-        description: `Network policy for collection ${name}`,
-        policy: JSON.stringify([{
-          Description: `Public access for ${name}`,
-          Rules: [
-            { ResourceType: 'dashboard', Resource: [`collection/${name}`] },
-            { ResourceType: 'collection', Resource: [`collection/${name}`] },
-          ],
-          AllowFromPublic: true,
-        }]),
-      }));
+      await client.send(
+        new CreateSecurityPolicyCommand({
+          name: policyName,
+          type: "network",
+          description: `Network policy for collection ${name}`,
+          policy: JSON.stringify([
+            {
+              Description: `Public access for ${name}`,
+              Rules: [
+                { ResourceType: "dashboard", Resource: [`collection/${name}`] },
+                {
+                  ResourceType: "collection",
+                  Resource: [`collection/${name}`],
+                },
+              ],
+              AllowFromPublic: true,
+            },
+          ]),
+        }),
+      );
     } catch (error) {
       const err = error as SdkError;
-      if (err.name !== 'ConflictException') {
-        throw new ProvisioningError(`Failed to create network policy for ${name}: ${err.message}`, err);
+      if (err.name !== "ConflictException") {
+        throw new ProvisioningError(
+          `Failed to create network policy for ${name}: ${err.message}`,
+          err,
+        );
       }
     }
 
     try {
       const result = await client.send(
-        new CreateCollectionCommand({ name, type })
+        new CreateCollectionCommand({ name, type }),
       );
 
       const arn =
         result.createCollectionDetail?.arn ??
-        `arn:aws:aoss:${config.region ?? 'us-east-1'}:${config.accountId ?? '000000000000'}:collection/${name}`;
+        `arn:aws:aoss:${config.region ?? "us-east-1"}:${config.accountId ?? "000000000000"}:collection/${name}`;
 
       return { resourceArn: arn };
     } catch (error) {
       const err = error as SdkError;
-      if (err.name === 'ConflictException') {
+      if (err.name === "ConflictException") {
         return {
-          resourceArn: `arn:aws:aoss:${config.region ?? 'us-east-1'}:${config.accountId ?? '000000000000'}:collection/${name}`,
+          resourceArn: `arn:aws:aoss:${config.region ?? "us-east-1"}:${config.accountId ?? "000000000000"}:collection/${name}`,
         };
       }
-      if (
-        err.name === 'AccessDenied' ||
-        err.name === 'AccessDeniedException'
-      ) {
+      if (err.name === "AccessDenied" || err.name === "AccessDeniedException") {
         throw new PermissionError(
           `Permission denied creating OpenSearch collection ${name}`,
-          err
+          err,
         );
       }
       throw new ProvisioningError(
         `Failed to create OpenSearch collection ${name}: ${err.message}`,
-        err
+        err,
       );
     }
   }
 
   async connect(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<void> {
-    const client = this.makeClient(credentials);
-    const names = config.collectionName ? [config.collectionName as string] : undefined;
-    const ids = config.collectionId ? [config.collectionId as string] : undefined;
+    const client = this.makeClient(credentials, "connect");
+    const names = config.collectionName
+      ? [config.collectionName as string]
+      : undefined;
+    const ids = config.collectionId
+      ? [config.collectionId as string]
+      : undefined;
 
     try {
       const response = await client.send(
-        new BatchGetCollectionCommand({ names, ids })
+        new BatchGetCollectionCommand({ names, ids }),
       );
       const collection = response.collectionDetails?.[0];
       if (!collection) {
         throw new ResourceNotFoundError(
-          `OpenSearch collection not found: ${config.collectionName ?? config.collectionId}`
+          `OpenSearch collection not found: ${config.collectionName ?? config.collectionId}`,
         );
       }
-      if (collection.status !== 'ACTIVE') {
+      if (collection.status !== "ACTIVE") {
         throw new ConnectionError(
           `OpenSearch collection ${collection.name} is not active (status: ${collection.status})`,
-          true
+          true,
         );
       }
     } catch (error) {
       const err = error as SdkError;
-      if (err instanceof ConnectionError || err instanceof ResourceNotFoundError) {
+      if (
+        err instanceof ConnectionError ||
+        err instanceof ResourceNotFoundError
+      ) {
         throw err;
       }
-      if (
-        err.name === 'AccessDenied' ||
-        err.name === 'AccessDeniedException'
-      ) {
+      if (err.name === "AccessDenied" || err.name === "AccessDeniedException") {
         throw new PermissionError(
           `Permission denied accessing OpenSearch collection`,
-          err
+          err,
         );
       }
       throw new ConnectionError(
         `Failed to connect to OpenSearch collection: ${err.message}`,
         true,
-        err
+        err,
       );
     }
   }
 
-  async disconnect(_config: Record<string, unknown>): Promise<void> {
+  async disconnect(
+    _config: Record<string, unknown>,
+    _credentials?: Record<string, unknown>,
+  ): Promise<void> {
     // No-op: disconnecting from OpenSearch doesn't require cleanup
   }
 
   async deprovision(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<void> {
-    const client = this.makeClient(credentials);
+    const client = this.makeClient(credentials, "deprovision");
     const collectionId = config.collectionId as string | undefined;
 
     try {
-      await client.send(
-        new DeleteCollectionCommand({ id: collectionId })
-      );
+      await client.send(new DeleteCollectionCommand({ id: collectionId }));
     } catch (error) {
       const err = error as SdkError;
-      if (err.name === 'ResourceNotFoundException') {
+      if (err.name === "ResourceNotFoundException") {
         return; // Already gone
       }
       throw err;
@@ -216,15 +264,19 @@ export class OpenSearchAdapter implements ConnectorAdapter {
 
   async testConnection(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<ConnectionTestResult> {
-    const client = this.makeClient(credentials);
-    const names = config.collectionName ? [config.collectionName as string] : undefined;
-    const ids = config.collectionId ? [config.collectionId as string] : undefined;
+    const client = this.makeClient(credentials, "testConnection");
+    const names = config.collectionName
+      ? [config.collectionName as string]
+      : undefined;
+    const ids = config.collectionId
+      ? [config.collectionId as string]
+      : undefined;
 
     try {
       const response = await client.send(
-        new BatchGetCollectionCommand({ names, ids })
+        new BatchGetCollectionCommand({ names, ids }),
       );
       const collection = response.collectionDetails?.[0];
       if (!collection) {
@@ -254,11 +306,11 @@ export class OpenSearchAdapter implements ConnectorAdapter {
 
   async getMetrics(
     _config: Record<string, unknown>,
-    _resourceArn?: string
+    _resourceArn?: string,
   ): Promise<MetricsResult> {
     // OpenSearch Serverless doesn't expose size via API
     return {
-      size: 'N/A',
+      size: "N/A",
       records: 0,
     };
   }

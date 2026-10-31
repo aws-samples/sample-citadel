@@ -1,242 +1,335 @@
-import { TimestreamAdapter } from '../timestream-adapter';
+import { TimestreamAdapter } from "../timestream-adapter";
 import {
   ProvisioningError,
   ConnectionError,
   PermissionError,
   ResourceNotFoundError,
   DataStoreError,
-} from '../errors';
-import { TimestreamWriteClient, CreateTableCommand } from '@aws-sdk/client-timestream-write';
+} from "../errors";
+import {
+  TimestreamWriteClient,
+  CreateTableCommand,
+} from "@aws-sdk/client-timestream-write";
+import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
 
 const mockSend = jest.fn();
-jest.mock('@aws-sdk/client-timestream-write', () => {
+jest.mock("@aws-sdk/client-timestream-write", () => {
   return {
-    TimestreamWriteClient: jest.fn().mockImplementation(() => ({ send: mockSend })),
-    CreateDatabaseCommand: jest.fn().mockImplementation((input) => ({ _type: 'CreateDatabase', input })),
-    CreateTableCommand: jest.fn().mockImplementation((input) => ({ _type: 'CreateTable', input })),
-    DescribeDatabaseCommand: jest.fn().mockImplementation((input) => ({ _type: 'DescribeDatabase', input })),
+    TimestreamWriteClient: jest
+      .fn()
+      .mockImplementation(() => ({ send: mockSend })),
+    CreateDatabaseCommand: jest
+      .fn()
+      .mockImplementation((input) => ({ _type: "CreateDatabase", input })),
+    CreateTableCommand: jest
+      .fn()
+      .mockImplementation((input) => ({ _type: "CreateTable", input })),
+    DescribeDatabaseCommand: jest
+      .fn()
+      .mockImplementation((input) => ({ _type: "DescribeDatabase", input })),
   };
 });
 
-describe('TimestreamAdapter', () => {
+describe("TimestreamAdapter", () => {
   let adapter: TimestreamAdapter;
-  const config = { databaseName: 'my-test-db' };
+  const config = { databaseName: "my-test-db" };
 
   beforeEach(() => {
     adapter = new TimestreamAdapter();
     mockSend.mockReset();
   });
 
-  describe('requiredPolicies', () => {
-    it('returns provision policies for CreateDatabase, CreateTable, DescribeDatabase', () => {
-      const policies = adapter.requiredPolicies(config, '123456789012', 'us-east-1');
+  describe("requiredPolicies", () => {
+    it("returns provision policies for CreateDatabase, CreateTable, DescribeDatabase", () => {
+      const policies = adapter.requiredPolicies(
+        config,
+        "123456789012",
+        "us-east-1",
+      );
       expect(policies.provision).toHaveLength(1);
-      expect(policies.provision[0].actions).toContain('timestream:CreateDatabase');
-      expect(policies.provision[0].actions).toContain('timestream:DescribeDatabase');
-      expect(policies.provision[0].resources).toEqual(['*']);
+      expect(policies.provision[0].actions).toContain(
+        "timestream:CreateDatabase",
+      );
+      expect(policies.provision[0].actions).toContain(
+        "timestream:DescribeDatabase",
+      );
+      expect(policies.provision[0].resources).toEqual(["*"]);
     });
 
-    it('returns connect policies for DescribeDatabase, DescribeTable, WriteRecords, Select', () => {
-      const policies = adapter.requiredPolicies(config, '123456789012', 'us-east-1');
+    it("returns connect policies for DescribeDatabase, DescribeTable, WriteRecords, Select", () => {
+      const policies = adapter.requiredPolicies(
+        config,
+        "123456789012",
+        "us-east-1",
+      );
       expect(policies.connect).toHaveLength(1);
       expect(policies.connect[0].actions).toEqual([
-        'timestream:DescribeDatabase',
-        'timestream:DescribeTable',
-        'timestream:WriteRecords',
-        'timestream:Select',
+        "timestream:DescribeDatabase",
+        "timestream:DescribeTable",
+        "timestream:WriteRecords",
+        "timestream:Select",
       ]);
     });
 
-    it('uses wildcard resource for provision', () => {
-      const policies = adapter.requiredPolicies({}, '123456789012', 'us-west-2');
-      expect(policies.provision[0].resources).toEqual(['*']);
+    it("uses wildcard resource for provision", () => {
+      const policies = adapter.requiredPolicies(
+        {},
+        "123456789012",
+        "us-west-2",
+      );
+      expect(policies.provision[0].resources).toEqual(["*"]);
     });
   });
 
-  describe('provision', () => {
-    it('creates a database and returns the ARN', async () => {
+  describe("provision", () => {
+    it("creates a database and returns the ARN", async () => {
       mockSend.mockResolvedValueOnce({
-        Database: { Arn: 'arn:aws:timestream:us-east-1:123:database/my-test-db' },
+        Database: {
+          Arn: "arn:aws:timestream:us-east-1:123:database/my-test-db",
+        },
       });
-      const result = await adapter.provision(config);
-      expect(result.resourceArn).toBe('arn:aws:timestream:us-east-1:123:database/my-test-db');
-    });
-
-    it('creates a table when tableName is in config', async () => {
-      mockSend
-        .mockResolvedValueOnce({ Database: { Arn: 'arn:aws:timestream:us-east-1:123:database/my-test-db' } })
-        .mockResolvedValueOnce({ Table: { Arn: 'arn:aws:timestream:us-east-1:123:table/my-test-db/my-table' } });
-
-      const configWithTable = { ...config, tableName: 'my-table', retentionProperties: { MemoryStoreRetentionPeriodInHours: '24' } };
-      await adapter.provision(configWithTable);
-      expect(CreateTableCommand).toHaveBeenCalledWith(
-        expect.objectContaining({
-          DatabaseName: 'my-test-db',
-          TableName: 'my-table',
-        })
+      const result = await adapter.provision(config, MOCK_SCOPED_CREDENTIALS);
+      expect(result.resourceArn).toBe(
+        "arn:aws:timestream:us-east-1:123:database/my-test-db",
       );
     });
 
-    it('handles ConflictException on database creation as idempotent success', async () => {
-      const sdkError = new Error('Already exists');
-      sdkError.name = 'ConflictException';
-      mockSend.mockRejectedValueOnce(sdkError);
-      const result = await adapter.provision(config);
-      expect(result.resourceArn).toContain('my-test-db');
+    it("creates a table when tableName is in config", async () => {
+      mockSend
+        .mockResolvedValueOnce({
+          Database: {
+            Arn: "arn:aws:timestream:us-east-1:123:database/my-test-db",
+          },
+        })
+        .mockResolvedValueOnce({
+          Table: {
+            Arn: "arn:aws:timestream:us-east-1:123:table/my-test-db/my-table",
+          },
+        });
+
+      const configWithTable = {
+        ...config,
+        tableName: "my-table",
+        retentionProperties: { MemoryStoreRetentionPeriodInHours: "24" },
+      };
+      await adapter.provision(configWithTable, MOCK_SCOPED_CREDENTIALS);
+      expect(CreateTableCommand).toHaveBeenCalledWith(
+        expect.objectContaining({
+          DatabaseName: "my-test-db",
+          TableName: "my-table",
+        }),
+      );
     });
 
-    it('handles ConflictException on table creation as idempotent success', async () => {
-      const tableError = new Error('Table already exists');
-      tableError.name = 'ConflictException';
+    it("handles ConflictException on database creation as idempotent success", async () => {
+      const sdkError = new Error("Already exists");
+      sdkError.name = "ConflictException";
+      mockSend.mockRejectedValueOnce(sdkError);
+      const result = await adapter.provision(config, MOCK_SCOPED_CREDENTIALS);
+      expect(result.resourceArn).toContain("my-test-db");
+    });
+
+    it("handles ConflictException on table creation as idempotent success", async () => {
+      const tableError = new Error("Table already exists");
+      tableError.name = "ConflictException";
       mockSend
-        .mockResolvedValueOnce({ Database: { Arn: 'arn:aws:timestream:us-east-1:123:database/my-test-db' } })
+        .mockResolvedValueOnce({
+          Database: {
+            Arn: "arn:aws:timestream:us-east-1:123:database/my-test-db",
+          },
+        })
         .mockRejectedValueOnce(tableError);
 
-      const configWithTable = { ...config, tableName: 'my-table' };
-      const result = await adapter.provision(configWithTable);
-      expect(result.resourceArn).toBe('arn:aws:timestream:us-east-1:123:database/my-test-db');
+      const configWithTable = { ...config, tableName: "my-table" };
+      const result = await adapter.provision(
+        configWithTable,
+        MOCK_SCOPED_CREDENTIALS,
+      );
+      expect(result.resourceArn).toBe(
+        "arn:aws:timestream:us-east-1:123:database/my-test-db",
+      );
     });
 
-    it('wraps AccessDeniedException in PermissionError', async () => {
-      const sdkError = new Error('Access Denied');
-      sdkError.name = 'AccessDeniedException';
+    it("wraps AccessDeniedException in PermissionError", async () => {
+      const sdkError = new Error("Access Denied");
+      sdkError.name = "AccessDeniedException";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.provision(config)).rejects.toThrow(PermissionError);
+      await expect(
+        adapter.provision(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(PermissionError);
     });
 
-    it('wraps unknown SDK errors in ProvisioningError with cause', async () => {
-      const sdkError = new Error('Something broke');
-      sdkError.name = 'InternalError';
+    it("wraps unknown SDK errors in ProvisioningError with cause", async () => {
+      const sdkError = new Error("Something broke");
+      sdkError.name = "InternalError";
       mockSend.mockRejectedValueOnce(sdkError);
       try {
-        await adapter.provision(config);
-        fail('Expected ProvisioningError');
+        await adapter.provision(config, MOCK_SCOPED_CREDENTIALS);
+        fail("Expected ProvisioningError");
       } catch (err) {
         expect(err).toBeInstanceOf(ProvisioningError);
         expect((err as DataStoreError).cause).toBe(sdkError);
       }
     });
 
-    it('propagates non-ConflictException table errors as ProvisioningError', async () => {
-      const tableError = new Error('Validation failed');
-      tableError.name = 'ValidationException';
+    it("propagates non-ConflictException table errors as ProvisioningError", async () => {
+      const tableError = new Error("Validation failed");
+      tableError.name = "ValidationException";
       mockSend
-        .mockResolvedValueOnce({ Database: { Arn: 'arn:aws:timestream:us-east-1:123:database/my-test-db' } })
+        .mockResolvedValueOnce({
+          Database: {
+            Arn: "arn:aws:timestream:us-east-1:123:database/my-test-db",
+          },
+        })
         .mockRejectedValueOnce(tableError);
 
-      const configWithTable = { ...config, tableName: 'my-table' };
-      await expect(adapter.provision(configWithTable)).rejects.toThrow(ProvisioningError);
+      const configWithTable = { ...config, tableName: "my-table" };
+      await expect(
+        adapter.provision(configWithTable, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(ProvisioningError);
     });
   });
 
-  describe('connect', () => {
-    it('succeeds when database exists', async () => {
+  describe("connect", () => {
+    it("succeeds when database exists", async () => {
       mockSend.mockResolvedValueOnce({
-        Database: { Arn: 'arn:aws:timestream:us-east-1:123:database/my-test-db', DatabaseName: 'my-test-db' },
+        Database: {
+          Arn: "arn:aws:timestream:us-east-1:123:database/my-test-db",
+          DatabaseName: "my-test-db",
+        },
       });
-      await expect(adapter.connect(config)).resolves.toBeUndefined();
+      await expect(
+        adapter.connect(config, MOCK_SCOPED_CREDENTIALS),
+      ).resolves.toBeUndefined();
     });
 
-    it('throws ResourceNotFoundError when database does not exist', async () => {
-      const sdkError = new Error('Not found');
-      sdkError.name = 'ResourceNotFoundException';
+    it("throws ResourceNotFoundError when database does not exist", async () => {
+      const sdkError = new Error("Not found");
+      sdkError.name = "ResourceNotFoundException";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.connect(config)).rejects.toThrow(ResourceNotFoundError);
+      await expect(
+        adapter.connect(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(ResourceNotFoundError);
     });
 
-    it('throws PermissionError on AccessDeniedException', async () => {
-      const sdkError = new Error('Forbidden');
-      sdkError.name = 'AccessDeniedException';
+    it("throws PermissionError on AccessDeniedException", async () => {
+      const sdkError = new Error("Forbidden");
+      sdkError.name = "AccessDeniedException";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.connect(config)).rejects.toThrow(PermissionError);
+      await expect(
+        adapter.connect(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(PermissionError);
     });
 
-    it('wraps other errors in ConnectionError with cause', async () => {
-      const sdkError = new Error('Network issue');
-      sdkError.name = 'NetworkingError';
+    it("wraps other errors in ConnectionError with cause", async () => {
+      const sdkError = new Error("Network issue");
+      sdkError.name = "NetworkingError";
       mockSend.mockRejectedValueOnce(sdkError);
       try {
-        await adapter.connect(config);
-        fail('Expected ConnectionError');
+        await adapter.connect(config, MOCK_SCOPED_CREDENTIALS);
+        fail("Expected ConnectionError");
       } catch (err) {
         expect(err).toBeInstanceOf(ConnectionError);
         expect((err as DataStoreError).cause).toBe(sdkError);
       }
     });
 
-    it('throws ResourceNotFoundError when Database is null', async () => {
+    it("throws ResourceNotFoundError when Database is null", async () => {
       mockSend.mockResolvedValueOnce({ Database: null });
-      await expect(adapter.connect(config)).rejects.toThrow(ResourceNotFoundError);
+      await expect(
+        adapter.connect(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(ResourceNotFoundError);
     });
   });
 
-  describe('disconnect', () => {
-    it('is a no-op', async () => {
-      await expect(adapter.disconnect(config)).resolves.toBeUndefined();
+  describe("disconnect", () => {
+    it("is a no-op", async () => {
+      await expect(
+        adapter.disconnect(config, MOCK_SCOPED_CREDENTIALS),
+      ).resolves.toBeUndefined();
     });
   });
 
-  describe('testConnection', () => {
-    it('returns success with database details', async () => {
+  describe("testConnection", () => {
+    it("returns success with database details", async () => {
       mockSend.mockResolvedValueOnce({
         Database: {
-          Arn: 'arn:aws:timestream:us-east-1:123:database/my-test-db',
+          Arn: "arn:aws:timestream:us-east-1:123:database/my-test-db",
           TableCount: 5,
         },
       });
-      const result = await adapter.testConnection(config);
+      const result = await adapter.testConnection(
+        config,
+        MOCK_SCOPED_CREDENTIALS,
+      );
       expect(result.success).toBe(true);
-      expect(result.details?.arn).toBe('arn:aws:timestream:us-east-1:123:database/my-test-db');
+      expect(result.details?.arn).toBe(
+        "arn:aws:timestream:us-east-1:123:database/my-test-db",
+      );
       expect(result.details?.tableCount).toBe(5);
     });
 
-    it('returns failure when DescribeDatabase fails', async () => {
-      mockSend.mockRejectedValueOnce(new Error('Not Found'));
-      const result = await adapter.testConnection(config);
+    it("returns failure when DescribeDatabase fails", async () => {
+      mockSend.mockRejectedValueOnce(new Error("Not Found"));
+      const result = await adapter.testConnection(
+        config,
+        MOCK_SCOPED_CREDENTIALS,
+      );
       expect(result.success).toBe(false);
     });
   });
 
-  describe('getMetrics', () => {
-    it('returns table count as records and placeholder size', async () => {
+  describe("getMetrics", () => {
+    it("returns table count as records and placeholder size", async () => {
       mockSend.mockResolvedValueOnce({
         Database: { TableCount: 3 },
       });
-      const result = await adapter.getMetrics(config);
-      expect(result.size).toBe('0 MB');
+      const result = await adapter.getMetrics(
+        config,
+        undefined,
+        MOCK_SCOPED_CREDENTIALS,
+      );
+      expect(result.size).toBe("0 MB");
       expect(result.records).toBe(3);
     });
 
-    it('wraps AccessDeniedException in PermissionError', async () => {
-      const sdkError = new Error('Access Denied');
-      sdkError.name = 'AccessDeniedException';
+    it("wraps AccessDeniedException in PermissionError", async () => {
+      const sdkError = new Error("Access Denied");
+      sdkError.name = "AccessDeniedException";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.getMetrics(config)).rejects.toThrow(PermissionError);
+      await expect(
+        adapter.getMetrics(config, undefined, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(PermissionError);
     });
 
-    it('wraps other errors in ConnectionError', async () => {
-      const sdkError = new Error('Timeout');
-      sdkError.name = 'RequestTimeout';
+    it("wraps other errors in ConnectionError", async () => {
+      const sdkError = new Error("Timeout");
+      sdkError.name = "RequestTimeout";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.getMetrics(config)).rejects.toThrow(ConnectionError);
+      await expect(
+        adapter.getMetrics(config, undefined, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(ConnectionError);
     });
   });
 
-  describe('scoped credentials', () => {
-    it('constructs client with provided credentials', async () => {
+  describe("scoped credentials", () => {
+    it("constructs client with provided credentials", async () => {
       mockSend.mockResolvedValueOnce({
-        Database: { Arn: 'arn:aws:timestream:us-east-1:123:database/my-test-db', DatabaseName: 'my-test-db' },
+        Database: {
+          Arn: "arn:aws:timestream:us-east-1:123:database/my-test-db",
+          DatabaseName: "my-test-db",
+        },
       });
       await adapter.connect(config, {
-        accessKeyId: 'AKIA...',
-        secretAccessKey: 'secret',
-        sessionToken: 'token',
+        accessKeyId: "AKIA...",
+        secretAccessKey: "secret",
+        sessionToken: "token",
       });
       expect(TimestreamWriteClient).toHaveBeenCalledWith({
         credentials: {
-          accessKeyId: 'AKIA...',
-          secretAccessKey: 'secret',
-          sessionToken: 'token',
+          accessKeyId: "AKIA...",
+          secretAccessKey: "secret",
+          sessionToken: "token",
         },
       });
     });

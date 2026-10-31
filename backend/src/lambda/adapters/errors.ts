@@ -12,4 +12,5 @@ export {
   ValidationError,
   IntegrationError,
   NotImplementedError,
-} from '../../adapters/errors';
+  CredentialMissingError,
+} from "../../adapters/errors";

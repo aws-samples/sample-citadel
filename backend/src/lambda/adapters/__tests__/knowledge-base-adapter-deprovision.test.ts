@@ -5,21 +5,34 @@
  * the underlying Bedrock Knowledge Base should be deleted.
  */
 
+import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
+
 const mockSend = jest.fn();
-jest.mock('@aws-sdk/client-bedrock-agent', () => {
+jest.mock("@aws-sdk/client-bedrock-agent", () => {
   return {
-    BedrockAgentClient: jest.fn().mockImplementation(() => ({ send: mockSend })),
-    CreateKnowledgeBaseCommand: jest.fn().mockImplementation((input) => ({ _type: 'CreateKnowledgeBase', input })),
-    GetKnowledgeBaseCommand: jest.fn().mockImplementation((input) => ({ _type: 'GetKnowledgeBase', input })),
-    DeleteKnowledgeBaseCommand: jest.fn().mockImplementation((input) => ({ _type: 'DeleteKnowledgeBase', input })),
+    BedrockAgentClient: jest
+      .fn()
+      .mockImplementation(() => ({ send: mockSend })),
+    CreateKnowledgeBaseCommand: jest
+      .fn()
+      .mockImplementation((input) => ({ _type: "CreateKnowledgeBase", input })),
+    GetKnowledgeBaseCommand: jest
+      .fn()
+      .mockImplementation((input) => ({ _type: "GetKnowledgeBase", input })),
+    DeleteKnowledgeBaseCommand: jest
+      .fn()
+      .mockImplementation((input) => ({ _type: "DeleteKnowledgeBase", input })),
   };
 });
 
-import { KnowledgeBaseAdapter } from '../knowledge-base-adapter';
-import { PermissionError } from '../errors';
-import { BedrockAgentClient, DeleteKnowledgeBaseCommand } from '@aws-sdk/client-bedrock-agent';
+import { KnowledgeBaseAdapter } from "../knowledge-base-adapter";
+import { PermissionError } from "../errors";
+import {
+  BedrockAgentClient,
+  DeleteKnowledgeBaseCommand,
+} from "@aws-sdk/client-bedrock-agent";
 
-describe('KnowledgeBaseAdapter.deprovision', () => {
+describe("KnowledgeBaseAdapter.deprovision", () => {
   let adapter: KnowledgeBaseAdapter;
 
   beforeEach(() => {
@@ -27,66 +40,82 @@ describe('KnowledgeBaseAdapter.deprovision', () => {
     mockSend.mockReset();
   });
 
-  test('deprovision method exists', () => {
+  test("deprovision method exists", () => {
     expect(adapter.deprovision).toBeDefined();
-    expect(typeof adapter.deprovision).toBe('function');
+    expect(typeof adapter.deprovision).toBe("function");
   });
 
-  test('calls DeleteKnowledgeBaseCommand with the knowledgeBaseId', async () => {
+  test("calls DeleteKnowledgeBaseCommand with the knowledgeBaseId", async () => {
     mockSend.mockResolvedValueOnce({});
 
-    await adapter.deprovision!({ knowledgeBaseId: 'kb-12345' });
+    await adapter.deprovision!(
+      { knowledgeBaseId: "kb-12345" },
+      MOCK_SCOPED_CREDENTIALS,
+    );
 
     expect(DeleteKnowledgeBaseCommand).toHaveBeenCalledWith({
-      knowledgeBaseId: 'kb-12345',
+      knowledgeBaseId: "kb-12345",
     });
     expect(mockSend).toHaveBeenCalledTimes(1);
   });
 
-  test('succeeds gracefully if knowledge base already deleted', async () => {
-    const sdkError = new Error('Not found');
-    sdkError.name = 'ResourceNotFoundException';
+  test("succeeds gracefully if knowledge base already deleted", async () => {
+    const sdkError = new Error("Not found");
+    sdkError.name = "ResourceNotFoundException";
     mockSend.mockRejectedValueOnce(sdkError);
 
     await expect(
-      adapter.deprovision!({ knowledgeBaseId: 'kb-gone' })
+      adapter.deprovision!(
+        { knowledgeBaseId: "kb-gone" },
+        MOCK_SCOPED_CREDENTIALS,
+      ),
     ).resolves.toBeUndefined();
   });
 
-  test('throws PermissionError on AccessDeniedException', async () => {
-    const sdkError = new Error('Access Denied');
-    sdkError.name = 'AccessDeniedException';
+  test("throws PermissionError on AccessDeniedException", async () => {
+    const sdkError = new Error("Access Denied");
+    sdkError.name = "AccessDeniedException";
     mockSend.mockRejectedValueOnce(sdkError);
 
     await expect(
-      adapter.deprovision!({ knowledgeBaseId: 'kb-12345' })
+      adapter.deprovision!(
+        { knowledgeBaseId: "kb-12345" },
+        MOCK_SCOPED_CREDENTIALS,
+      ),
     ).rejects.toThrow(PermissionError);
   });
 
-  test('uses scoped credentials when provided', async () => {
+  test("uses scoped credentials when provided", async () => {
     mockSend.mockResolvedValueOnce({});
 
     await adapter.deprovision!(
-      { knowledgeBaseId: 'kb-12345' },
-      { accessKeyId: 'AKIA...', secretAccessKey: 'secret', sessionToken: 'token' }
+      { knowledgeBaseId: "kb-12345" },
+      {
+        accessKeyId: "AKIA...",
+        secretAccessKey: "secret",
+        sessionToken: "token",
+      },
     );
 
     expect(BedrockAgentClient).toHaveBeenCalledWith({
       credentials: {
-        accessKeyId: 'AKIA...',
-        secretAccessKey: 'secret',
-        sessionToken: 'token',
+        accessKeyId: "AKIA...",
+        secretAccessKey: "secret",
+        sessionToken: "token",
       },
     });
   });
 
-  test('propagates unexpected errors', async () => {
-    const sdkError = new Error('Internal failure');
-    sdkError.name = 'InternalServerError';
+  test("propagates unexpected errors", async () => {
+    const sdkError = new Error("Internal failure");
+    sdkError.name = "InternalServerError";
     mockSend.mockRejectedValueOnce(sdkError);
 
     await expect(
-      adapter.deprovision!({ knowledgeBaseId: 'kb-12345' })
-    ).rejects.toThrow('Internal failure');
+      adapter.deprovision!(
+        { knowledgeBaseId: "kb-12345" },
+        MOCK_SCOPED_CREDENTIALS,
+      ),
+    ).rejects.toThrow("Internal failure");
   });
 });

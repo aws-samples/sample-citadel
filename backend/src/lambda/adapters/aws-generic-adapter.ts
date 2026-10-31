@@ -1,8 +1,14 @@
 import {
-  ConnectorAdapter, ConnectorCategory, ConnectorSpec, AuthenticationMethod,
-  RequiredPolicies, ProvisionResult, ConnectionTestResult, MetricsResult,
-} from '../../adapters/base';
-import { NotImplementedError } from '../../adapters/errors';
+  ConnectorAdapter,
+  ConnectorCategory,
+  ConnectorSpec,
+  AuthenticationMethod,
+  RequiredPolicies,
+  ProvisionResult,
+  ConnectionTestResult,
+  MetricsResult,
+} from "../../adapters/base";
+import { NotImplementedError } from "../../adapters/errors";
 
 /**
  * Fallback wrapper for AWS services that do not yet have a dedicated adapter.
@@ -20,43 +26,92 @@ import { NotImplementedError } from '../../adapters/errors';
  * Currently has no registered consumers; retained as a guard against accidental fallback registration.
  */
 export class AwsGenericAdapter implements ConnectorAdapter {
-  readonly category: ConnectorCategory = 'datastore';
+  readonly category: ConnectorCategory = "datastore";
   readonly spec: ConnectorSpec;
 
   constructor(private serviceName: string) {
-    this.spec = { type: serviceName.toUpperCase(), provider: 'Amazon Web Services', category: 'datastore', authentication: { method: AuthenticationMethod.IAM_ROLE, fields: [], secretStructure: {} }, configuration: { required: [], optional: [], ssmParameters: [] } };
+    this.spec = {
+      type: serviceName.toUpperCase(),
+      provider: "Amazon Web Services",
+      category: "datastore",
+      authentication: {
+        method: AuthenticationMethod.IAM_ROLE,
+        fields: [],
+        secretStructure: {},
+      },
+      configuration: { required: [], optional: [], ssmParameters: [] },
+    };
   }
 
   requiredPolicies(
     _config: Record<string, unknown>,
     _accountId: string,
-    _region: string
+    _region: string,
   ): RequiredPolicies {
     return { provision: [], connect: [] };
   }
 
   async provision(config: Record<string, unknown>): Promise<ProvisionResult> {
-    console.log(`[AwsGenericAdapter:${this.serviceName}] provision called`, config);
-    throw new NotImplementedError(`AwsGenericAdapter:${this.serviceName}`, 'provision');
+    console.log(
+      `[AwsGenericAdapter:${this.serviceName}] provision called`,
+      config,
+    );
+    throw new NotImplementedError(
+      `AwsGenericAdapter:${this.serviceName}`,
+      "provision",
+    );
   }
 
   async connect(config: Record<string, unknown>): Promise<void> {
-    console.log(`[AwsGenericAdapter:${this.serviceName}] connect called`, config);
-    throw new NotImplementedError(`AwsGenericAdapter:${this.serviceName}`, 'connect');
+    console.log(
+      `[AwsGenericAdapter:${this.serviceName}] connect called`,
+      config,
+    );
+    throw new NotImplementedError(
+      `AwsGenericAdapter:${this.serviceName}`,
+      "connect",
+    );
   }
 
-  async disconnect(config: Record<string, unknown>): Promise<void> {
-    console.log(`[AwsGenericAdapter:${this.serviceName}] disconnect called`, config);
-    throw new NotImplementedError(`AwsGenericAdapter:${this.serviceName}`, 'disconnect');
+  async disconnect(
+    config: Record<string, unknown>,
+    _credentials?: Record<string, unknown>,
+  ): Promise<void> {
+    console.log(
+      `[AwsGenericAdapter:${this.serviceName}] disconnect called`,
+      config,
+    );
+    throw new NotImplementedError(
+      `AwsGenericAdapter:${this.serviceName}`,
+      "disconnect",
+    );
   }
 
-  async testConnection(config: Record<string, unknown>): Promise<ConnectionTestResult> {
-    console.log(`[AwsGenericAdapter:${this.serviceName}] testConnection called`, config);
-    throw new NotImplementedError(`AwsGenericAdapter:${this.serviceName}`, 'testConnection');
+  async testConnection(
+    config: Record<string, unknown>,
+  ): Promise<ConnectionTestResult> {
+    console.log(
+      `[AwsGenericAdapter:${this.serviceName}] testConnection called`,
+      config,
+    );
+    throw new NotImplementedError(
+      `AwsGenericAdapter:${this.serviceName}`,
+      "testConnection",
+    );
   }
 
-  async getMetrics(config: Record<string, unknown>): Promise<MetricsResult> {
-    console.log(`[AwsGenericAdapter:${this.serviceName}] getMetrics called`, config);
-    throw new NotImplementedError(`AwsGenericAdapter:${this.serviceName}`, 'getMetrics');
+  async getMetrics(
+    config: Record<string, unknown>,
+    _resourceArn?: string,
+    _credentials?: Record<string, unknown>,
+  ): Promise<MetricsResult> {
+    console.log(
+      `[AwsGenericAdapter:${this.serviceName}] getMetrics called`,
+      config,
+    );
+    throw new NotImplementedError(
+      `AwsGenericAdapter:${this.serviceName}`,
+      "getMetrics",
+    );
   }
 }
