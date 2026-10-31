@@ -276,6 +276,117 @@ describe("ServicesStack", () => {
   });
 });
 
+describe("ToolSandboxFunction IAM — H9 scoped AssumeRole", () => {
+  let app: cdk.App;
+  let template: cdk.assertions.Template;
+
+  beforeAll(() => {
+    app = new cdk.App();
+
+    const prereqStack = new cdk.Stack(app, "H9PrereqStack", {
+      env: { account: "123456789012", region: "us-east-1" },
+    });
+    const agentEventBus = new events.EventBus(prereqStack, "H9EventBus", {
+      eventBusName: "h9-test-bus",
+    });
+    const documentBucket = new s3.Bucket(prereqStack, "H9DocBucket");
+    const { ServicesStack: SvcStack } =
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      require("../lib/services-stack") as typeof import("../lib/services-stack");
+
+    const stack = new SvcStack(app, "H9ServicesStack", {
+      environment: "test",
+      agentEventBus,
+      documentBucket,
+      userOrgMembershipTable: dynamodb.Table.fromTableName(
+        prereqStack,
+        "H9UserOrgMembership",
+        "citadel-user-org-membership-test",
+      ),
+      env: { account: "123456789012", region: "us-east-1" },
+    });
+
+    template = cdk.assertions.Template.fromStack(stack);
+  });
+
+  function getToolSandboxStatements(): Array<Record<string, unknown>> {
+    const policies = template.findResources("AWS::IAM::Policy");
+    for (const [logicalId, policy] of Object.entries(policies)) {
+      if (!logicalId.includes("ToolSandboxFunction")) continue;
+      const doc = (
+        policy.Properties as {
+          PolicyDocument?: { Statement?: unknown[] };
+        }
+      )?.PolicyDocument;
+      if (doc?.Statement) {
+        return doc.Statement as Array<Record<string, unknown>>;
+      }
+    }
+    return [];
+  }
+
+  test("ToolSandbox sts:AssumeRole does NOT target Resource::*", () => {
+    const statements = getToolSandboxStatements();
+    const assumeStatements = statements.filter((stmt) => {
+      const actions = Array.isArray(stmt.Action)
+        ? (stmt.Action as string[])
+        : [stmt.Action as string];
+      return actions.includes("sts:AssumeRole");
+    });
+
+    expect(assumeStatements.length).toBeGreaterThanOrEqual(1);
+    for (const stmt of assumeStatements) {
+      const resources = Array.isArray(stmt.Resource)
+        ? (stmt.Resource as unknown[])
+        : [stmt.Resource];
+      expect(resources).not.toContain("*");
+    }
+  });
+
+  test("ToolSandbox sts:AssumeRole is scoped to citadel-ds-* and citadel-int-* prefixes", () => {
+    const statements = getToolSandboxStatements();
+    const assumeStatements = statements.filter((stmt) => {
+      const actions = Array.isArray(stmt.Action)
+        ? (stmt.Action as string[])
+        : [stmt.Action as string];
+      return actions.includes("sts:AssumeRole");
+    });
+
+    // Collect all resources from all AssumeRole statements
+    const allResources: unknown[] = [];
+    for (const stmt of assumeStatements) {
+      const resources = Array.isArray(stmt.Resource)
+        ? (stmt.Resource as unknown[])
+        : [stmt.Resource];
+      allResources.push(...resources);
+    }
+
+    // Flatten Fn::Join ARNs into their string representation
+    const arnStrings = allResources.map((r) => {
+      if (typeof r === "string") return r;
+      // CDK renders cross-stack ARNs as { "Fn::Join": ["", [...]] }
+      if (
+        r &&
+        typeof r === "object" &&
+        "Fn::Join" in (r as Record<string, unknown>)
+      ) {
+        const parts = (r as { "Fn::Join": [string, unknown[]] })["Fn::Join"][1];
+        return parts
+          .map((p) =>
+            typeof p === "string"
+              ? p
+              : JSON.stringify(p),
+          )
+          .join("");
+      }
+      return JSON.stringify(r);
+    });
+
+    expect(arnStrings.some((a) => a.includes("citadel-ds-"))).toBe(true);
+    expect(arnStrings.some((a) => a.includes("citadel-int-"))).toBe(true);
+  });
+});
+
 describe("crossRegionPrefix", () => {
   // Mirrors arbiter/supervisor/index.py::_cross_region_prefix exactly.
   test('us-* regions map to "us"', () => {

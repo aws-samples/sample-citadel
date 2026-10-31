@@ -1086,12 +1086,17 @@ def handler(event, context):
     // Grant S3 read on TOOLS_BUCKET
     toolsBucket.grantRead(toolSandboxFunction, "tools/*");
 
-    // Grant STS assume role for scoped credentials
+    // Grant STS assume role for scoped credentials — scoped to the
+    // datastore and integration role prefixes that the credential vender
+    // creates (citadel-ds-{id}, citadel-int-{id}).  Same-account only.
     toolSandboxFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: ["sts:AssumeRole"],
-        resources: ["*"],
+        resources: [
+          `arn:aws:iam::${this.account}:role/citadel-ds-*`,
+          `arn:aws:iam::${this.account}:role/citadel-int-*`,
+        ],
       }),
     );
 
