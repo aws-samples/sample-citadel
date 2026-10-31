@@ -26,6 +26,12 @@ const s3 = new S3Client({});
 
 const TOOLS_BUCKET = process.env.TOOLS_BUCKET!;
 
+/**
+ * Sentinel org value for system-seeded / shared tool records.
+ * Matches TENANCY.md §Sentinels and CIT-252 backfill. Case-sensitive.
+ */
+const ALL_ORGANIZATIONS = "All Organizations";
+
 // --- Types ---
 
 export interface ToolTestResult {
@@ -169,11 +175,40 @@ export async function executeTool(
       };
     }
 
-    // ORG MATCH — enforced AFTER load since the lookup itself has no org
-    // filter available (no OrgIndex on ToolsConfigTable). A cross-org
-    // config is reported identically to a missing one (no existence
-    // disclosure across tenants).
-    if (toolConfig.orgId && toolConfig.orgId !== callerOrgId) {
+    // ORG MATCH — fail-closed (H19): absent/empty orgId → refuse. The
+    // "All Organizations" sentinel (CIT-252) is explicitly allowed so
+    // system-seeded tools remain accessible. Any other mismatch is
+    // reported identically to a missing tool (no existence disclosure
+    // across tenants).
+    if (
+      !toolConfig.orgId ||
+      (toolConfig.orgId !== callerOrgId &&
+        toolConfig.orgId !== ALL_ORGANIZATIONS)
+    ) {
+      // Best-effort CloudWatch metric so dashboards can track rejections
+      // caused by the fail-closed flip (tools with absent orgId that were
+      // previously silently allowed).
+      try {
+        const { CloudWatchClient, PutMetricDataCommand } = await import(
+          "@aws-sdk/client-cloudwatch"
+        );
+        const cw = new CloudWatchClient({});
+        await cw.send(
+          new PutMetricDataCommand({
+            Namespace: "Citadel/Sandbox",
+            MetricData: [
+              {
+                MetricName: "OrgRefused",
+                Value: 1,
+                Unit: "Count",
+                Dimensions: [{ Name: "toolId", Value: toolId }],
+              },
+            ],
+          }),
+        );
+      } catch {
+        // Best effort — metric failure must never block the deny path.
+      }
       return {
         success: false,
         error: "Tool not found",
