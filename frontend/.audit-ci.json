@@ -6,9 +6,11 @@
   "critical": true,
   "allowlist": [
     "GHSA-rj75-hqrm-r3gf",
-    "GHSA-gcqx-w48m-w2h4"
+    "GHSA-gcqx-w48m-w2h4",
+    "GHSA-3g3m-2fjr-6pw4",
+    "GHSA-g3hv-75wg-m249"
   ],
   "report": true,
   "skip-dev": false,
-  "_comment": "Frontend-scoped audit-ci gate (finding 9c287884). Carries GHSA-rj75-hqrm-r3gf (postcss-selector-parser, moderate; transitive via @tailwindcss/typography, fix requires semver-major downgrade of typography) and GHSA-gcqx-w48m-w2h4 (deepmerge >=4.2.0 <=4.3.1 prototype poisoning, LOW; dev-only transitive via jest-config, no runtime exposure, no fix version available). See ../audit-ci-allowlist-justifications.md for details."
+  "_comment": "Frontend-scoped audit-ci gate (finding 9c287884). Carries GHSA-rj75-hqrm-r3gf (postcss-selector-parser, moderate; transitive via @tailwindcss/typography), GHSA-gcqx-w48m-w2h4 (deepmerge, LOW; dev-only via jest-config), GHSA-3g3m-2fjr-6pw4 (glob >=9 <=14.0.1, MODERATE; dev-only via jest/test-exclude, fix 14.0.2 requires semver-major jump past parents' ^10/^13 caps), GHSA-g3hv-75wg-m249 (minimatch <11.0.1, MODERATE; dev-only via jest/test-exclude, fix 11.0.1 requires semver-major jump past parents' ^9/^10 caps). See ../audit-ci-allowlist-justifications.md for details."
 }

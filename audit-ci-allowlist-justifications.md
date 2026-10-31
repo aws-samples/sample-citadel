@@ -243,3 +243,54 @@ features used in the project). No 0.5.x release of `@tailwindcss/typography` shi
 1. Check for a `strands-agents-tools` release that raises the pillow cap to `>=13.0.0`.
 2. When available, bump pillow and remove the `--ignore-vuln` flags from `.github/workflows/advisory-scan.yml`.
 3. Re-run `pip-audit` to confirm all 8 CVEs clear.
+
+## GHSA-3g3m-2fjr-6pw4 — glob (MODERATE ReDoS via pattern compilation)
+
+**Added: 2026-10-31** | **revisitBy: 2027-01-31**
+
+**Affected instances:**
+- Root lockfile: `glob@13.0.6` (transitive via jest@30.5.2 → @jest/reporters, jest-config, jest-runtime) and `glob@10.5.0` (transitive via ts-jest → @jest/transform → babel-plugin-istanbul → test-exclude)
+- Frontend lockfile: same chains
+
+**Advisory:** `glob >=9.0.0, <=14.0.1` — ReDoS via pattern compilation. Fix: `14.0.2`.
+
+**Why remediation is blocked:**
+- `@jest/reporters@30.5.2` depends on `glob@^13.0.6`; cannot satisfy `>=14.0.2`.
+- `test-exclude@7.0.2` depends on `glob@^10.4.1`; cannot satisfy `>=14.0.2`.
+- An npm `overrides` entry forcing `glob@>=14.0.2` would inject a semver-major version into packages expecting ^10 or ^13, risking runtime breakage in jest's file-matching internals.
+
+**Exposure & Risk Acceptance:**
+- Dev/build-time only dependency (jest test runner, Istanbul code coverage). Not deployed to production runtime.
+- ReDoS requires attacker-controlled glob patterns at test-execution time, which is not an applicable threat.
+- Acceptance: risk is minimal; no remediation path until jest and test-exclude release versions depending on glob >=14.0.2.
+
+**Recommended follow-ups:**
+1. Check for jest and test-exclude releases with `glob >=14.0.2`.
+2. When available, bump and remove this allowlist entry from `.audit-ci.json` and `frontend/.audit-ci.json`.
+
+## GHSA-g3hv-75wg-m249 — minimatch (MODERATE ReDoS via bracket expression parsing)
+
+**Added: 2026-10-31** | **revisitBy: 2027-01-31**
+
+**Affected instances:**
+- Root lockfile: `minimatch@10.2.6` (transitive via aws-cdk-lib@2.274.0, eslint@10.13.0, @typescript-eslint/typescript-estree, jest via glob@13, test-exclude) and `minimatch@9.0.9` (transitive via glob@10.5.0 in test-exclude chain)
+- Frontend lockfile: `minimatch@10.2.6` and `minimatch@9.0.9` (same jest/test-exclude chains)
+
+**Advisory:** `minimatch <11.0.1` — ReDoS via bracket expression parsing. Fix: `11.0.1`.
+
+**Why remediation is blocked:**
+- `aws-cdk-lib@2.274.0` depends on `minimatch@^10.2.6`; cannot satisfy `>=11.0.1`.
+- `eslint@10.13.0` depends on `minimatch@^10.2.5`; cannot satisfy `>=11.0.1`.
+- `@typescript-eslint/typescript-estree` depends on `minimatch@^10.0.0`; cannot satisfy `>=11.0.1`.
+- `glob@13.0.6` depends on `minimatch@^10.0.0`; cannot satisfy `>=11.0.1`.
+- `glob@10.5.0` depends on `minimatch@^9.0.4`; cannot satisfy `>=11.0.1`.
+- An npm `overrides` entry forcing `minimatch@>=11.0.1` would inject a semver-major version into packages expecting ^9 or ^10, risking runtime breakage in aws-cdk-lib CDK synth, eslint linting, and jest file-matching.
+
+**Exposure & Risk Acceptance:**
+- All affected instances are dev/build-time only dependencies (CDK synth, eslint, jest). Not deployed to production runtime.
+- ReDoS requires attacker-controlled minimatch patterns at build/lint/test time, which is not an applicable threat.
+- Acceptance: risk is minimal; no remediation path until upstream packages release versions depending on minimatch >=11.0.1.
+
+**Recommended follow-ups:**
+1. Check for aws-cdk-lib, eslint, jest, and test-exclude releases with `minimatch >=11.0.1`.
+2. When available, bump and remove this allowlist entry from `.audit-ci.json` and `frontend/.audit-ci.json`.
