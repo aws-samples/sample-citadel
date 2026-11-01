@@ -4,6 +4,7 @@ import {
   ConnectionError,
   PermissionError,
   ResourceNotFoundError,
+  ValidationError,
   DataStoreError,
 } from "../errors";
 import { S3Client } from "@aws-sdk/client-s3";
@@ -20,6 +21,12 @@ jest.mock("@aws-sdk/client-s3", () => {
     PutBucketVersioningCommand: jest
       .fn()
       .mockImplementation((input) => ({ _type: "PutBucketVersioning", input })),
+    PutBucketTaggingCommand: jest
+      .fn()
+      .mockImplementation((input) => ({ _type: "PutBucketTagging", input })),
+    GetBucketTaggingCommand: jest
+      .fn()
+      .mockImplementation((input) => ({ _type: "GetBucketTagging", input })),
     HeadBucketCommand: jest
       .fn()
       .mockImplementation((input) => ({ _type: "HeadBucket", input })),
@@ -31,7 +38,11 @@ jest.mock("@aws-sdk/client-s3", () => {
 
 describe("S3Adapter", () => {
   let adapter: S3Adapter;
-  const config = { bucketName: "my-test-bucket" };
+  const config = {
+    bucketName: "citadel-my-test-bucket",
+    dataStoreId: "ds-001",
+    orgId: "org-001",
+  };
 
   beforeEach(() => {
     adapter = new S3Adapter();
@@ -39,20 +50,50 @@ describe("S3Adapter", () => {
   });
 
   describe("requiredPolicies", () => {
-    it("returns provision policies including create, delete, and list actions", () => {
+    it("returns scoped provision policies with no '*' resource", () => {
       const policies = adapter.requiredPolicies(
         config,
         "123456789012",
         "us-east-1",
       );
-      expect(policies.provision).toHaveLength(1);
-      expect(policies.provision[0].actions).toContain("s3:CreateBucket");
-      expect(policies.provision[0].actions).toContain("s3:DeleteBucket");
-      expect(policies.provision[0].actions).toContain("s3:DeleteObject");
-      expect(policies.provision[0].resources).toEqual(["*"]);
+      expect(policies.provision).toHaveLength(3);
+
+      // CreateBucket scoped to citadel- prefix
+      expect(policies.provision[0].actions).toEqual(["s3:CreateBucket"]);
+      expect(policies.provision[0].resources).toEqual([
+        "arn:aws:s3:::citadel-*",
+      ]);
+
+      // Bucket-level actions scoped to specific bucket
+      expect(policies.provision[1].actions).toContain("s3:DeleteBucket");
+      expect(policies.provision[1].actions).toContain("s3:PutBucketVersioning");
+      expect(policies.provision[1].actions).toContain("s3:GetBucketTagging");
+      expect(policies.provision[1].actions).toContain("s3:PutBucketTagging");
+      expect(policies.provision[1].resources).toEqual([
+        "arn:aws:s3:::citadel-my-test-bucket",
+      ]);
+
+      // Object-level actions scoped to objects within the bucket
+      expect(policies.provision[2].actions).toEqual(["s3:DeleteObject"]);
+      expect(policies.provision[2].resources).toEqual([
+        "arn:aws:s3:::citadel-my-test-bucket/*",
+      ]);
     });
 
-    it("returns connect policies for read/write operations on bucket and objects", () => {
+    it("provision policy snapshot has no '*' resource anywhere", () => {
+      const policies = adapter.requiredPolicies(
+        config,
+        "123456789012",
+        "us-east-1",
+      );
+      const allResources = policies.provision.flatMap((p) => p.resources);
+      expect(allResources).not.toContain("*");
+      for (const r of allResources) {
+        expect(r).not.toBe("*");
+      }
+    });
+
+    it("connect policies are scoped to bucket and objects", () => {
       const policies = adapter.requiredPolicies(
         config,
         "123456789012",
@@ -67,35 +108,232 @@ describe("S3Adapter", () => {
         "s3:PutObject",
       ]);
       expect(policies.connect[0].resources).toEqual([
-        "arn:aws:s3:::my-test-bucket",
-        "arn:aws:s3:::my-test-bucket/*",
+        "arn:aws:s3:::citadel-my-test-bucket",
+        "arn:aws:s3:::citadel-my-test-bucket/*",
       ]);
     });
   });
 
-  describe("provision", () => {
-    it("creates a bucket and returns the ARN", async () => {
-      mockSend.mockResolvedValueOnce({});
+  describe("provision — bucket name validation", () => {
+    it("rejects bucket name without citadel- prefix", async () => {
+      await expect(
+        adapter.provision(
+          { bucketName: "my-bucket", dataStoreId: "ds-1", orgId: "org-1" },
+          MOCK_SCOPED_CREDENTIALS,
+        ),
+      ).rejects.toThrow(ValidationError);
+    });
+
+    it("rejects bucket name 'test-bucket' (no prefix)", async () => {
+      await expect(
+        adapter.provision(
+          { bucketName: "test-bucket", dataStoreId: "ds-1", orgId: "org-1" },
+          MOCK_SCOPED_CREDENTIALS,
+        ),
+      ).rejects.toThrow(/must start with "citadel-"/);
+    });
+
+    it("rejects bucket name with invalid characters after lowercasing", async () => {
+      await expect(
+        adapter.provision(
+          {
+            bucketName: "citadel-my_bucket!",
+            dataStoreId: "ds-1",
+            orgId: "org-1",
+          },
+          MOCK_SCOPED_CREDENTIALS,
+        ),
+      ).rejects.toThrow(ProvisioningError);
+    });
+
+    it("rejects bucket name that is too short", async () => {
+      await expect(
+        adapter.provision(
+          { bucketName: "citadel-", dataStoreId: "ds-1", orgId: "org-1" },
+          MOCK_SCOPED_CREDENTIALS,
+        ),
+      ).rejects.toThrow(ProvisioningError);
+    });
+
+    it("rejects missing bucketName", async () => {
+      await expect(
+        adapter.provision({}, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(ProvisioningError);
+    });
+
+    it("accepts valid citadel-prefixed bucket name", async () => {
+      mockSend.mockResolvedValueOnce({}); // CreateBucket
+      mockSend.mockResolvedValueOnce({}); // PutBucketTagging
       const result = await adapter.provision(config, MOCK_SCOPED_CREDENTIALS);
-      expect(result.resourceArn).toBe("arn:aws:s3:::my-test-bucket");
+      expect(result.resourceArn).toBe("arn:aws:s3:::citadel-my-test-bucket");
+    });
+  });
+
+  describe("provision — tagging on creation", () => {
+    it("tags the bucket with Citadel ownership metadata after creation", async () => {
+      mockSend.mockResolvedValueOnce({}); // CreateBucket
+      mockSend.mockResolvedValueOnce({}); // PutBucketTagging
+      await adapter.provision(config, MOCK_SCOPED_CREDENTIALS);
+
+      // Second call should be PutBucketTagging
+      expect(mockSend).toHaveBeenCalledTimes(2);
+      const tagCall = mockSend.mock.calls[1][0];
+      expect(tagCall._type).toBe("PutBucketTagging");
+      expect(tagCall.input.Bucket).toBe("citadel-my-test-bucket");
+      expect(tagCall.input.Tagging.TagSet).toEqual(
+        expect.arrayContaining([
+          { Key: "ManagedBy", Value: "citadel" },
+          { Key: "citadel:dataStoreId", Value: "ds-001" },
+          { Key: "citadel:orgId", Value: "org-001" },
+        ]),
+      );
+    });
+
+    it("skips tagging when dataStoreId or orgId is absent", async () => {
+      mockSend.mockResolvedValueOnce({}); // CreateBucket only
+      await adapter.provision(
+        { bucketName: "citadel-no-ids" },
+        MOCK_SCOPED_CREDENTIALS,
+      );
+      // Only CreateBucket call, no PutBucketTagging
+      expect(mockSend).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("provision — adoption guard (BucketAlreadyOwnedByYou)", () => {
+    const bucketExistsError = () => {
+      const e = new Error("Bucket already owned by you");
+      e.name = "BucketAlreadyOwnedByYou";
+      return e;
+    };
+
+    it("adopts bucket with matching Citadel tags", async () => {
+      mockSend.mockRejectedValueOnce(bucketExistsError()); // CreateBucket
+      mockSend.mockResolvedValueOnce({
+        TagSet: [
+          { Key: "ManagedBy", Value: "citadel" },
+          { Key: "citadel:dataStoreId", Value: "ds-001" },
+          { Key: "citadel:orgId", Value: "org-001" },
+        ],
+      }); // GetBucketTagging
+
+      const result = await adapter.provision(config, MOCK_SCOPED_CREDENTIALS);
+      expect(result.resourceArn).toBe("arn:aws:s3:::citadel-my-test-bucket");
+    });
+
+    it("refuses adoption when bucket has no tags", async () => {
+      mockSend.mockRejectedValueOnce(bucketExistsError());
+      const noTags = new Error("No tags");
+      noTags.name = "NoSuchTagSet";
+      mockSend.mockRejectedValueOnce(noTags);
+
+      try {
+        await adapter.provision(config, MOCK_SCOPED_CREDENTIALS);
+        fail("Expected ProvisioningError");
+      } catch (err) {
+        expect(err).toBeInstanceOf(ProvisioningError);
+        expect((err as Error).message).toMatch(/no tags/i);
+      }
+    });
+
+    it("refuses adoption when tags belong to another datastore", async () => {
+      mockSend.mockRejectedValueOnce(bucketExistsError());
+      mockSend.mockResolvedValueOnce({
+        TagSet: [
+          { Key: "citadel:dataStoreId", Value: "ds-OTHER" },
+          { Key: "citadel:orgId", Value: "org-OTHER" },
+        ],
+      });
+
+      try {
+        await adapter.provision(config, MOCK_SCOPED_CREDENTIALS);
+        fail("Expected ProvisioningError");
+      } catch (err) {
+        expect(err).toBeInstanceOf(ProvisioningError);
+        expect((err as Error).message).toMatch(/not tagged as owned/i);
+      }
+    });
+
+    it("refuses adoption when tags match org but not datastore", async () => {
+      mockSend.mockRejectedValueOnce(bucketExistsError());
+      mockSend.mockResolvedValueOnce({
+        TagSet: [
+          { Key: "citadel:dataStoreId", Value: "ds-OTHER" },
+          { Key: "citadel:orgId", Value: "org-001" },
+        ],
+      });
+
+      await expect(
+        adapter.provision(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(ProvisioningError);
+    });
+
+    it("refuses adoption when dataStoreId/orgId is missing from config", async () => {
+      mockSend.mockRejectedValueOnce(bucketExistsError());
+
+      try {
+        await adapter.provision(
+          { bucketName: "citadel-existing" },
+          MOCK_SCOPED_CREDENTIALS,
+        );
+        fail("Expected ProvisioningError");
+      } catch (err) {
+        expect(err).toBeInstanceOf(ProvisioningError);
+        expect((err as Error).message).toMatch(/missing dataStoreId\/orgId/i);
+      }
+    });
+
+    it("refuses adoption when GetBucketTagging fails with unexpected error", async () => {
+      mockSend.mockRejectedValueOnce(bucketExistsError());
+      const tagErr = new Error("InternalError");
+      tagErr.name = "InternalError";
+      mockSend.mockRejectedValueOnce(tagErr);
+
+      try {
+        await adapter.provision(config, MOCK_SCOPED_CREDENTIALS);
+        fail("Expected ProvisioningError");
+      } catch (err) {
+        expect(err).toBeInstanceOf(ProvisioningError);
+        expect((err as Error).message).toMatch(/tag verification failed/i);
+      }
+    });
+  });
+
+  describe("provision — BucketAlreadyExists (cross-account)", () => {
+    it("refuses adoption for BucketAlreadyExists with matching tags", async () => {
+      const e = new Error("Bucket already exists");
+      e.name = "BucketAlreadyExists";
+      mockSend.mockRejectedValueOnce(e);
+      mockSend.mockResolvedValueOnce({
+        TagSet: [
+          { Key: "citadel:dataStoreId", Value: "ds-001" },
+          { Key: "citadel:orgId", Value: "org-001" },
+        ],
+      });
+
+      // BucketAlreadyExists triggers same adoption check
+      const result = await adapter.provision(config, MOCK_SCOPED_CREDENTIALS);
+      expect(result.resourceArn).toBe("arn:aws:s3:::citadel-my-test-bucket");
+    });
+  });
+
+  describe("provision — general", () => {
+    it("creates a bucket and returns the ARN", async () => {
+      mockSend.mockResolvedValueOnce({}); // CreateBucket
+      mockSend.mockResolvedValueOnce({}); // PutBucketTagging
+      const result = await adapter.provision(config, MOCK_SCOPED_CREDENTIALS);
+      expect(result.resourceArn).toBe("arn:aws:s3:::citadel-my-test-bucket");
     });
 
     it("enables versioning when config.versioning is true", async () => {
       mockSend.mockResolvedValueOnce({}); // CreateBucket
+      mockSend.mockResolvedValueOnce({}); // PutBucketTagging
       mockSend.mockResolvedValueOnce({}); // PutBucketVersioning
       await adapter.provision(
         { ...config, versioning: true },
         MOCK_SCOPED_CREDENTIALS,
       );
-      expect(mockSend).toHaveBeenCalledTimes(2);
-    });
-
-    it("handles BucketAlreadyOwnedByYou as idempotent success", async () => {
-      const sdkError = new Error("Bucket already owned by you");
-      sdkError.name = "BucketAlreadyOwnedByYou";
-      mockSend.mockRejectedValueOnce(sdkError);
-      const result = await adapter.provision(config, MOCK_SCOPED_CREDENTIALS);
-      expect(result.resourceArn).toBe("arn:aws:s3:::my-test-bucket");
+      expect(mockSend).toHaveBeenCalledTimes(3);
     });
 
     it("wraps AccessDenied in PermissionError", async () => {
@@ -130,6 +368,7 @@ describe("S3Adapter", () => {
 
     it("wraps versioning AccessDenied in PermissionError", async () => {
       mockSend.mockResolvedValueOnce({}); // CreateBucket succeeds
+      mockSend.mockResolvedValueOnce({}); // PutBucketTagging
       const sdkError = new Error("Access Denied");
       sdkError.name = "AccessDenied";
       mockSend.mockRejectedValueOnce(sdkError);
@@ -206,7 +445,7 @@ describe("S3Adapter", () => {
         MOCK_SCOPED_CREDENTIALS,
       );
       expect(result.success).toBe(true);
-      expect(result.message).toContain("my-test-bucket");
+      expect(result.message).toContain("citadel-my-test-bucket");
     });
 
     it("returns failure when HeadBucket fails", async () => {

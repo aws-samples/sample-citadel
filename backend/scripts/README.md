@@ -55,3 +55,23 @@ Flags: `--org` (required), `--registry-id` (required), `--table-agents` (require
 `--table-tools` (required), `--apply`, `--dry-run` (default), `--include-unkinded`
 (also consider rows lacking `citadelKind` whose orgId is absent — `decision#` keys
 and orgId `'All Organizations'` rows are never touched).
+
+## resync-datastore-roles
+
+Re-issues the scoped IAM inline policy for each S3 datastore's `citadel-ds-{id}` role **and** backfills Citadel ownership tags on the S3 buckets. After the S3 adapter's `requiredPolicies` was tightened to scope `DeleteBucket`/`DeleteObject` to the specific bucket ARN (instead of `*`), existing roles still carry the old wildcard grants. Additionally, the new tag-based adoption guard requires `citadel:dataStoreId` + `citadel:orgId` tags on every bucket — existing buckets created before the guard have none.
+
+**Policy resync:** calls `PolicyManager.ensureRole` (IAM `PutRolePolicy` upsert) for each connected S3 row.
+
+**Tag backfill:** reads each bucket's tags via `GetBucketTagging`. If the required Citadel tags are absent and the DynamoDB row proves ownership, applies `ManagedBy=citadel`, `citadel:dataStoreId`, and `citadel:orgId` via `PutBucketTagging`, merging with any pre-existing tags (never dropping foreign tags). If tags exist with a **different** `dataStoreId`/`orgId`, prints CONFLICT and skips (never overwrites).
+
+```bash
+# Dry-run — shows current vs proposed policy per role + tag actions
+npx ts-node --project tsconfig.scripts.json scripts/resync-datastore-roles.ts \
+  --table <datastores-table>
+
+# Apply — re-issues inline policy + tags buckets (idempotent)
+npx ts-node --project tsconfig.scripts.json scripts/resync-datastore-roles.ts \
+  --table <datastores-table> --apply
+```
+
+Flags: `--table` (required), `--apply`, `--dry-run` (default). Idempotent.

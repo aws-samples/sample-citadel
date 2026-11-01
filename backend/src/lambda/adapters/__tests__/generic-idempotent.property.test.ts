@@ -30,6 +30,8 @@ jest.mock("@aws-sdk/client-s3", () => ({
   S3Client: jest.fn().mockImplementation(() => ({ send: mockS3Send })),
   CreateBucketCommand: jest.fn().mockImplementation((i) => i),
   PutBucketVersioningCommand: jest.fn().mockImplementation((i) => i),
+  PutBucketTaggingCommand: jest.fn().mockImplementation((i) => i),
+  GetBucketTaggingCommand: jest.fn().mockImplementation((i) => i),
   HeadBucketCommand: jest.fn().mockImplementation((i) => i),
   ListObjectsV2Command: jest.fn().mockImplementation((i) => i),
 }));
@@ -290,7 +292,11 @@ describe("Property 16: Adapter idempotent provisioning on already-exists", () =>
       name: "S3Adapter",
       create: () => new S3Adapter(),
       mock: mockS3Send,
-      config: { bucketName: "test-bucket" },
+      config: {
+        bucketName: "citadel-test-bucket",
+        dataStoreId: "ds-001",
+        orgId: "org-001",
+      },
       errorName: "BucketAlreadyOwnedByYou",
     },
     {
@@ -424,8 +430,22 @@ describe("Property 16: Adapter idempotent provisioning on already-exists", () =>
             const adapter = create();
             const err = new Error(errorMessage);
             err.name = errorName;
-            // Use mockRejectedValue (persistent) so multi-call adapters get the error on every call
-            mock.mockRejectedValue(err);
+
+            // S3Adapter: BucketAlreadyOwnedByYou triggers a tag-based adoption
+            // check (GetBucketTaggingCommand). The first send() must reject with
+            // the already-exists error, and the second must resolve with matching
+            // Citadel ownership tags.
+            if (name === "S3Adapter") {
+              mock.mockRejectedValueOnce(err).mockResolvedValueOnce({
+                TagSet: [
+                  { Key: "citadel:dataStoreId", Value: config.dataStoreId },
+                  { Key: "citadel:orgId", Value: config.orgId },
+                ],
+              });
+            } else {
+              // Use mockRejectedValue (persistent) so multi-call adapters get the error on every call
+              mock.mockRejectedValue(err);
+            }
             // For adapters that use multiple SDK clients (e.g. KnowledgeBase uses OSS + Bedrock),
             // also mock the OSS client to reject with the same error
             if (mock !== mockOssSend) {
