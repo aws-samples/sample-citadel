@@ -7,7 +7,6 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 from strands import Agent, tool, models
-from strands_tools import file_write, http_request, shell
 import os
 from tools_config import load_config_from_dynamodb, create_tool_desc
 from design_assessment_gate import check_design_assessment, DesignAssessmentMissingError
@@ -61,8 +60,6 @@ IDEMPOTENCY_TABLE = os.environ.get('IDEMPOTENCY_TABLE')
 IDEMPOTENCY_TTL_SECONDS = 7 * 24 * 60 * 60
 
 logger = logging.getLogger(__name__)
-
-os.environ.setdefault("BYPASS_TOOL_CONSENT", "true")
 
 
 _registry_client = None
@@ -561,7 +558,7 @@ def get_tool_fabricator_prompt():
     
     STEP 1: Design the tool mentally (determine name, parameters, return type, implementation)
     
-    STEP 2: Call file_write tool to save it to /tmp/[tool_name].py
+    STEP 2: Call write_job_file tool to save it to /tmp/[tool_name].py
     
     STEP 3: Call upload_tool_to_s3 tool with the file path
     
@@ -584,7 +581,7 @@ def get_tool_fabricator_prompt():
     CRITICAL: The tool is NOT registered in AgentCore Registry and CANNOT be used until store_tool_config_registry is called.
     If you skip this step, the tool will be lost and unusable.
     
-    YOU MUST ACTUALLY CALL ALL THREE TOOLS (file_write, upload_tool_to_s3, store_tool_config_registry) IN SEQUENCE. Do not just describe what you would do.
+    YOU MUST ACTUALLY CALL ALL THREE TOOLS (write_job_file, upload_tool_to_s3, store_tool_config_registry) IN SEQUENCE. Do not just describe what you would do.
     After calling each tool, verify it succeeded before moving to the next step.
     </critical_workflow>
 
@@ -600,9 +597,9 @@ def get_tool_fabricator_prompt():
     
     Step 2 - Generate the complete tool code as a string
     
-    Step 3 - CALL file_write tool (REQUIRED):
-    file_write(
-        path="/tmp/validate_email.py",
+    Step 3 - CALL write_job_file tool (REQUIRED):
+    write_job_file(
+        file_name="validate_email.py",
         content='''from strands import tool
 
     @tool
@@ -645,13 +642,13 @@ def get_tool_fabricator_prompt():
         ✓ Step 5 complete - tool registered in Registry
         
         Step 6 - Verify all three tools were called:
-        ✓ file_write - YES
+        ✓ write_job_file - YES
         ✓ upload_tool_to_s3 - YES  
         ✓ store_tool_config_registry - YES
         
         ✅ TOOL CREATION COMPLETE - Tool is now discoverable and usable by other agents
         
-        CRITICAL: You must call ALL THREE tools (file_write, upload_tool_to_s3, store_tool_config_registry) for every tool creation request.
+        CRITICAL: You must call ALL THREE tools (write_job_file, upload_tool_to_s3, store_tool_config_registry) for every tool creation request.
         If you skip store_tool_config_registry, the tool will be created but NOT registered, making it invisible to the system.
 
         FAILURE HANDLING (NON-NEGOTIABLE): if store_tool_config_registry fails
@@ -685,11 +682,11 @@ def get_tool_fabricator_prompt():
         <reminder>
         ⚠️ MANDATORY: You have THREE tools that MUST ALL be called for EVERY tool creation ⚠️
         
-        1. file_write - Save the tool code to /tmp/[tool_name].py
+        1. write_job_file - Save the tool code to /tmp/[tool_name].py
         2. upload_tool_to_s3 - Upload the file to S3 storage
         3. store_tool_config_registry - Register the tool in AgentCore Registry
         
-        ❌ FAILURE MODE: If you only call file_write and upload_tool_to_s3 but skip store_tool_config_registry,
+        ❌ FAILURE MODE: If you only call write_job_file and upload_tool_to_s3 but skip store_tool_config_registry,
         the tool will NOT be registered in the Registry and CANNOT be discovered or used by other agents.
         
         ✅ SUCCESS CRITERIA: The tool creation is ONLY complete when ALL THREE tools have been called successfully.
@@ -698,7 +695,7 @@ def get_tool_fabricator_prompt():
         After each tool call, verify it succeeded before proceeding to the next step.
         
         VERIFICATION CHECKLIST:
-        □ Called file_write with tool code
+        □ Called write_job_file with tool code
         □ Called upload_tool_to_s3 with file path
         □ Called store_tool_config_registry with tool_id, schema, and description
         
@@ -885,7 +882,7 @@ def get_agent_fabricator_prompt(org_id: str = ""):
     <persistence_workflow>
     After generating the agent code, you MUST persist the agent by calling these tools in order:
 
-    STEP 1: Call file_write to save the agent code to /tmp/[agent_name].py
+    STEP 1: Call write_job_file to save the agent code to /tmp/[agent_name].py
 
     STEP 2: Call upload_agent_to_s3 with the file path to upload to S3 storage
 
@@ -907,7 +904,7 @@ def get_agent_fabricator_prompt(org_id: str = ""):
     STEP 4: Call complete_task to signal fabrication is done.
 
     VERIFICATION CHECKLIST:
-    □ Called file_write with agent code to /tmp/
+    □ Called write_job_file with agent code to /tmp/
     □ Called upload_agent_to_s3 with the file path
     □ Called store_agent_config_registry with agent_id, schema, and description
     □ Called complete_task to finalize
@@ -2191,6 +2188,55 @@ def store_tool_config_registry(
         raise
 
 
+# ---------------------------------------------------------------------------
+# Confined file-write tool — replaces raw file_write from strands_tools.
+# The fabricator only needs to write generated code to /tmp/ before S3 upload.
+# This tool validates paths so the LLM cannot escape /tmp/.
+# ---------------------------------------------------------------------------
+
+_JOB_DIR = "/tmp"
+
+
+@tool
+def write_job_file(file_name: str, content: str) -> str:
+    """Write generated code to a file inside the job directory (/tmp).
+
+    Args:
+        file_name: Basename of the file to create (e.g. "validate_email.py").
+                   Must not contain path separators or traversal sequences.
+        content:   The file content to write.
+
+    Returns:
+        The absolute path of the written file.
+    """
+    import pathlib
+
+    # Reject absolute paths and any traversal
+    if not file_name or not isinstance(file_name, str):
+        raise ValueError("file_name must be a non-empty string")
+    if file_name.startswith("/") or file_name.startswith("\\"):
+        raise ValueError(
+            f"Absolute paths are not allowed: {file_name!r}. "
+            "Provide a plain filename like 'my_tool.py'."
+        )
+    if ".." in file_name.split("/") or ".." in file_name.split("\\"):
+        raise ValueError(
+            f"Path traversal is not allowed: {file_name!r}. "
+            "Provide a plain filename like 'my_tool.py'."
+        )
+
+    resolved = pathlib.Path(_JOB_DIR, file_name).resolve()
+    job_root = pathlib.Path(_JOB_DIR).resolve()
+    if not str(resolved).startswith(str(job_root) + "/") and resolved != job_root:
+        raise ValueError(
+            f"Resolved path {resolved} escapes job directory {job_root}"
+        )
+
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    resolved.write_text(content)
+    return str(resolved)
+
+
 def create_tool_fabricator(store_tool_tool=None):
     """Create and return the Tool Fabricator agent.
 
@@ -2223,7 +2269,7 @@ def create_tool_fabricator(store_tool_tool=None):
     
     tool_fabricator = Agent(
         bedrock_model,
-        tools=[file_write, http_request, shell, upload_tool_to_s3, store_tool_tool],
+        tools=[write_job_file, upload_tool_to_s3, store_tool_tool],
         system_prompt=get_tool_fabricator_prompt()
     )
     
@@ -2322,7 +2368,7 @@ def create_agent_fabricator(complete_task, store_agent_tool=None, org_id: str = 
     
     agent_fabricator = Agent(
         bedrock_model,
-        tools=[file_write, http_request, shell, get_worker_tool, create_custom_tool,
+        tools=[write_job_file, get_worker_tool, create_custom_tool,
             upload_agent_to_s3, store_agent_tool, complete_task],
         system_prompt=get_agent_fabricator_prompt(org_id=org_id)
     )
