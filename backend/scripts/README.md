@@ -55,3 +55,19 @@ Flags: `--org` (required), `--registry-id` (required), `--table-agents` (require
 `--table-tools` (required), `--apply`, `--dry-run` (default), `--include-unkinded`
 (also consider rows lacking `citadelKind` whose orgId is absent — `decision#` keys
 and orgId `'All Organizations'` rows are never touched).
+
+## resync-datastore-roles
+
+Re-issues the scoped IAM inline policy for each S3 datastore's `citadel-ds-{id}` role. After the S3 adapter's `requiredPolicies` was tightened to scope `DeleteBucket`/`DeleteObject` to the specific bucket ARN (instead of `*`), existing roles still carry the old wildcard grants. This script calls `PolicyManager.ensureRole` (an IAM `PutRolePolicy` upsert) for each connected S3 row.
+
+```bash
+# Dry-run — shows current vs proposed policy per role
+npx ts-node --project tsconfig.scripts.json scripts/resync-datastore-roles.ts \
+  --table <datastores-table>
+
+# Apply
+npx ts-node --project tsconfig.scripts.json scripts/resync-datastore-roles.ts \
+  --table <datastores-table> --apply
+```
+
+Flags: `--table` (required), `--apply`, `--dry-run` (default). Idempotent.
