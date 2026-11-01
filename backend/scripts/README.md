@@ -55,3 +55,21 @@ Flags: `--org` (required), `--registry-id` (required), `--table-agents` (require
 `--table-tools` (required), `--apply`, `--dry-run` (default), `--include-unkinded`
 (also consider rows lacking `citadelKind` whose orgId is absent — `decision#` keys
 and orgId `'All Organizations'` rows are never touched).
+
+## migrate-aoss-policies
+
+Removes the account root principal from AOSS data access policies for
+Knowledge Base datastores and adds the vended `citadel-ds-{id}` role
+as a scoped principal instead.
+
+```bash
+# Dry-run — see what would change
+npx ts-node --project tsconfig.scripts.json scripts/migrate-aoss-policies.ts \
+  --table <datastores-table>
+
+# Apply (requires admin credentials with aoss:UpdateAccessPolicy)
+npx ts-node --project tsconfig.scripts.json scripts/migrate-aoss-policies.ts \
+  --table <datastores-table> --apply
+```
+
+Flags: `--table` (required), `--apply`, `--dry-run` (default).
