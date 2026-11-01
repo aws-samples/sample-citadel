@@ -1,102 +1,136 @@
-import { RedshiftAdapter } from '../redshift-adapter';
+import { RedshiftAdapter } from "../redshift-adapter";
 import {
   ProvisioningError,
   ConnectionError,
   PermissionError,
   ResourceNotFoundError,
   DataStoreError,
-} from '../errors';
-import { RedshiftClient, CreateClusterCommand } from '@aws-sdk/client-redshift';
+} from "../errors";
+import { RedshiftClient, CreateClusterCommand } from "@aws-sdk/client-redshift";
+import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
 
 const mockSend = jest.fn();
-jest.mock('@aws-sdk/client-redshift', () => {
+jest.mock("@aws-sdk/client-redshift", () => {
   return {
     RedshiftClient: jest.fn().mockImplementation(() => ({ send: mockSend })),
-    CreateClusterCommand: jest.fn().mockImplementation((input) => ({ _type: 'CreateCluster', input })),
-    DescribeClustersCommand: jest.fn().mockImplementation((input) => ({ _type: 'DescribeClusters', input })),
+    CreateClusterCommand: jest
+      .fn()
+      .mockImplementation((input) => ({ _type: "CreateCluster", input })),
+    DescribeClustersCommand: jest
+      .fn()
+      .mockImplementation((input) => ({ _type: "DescribeClusters", input })),
   };
 });
 
-describe('RedshiftAdapter', () => {
+describe("RedshiftAdapter", () => {
   let adapter: RedshiftAdapter;
-  const config = { clusterIdentifier: 'my-test-cluster' };
-  const creds = { masterUsername: 'admin', masterPassword: 'Secret123' };
+  const config = { clusterIdentifier: "my-test-cluster" };
+  const creds = {
+    masterUsername: "admin",
+    masterPassword: "Secret123",
+    ...MOCK_SCOPED_CREDENTIALS,
+  };
 
   beforeEach(() => {
     adapter = new RedshiftAdapter();
     mockSend.mockReset();
   });
 
-  describe('requiredPolicies', () => {
-    it('returns provision policies for CreateCluster and DescribeClusters', () => {
-      const policies = adapter.requiredPolicies(config, '123456789012', 'us-east-1');
+  describe("requiredPolicies", () => {
+    it("returns provision policies for CreateCluster and DescribeClusters", () => {
+      const policies = adapter.requiredPolicies(
+        config,
+        "123456789012",
+        "us-east-1",
+      );
       expect(policies.provision.length).toBeGreaterThanOrEqual(1);
       const redshiftActions = policies.provision[0].actions;
-      expect(redshiftActions).toContain('redshift:CreateCluster');
-      expect(redshiftActions).toContain('redshift:DescribeClusters');
-      expect(policies.provision[0].resources).toEqual(['*']);
+      expect(redshiftActions).toContain("redshift:CreateCluster");
+      expect(redshiftActions).toContain("redshift:DescribeClusters");
+      expect(policies.provision[0].resources).toEqual(["*"]);
     });
 
-    it('returns connect policies for DescribeClusters', () => {
-      const policies = adapter.requiredPolicies(config, '123456789012', 'us-east-1');
+    it("returns connect policies for DescribeClusters", () => {
+      const policies = adapter.requiredPolicies(
+        config,
+        "123456789012",
+        "us-east-1",
+      );
       expect(policies.connect).toHaveLength(1);
-      expect(policies.connect[0].actions).toEqual(['redshift:DescribeClusters']);
+      expect(policies.connect[0].actions).toEqual([
+        "redshift:DescribeClusters",
+      ]);
     });
 
-    it('uses wildcard resource for provision', () => {
-      const policies = adapter.requiredPolicies({}, '123456789012', 'us-west-2');
-      expect(policies.provision[0].resources).toEqual(['*']);
+    it("uses wildcard resource for provision", () => {
+      const policies = adapter.requiredPolicies(
+        {},
+        "123456789012",
+        "us-west-2",
+      );
+      expect(policies.provision[0].resources).toEqual(["*"]);
     });
   });
 
-  describe('provision', () => {
-    it('creates a cluster and returns the ARN', async () => {
+  describe("provision", () => {
+    it("creates a cluster and returns the ARN", async () => {
       mockSend.mockResolvedValueOnce({
-        Cluster: { ClusterNamespaceArn: 'arn:aws:redshift:us-east-1:123:cluster:my-test-cluster' },
+        Cluster: {
+          ClusterNamespaceArn:
+            "arn:aws:redshift:us-east-1:123:cluster:my-test-cluster",
+        },
       });
       const result = await adapter.provision(config, creds);
-      expect(result.resourceArn).toBe('arn:aws:redshift:us-east-1:123:cluster:my-test-cluster');
+      expect(result.resourceArn).toBe(
+        "arn:aws:redshift:us-east-1:123:cluster:my-test-cluster",
+      );
     });
 
-    it('sends CreateClusterCommand with ra3.xlplus node type', async () => {
+    it("sends CreateClusterCommand with ra3.xlplus node type", async () => {
       mockSend.mockResolvedValueOnce({ Cluster: {} });
       await adapter.provision(config, creds);
       expect(CreateClusterCommand).toHaveBeenCalledWith(
         expect.objectContaining({
-          ClusterIdentifier: 'my-test-cluster',
-          NodeType: 'ra3.xlplus',
-          MasterUsername: 'admin',
-          MasterUserPassword: 'Secret123',
-        })
+          ClusterIdentifier: "my-test-cluster",
+          NodeType: "ra3.xlplus",
+          MasterUsername: "admin",
+          MasterUserPassword: "Secret123",
+        }),
       );
     });
 
-    it('throws ProvisioningError when credentials are missing', async () => {
-      await expect(adapter.provision(config, {})).rejects.toThrow(ProvisioningError);
+    it("throws CredentialMissingError when scoped credentials are missing", async () => {
+      const { CredentialMissingError } =
+        await import("../../../adapters/errors");
+      await expect(adapter.provision(config, {})).rejects.toThrow(
+        CredentialMissingError,
+      );
     });
 
-    it('handles ClusterAlreadyExistsFault as idempotent success', async () => {
-      const sdkError = new Error('Already exists');
-      sdkError.name = 'ClusterAlreadyExistsFault';
+    it("handles ClusterAlreadyExistsFault as idempotent success", async () => {
+      const sdkError = new Error("Already exists");
+      sdkError.name = "ClusterAlreadyExistsFault";
       mockSend.mockRejectedValueOnce(sdkError);
       const result = await adapter.provision(config, creds);
-      expect(result.resourceArn).toContain('my-test-cluster');
+      expect(result.resourceArn).toContain("my-test-cluster");
     });
 
-    it('wraps AccessDeniedException in PermissionError', async () => {
-      const sdkError = new Error('Access Denied');
-      sdkError.name = 'AccessDeniedException';
+    it("wraps AccessDeniedException in PermissionError", async () => {
+      const sdkError = new Error("Access Denied");
+      sdkError.name = "AccessDeniedException";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.provision(config, creds)).rejects.toThrow(PermissionError);
+      await expect(adapter.provision(config, creds)).rejects.toThrow(
+        PermissionError,
+      );
     });
 
-    it('wraps unknown SDK errors in ProvisioningError with cause', async () => {
-      const sdkError = new Error('Something broke');
-      sdkError.name = 'InternalError';
+    it("wraps unknown SDK errors in ProvisioningError with cause", async () => {
+      const sdkError = new Error("Something broke");
+      sdkError.name = "InternalError";
       mockSend.mockRejectedValueOnce(sdkError);
       try {
         await adapter.provision(config, creds);
-        fail('Expected ProvisioningError');
+        fail("Expected ProvisioningError");
       } catch (err) {
         expect(err).toBeInstanceOf(ProvisioningError);
         expect((err as DataStoreError).cause).toBe(sdkError);
@@ -104,42 +138,50 @@ describe('RedshiftAdapter', () => {
     });
   });
 
-  describe('connect', () => {
-    it('succeeds when cluster status is available', async () => {
+  describe("connect", () => {
+    it("succeeds when cluster status is available", async () => {
       mockSend.mockResolvedValueOnce({
-        Clusters: [{ ClusterStatus: 'available' }],
+        Clusters: [{ ClusterStatus: "available" }],
       });
-      await expect(adapter.connect(config)).resolves.toBeUndefined();
+      await expect(
+        adapter.connect(config, MOCK_SCOPED_CREDENTIALS),
+      ).resolves.toBeUndefined();
     });
 
-    it('throws ConnectionError when cluster is not available', async () => {
+    it("throws ConnectionError when cluster is not available", async () => {
       mockSend.mockResolvedValueOnce({
-        Clusters: [{ ClusterStatus: 'creating' }],
+        Clusters: [{ ClusterStatus: "creating" }],
       });
-      await expect(adapter.connect(config)).rejects.toThrow(ConnectionError);
+      await expect(
+        adapter.connect(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(ConnectionError);
     });
 
-    it('throws ResourceNotFoundError when cluster does not exist', async () => {
-      const sdkError = new Error('Not found');
-      sdkError.name = 'ClusterNotFoundFault';
+    it("throws ResourceNotFoundError when cluster does not exist", async () => {
+      const sdkError = new Error("Not found");
+      sdkError.name = "ClusterNotFoundFault";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.connect(config)).rejects.toThrow(ResourceNotFoundError);
+      await expect(
+        adapter.connect(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(ResourceNotFoundError);
     });
 
-    it('throws PermissionError on AccessDeniedException', async () => {
-      const sdkError = new Error('Forbidden');
-      sdkError.name = 'AccessDeniedException';
+    it("throws PermissionError on AccessDeniedException", async () => {
+      const sdkError = new Error("Forbidden");
+      sdkError.name = "AccessDeniedException";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.connect(config)).rejects.toThrow(PermissionError);
+      await expect(
+        adapter.connect(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(PermissionError);
     });
 
-    it('wraps other errors in ConnectionError with cause', async () => {
-      const sdkError = new Error('Network issue');
-      sdkError.name = 'NetworkingError';
+    it("wraps other errors in ConnectionError with cause", async () => {
+      const sdkError = new Error("Network issue");
+      sdkError.name = "NetworkingError";
       mockSend.mockRejectedValueOnce(sdkError);
       try {
-        await adapter.connect(config);
-        fail('Expected ConnectionError');
+        await adapter.connect(config, MOCK_SCOPED_CREDENTIALS);
+        fail("Expected ConnectionError");
       } catch (err) {
         expect(err).toBeInstanceOf(ConnectionError);
         expect((err as DataStoreError).cause).toBe(sdkError);
@@ -147,75 +189,98 @@ describe('RedshiftAdapter', () => {
     });
   });
 
-  describe('disconnect', () => {
-    it('is a no-op', async () => {
-      await expect(adapter.disconnect(config)).resolves.toBeUndefined();
+  describe("disconnect", () => {
+    it("is a no-op", async () => {
+      await expect(
+        adapter.disconnect(config, MOCK_SCOPED_CREDENTIALS),
+      ).resolves.toBeUndefined();
     });
   });
 
-  describe('testConnection', () => {
-    it('returns success with cluster details', async () => {
+  describe("testConnection", () => {
+    it("returns success with cluster details", async () => {
       mockSend.mockResolvedValueOnce({
-        Clusters: [{
-          ClusterStatus: 'available',
-          Endpoint: { Address: 'my-cluster.abc.us-east-1.redshift.amazonaws.com', Port: 5439 },
-          NumberOfNodes: 2,
-        }],
+        Clusters: [
+          {
+            ClusterStatus: "available",
+            Endpoint: {
+              Address: "my-cluster.abc.us-east-1.redshift.amazonaws.com",
+              Port: 5439,
+            },
+            NumberOfNodes: 2,
+          },
+        ],
       });
-      const result = await adapter.testConnection(config);
+      const result = await adapter.testConnection(
+        config,
+        MOCK_SCOPED_CREDENTIALS,
+      );
       expect(result.success).toBe(true);
-      expect(result.details?.endpoint).toBe('my-cluster.abc.us-east-1.redshift.amazonaws.com');
+      expect(result.details?.endpoint).toBe(
+        "my-cluster.abc.us-east-1.redshift.amazonaws.com",
+      );
       expect(result.details?.port).toBe(5439);
       expect(result.details?.numberOfNodes).toBe(2);
     });
 
-    it('returns failure when DescribeClusters fails', async () => {
-      mockSend.mockRejectedValueOnce(new Error('Not Found'));
-      const result = await adapter.testConnection(config);
+    it("returns failure when DescribeClusters fails", async () => {
+      mockSend.mockRejectedValueOnce(new Error("Not Found"));
+      const result = await adapter.testConnection(
+        config,
+        MOCK_SCOPED_CREDENTIALS,
+      );
       expect(result.success).toBe(false);
     });
   });
 
-  describe('getMetrics', () => {
-    it('returns number of nodes and estimated storage', async () => {
+  describe("getMetrics", () => {
+    it("returns number of nodes and estimated storage", async () => {
       mockSend.mockResolvedValueOnce({
         Clusters: [{ NumberOfNodes: 3 }],
       });
-      const result = await adapter.getMetrics(config);
-      expect(result.size).toBe('480 GB');
+      const result = await adapter.getMetrics(
+        config,
+        undefined,
+        MOCK_SCOPED_CREDENTIALS,
+      );
+      expect(result.size).toBe("480 GB");
       expect(result.records).toBe(3);
     });
 
-    it('wraps AccessDeniedException in PermissionError', async () => {
-      const sdkError = new Error('Access Denied');
-      sdkError.name = 'AccessDeniedException';
+    it("wraps AccessDeniedException in PermissionError", async () => {
+      const sdkError = new Error("Access Denied");
+      sdkError.name = "AccessDeniedException";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.getMetrics(config)).rejects.toThrow(PermissionError);
+      await expect(
+        adapter.getMetrics(config, undefined, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(PermissionError);
     });
 
-    it('wraps other errors in ConnectionError', async () => {
-      const sdkError = new Error('Timeout');
-      sdkError.name = 'RequestTimeout';
+    it("wraps other errors in ConnectionError", async () => {
+      const sdkError = new Error("Timeout");
+      sdkError.name = "RequestTimeout";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.getMetrics(config)).rejects.toThrow(ConnectionError);
+      await expect(
+        adapter.getMetrics(config, undefined, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(ConnectionError);
     });
   });
 
-  describe('scoped credentials', () => {
-    it('constructs client with provided credentials', async () => {
+  describe("scoped credentials", () => {
+    it("constructs client with provided credentials", async () => {
       mockSend.mockResolvedValueOnce({
-        Clusters: [{ ClusterStatus: 'available' }],
+        Clusters: [{ ClusterStatus: "available" }],
       });
       await adapter.connect(config, {
-        accessKeyId: 'AKIA...',
-        secretAccessKey: 'secret',
-        sessionToken: 'token',
+        accessKeyId: "AKIA...",
+        secretAccessKey: "secret",
+        sessionToken: "token",
       });
       expect(RedshiftClient).toHaveBeenCalledWith({
         credentials: {
-          accessKeyId: 'AKIA...',
-          secretAccessKey: 'secret',
-          sessionToken: 'token',
+          accessKeyId: "AKIA...",
+          secretAccessKey: "secret",
+          sessionToken: "token",
         },
       });
     });

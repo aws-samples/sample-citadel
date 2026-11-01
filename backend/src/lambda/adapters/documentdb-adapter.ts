@@ -3,50 +3,76 @@ import {
   CreateDBClusterCommand,
   DeleteDBClusterCommand,
   DescribeDBClustersCommand,
-} from '@aws-sdk/client-docdb';
-import { ConnectorAdapter, ConnectorCategory, ConnectorSpec, AuthenticationMethod, RequiredPolicies, ProvisionResult, ConnectionTestResult, MetricsResult } from '../../adapters/base';
-import { ProvisioningError, ConnectionError, PermissionError, ResourceNotFoundError } from './errors';
-import { SdkError, AwsCredentialFields } from './sdk-types';
+} from "@aws-sdk/client-docdb";
+import {
+  ConnectorAdapter,
+  ConnectorCategory,
+  ConnectorSpec,
+  AuthenticationMethod,
+  RequiredPolicies,
+  ProvisionResult,
+  ConnectionTestResult,
+  MetricsResult,
+} from "../../adapters/base";
+import {
+  ProvisioningError,
+  ConnectionError,
+  PermissionError,
+  ResourceNotFoundError,
+} from "./errors";
+import { SdkError } from "./sdk-types";
+import { requireScopedCredentials } from "./credential-guard";
 
 export class DocumentDBAdapter implements ConnectorAdapter {
-  readonly category: ConnectorCategory = 'datastore';
-  readonly spec: ConnectorSpec = { type: 'DOCUMENTDB', provider: 'Amazon Web Services', category: 'datastore', authentication: { method: AuthenticationMethod.IAM_ROLE, fields: [], secretStructure: {} }, configuration: { required: ['clusterIdentifier'], optional: [], ssmParameters: [] } };
-  private makeClient(creds?: Record<string, unknown>): DocDBClient {
-    const c = creds as AwsCredentialFields | undefined;
-    if (c?.accessKeyId && c?.secretAccessKey && c?.sessionToken) {
-      return new DocDBClient({
-        credentials: {
-          accessKeyId: c.accessKeyId,
-          secretAccessKey: c.secretAccessKey,
-          sessionToken: c.sessionToken,
-        },
-      });
-    }
-    return new DocDBClient({});
+  readonly category: ConnectorCategory = "datastore";
+  readonly spec: ConnectorSpec = {
+    type: "DOCUMENTDB",
+    provider: "Amazon Web Services",
+    category: "datastore",
+    authentication: {
+      method: AuthenticationMethod.IAM_ROLE,
+      fields: [],
+      secretStructure: {},
+    },
+    configuration: {
+      required: ["clusterIdentifier"],
+      optional: [],
+      ssmParameters: [],
+    },
+  };
+  private makeClient(
+    creds: Record<string, unknown> | undefined,
+    op: string,
+  ): DocDBClient {
+    const credentials = requireScopedCredentials(creds, {
+      adapter: "DocumentDBAdapter",
+      op,
+    });
+    return new DocDBClient({ credentials });
   }
 
   requiredPolicies(
     config: Record<string, unknown>,
     accountId: string,
-    region: string
+    region: string,
   ): RequiredPolicies {
-    const clusterArn = `arn:aws:rds:${region}:${accountId}:cluster:${config.dbClusterIdentifier ?? '*'}`;
+    const clusterArn = `arn:aws:rds:${region}:${accountId}:cluster:${config.dbClusterIdentifier ?? "*"}`;
 
     return {
       provision: [
         {
           actions: [
-            'rds:CreateDBCluster',
-            'rds:DeleteDBCluster',
-            'rds:DescribeDBClusters',
-            'rds:AddTagsToResource',
+            "rds:CreateDBCluster",
+            "rds:DeleteDBCluster",
+            "rds:DescribeDBClusters",
+            "rds:AddTagsToResource",
           ],
-          resources: ['*'],
+          resources: ["*"],
         },
       ],
       connect: [
         {
-          actions: ['rds:DescribeDBClusters'],
+          actions: ["rds:DescribeDBClusters"],
           resources: [clusterArn],
         },
       ],
@@ -55,18 +81,21 @@ export class DocumentDBAdapter implements ConnectorAdapter {
 
   async provision(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<ProvisionResult> {
-    const client = this.makeClient(credentials);
+    const client = this.makeClient(credentials, "provision");
     const identifier =
-      (config.dbClusterIdentifier as string | undefined) ?? `citadel-docdb-${Date.now()}`;
+      (config.dbClusterIdentifier as string | undefined) ??
+      `citadel-docdb-${Date.now()}`;
 
-    const masterUsername = (credentials?.masterUsername ?? config.masterUsername) as string | undefined;
-    const masterPassword = (credentials?.masterPassword ?? config.masterPassword) as string | undefined;
+    const masterUsername = (credentials?.masterUsername ??
+      config.masterUsername) as string | undefined;
+    const masterPassword = (credentials?.masterPassword ??
+      config.masterPassword) as string | undefined;
 
     if (!masterUsername || !masterPassword) {
       throw new ProvisioningError(
-        'masterUsername and masterPassword are required to provision a DocumentDB cluster'
+        "masterUsername and masterPassword are required to provision a DocumentDB cluster",
       );
     }
 
@@ -74,58 +103,55 @@ export class DocumentDBAdapter implements ConnectorAdapter {
       const result = await client.send(
         new CreateDBClusterCommand({
           DBClusterIdentifier: identifier,
-          Engine: 'docdb',
+          Engine: "docdb",
           MasterUsername: masterUsername,
           MasterUserPassword: masterPassword,
-        })
+        }),
       );
 
       const arn =
         result.DBCluster?.DBClusterArn ??
-        `arn:aws:rds:${config.region ?? 'us-east-1'}:${config.accountId ?? '000000000000'}:cluster:${identifier}`;
+        `arn:aws:rds:${config.region ?? "us-east-1"}:${config.accountId ?? "000000000000"}:cluster:${identifier}`;
 
       return { resourceArn: arn };
     } catch (error) {
       const err = error as SdkError;
-      if (err.name === 'DBClusterAlreadyExistsFault') {
+      if (err.name === "DBClusterAlreadyExistsFault") {
         return {
-          resourceArn: `arn:aws:rds:${config.region ?? 'us-east-1'}:${config.accountId ?? '000000000000'}:cluster:${identifier}`,
+          resourceArn: `arn:aws:rds:${config.region ?? "us-east-1"}:${config.accountId ?? "000000000000"}:cluster:${identifier}`,
         };
       }
-      if (
-        err.name === 'AccessDenied' ||
-        err.name === 'AccessDeniedException'
-      ) {
+      if (err.name === "AccessDenied" || err.name === "AccessDeniedException") {
         throw new PermissionError(
           `Permission denied creating DocumentDB cluster ${identifier}`,
-          err
+          err,
         );
       }
       throw new ProvisioningError(
         `Failed to create DocumentDB cluster ${identifier}: ${err.message}`,
-        err
+        err,
       );
     }
   }
 
   async connect(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<void> {
-    const client = this.makeClient(credentials);
+    const client = this.makeClient(credentials, "connect");
     const identifier = config.dbClusterIdentifier as string | undefined;
 
     try {
       const response = await client.send(
         new DescribeDBClustersCommand({
           DBClusterIdentifier: identifier,
-        })
+        }),
       );
       const status = response.DBClusters?.[0]?.Status;
-      if (status !== 'available') {
+      if (status !== "available") {
         throw new ConnectionError(
           `DocumentDB cluster ${identifier} is not available (status: ${status})`,
-          true
+          true,
         );
       }
     } catch (error) {
@@ -133,38 +159,38 @@ export class DocumentDBAdapter implements ConnectorAdapter {
       if (err instanceof ConnectionError) {
         throw err;
       }
-      if (err.name === 'DBClusterNotFoundFault') {
+      if (err.name === "DBClusterNotFoundFault") {
         throw new ResourceNotFoundError(
           `DocumentDB cluster ${identifier} does not exist`,
-          err
+          err,
         );
       }
-      if (
-        err.name === 'AccessDenied' ||
-        err.name === 'AccessDeniedException'
-      ) {
+      if (err.name === "AccessDenied" || err.name === "AccessDeniedException") {
         throw new PermissionError(
           `Permission denied accessing DocumentDB cluster ${identifier}`,
-          err
+          err,
         );
       }
       throw new ConnectionError(
         `Failed to connect to DocumentDB cluster ${identifier}: ${err.message}`,
         true,
-        err
+        err,
       );
     }
   }
 
-  async disconnect(_config: Record<string, unknown>): Promise<void> {
+  async disconnect(
+    _config: Record<string, unknown>,
+    _credentials?: Record<string, unknown>,
+  ): Promise<void> {
     // No-op: disconnecting from DocumentDB doesn't require cleanup
   }
 
   async deprovision(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<void> {
-    const client = this.makeClient(credentials);
+    const client = this.makeClient(credentials, "deprovision");
     const identifier = config.dbClusterIdentifier as string | undefined;
 
     try {
@@ -172,11 +198,11 @@ export class DocumentDBAdapter implements ConnectorAdapter {
         new DeleteDBClusterCommand({
           DBClusterIdentifier: identifier,
           SkipFinalSnapshot: true,
-        })
+        }),
       );
     } catch (error) {
       const err = error as SdkError;
-      if (err.name === 'DBClusterNotFoundFault') {
+      if (err.name === "DBClusterNotFoundFault") {
         return; // Already gone
       }
       throw err;
@@ -185,16 +211,16 @@ export class DocumentDBAdapter implements ConnectorAdapter {
 
   async testConnection(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<ConnectionTestResult> {
-    const client = this.makeClient(credentials);
+    const client = this.makeClient(credentials, "testConnection");
     const identifier = config.dbClusterIdentifier as string | undefined;
 
     try {
       const response = await client.send(
         new DescribeDBClustersCommand({
           DBClusterIdentifier: identifier,
-        })
+        }),
       );
       const cluster = response.DBClusters?.[0];
       return {
@@ -218,18 +244,20 @@ export class DocumentDBAdapter implements ConnectorAdapter {
 
   async getMetrics(
     config: Record<string, unknown>,
-    _resourceArn?: string
+    _resourceArn?: string,
+    credentials?: Record<string, unknown>,
   ): Promise<MetricsResult> {
-    const client = this.makeClient();
+    const client = this.makeClient(credentials, "getMetrics");
     const identifier = config.dbClusterIdentifier as string | undefined;
 
     try {
       const response = await client.send(
         new DescribeDBClustersCommand({
           DBClusterIdentifier: identifier,
-        })
+        }),
       );
-      const cluster = response.DBClusters?.[0] as Record<string, unknown> | undefined;
+      const cluster = response.DBClusters?.[0] as
+        Record<string, unknown> | undefined;
       const allocatedGB = cluster?.AllocatedStorage ?? 0;
 
       return {
@@ -238,19 +266,16 @@ export class DocumentDBAdapter implements ConnectorAdapter {
       };
     } catch (error) {
       const err = error as SdkError;
-      if (
-        err.name === 'AccessDenied' ||
-        err.name === 'AccessDeniedException'
-      ) {
+      if (err.name === "AccessDenied" || err.name === "AccessDeniedException") {
         throw new PermissionError(
           `Permission denied describing DocumentDB cluster ${identifier}`,
-          err
+          err,
         );
       }
       throw new ConnectionError(
         `Failed to get metrics for DocumentDB cluster ${identifier}: ${err.message}`,
         true,
-        err
+        err,
       );
     }
   }

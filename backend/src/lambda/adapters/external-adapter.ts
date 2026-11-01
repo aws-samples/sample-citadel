@@ -1,80 +1,103 @@
-import * as net from 'net';
+import * as net from "net";
 import {
-  ConnectorAdapter, ConnectorCategory, ConnectorSpec, AuthenticationMethod,
-  RequiredPolicies, ProvisionResult, ConnectionTestResult, MetricsResult,
-} from '../../adapters/base';
-import { ProvisioningError, ConnectionError } from './errors';
-import { SdkError } from './sdk-types';
+  ConnectorAdapter,
+  ConnectorCategory,
+  ConnectorSpec,
+  AuthenticationMethod,
+  RequiredPolicies,
+  ProvisionResult,
+  ConnectionTestResult,
+  MetricsResult,
+} from "../../adapters/base";
+import { ProvisioningError, ConnectionError } from "./errors";
+import { SdkError } from "./sdk-types";
 
 export class ExternalDatabaseAdapter implements ConnectorAdapter {
-  readonly category: ConnectorCategory = 'datastore';
+  readonly category: ConnectorCategory = "datastore";
   readonly spec: ConnectorSpec;
 
   constructor(private kind: string) {
-    this.spec = { type: `EXTERNAL_${kind.toUpperCase()}`, provider: 'External', category: 'datastore', authentication: { method: AuthenticationMethod.IAM_ROLE, fields: [], secretStructure: {} }, configuration: { required: [], optional: [], ssmParameters: [] } };
+    this.spec = {
+      type: `EXTERNAL_${kind.toUpperCase()}`,
+      provider: "External",
+      category: "datastore",
+      authentication: {
+        method: AuthenticationMethod.IAM_ROLE,
+        fields: [],
+        secretStructure: {},
+      },
+      configuration: { required: [], optional: [], ssmParameters: [] },
+    };
   }
 
   requiredPolicies(
     _config: Record<string, unknown>,
     _accountId: string,
-    _region: string
+    _region: string,
   ): RequiredPolicies {
     return { provision: [], connect: [] };
   }
 
   async provision(
     _config: Record<string, unknown>,
-    _credentials?: Record<string, unknown>
+    _credentials?: Record<string, unknown>,
   ): Promise<ProvisionResult> {
     throw new ProvisioningError(
-      `Provisioning is not supported for external ${this.kind} data stores`
+      `Provisioning is not supported for external ${this.kind} data stores`,
     );
   }
 
   async connect(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<void> {
     const result = await this.testConnection(config, credentials);
     if (!result.success) {
       throw new ConnectionError(
-        `Failed to connect to ${this.kind}: ${result.message}`
+        `Failed to connect to ${this.kind}: ${result.message}`,
       );
     }
   }
 
-  async disconnect(_config: Record<string, unknown>): Promise<void> {
+  async disconnect(
+    _config: Record<string, unknown>,
+    _credentials?: Record<string, unknown>,
+  ): Promise<void> {
     // No-op for external stores
   }
 
   async testConnection(
     config: Record<string, unknown>,
-    _credentials?: Record<string, unknown>
+    _credentials?: Record<string, unknown>,
   ): Promise<ConnectionTestResult> {
     switch (this.kind) {
-      case 'mongodb':
+      case "mongodb":
         return this.testMongoConnection(config);
-      case 'api':
+      case "api":
         return this.testApiConnection(config);
-      case 'postgresql':
-      case 'mysql':
-      case 'elasticsearch':
-      case 'redis':
+      case "postgresql":
+      case "mysql":
+      case "elasticsearch":
+      case "redis":
         return this.testTcpConnection(config);
       default:
-        return { success: false, message: `Unsupported external kind: ${this.kind}` };
+        return {
+          success: false,
+          message: `Unsupported external kind: ${this.kind}`,
+        };
     }
   }
 
   async getMetrics(
     _config: Record<string, unknown>,
-    _resourceArn?: string
+    _resourceArn?: string,
+    _credentials?: Record<string, unknown>,
   ): Promise<MetricsResult> {
-    return { size: '0 MB', records: 0 };
+    return { size: "0 MB", records: 0 };
   }
 
   private async testMongoConnection(
-    config: Record<string, unknown>
+    config: Record<string, unknown>,
   ): Promise<ConnectionTestResult> {
     try {
       const url = new URL(config.connectionString as string);
@@ -102,7 +125,7 @@ export class ExternalDatabaseAdapter implements ConnectorAdapter {
   }
 
   private async testApiConnection(
-    config: Record<string, unknown>
+    config: Record<string, unknown>,
   ): Promise<ConnectionTestResult> {
     try {
       new URL(config.baseUrl as string);
@@ -120,7 +143,7 @@ export class ExternalDatabaseAdapter implements ConnectorAdapter {
   }
 
   private async testTcpConnection(
-    config: Record<string, unknown>
+    config: Record<string, unknown>,
   ): Promise<ConnectionTestResult> {
     const host = config.host as string | undefined;
     const port = config.port as number | undefined;
@@ -144,19 +167,23 @@ export class ExternalDatabaseAdapter implements ConnectorAdapter {
     };
   }
 
-  private tcpCheck(host: string, port: number, timeoutMs: number): Promise<boolean> {
+  private tcpCheck(
+    host: string,
+    port: number,
+    timeoutMs: number,
+  ): Promise<boolean> {
     return new Promise((resolve) => {
       const socket = new net.Socket();
       socket.setTimeout(timeoutMs);
-      socket.once('connect', () => {
+      socket.once("connect", () => {
         socket.destroy();
         resolve(true);
       });
-      socket.once('timeout', () => {
+      socket.once("timeout", () => {
         socket.destroy();
         resolve(false);
       });
-      socket.once('error', () => {
+      socket.once("error", () => {
         socket.destroy();
         resolve(false);
       });

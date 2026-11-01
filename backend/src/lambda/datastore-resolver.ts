@@ -750,7 +750,11 @@ async function createDataStore(
 
     // Get metrics (use scoped credentials if available)
     try {
-      const metrics = await adapter.getMetrics!(config, resourceArn);
+      const metrics = await adapter.getMetrics!(
+        config,
+        resourceArn,
+        scopedCredentials || credentials,
+      );
       size = size || metrics.size;
       records = records ?? metrics.records;
     } catch (metricsError) {
@@ -913,7 +917,7 @@ async function deleteDataStore(dataStoreId: string, event: unknown) {
 
   // Disconnect first
   try {
-    await adapter.disconnect(config);
+    await adapter.disconnect(config, scopedCredentials);
   } catch (error) {
     console.warn("Failed to disconnect:", error);
   }
@@ -1107,8 +1111,21 @@ async function disconnectDataStore(dataStoreId: string, event: unknown) {
         ? JSON.parse(existing.config)
         : existing.config;
 
+    // Vend scoped credentials for disconnect (same as connect path)
+    let scopedCredentials: ScopedCredentials | undefined;
     try {
-      await adapter.disconnect(config);
+      const { accountId } = await policyManager.getAccountContext();
+      scopedCredentials = await policyManager.assumeScopedRole(
+        dataStoreId,
+        accountId,
+        "datastore",
+      );
+    } catch (error) {
+      console.warn("Failed to assume scoped role for disconnect:", error);
+    }
+
+    try {
+      await adapter.disconnect(config, scopedCredentials);
     } catch (error) {
       console.warn("Disconnect warning:", error);
     }

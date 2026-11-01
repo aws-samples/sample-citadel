@@ -1,307 +1,357 @@
-import { DynamoDBAdapter } from '../dynamodb-adapter';
+import { DynamoDBAdapter } from "../dynamodb-adapter";
 import {
   ProvisioningError,
   ConnectionError,
   PermissionError,
   ResourceNotFoundError,
   DataStoreError,
-} from '../errors';
-import { DynamoDBClient, CreateTableCommand } from '@aws-sdk/client-dynamodb';
+} from "../errors";
+import { DynamoDBClient, CreateTableCommand } from "@aws-sdk/client-dynamodb";
+import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
 
 // Mock the entire @aws-sdk/client-dynamodb module
 const mockSend = jest.fn();
-jest.mock('@aws-sdk/client-dynamodb', () => {
+jest.mock("@aws-sdk/client-dynamodb", () => {
   return {
     DynamoDBClient: jest.fn().mockImplementation(() => ({ send: mockSend })),
-    CreateTableCommand: jest.fn().mockImplementation((input) => ({ _type: 'CreateTable', input })),
-    DescribeTableCommand: jest.fn().mockImplementation((input) => ({ _type: 'DescribeTable', input })),
-    KeyType: { HASH: 'HASH', RANGE: 'RANGE' },
-    ScalarAttributeType: { S: 'S' },
-    BillingMode: { PAY_PER_REQUEST: 'PAY_PER_REQUEST' },
+    CreateTableCommand: jest
+      .fn()
+      .mockImplementation((input) => ({ _type: "CreateTable", input })),
+    DescribeTableCommand: jest
+      .fn()
+      .mockImplementation((input) => ({ _type: "DescribeTable", input })),
+    KeyType: { HASH: "HASH", RANGE: "RANGE" },
+    ScalarAttributeType: { S: "S" },
+    BillingMode: { PAY_PER_REQUEST: "PAY_PER_REQUEST" },
   };
 });
 
-describe('DynamoDBAdapter', () => {
+describe("DynamoDBAdapter", () => {
   let adapter: DynamoDBAdapter;
-  const config = { tableName: 'my-test-table' };
+  const config = { tableName: "my-test-table" };
 
   beforeEach(() => {
     adapter = new DynamoDBAdapter();
     mockSend.mockReset();
   });
 
-  describe('requiredPolicies', () => {
-    it('returns provision policies for CreateTable and DescribeTable', () => {
-      const policies = adapter.requiredPolicies(config, '123456789012', 'us-east-1');
+  describe("requiredPolicies", () => {
+    it("returns provision policies for CreateTable and DescribeTable", () => {
+      const policies = adapter.requiredPolicies(
+        config,
+        "123456789012",
+        "us-east-1",
+      );
       expect(policies.provision).toHaveLength(1);
       expect(policies.provision[0].actions).toEqual([
-        'dynamodb:CreateTable',
-        'dynamodb:DeleteTable',
-        'dynamodb:DescribeTable',
+        "dynamodb:CreateTable",
+        "dynamodb:DeleteTable",
+        "dynamodb:DescribeTable",
       ]);
-      expect(policies.provision[0].resources).toEqual([
-        '*',
-      ]);
+      expect(policies.provision[0].resources).toEqual(["*"]);
     });
 
-    it('returns connect policies for CRUD operations on table and indexes', () => {
-      const policies = adapter.requiredPolicies(config, '123456789012', 'us-east-1');
+    it("returns connect policies for CRUD operations on table and indexes", () => {
+      const policies = adapter.requiredPolicies(
+        config,
+        "123456789012",
+        "us-east-1",
+      );
       expect(policies.connect).toHaveLength(1);
       expect(policies.connect[0].actions).toEqual([
-        'dynamodb:DescribeTable',
-        'dynamodb:GetItem',
-        'dynamodb:PutItem',
-        'dynamodb:Query',
-        'dynamodb:Scan',
+        "dynamodb:DescribeTable",
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:Query",
+        "dynamodb:Scan",
       ]);
       expect(policies.connect[0].resources).toEqual([
-        'arn:aws:dynamodb:us-east-1:123456789012:table/my-test-table',
-        'arn:aws:dynamodb:us-east-1:123456789012:table/my-test-table/index/*',
+        "arn:aws:dynamodb:us-east-1:123456789012:table/my-test-table",
+        "arn:aws:dynamodb:us-east-1:123456789012:table/my-test-table/index/*",
       ]);
     });
   });
 
-  describe('provision', () => {
-    it('creates a table and returns the ARN', async () => {
+  describe("provision", () => {
+    it("creates a table and returns the ARN", async () => {
       mockSend.mockResolvedValueOnce({});
-      const result = await adapter.provision({
-        ...config,
-        region: 'us-east-1',
-        accountId: '123456789012',
-      });
+      const result = await adapter.provision(
+        {
+          ...config,
+          region: "us-east-1",
+          accountId: "123456789012",
+        },
+        MOCK_SCOPED_CREDENTIALS,
+      );
       expect(result.resourceArn).toBe(
-        'arn:aws:dynamodb:us-east-1:123456789012:table/my-test-table'
+        "arn:aws:dynamodb:us-east-1:123456789012:table/my-test-table",
       );
     });
 
     it('uses default partition key "pk" and no sort key when sortKey not provided', async () => {
       mockSend.mockResolvedValueOnce({});
-      await adapter.provision(config);
+      await adapter.provision(config, MOCK_SCOPED_CREDENTIALS);
       expect(CreateTableCommand).toHaveBeenCalledWith(
         expect.objectContaining({
-          TableName: 'my-test-table',
-          KeySchema: [
-            { AttributeName: 'pk', KeyType: 'HASH' },
-          ],
-          AttributeDefinitions: [
-            { AttributeName: 'pk', AttributeType: 'S' },
-          ],
-          BillingMode: 'PAY_PER_REQUEST',
-        })
+          TableName: "my-test-table",
+          KeySchema: [{ AttributeName: "pk", KeyType: "HASH" }],
+          AttributeDefinitions: [{ AttributeName: "pk", AttributeType: "S" }],
+          BillingMode: "PAY_PER_REQUEST",
+        }),
       );
     });
 
-    it('uses custom partition and sort keys from config', async () => {
+    it("uses custom partition and sort keys from config", async () => {
       mockSend.mockResolvedValueOnce({});
-      await adapter.provision({
-        ...config,
-        partitionKey: 'userId',
-        sortKey: 'timestamp',
-      });
+      await adapter.provision(
+        {
+          ...config,
+          partitionKey: "userId",
+          sortKey: "timestamp",
+        },
+        MOCK_SCOPED_CREDENTIALS,
+      );
       expect(CreateTableCommand).toHaveBeenCalledWith(
         expect.objectContaining({
           KeySchema: [
-            { AttributeName: 'userId', KeyType: 'HASH' },
-            { AttributeName: 'timestamp', KeyType: 'RANGE' },
+            { AttributeName: "userId", KeyType: "HASH" },
+            { AttributeName: "timestamp", KeyType: "RANGE" },
           ],
-        })
+        }),
       );
     });
 
-    it('handles ResourceInUseException as idempotent success', async () => {
-      const sdkError = new Error('Table already exists');
-      sdkError.name = 'ResourceInUseException';
+    it("handles ResourceInUseException as idempotent success", async () => {
+      const sdkError = new Error("Table already exists");
+      sdkError.name = "ResourceInUseException";
       mockSend.mockRejectedValueOnce(sdkError);
-      const result = await adapter.provision(config);
-      expect(result.resourceArn).toContain('my-test-table');
+      const result = await adapter.provision(config, MOCK_SCOPED_CREDENTIALS);
+      expect(result.resourceArn).toContain("my-test-table");
     });
 
-    it('wraps AccessDeniedException in PermissionError', async () => {
-      const sdkError = new Error('Access Denied');
-      sdkError.name = 'AccessDeniedException';
+    it("wraps AccessDeniedException in PermissionError", async () => {
+      const sdkError = new Error("Access Denied");
+      sdkError.name = "AccessDeniedException";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.provision(config)).rejects.toThrow(PermissionError);
+      await expect(
+        adapter.provision(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(PermissionError);
     });
 
-    it('wraps unknown SDK errors in ProvisioningError', async () => {
-      const sdkError = new Error('Something broke');
-      sdkError.name = 'InternalServerError';
+    it("wraps unknown SDK errors in ProvisioningError", async () => {
+      const sdkError = new Error("Something broke");
+      sdkError.name = "InternalServerError";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.provision(config)).rejects.toThrow(ProvisioningError);
+      await expect(
+        adapter.provision(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(ProvisioningError);
     });
 
-    it('preserves the original SDK error as cause', async () => {
-      const sdkError = new Error('Something broke');
-      sdkError.name = 'InternalServerError';
+    it("preserves the original SDK error as cause", async () => {
+      const sdkError = new Error("Something broke");
+      sdkError.name = "InternalServerError";
       mockSend.mockRejectedValueOnce(sdkError);
       try {
-        await adapter.provision(config);
-        fail('Expected ProvisioningError');
+        await adapter.provision(config, MOCK_SCOPED_CREDENTIALS);
+        fail("Expected ProvisioningError");
       } catch (err) {
         expect((err as DataStoreError).cause).toBe(sdkError);
       }
     });
   });
 
-  describe('connect', () => {
-    it('succeeds when table status is ACTIVE', async () => {
+  describe("connect", () => {
+    it("succeeds when table status is ACTIVE", async () => {
       mockSend.mockResolvedValueOnce({
-        Table: { TableStatus: 'ACTIVE' },
+        Table: { TableStatus: "ACTIVE" },
       });
-      await expect(adapter.connect(config)).resolves.toBeUndefined();
+      await expect(
+        adapter.connect(config, MOCK_SCOPED_CREDENTIALS),
+      ).resolves.toBeUndefined();
     });
 
-    it('throws ConnectionError when table is not ACTIVE', async () => {
+    it("throws ConnectionError when table is not ACTIVE", async () => {
       mockSend.mockResolvedValueOnce({
-        Table: { TableStatus: 'CREATING' },
+        Table: { TableStatus: "CREATING" },
       });
-      await expect(adapter.connect(config)).rejects.toThrow(ConnectionError);
+      await expect(
+        adapter.connect(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(ConnectionError);
     });
 
-    it('throws ResourceNotFoundError when table does not exist', async () => {
-      const sdkError = new Error('Table not found');
-      sdkError.name = 'ResourceNotFoundException';
+    it("throws ResourceNotFoundError when table does not exist", async () => {
+      const sdkError = new Error("Table not found");
+      sdkError.name = "ResourceNotFoundException";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.connect(config)).rejects.toThrow(ResourceNotFoundError);
+      await expect(
+        adapter.connect(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(ResourceNotFoundError);
     });
 
-    it('throws PermissionError on AccessDeniedException', async () => {
-      const sdkError = new Error('Forbidden');
-      sdkError.name = 'AccessDeniedException';
+    it("throws PermissionError on AccessDeniedException", async () => {
+      const sdkError = new Error("Forbidden");
+      sdkError.name = "AccessDeniedException";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.connect(config)).rejects.toThrow(PermissionError);
+      await expect(
+        adapter.connect(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(PermissionError);
     });
 
-    it('throws ConnectionError on other errors', async () => {
-      const sdkError = new Error('Network issue');
-      sdkError.name = 'NetworkingError';
+    it("throws ConnectionError on other errors", async () => {
+      const sdkError = new Error("Network issue");
+      sdkError.name = "NetworkingError";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.connect(config)).rejects.toThrow(ConnectionError);
+      await expect(
+        adapter.connect(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(ConnectionError);
     });
 
-    it('preserves SDK error as cause in ConnectionError', async () => {
-      const sdkError = new Error('Network issue');
-      sdkError.name = 'NetworkingError';
+    it("preserves SDK error as cause in ConnectionError", async () => {
+      const sdkError = new Error("Network issue");
+      sdkError.name = "NetworkingError";
       mockSend.mockRejectedValueOnce(sdkError);
       try {
-        await adapter.connect(config);
-        fail('Expected ConnectionError');
+        await adapter.connect(config, MOCK_SCOPED_CREDENTIALS);
+        fail("Expected ConnectionError");
       } catch (err) {
         expect((err as DataStoreError).cause).toBe(sdkError);
       }
     });
   });
 
-  describe('disconnect', () => {
-    it('is a no-op', async () => {
-      await expect(adapter.disconnect(config)).resolves.toBeUndefined();
+  describe("disconnect", () => {
+    it("is a no-op", async () => {
+      await expect(
+        adapter.disconnect(config, MOCK_SCOPED_CREDENTIALS),
+      ).resolves.toBeUndefined();
     });
   });
 
-  describe('testConnection', () => {
-    it('returns success with table details when DescribeTable succeeds', async () => {
+  describe("testConnection", () => {
+    it("returns success with table details when DescribeTable succeeds", async () => {
       mockSend.mockResolvedValueOnce({
         Table: {
-          TableStatus: 'ACTIVE',
+          TableStatus: "ACTIVE",
           ItemCount: 100,
           TableSizeBytes: 2048,
         },
       });
-      const result = await adapter.testConnection(config);
+      const result = await adapter.testConnection(
+        config,
+        MOCK_SCOPED_CREDENTIALS,
+      );
       expect(result.success).toBe(true);
-      expect(result.message).toContain('my-test-table');
+      expect(result.message).toContain("my-test-table");
       expect(result.details).toEqual({
-        tableStatus: 'ACTIVE',
+        tableStatus: "ACTIVE",
         itemCount: 100,
         tableSizeBytes: 2048,
       });
     });
 
-    it('returns failure when DescribeTable fails', async () => {
-      const sdkError = new Error('Not Found');
-      sdkError.name = 'ResourceNotFoundException';
+    it("returns failure when DescribeTable fails", async () => {
+      const sdkError = new Error("Not Found");
+      sdkError.name = "ResourceNotFoundException";
       mockSend.mockRejectedValueOnce(sdkError);
-      const result = await adapter.testConnection(config);
+      const result = await adapter.testConnection(
+        config,
+        MOCK_SCOPED_CREDENTIALS,
+      );
       expect(result.success).toBe(false);
-      expect(result.message).toContain('Failed');
+      expect(result.message).toContain("Failed");
     });
 
-    it('defaults itemCount and tableSizeBytes to 0 when not present', async () => {
+    it("defaults itemCount and tableSizeBytes to 0 when not present", async () => {
       mockSend.mockResolvedValueOnce({
-        Table: { TableStatus: 'ACTIVE' },
+        Table: { TableStatus: "ACTIVE" },
       });
-      const result = await adapter.testConnection(config);
+      const result = await adapter.testConnection(
+        config,
+        MOCK_SCOPED_CREDENTIALS,
+      );
       expect(result.details?.itemCount).toBe(0);
       expect(result.details?.tableSizeBytes).toBe(0);
     });
   });
 
-  describe('getMetrics', () => {
-    it('returns size in MB and item count from DescribeTable', async () => {
+  describe("getMetrics", () => {
+    it("returns size in MB and item count from DescribeTable", async () => {
       mockSend.mockResolvedValueOnce({
         Table: {
           TableSizeBytes: 5242880, // 5 MB
           ItemCount: 1000,
         },
       });
-      const result = await adapter.getMetrics(config);
-      expect(result.size).toBe('5.00 MB');
+      const result = await adapter.getMetrics(
+        config,
+        undefined,
+        MOCK_SCOPED_CREDENTIALS,
+      );
+      expect(result.size).toBe("5.00 MB");
       expect(result.records).toBe(1000);
     });
 
-    it('returns 0 when table has no data', async () => {
+    it("returns 0 when table has no data", async () => {
       mockSend.mockResolvedValueOnce({
         Table: {
           TableSizeBytes: 0,
           ItemCount: 0,
         },
       });
-      const result = await adapter.getMetrics(config);
-      expect(result.size).toBe('0.00 MB');
+      const result = await adapter.getMetrics(
+        config,
+        undefined,
+        MOCK_SCOPED_CREDENTIALS,
+      );
+      expect(result.size).toBe("0.00 MB");
       expect(result.records).toBe(0);
     });
 
-    it('wraps AccessDeniedException in PermissionError', async () => {
-      const sdkError = new Error('Access Denied');
-      sdkError.name = 'AccessDeniedException';
+    it("wraps AccessDeniedException in PermissionError", async () => {
+      const sdkError = new Error("Access Denied");
+      sdkError.name = "AccessDeniedException";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.getMetrics(config)).rejects.toThrow(PermissionError);
+      await expect(
+        adapter.getMetrics(config, undefined, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(PermissionError);
     });
 
-    it('wraps other errors in ConnectionError', async () => {
-      const sdkError = new Error('Timeout');
-      sdkError.name = 'TimeoutError';
+    it("wraps other errors in ConnectionError", async () => {
+      const sdkError = new Error("Timeout");
+      sdkError.name = "TimeoutError";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(adapter.getMetrics(config)).rejects.toThrow(ConnectionError);
+      await expect(
+        adapter.getMetrics(config, undefined, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(ConnectionError);
     });
   });
 
-  describe('scoped credentials', () => {
-    it('constructs client with provided credentials', async () => {
+  describe("scoped credentials", () => {
+    it("constructs client with provided credentials", async () => {
       mockSend.mockResolvedValueOnce({
-        Table: { TableStatus: 'ACTIVE' },
+        Table: { TableStatus: "ACTIVE" },
       });
       const creds = {
-        accessKeyId: 'AKIA...',
-        secretAccessKey: 'secret',
-        sessionToken: 'token',
+        accessKeyId: "AKIA...",
+        secretAccessKey: "secret",
+        sessionToken: "token",
       };
       await adapter.connect(config, creds);
       expect(DynamoDBClient).toHaveBeenCalledWith({
         credentials: {
-          accessKeyId: 'AKIA...',
-          secretAccessKey: 'secret',
-          sessionToken: 'token',
+          accessKeyId: "AKIA...",
+          secretAccessKey: "secret",
+          sessionToken: "token",
         },
       });
     });
 
-    it('constructs default client when no credentials provided', async () => {
-      mockSend.mockResolvedValueOnce({
-        Table: { TableStatus: 'ACTIVE' },
-      });
-      await adapter.connect(config);
-      expect(DynamoDBClient).toHaveBeenCalledWith({});
+    it("throws CredentialMissingError when no credentials provided", async () => {
+      const { CredentialMissingError } =
+        await import("../../../adapters/errors");
+      await expect(adapter.connect(config)).rejects.toThrow(
+        CredentialMissingError,
+      );
     });
   });
 });

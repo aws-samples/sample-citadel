@@ -3,32 +3,58 @@ import {
   CreateTableBucketCommand,
   GetTableBucketCommand,
   ListTablesCommand,
-} from '@aws-sdk/client-s3tables';
-import { ConnectorAdapter, ConnectorCategory, ConnectorSpec, AuthenticationMethod, RequiredPolicies, ProvisionResult, ConnectionTestResult, MetricsResult } from '../../adapters/base';
-import { ProvisioningError, ConnectionError, PermissionError, ResourceNotFoundError } from './errors';
-import { SdkError, AwsCredentialFields } from './sdk-types';
+} from "@aws-sdk/client-s3tables";
+import {
+  ConnectorAdapter,
+  ConnectorCategory,
+  ConnectorSpec,
+  AuthenticationMethod,
+  RequiredPolicies,
+  ProvisionResult,
+  ConnectionTestResult,
+  MetricsResult,
+} from "../../adapters/base";
+import {
+  ProvisioningError,
+  ConnectionError,
+  PermissionError,
+  ResourceNotFoundError,
+} from "./errors";
+import { SdkError } from "./sdk-types";
+import { requireScopedCredentials } from "./credential-guard";
 
 export class S3TablesAdapter implements ConnectorAdapter {
-  readonly category: ConnectorCategory = 'datastore';
-  readonly spec: ConnectorSpec = { type: 'S3_TABLES', provider: 'Amazon Web Services', category: 'datastore', authentication: { method: AuthenticationMethod.IAM_ROLE, fields: [], secretStructure: {} }, configuration: { required: ['tableBucketArn'], optional: [], ssmParameters: [] } };
-  private makeClient(creds?: Record<string, unknown>): S3TablesClient {
-    const c = creds as AwsCredentialFields | undefined;
-    if (c?.accessKeyId && c?.secretAccessKey && c?.sessionToken) {
-      return new S3TablesClient({
-        credentials: {
-          accessKeyId: c.accessKeyId,
-          secretAccessKey: c.secretAccessKey,
-          sessionToken: c.sessionToken,
-        },
-      });
-    }
-    return new S3TablesClient({});
+  readonly category: ConnectorCategory = "datastore";
+  readonly spec: ConnectorSpec = {
+    type: "S3_TABLES",
+    provider: "Amazon Web Services",
+    category: "datastore",
+    authentication: {
+      method: AuthenticationMethod.IAM_ROLE,
+      fields: [],
+      secretStructure: {},
+    },
+    configuration: {
+      required: ["tableBucketArn"],
+      optional: [],
+      ssmParameters: [],
+    },
+  };
+  private makeClient(
+    creds: Record<string, unknown> | undefined,
+    op: string,
+  ): S3TablesClient {
+    const credentials = requireScopedCredentials(creds, {
+      adapter: "S3TablesAdapter",
+      op,
+    });
+    return new S3TablesClient({ credentials });
   }
 
   requiredPolicies(
     config: Record<string, unknown>,
     accountId: string,
-    region: string
+    region: string,
   ): RequiredPolicies {
     const bucketArn = `arn:aws:s3tables:${region}:${accountId}:bucket/*`;
 
@@ -36,9 +62,9 @@ export class S3TablesAdapter implements ConnectorAdapter {
       provision: [
         {
           actions: [
-            's3tables:CreateTableBucket',
-            's3tables:CreateTable',
-            's3tables:GetTableBucket',
+            "s3tables:CreateTableBucket",
+            "s3tables:CreateTable",
+            "s3tables:GetTableBucket",
           ],
           resources: [bucketArn],
         },
@@ -46,9 +72,9 @@ export class S3TablesAdapter implements ConnectorAdapter {
       connect: [
         {
           actions: [
-            's3tables:GetTableBucket',
-            's3tables:GetTable',
-            's3tables:ListTables',
+            "s3tables:GetTableBucket",
+            "s3tables:GetTable",
+            "s3tables:ListTables",
           ],
           resources: [bucketArn],
         },
@@ -58,59 +84,57 @@ export class S3TablesAdapter implements ConnectorAdapter {
 
   async provision(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<ProvisionResult> {
-    const client = this.makeClient(credentials);
+    const client = this.makeClient(credentials, "provision");
     const bucketName =
-      (config.tableBucketName as string | undefined) ?? `citadel-s3tables-${Date.now()}`;
+      (config.tableBucketName as string | undefined) ??
+      `citadel-s3tables-${Date.now()}`;
 
     try {
       const result = await client.send(
-        new CreateTableBucketCommand({ name: bucketName })
+        new CreateTableBucketCommand({ name: bucketName }),
       );
 
       const resourceArn =
         result.arn ??
-        `arn:aws:s3tables:${config.region ?? 'us-east-1'}:${config.accountId ?? '000000000000'}:bucket/${bucketName}`;
+        `arn:aws:s3tables:${config.region ?? "us-east-1"}:${config.accountId ?? "000000000000"}:bucket/${bucketName}`;
 
       return { resourceArn };
     } catch (error) {
       const err = error as SdkError;
-      if (err.name === 'ConflictException') {
+      if (err.name === "ConflictException") {
         return {
-          resourceArn: `arn:aws:s3tables:${config.region ?? 'us-east-1'}:${config.accountId ?? '000000000000'}:bucket/${bucketName}`,
+          resourceArn: `arn:aws:s3tables:${config.region ?? "us-east-1"}:${config.accountId ?? "000000000000"}:bucket/${bucketName}`,
         };
       }
-      if (
-        err.name === 'AccessDenied' ||
-        err.name === 'AccessDeniedException'
-      ) {
+      if (err.name === "AccessDenied" || err.name === "AccessDeniedException") {
         throw new PermissionError(
           `Permission denied creating S3 Tables bucket ${bucketName}`,
-          err
+          err,
         );
       }
       throw new ProvisioningError(
         `Failed to create S3 Tables bucket ${bucketName}: ${err.message}`,
-        err
+        err,
       );
     }
   }
 
   async connect(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<void> {
-    const client = this.makeClient(credentials);
+    const client = this.makeClient(credentials, "connect");
     const tableBucketARN = config.tableBucketARN as string | undefined;
 
     try {
       const response = await client.send(
-        new GetTableBucketCommand({ tableBucketARN })
+        new GetTableBucketCommand({ tableBucketARN }),
       );
       if (!response.arn) {
         throw new ResourceNotFoundError(
-          `S3 Tables bucket ${tableBucketARN} does not exist`
+          `S3 Tables bucket ${tableBucketARN} does not exist`,
         );
       }
     } catch (error) {
@@ -118,43 +142,43 @@ export class S3TablesAdapter implements ConnectorAdapter {
       if (err instanceof ResourceNotFoundError) {
         throw err;
       }
-      if (err.name === 'NotFoundException') {
+      if (err.name === "NotFoundException") {
         throw new ResourceNotFoundError(
           `S3 Tables bucket ${tableBucketARN} does not exist`,
-          err
+          err,
         );
       }
-      if (
-        err.name === 'AccessDenied' ||
-        err.name === 'AccessDeniedException'
-      ) {
+      if (err.name === "AccessDenied" || err.name === "AccessDeniedException") {
         throw new PermissionError(
           `Permission denied accessing S3 Tables bucket ${tableBucketARN}`,
-          err
+          err,
         );
       }
       throw new ConnectionError(
         `Failed to connect to S3 Tables bucket ${tableBucketARN}: ${err.message}`,
         true,
-        err
+        err,
       );
     }
   }
 
-  async disconnect(_config: Record<string, unknown>): Promise<void> {
+  async disconnect(
+    _config: Record<string, unknown>,
+    _credentials?: Record<string, unknown>,
+  ): Promise<void> {
     // No-op: disconnecting from S3 Tables doesn't require cleanup
   }
 
   async testConnection(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<ConnectionTestResult> {
-    const client = this.makeClient(credentials);
+    const client = this.makeClient(credentials, "testConnection");
     const tableBucketARN = config.tableBucketARN as string | undefined;
 
     try {
       const response = await client.send(
-        new GetTableBucketCommand({ tableBucketARN })
+        new GetTableBucketCommand({ tableBucketARN }),
       );
       return {
         success: true,
@@ -176,37 +200,35 @@ export class S3TablesAdapter implements ConnectorAdapter {
 
   async getMetrics(
     config: Record<string, unknown>,
-    _resourceArn?: string
+    _resourceArn?: string,
+    credentials?: Record<string, unknown>,
   ): Promise<MetricsResult> {
-    const client = this.makeClient();
+    const client = this.makeClient(credentials, "getMetrics");
     const tableBucketARN = config.tableBucketARN as string | undefined;
 
     try {
       const response = await client.send(
-        new ListTablesCommand({ tableBucketARN })
+        new ListTablesCommand({ tableBucketARN }),
       );
 
       const tableCount = response.tables?.length ?? 0;
 
       return {
-        size: '0 MB',
+        size: "0 MB",
         records: tableCount,
       };
     } catch (error) {
       const err = error as SdkError;
-      if (
-        err.name === 'AccessDenied' ||
-        err.name === 'AccessDeniedException'
-      ) {
+      if (err.name === "AccessDenied" || err.name === "AccessDeniedException") {
         throw new PermissionError(
           `Permission denied listing S3 Tables in bucket ${tableBucketARN}`,
-          err
+          err,
         );
       }
       throw new ConnectionError(
         `Failed to get metrics for S3 Tables bucket ${tableBucketARN}: ${err.message}`,
         true,
-        err
+        err,
       );
     }
   }

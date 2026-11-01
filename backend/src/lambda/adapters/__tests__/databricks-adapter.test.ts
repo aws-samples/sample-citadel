@@ -6,6 +6,7 @@ import {
   ValidationError,
   DataStoreError,
 } from "../errors";
+import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
 
 const mockConnect = jest.fn();
 const mockClose = jest.fn();
@@ -45,34 +46,43 @@ describe("DatabricksAdapter", () => {
 
   describe("provision", () => {
     it("throws ProvisioningError", async () => {
-      await expect(adapter.provision(validConfig)).rejects.toThrow(
-        ProvisioningError,
-      );
+      await expect(
+        adapter.provision(validConfig, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(ProvisioningError);
     });
 
     it("includes kind in error message", async () => {
-      await expect(adapter.provision(validConfig)).rejects.toThrow(
-        /databricks/,
-      );
+      await expect(
+        adapter.provision(validConfig, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(/databricks/);
     });
   });
 
   describe("testConnection", () => {
     it("throws ValidationError when host is missing", async () => {
       await expect(
-        adapter.testConnection({ httpPath: "/path", token: "tok" }),
+        adapter.testConnection(
+          { httpPath: "/path", token: "tok" },
+          MOCK_SCOPED_CREDENTIALS,
+        ),
       ).rejects.toThrow(ValidationError);
     });
 
     it("throws ValidationError when httpPath is missing", async () => {
       await expect(
-        adapter.testConnection({ host: "h", token: "tok" }),
+        adapter.testConnection(
+          { host: "h", token: "tok" },
+          MOCK_SCOPED_CREDENTIALS,
+        ),
       ).rejects.toThrow(ValidationError);
     });
 
     it("throws ValidationError when token is missing", async () => {
       await expect(
-        adapter.testConnection({ host: "h", httpPath: "/path" }),
+        adapter.testConnection(
+          { host: "h", httpPath: "/path" },
+          MOCK_SCOPED_CREDENTIALS,
+        ),
       ).rejects.toThrow(ValidationError);
     });
 
@@ -80,7 +90,10 @@ describe("DatabricksAdapter", () => {
       mockConnect.mockResolvedValueOnce(undefined);
       mockClose.mockResolvedValueOnce(undefined);
 
-      const result = await adapter.testConnection(validConfig);
+      const result = await adapter.testConnection(
+        validConfig,
+        MOCK_SCOPED_CREDENTIALS,
+      );
       expect(result.success).toBe(true);
       expect(result.message).toContain("myworkspace.cloud.databricks.com");
       expect(result.details?.host).toBe("myworkspace.cloud.databricks.com");
@@ -91,7 +104,7 @@ describe("DatabricksAdapter", () => {
       mockConnect.mockResolvedValueOnce(undefined);
       mockClose.mockResolvedValueOnce(undefined);
 
-      await adapter.testConnection(validConfig);
+      await adapter.testConnection(validConfig, MOCK_SCOPED_CREDENTIALS);
       expect(mockConnect).toHaveBeenCalledWith({
         host: "myworkspace.cloud.databricks.com",
         path: "/sql/1.0/warehouses/abc123",
@@ -105,7 +118,7 @@ describe("DatabricksAdapter", () => {
       mockConnect.mockResolvedValueOnce(undefined);
       mockClose.mockResolvedValueOnce(undefined);
 
-      await adapter.testConnection(validConfig);
+      await adapter.testConnection(validConfig, MOCK_SCOPED_CREDENTIALS);
       expect(mockConnect).toHaveBeenCalledWith(
         expect.objectContaining({ telemetryEnabled: false }),
       );
@@ -117,7 +130,7 @@ describe("DatabricksAdapter", () => {
       mockClose.mockResolvedValueOnce(undefined);
 
       try {
-        await adapter.testConnection(validConfig);
+        await adapter.testConnection(validConfig, MOCK_SCOPED_CREDENTIALS);
         fail("Expected PermissionError");
       } catch (err) {
         expect(err).toBeInstanceOf(PermissionError);
@@ -131,7 +144,7 @@ describe("DatabricksAdapter", () => {
       mockClose.mockResolvedValueOnce(undefined);
 
       try {
-        await adapter.testConnection(validConfig);
+        await adapter.testConnection(validConfig, MOCK_SCOPED_CREDENTIALS);
         fail("Expected ConnectionError");
       } catch (err) {
         expect(err).toBeInstanceOf(ConnectionError);
@@ -145,7 +158,7 @@ describe("DatabricksAdapter", () => {
       mockClose.mockResolvedValueOnce(undefined);
 
       try {
-        await adapter.testConnection(validConfig);
+        await adapter.testConnection(validConfig, MOCK_SCOPED_CREDENTIALS);
         fail("Expected DataStoreError");
       } catch (err) {
         expect(err).toBeInstanceOf(DataStoreError);
@@ -172,7 +185,7 @@ describe("DatabricksAdapter", () => {
       mockClose.mockResolvedValueOnce(undefined);
 
       try {
-        await adapter.testConnection(validConfig);
+        await adapter.testConnection(validConfig, MOCK_SCOPED_CREDENTIALS);
       } catch {
         /* expected */
       }
@@ -186,7 +199,9 @@ describe("DatabricksAdapter", () => {
       mockConnect.mockResolvedValueOnce(undefined);
       mockClose.mockResolvedValueOnce(undefined);
 
-      await expect(adapter.connect(validConfig)).resolves.toBeUndefined();
+      await expect(
+        adapter.connect(validConfig, MOCK_SCOPED_CREDENTIALS),
+      ).resolves.toBeUndefined();
     });
 
     it("throws ConnectionError when SDK connect fails", async () => {
@@ -194,27 +209,33 @@ describe("DatabricksAdapter", () => {
       mockConnect.mockRejectedValueOnce(sdkError);
       mockClose.mockResolvedValueOnce(undefined);
 
-      await expect(adapter.connect(validConfig)).rejects.toThrow(
-        ConnectionError,
-      );
+      await expect(
+        adapter.connect(validConfig, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(ConnectionError);
     });
 
     it("propagates ValidationError from testConnection", async () => {
-      await expect(adapter.connect({ httpPath: "/path" })).rejects.toThrow(
-        ValidationError,
-      );
+      await expect(
+        adapter.connect({ httpPath: "/path" }, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(ValidationError);
     });
   });
 
   describe("disconnect", () => {
     it("is a no-op", async () => {
-      await expect(adapter.disconnect(validConfig)).resolves.toBeUndefined();
+      await expect(
+        adapter.disconnect(validConfig, MOCK_SCOPED_CREDENTIALS),
+      ).resolves.toBeUndefined();
     });
   });
 
   describe("getMetrics", () => {
     it("returns placeholder metrics", async () => {
-      const result = await adapter.getMetrics(validConfig);
+      const result = await adapter.getMetrics(
+        validConfig,
+        undefined,
+        MOCK_SCOPED_CREDENTIALS,
+      );
       expect(result.size).toBe("0 MB");
       expect(result.records).toBe(0);
     });

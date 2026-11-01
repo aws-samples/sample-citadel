@@ -3,46 +3,72 @@ import {
   CreateKeyspaceCommand,
   DeleteKeyspaceCommand,
   GetKeyspaceCommand,
-} from '@aws-sdk/client-keyspaces';
-import { ConnectorAdapter, ConnectorCategory, ConnectorSpec, AuthenticationMethod, RequiredPolicies, ProvisionResult, ConnectionTestResult, MetricsResult } from '../../adapters/base';
-import { ProvisioningError, ConnectionError, PermissionError, ResourceNotFoundError } from './errors';
-import { SdkError, AwsCredentialFields } from './sdk-types';
+} from "@aws-sdk/client-keyspaces";
+import {
+  ConnectorAdapter,
+  ConnectorCategory,
+  ConnectorSpec,
+  AuthenticationMethod,
+  RequiredPolicies,
+  ProvisionResult,
+  ConnectionTestResult,
+  MetricsResult,
+} from "../../adapters/base";
+import {
+  ProvisioningError,
+  ConnectionError,
+  PermissionError,
+  ResourceNotFoundError,
+} from "./errors";
+import { SdkError } from "./sdk-types";
+import { requireScopedCredentials } from "./credential-guard";
 
 export class KeyspacesAdapter implements ConnectorAdapter {
-  readonly category: ConnectorCategory = 'datastore';
-  readonly spec: ConnectorSpec = { type: 'KEYSPACES', provider: 'Amazon Web Services', category: 'datastore', authentication: { method: AuthenticationMethod.IAM_ROLE, fields: [], secretStructure: {} }, configuration: { required: ['keyspaceName'], optional: [], ssmParameters: [] } };
-  private makeClient(creds?: Record<string, unknown>): KeyspacesClient {
-    const c = creds as AwsCredentialFields | undefined;
-    if (c?.accessKeyId && c?.secretAccessKey && c?.sessionToken) {
-      return new KeyspacesClient({
-        credentials: {
-          accessKeyId: c.accessKeyId,
-          secretAccessKey: c.secretAccessKey,
-          sessionToken: c.sessionToken,
-        },
-      });
-    }
-    return new KeyspacesClient({});
+  readonly category: ConnectorCategory = "datastore";
+  readonly spec: ConnectorSpec = {
+    type: "KEYSPACES",
+    provider: "Amazon Web Services",
+    category: "datastore",
+    authentication: {
+      method: AuthenticationMethod.IAM_ROLE,
+      fields: [],
+      secretStructure: {},
+    },
+    configuration: {
+      required: ["keyspaceName"],
+      optional: [],
+      ssmParameters: [],
+    },
+  };
+  private makeClient(
+    creds: Record<string, unknown> | undefined,
+    op: string,
+  ): KeyspacesClient {
+    const credentials = requireScopedCredentials(creds, {
+      adapter: "KeyspacesAdapter",
+      op,
+    });
+    return new KeyspacesClient({ credentials });
   }
 
   requiredPolicies(
     config: Record<string, unknown>,
     accountId: string,
-    region: string
+    region: string,
   ): RequiredPolicies {
-    const keyspaceName = config.keyspaceName ?? '*';
+    const keyspaceName = config.keyspaceName ?? "*";
     const keyspaceArn = `arn:aws:cassandra:${region}:${accountId}:/keyspace/${keyspaceName}`;
 
     return {
       provision: [
         {
-          actions: ['cassandra:Create', 'cassandra:Drop', 'cassandra:Select'],
-          resources: ['*'],
+          actions: ["cassandra:Create", "cassandra:Drop", "cassandra:Select"],
+          resources: ["*"],
         },
       ],
       connect: [
         {
-          actions: ['cassandra:Select', 'cassandra:Modify'],
+          actions: ["cassandra:Select", "cassandra:Modify"],
           resources: [keyspaceArn],
         },
       ],
@@ -51,59 +77,57 @@ export class KeyspacesAdapter implements ConnectorAdapter {
 
   async provision(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<ProvisionResult> {
-    const client = this.makeClient(credentials);
+    const client = this.makeClient(credentials, "provision");
     const keyspaceName =
-      (config.keyspaceName as string | undefined) ?? `citadel-keyspaces-${Date.now()}`;
+      (config.keyspaceName as string | undefined) ??
+      `citadel-keyspaces-${Date.now()}`;
 
     try {
       const result = await client.send(
-        new CreateKeyspaceCommand({ keyspaceName })
+        new CreateKeyspaceCommand({ keyspaceName }),
       );
 
       const resourceArn =
         result.resourceArn ??
-        `arn:aws:cassandra:${config.region ?? 'us-east-1'}:${config.accountId ?? '000000000000'}:/keyspace/${keyspaceName}`;
+        `arn:aws:cassandra:${config.region ?? "us-east-1"}:${config.accountId ?? "000000000000"}:/keyspace/${keyspaceName}`;
 
       return { resourceArn };
     } catch (error) {
       const err = error as SdkError;
-      if (err.name === 'ConflictException') {
+      if (err.name === "ConflictException") {
         return {
-          resourceArn: `arn:aws:cassandra:${config.region ?? 'us-east-1'}:${config.accountId ?? '000000000000'}:/keyspace/${keyspaceName}`,
+          resourceArn: `arn:aws:cassandra:${config.region ?? "us-east-1"}:${config.accountId ?? "000000000000"}:/keyspace/${keyspaceName}`,
         };
       }
-      if (
-        err.name === 'AccessDenied' ||
-        err.name === 'AccessDeniedException'
-      ) {
+      if (err.name === "AccessDenied" || err.name === "AccessDeniedException") {
         throw new PermissionError(
           `Permission denied creating Keyspaces keyspace ${keyspaceName}`,
-          err
+          err,
         );
       }
       throw new ProvisioningError(
         `Failed to create Keyspaces keyspace ${keyspaceName}: ${err.message}`,
-        err
+        err,
       );
     }
   }
 
   async connect(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<void> {
-    const client = this.makeClient(credentials);
+    const client = this.makeClient(credentials, "connect");
     const keyspaceName = config.keyspaceName as string | undefined;
 
     try {
       const response = await client.send(
-        new GetKeyspaceCommand({ keyspaceName })
+        new GetKeyspaceCommand({ keyspaceName }),
       );
       if (!response.keyspaceName) {
         throw new ResourceNotFoundError(
-          `Keyspaces keyspace ${keyspaceName} does not exist`
+          `Keyspaces keyspace ${keyspaceName} does not exist`,
         );
       }
     } catch (error) {
@@ -111,47 +135,45 @@ export class KeyspacesAdapter implements ConnectorAdapter {
       if (err instanceof ResourceNotFoundError) {
         throw err;
       }
-      if (err.name === 'ResourceNotFoundException') {
+      if (err.name === "ResourceNotFoundException") {
         throw new ResourceNotFoundError(
           `Keyspaces keyspace ${keyspaceName} does not exist`,
-          err
+          err,
         );
       }
-      if (
-        err.name === 'AccessDenied' ||
-        err.name === 'AccessDeniedException'
-      ) {
+      if (err.name === "AccessDenied" || err.name === "AccessDeniedException") {
         throw new PermissionError(
           `Permission denied accessing Keyspaces keyspace ${keyspaceName}`,
-          err
+          err,
         );
       }
       throw new ConnectionError(
         `Failed to connect to Keyspaces keyspace ${keyspaceName}: ${err.message}`,
         true,
-        err
+        err,
       );
     }
   }
 
-  async disconnect(_config: Record<string, unknown>): Promise<void> {
+  async disconnect(
+    _config: Record<string, unknown>,
+    _credentials?: Record<string, unknown>,
+  ): Promise<void> {
     // No-op: disconnecting from Keyspaces doesn't require cleanup
   }
 
   async deprovision(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<void> {
-    const client = this.makeClient(credentials);
+    const client = this.makeClient(credentials, "deprovision");
     const keyspaceName = config.keyspaceName as string | undefined;
 
     try {
-      await client.send(
-        new DeleteKeyspaceCommand({ keyspaceName })
-      );
+      await client.send(new DeleteKeyspaceCommand({ keyspaceName }));
     } catch (error) {
       const err = error as SdkError;
-      if (err.name === 'ResourceNotFoundException') {
+      if (err.name === "ResourceNotFoundException") {
         return; // Already gone
       }
       throw err;
@@ -160,21 +182,21 @@ export class KeyspacesAdapter implements ConnectorAdapter {
 
   async testConnection(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<ConnectionTestResult> {
-    const client = this.makeClient(credentials);
+    const client = this.makeClient(credentials, "testConnection");
     const keyspaceName = config.keyspaceName as string | undefined;
 
     try {
       const response = await client.send(
-        new GetKeyspaceCommand({ keyspaceName })
+        new GetKeyspaceCommand({ keyspaceName }),
       );
       return {
         success: true,
         message: `Successfully connected to Keyspaces keyspace ${keyspaceName}`,
         details: {
           arn: response.resourceArn,
-          status: 'ACTIVE',
+          status: "ACTIVE",
         },
       };
     } catch (error) {
@@ -189,35 +211,31 @@ export class KeyspacesAdapter implements ConnectorAdapter {
 
   async getMetrics(
     config: Record<string, unknown>,
-    _resourceArn?: string
+    _resourceArn?: string,
+    credentials?: Record<string, unknown>,
   ): Promise<MetricsResult> {
-    const client = this.makeClient();
+    const client = this.makeClient(credentials, "getMetrics");
     const keyspaceName = config.keyspaceName as string | undefined;
 
     try {
-      await client.send(
-        new GetKeyspaceCommand({ keyspaceName })
-      );
+      await client.send(new GetKeyspaceCommand({ keyspaceName }));
 
       return {
-        size: '0 MB',
+        size: "0 MB",
         records: 0,
       };
     } catch (error) {
       const err = error as SdkError;
-      if (
-        err.name === 'AccessDenied' ||
-        err.name === 'AccessDeniedException'
-      ) {
+      if (err.name === "AccessDenied" || err.name === "AccessDeniedException") {
         throw new PermissionError(
           `Permission denied describing Keyspaces keyspace ${keyspaceName}`,
-          err
+          err,
         );
       }
       throw new ConnectionError(
         `Failed to get metrics for Keyspaces keyspace ${keyspaceName}: ${err.message}`,
         true,
-        err
+        err,
       );
     }
   }

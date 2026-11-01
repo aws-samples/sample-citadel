@@ -1,52 +1,65 @@
 /**
  * TDD Tests for TimestreamAdapter.deprovision
  */
-import { TimestreamWriteClient, DeleteDatabaseCommand } from '@aws-sdk/client-timestream-write';
-import { mockClient } from 'aws-sdk-client-mock';
+import {
+  TimestreamWriteClient,
+  DeleteDatabaseCommand,
+} from "@aws-sdk/client-timestream-write";
+import { mockClient } from "aws-sdk-client-mock";
+import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
 
 const timestreamMock = mockClient(TimestreamWriteClient);
 
-import { TimestreamAdapter } from '../timestream-adapter';
+import { TimestreamAdapter } from "../timestream-adapter";
 
-describe('TimestreamAdapter.deprovision', () => {
+describe("TimestreamAdapter.deprovision", () => {
   const adapter = new TimestreamAdapter();
 
   beforeEach(() => {
     timestreamMock.reset();
   });
 
-  test('deprovision method exists', () => {
+  test("deprovision method exists", () => {
     expect(adapter.deprovision).toBeDefined();
-    expect(typeof adapter.deprovision).toBe('function');
+    expect(typeof adapter.deprovision).toBe("function");
   });
 
-  test('calls DeleteDatabaseCommand with the database name', async () => {
+  test("calls DeleteDatabaseCommand with the database name", async () => {
     timestreamMock.on(DeleteDatabaseCommand).resolves({});
 
-    await adapter.deprovision!({ databaseName: 'my-timestream-db' });
+    await adapter.deprovision!(
+      { databaseName: "my-timestream-db" },
+      MOCK_SCOPED_CREDENTIALS,
+    );
 
     const calls = timestreamMock.commandCalls(DeleteDatabaseCommand);
     expect(calls).toHaveLength(1);
-    expect(calls[0].args[0].input.DatabaseName).toBe('my-timestream-db');
+    expect(calls[0].args[0].input.DatabaseName).toBe("my-timestream-db");
   });
 
-  test('succeeds gracefully if database already deleted', async () => {
-    const notFoundError = new Error('Database not found');
-    notFoundError.name = 'ResourceNotFoundException';
+  test("succeeds gracefully if database already deleted", async () => {
+    const notFoundError = new Error("Database not found");
+    notFoundError.name = "ResourceNotFoundException";
     timestreamMock.on(DeleteDatabaseCommand).rejects(notFoundError);
 
     await expect(
-      adapter.deprovision!({ databaseName: 'gone-db' })
+      adapter.deprovision!(
+        { databaseName: "gone-db" },
+        MOCK_SCOPED_CREDENTIALS,
+      ),
     ).resolves.toBeUndefined();
   });
 
-  test('propagates unexpected errors', async () => {
-    const internalError = new Error('Internal failure');
-    internalError.name = 'InternalServerError';
+  test("propagates unexpected errors", async () => {
+    const internalError = new Error("Internal failure");
+    internalError.name = "InternalServerError";
     timestreamMock.on(DeleteDatabaseCommand).rejects(internalError);
 
     await expect(
-      adapter.deprovision!({ databaseName: 'my-timestream-db' })
-    ).rejects.toThrow('Internal failure');
+      adapter.deprovision!(
+        { databaseName: "my-timestream-db" },
+        MOCK_SCOPED_CREDENTIALS,
+      ),
+    ).rejects.toThrow("Internal failure");
   });
 });

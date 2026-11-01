@@ -1,114 +1,141 @@
-import { AuroraAdapter } from '../aurora-adapter';
+import { AuroraAdapter } from "../aurora-adapter";
 import {
   ProvisioningError,
   ConnectionError,
   PermissionError,
   ResourceNotFoundError,
   DataStoreError,
-} from '../errors';
-import { RDSClient, CreateDBClusterCommand } from '@aws-sdk/client-rds';
+} from "../errors";
+import { RDSClient, CreateDBClusterCommand } from "@aws-sdk/client-rds";
+import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
 
 const mockSend = jest.fn();
-jest.mock('@aws-sdk/client-rds', () => {
+jest.mock("@aws-sdk/client-rds", () => {
   return {
     RDSClient: jest.fn().mockImplementation(() => ({ send: mockSend })),
-    CreateDBClusterCommand: jest.fn().mockImplementation((input) => ({ _type: 'CreateDBCluster', input })),
-    DescribeDBClustersCommand: jest.fn().mockImplementation((input) => ({ _type: 'DescribeDBClusters', input })),
+    CreateDBClusterCommand: jest
+      .fn()
+      .mockImplementation((input) => ({ _type: "CreateDBCluster", input })),
+    DescribeDBClustersCommand: jest
+      .fn()
+      .mockImplementation((input) => ({ _type: "DescribeDBClusters", input })),
   };
 });
 
-describe('AuroraAdapter', () => {
+describe("AuroraAdapter", () => {
   let postgresAdapter: AuroraAdapter;
   let mysqlAdapter: AuroraAdapter;
-  const config = { dbClusterIdentifier: 'my-test-cluster' };
-  const creds = { masterUsername: 'dbadmin', masterPassword: 'secret123' };
+  const config = { dbClusterIdentifier: "my-test-cluster" };
+  const creds = {
+    masterUsername: "dbadmin",
+    masterPassword: "secret123",
+    ...MOCK_SCOPED_CREDENTIALS,
+  };
 
   beforeEach(() => {
-    postgresAdapter = new AuroraAdapter('postgres');
-    mysqlAdapter = new AuroraAdapter('mysql');
+    postgresAdapter = new AuroraAdapter("postgres");
+    mysqlAdapter = new AuroraAdapter("mysql");
     mockSend.mockReset();
   });
 
-  describe('requiredPolicies', () => {
-    it('returns provision policies for CreateDBCluster, DescribeDBClusters, AddTagsToResource', () => {
-      const policies = postgresAdapter.requiredPolicies(config, '123456789012', 'us-east-1');
+  describe("requiredPolicies", () => {
+    it("returns provision policies for CreateDBCluster, DescribeDBClusters, AddTagsToResource", () => {
+      const policies = postgresAdapter.requiredPolicies(
+        config,
+        "123456789012",
+        "us-east-1",
+      );
       expect(policies.provision).toHaveLength(1);
       expect(policies.provision[0].actions).toEqual([
-        'rds:CreateDBCluster',
-        'rds:DeleteDBCluster',
-        'rds:DescribeDBClusters',
-        'rds:AddTagsToResource',
+        "rds:CreateDBCluster",
+        "rds:DeleteDBCluster",
+        "rds:DescribeDBClusters",
+        "rds:AddTagsToResource",
       ]);
-      expect(policies.provision[0].resources).toEqual([
-        '*',
-      ]);
+      expect(policies.provision[0].resources).toEqual(["*"]);
     });
 
-    it('returns connect policies for DescribeDBClusters', () => {
-      const policies = postgresAdapter.requiredPolicies(config, '123456789012', 'us-east-1');
+    it("returns connect policies for DescribeDBClusters", () => {
+      const policies = postgresAdapter.requiredPolicies(
+        config,
+        "123456789012",
+        "us-east-1",
+      );
       expect(policies.connect).toHaveLength(1);
-      expect(policies.connect[0].actions).toEqual(['rds:DescribeDBClusters']);
+      expect(policies.connect[0].actions).toEqual(["rds:DescribeDBClusters"]);
     });
 
-    it('uses wildcard when dbClusterIdentifier is not in config', () => {
-      const policies = postgresAdapter.requiredPolicies({}, '123456789012', 'us-west-2');
-      expect(policies.provision[0].resources).toEqual([
-        '*',
-      ]);
+    it("uses wildcard when dbClusterIdentifier is not in config", () => {
+      const policies = postgresAdapter.requiredPolicies(
+        {},
+        "123456789012",
+        "us-west-2",
+      );
+      expect(policies.provision[0].resources).toEqual(["*"]);
     });
   });
 
-  describe('provision', () => {
-    it('creates a cluster and returns the ARN', async () => {
+  describe("provision", () => {
+    it("creates a cluster and returns the ARN", async () => {
       mockSend.mockResolvedValueOnce({
-        DBCluster: { DBClusterArn: 'arn:aws:rds:us-east-1:123:cluster:my-test-cluster' },
+        DBCluster: {
+          DBClusterArn: "arn:aws:rds:us-east-1:123:cluster:my-test-cluster",
+        },
       });
       const result = await postgresAdapter.provision(config, creds);
-      expect(result.resourceArn).toBe('arn:aws:rds:us-east-1:123:cluster:my-test-cluster');
+      expect(result.resourceArn).toBe(
+        "arn:aws:rds:us-east-1:123:cluster:my-test-cluster",
+      );
     });
 
-    it('uses aurora-postgresql engine for postgres adapter', async () => {
+    it("uses aurora-postgresql engine for postgres adapter", async () => {
       mockSend.mockResolvedValueOnce({ DBCluster: {} });
       await postgresAdapter.provision(config, creds);
       expect(CreateDBClusterCommand).toHaveBeenCalledWith(
-        expect.objectContaining({ Engine: 'aurora-postgresql' })
+        expect.objectContaining({ Engine: "aurora-postgresql" }),
       );
     });
 
-    it('uses aurora-mysql engine for mysql adapter', async () => {
+    it("uses aurora-mysql engine for mysql adapter", async () => {
       mockSend.mockResolvedValueOnce({ DBCluster: {} });
       await mysqlAdapter.provision(config, creds);
       expect(CreateDBClusterCommand).toHaveBeenCalledWith(
-        expect.objectContaining({ Engine: 'aurora-mysql' })
+        expect.objectContaining({ Engine: "aurora-mysql" }),
       );
     });
 
-    it('throws ProvisioningError when credentials are missing', async () => {
-      await expect(postgresAdapter.provision(config, {})).rejects.toThrow(ProvisioningError);
+    it("throws CredentialMissingError when scoped credentials are missing", async () => {
+      const { CredentialMissingError } =
+        await import("../../../adapters/errors");
+      await expect(postgresAdapter.provision(config, {})).rejects.toThrow(
+        CredentialMissingError,
+      );
     });
 
-    it('handles DBClusterAlreadyExistsFault as idempotent success', async () => {
-      const sdkError = new Error('Already exists');
-      sdkError.name = 'DBClusterAlreadyExistsFault';
+    it("handles DBClusterAlreadyExistsFault as idempotent success", async () => {
+      const sdkError = new Error("Already exists");
+      sdkError.name = "DBClusterAlreadyExistsFault";
       mockSend.mockRejectedValueOnce(sdkError);
       const result = await postgresAdapter.provision(config, creds);
-      expect(result.resourceArn).toContain('my-test-cluster');
+      expect(result.resourceArn).toContain("my-test-cluster");
     });
 
-    it('wraps AccessDeniedException in PermissionError', async () => {
-      const sdkError = new Error('Access Denied');
-      sdkError.name = 'AccessDeniedException';
+    it("wraps AccessDeniedException in PermissionError", async () => {
+      const sdkError = new Error("Access Denied");
+      sdkError.name = "AccessDeniedException";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(postgresAdapter.provision(config, creds)).rejects.toThrow(PermissionError);
+      await expect(postgresAdapter.provision(config, creds)).rejects.toThrow(
+        PermissionError,
+      );
     });
 
-    it('wraps unknown SDK errors in ProvisioningError with cause', async () => {
-      const sdkError = new Error('Something broke');
-      sdkError.name = 'InternalError';
+    it("wraps unknown SDK errors in ProvisioningError with cause", async () => {
+      const sdkError = new Error("Something broke");
+      sdkError.name = "InternalError";
       mockSend.mockRejectedValueOnce(sdkError);
       try {
         await postgresAdapter.provision(config, creds);
-        fail('Expected ProvisioningError');
+        fail("Expected ProvisioningError");
       } catch (err) {
         expect(err).toBeInstanceOf(ProvisioningError);
         expect((err as DataStoreError).cause).toBe(sdkError);
@@ -116,42 +143,50 @@ describe('AuroraAdapter', () => {
     });
   });
 
-  describe('connect', () => {
-    it('succeeds when cluster status is available', async () => {
+  describe("connect", () => {
+    it("succeeds when cluster status is available", async () => {
       mockSend.mockResolvedValueOnce({
-        DBClusters: [{ Status: 'available' }],
+        DBClusters: [{ Status: "available" }],
       });
-      await expect(postgresAdapter.connect(config)).resolves.toBeUndefined();
+      await expect(
+        postgresAdapter.connect(config, MOCK_SCOPED_CREDENTIALS),
+      ).resolves.toBeUndefined();
     });
 
-    it('throws ConnectionError when cluster is not available', async () => {
+    it("throws ConnectionError when cluster is not available", async () => {
       mockSend.mockResolvedValueOnce({
-        DBClusters: [{ Status: 'creating' }],
+        DBClusters: [{ Status: "creating" }],
       });
-      await expect(postgresAdapter.connect(config)).rejects.toThrow(ConnectionError);
+      await expect(
+        postgresAdapter.connect(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(ConnectionError);
     });
 
-    it('throws ResourceNotFoundError when cluster does not exist', async () => {
-      const sdkError = new Error('Not found');
-      sdkError.name = 'DBClusterNotFoundFault';
+    it("throws ResourceNotFoundError when cluster does not exist", async () => {
+      const sdkError = new Error("Not found");
+      sdkError.name = "DBClusterNotFoundFault";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(postgresAdapter.connect(config)).rejects.toThrow(ResourceNotFoundError);
+      await expect(
+        postgresAdapter.connect(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(ResourceNotFoundError);
     });
 
-    it('throws PermissionError on AccessDeniedException', async () => {
-      const sdkError = new Error('Forbidden');
-      sdkError.name = 'AccessDeniedException';
+    it("throws PermissionError on AccessDeniedException", async () => {
+      const sdkError = new Error("Forbidden");
+      sdkError.name = "AccessDeniedException";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(postgresAdapter.connect(config)).rejects.toThrow(PermissionError);
+      await expect(
+        postgresAdapter.connect(config, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(PermissionError);
     });
 
-    it('wraps other errors in ConnectionError with cause', async () => {
-      const sdkError = new Error('Network issue');
-      sdkError.name = 'NetworkingError';
+    it("wraps other errors in ConnectionError with cause", async () => {
+      const sdkError = new Error("Network issue");
+      sdkError.name = "NetworkingError";
       mockSend.mockRejectedValueOnce(sdkError);
       try {
-        await postgresAdapter.connect(config);
-        fail('Expected ConnectionError');
+        await postgresAdapter.connect(config, MOCK_SCOPED_CREDENTIALS);
+        fail("Expected ConnectionError");
       } catch (err) {
         expect(err).toBeInstanceOf(ConnectionError);
         expect((err as DataStoreError).cause).toBe(sdkError);
@@ -159,76 +194,96 @@ describe('AuroraAdapter', () => {
     });
   });
 
-  describe('disconnect', () => {
-    it('is a no-op', async () => {
-      await expect(postgresAdapter.disconnect(config)).resolves.toBeUndefined();
+  describe("disconnect", () => {
+    it("is a no-op", async () => {
+      await expect(
+        postgresAdapter.disconnect(config, MOCK_SCOPED_CREDENTIALS),
+      ).resolves.toBeUndefined();
     });
   });
 
-  describe('testConnection', () => {
-    it('returns success with cluster details', async () => {
+  describe("testConnection", () => {
+    it("returns success with cluster details", async () => {
       mockSend.mockResolvedValueOnce({
-        DBClusters: [{
-          Status: 'available',
-          Endpoint: 'my-cluster.cluster-abc.us-east-1.rds.amazonaws.com',
-          Port: 5432,
-          Engine: 'aurora-postgresql',
-        }],
+        DBClusters: [
+          {
+            Status: "available",
+            Endpoint: "my-cluster.cluster-abc.us-east-1.rds.amazonaws.com",
+            Port: 5432,
+            Engine: "aurora-postgresql",
+          },
+        ],
       });
-      const result = await postgresAdapter.testConnection(config);
+      const result = await postgresAdapter.testConnection(
+        config,
+        MOCK_SCOPED_CREDENTIALS,
+      );
       expect(result.success).toBe(true);
-      expect(result.details?.endpoint).toBe('my-cluster.cluster-abc.us-east-1.rds.amazonaws.com');
+      expect(result.details?.endpoint).toBe(
+        "my-cluster.cluster-abc.us-east-1.rds.amazonaws.com",
+      );
       expect(result.details?.port).toBe(5432);
-      expect(result.details?.engine).toBe('aurora-postgresql');
+      expect(result.details?.engine).toBe("aurora-postgresql");
     });
 
-    it('returns failure when DescribeDBClusters fails', async () => {
-      mockSend.mockRejectedValueOnce(new Error('Not Found'));
-      const result = await postgresAdapter.testConnection(config);
+    it("returns failure when DescribeDBClusters fails", async () => {
+      mockSend.mockRejectedValueOnce(new Error("Not Found"));
+      const result = await postgresAdapter.testConnection(
+        config,
+        MOCK_SCOPED_CREDENTIALS,
+      );
       expect(result.success).toBe(false);
     });
   });
 
-  describe('getMetrics', () => {
-    it('returns allocated storage and zero records', async () => {
+  describe("getMetrics", () => {
+    it("returns allocated storage and zero records", async () => {
       mockSend.mockResolvedValueOnce({
         DBClusters: [{ AllocatedStorage: 100 }],
       });
-      const result = await postgresAdapter.getMetrics(config);
-      expect(result.size).toBe('100 GB');
+      const result = await postgresAdapter.getMetrics(
+        config,
+        undefined,
+        MOCK_SCOPED_CREDENTIALS,
+      );
+      expect(result.size).toBe("100 GB");
       expect(result.records).toBe(0);
     });
 
-    it('wraps AccessDeniedException in PermissionError', async () => {
-      const sdkError = new Error('Access Denied');
-      sdkError.name = 'AccessDeniedException';
+    it("wraps AccessDeniedException in PermissionError", async () => {
+      const sdkError = new Error("Access Denied");
+      sdkError.name = "AccessDeniedException";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(postgresAdapter.getMetrics(config)).rejects.toThrow(PermissionError);
+      await expect(
+        postgresAdapter.getMetrics(config, undefined, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(PermissionError);
     });
 
-    it('wraps other errors in ConnectionError', async () => {
-      const sdkError = new Error('Timeout');
-      sdkError.name = 'RequestTimeout';
+    it("wraps other errors in ConnectionError", async () => {
+      const sdkError = new Error("Timeout");
+      sdkError.name = "RequestTimeout";
       mockSend.mockRejectedValueOnce(sdkError);
-      await expect(postgresAdapter.getMetrics(config)).rejects.toThrow(ConnectionError);
+      await expect(
+        postgresAdapter.getMetrics(config, undefined, MOCK_SCOPED_CREDENTIALS),
+      ).rejects.toThrow(ConnectionError);
     });
   });
 
-  describe('scoped credentials', () => {
-    it('constructs client with provided credentials', async () => {
+  describe("scoped credentials", () => {
+    it("constructs client with provided credentials", async () => {
       mockSend.mockResolvedValueOnce({
-        DBClusters: [{ Status: 'available' }],
+        DBClusters: [{ Status: "available" }],
       });
       await postgresAdapter.connect(config, {
-        accessKeyId: 'AKIA...',
-        secretAccessKey: 'secret',
-        sessionToken: 'token',
+        accessKeyId: "AKIA...",
+        secretAccessKey: "secret",
+        sessionToken: "token",
       });
       expect(RDSClient).toHaveBeenCalledWith({
         credentials: {
-          accessKeyId: 'AKIA...',
-          secretAccessKey: 'secret',
-          sessionToken: 'token',
+          accessKeyId: "AKIA...",
+          secretAccessKey: "secret",
+          sessionToken: "token",
         },
       });
     });
