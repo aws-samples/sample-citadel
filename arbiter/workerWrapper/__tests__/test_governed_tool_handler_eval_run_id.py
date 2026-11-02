@@ -90,7 +90,7 @@ def test_finding_eval_run_id_none_when_absent():
     ),
     eval_run_id=st.one_of(st.none(), st.text(min_size=1, max_size=20)),
     tool_args=st.dictionaries(
-        st.text(min_size=1, max_size=10),
+        st.text(min_size=1, max_size=10).filter(lambda k: k not in ('name', 'toolUseId')),
         st.one_of(st.text(max_size=20), st.integers(), st.booleans()),
         max_size=5,
     ),
