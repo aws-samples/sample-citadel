@@ -134,12 +134,23 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
     _region: string,
   ): RequiredPolicies {
     const knowledgeBaseArn = `arn:aws:bedrock:${_region}:${_accountId}:knowledge-base/*`;
+    // If config carries a collectionArn, scope AOSS APIAccessAll to it;
+    // otherwise use a wildcard (collection ARN not known until after provision).
+    const collectionArn =
+      typeof _config.collectionArn === "string"
+        ? _config.collectionArn
+        : `arn:aws:aoss:${_region}:${_accountId}:collection/*`;
+
     return {
       provision: [],
       connect: [
         {
           actions: ["bedrock:GetKnowledgeBase", "bedrock:Retrieve"],
           resources: [knowledgeBaseArn],
+        },
+        {
+          actions: ["aoss:APIAccessAll"],
+          resources: [collectionArn],
         },
       ],
     };
@@ -281,6 +292,7 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
     name: string,
     serviceRoleArn: string,
     accountId: string,
+    vendedRoleArn?: string,
   ): Promise<{ collectionArn: string; collectionId: string }> {
     const ossClient = this.platformOssClient();
     const collectionName = `aifkb-${name
@@ -384,7 +396,10 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
                   ResourceType: "collection",
                 },
               ],
-              Principal: [serviceRoleArn, `arn:aws:iam::${accountId}:root`],
+              Principal: [
+                serviceRoleArn,
+                ...(vendedRoleArn ? [vendedRoleArn] : []),
+              ],
             },
           ]),
         }),
@@ -642,6 +657,9 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
         name,
         roleArn,
         accountId,
+        config.dataStoreId
+          ? `arn:aws:iam::${accountId}:role/citadel-ds-${config.dataStoreId as string}`
+          : undefined,
       );
       collectionArn = vectorStore.collectionArn;
 
