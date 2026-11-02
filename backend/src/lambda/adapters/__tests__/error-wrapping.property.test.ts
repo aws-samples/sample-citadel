@@ -34,6 +34,8 @@ jest.mock("@aws-sdk/client-s3", () => ({
   S3Client: jest.fn().mockImplementation(() => ({ send: mockS3Send })),
   CreateBucketCommand: jest.fn().mockImplementation((i) => i),
   PutBucketVersioningCommand: jest.fn().mockImplementation((i) => i),
+  PutBucketTaggingCommand: jest.fn().mockImplementation((i) => i),
+  GetBucketTaggingCommand: jest.fn().mockImplementation((i) => i),
   HeadBucketCommand: jest.fn().mockImplementation((i) => i),
   ListObjectsV2Command: jest.fn().mockImplementation((i) => i),
 }));
@@ -269,7 +271,11 @@ describe("Property 1: Adapter SDK error wrapping", () => {
     "S3Adapter",
     () => new S3Adapter(),
     mockS3Send,
-    { bucketName: "my-test-bucket" },
+    {
+      bucketName: "citadel-my-test-bucket",
+      dataStoreId: "ds-1",
+      orgId: "org-1",
+    },
     MOCK_SCOPED_CREDENTIALS,
   );
   testProvisionWrapping(
