@@ -33,6 +33,13 @@ from deadline import (
     set_fabrication_deadline,
     timed_out_failure_message,
 )
+from fabrication_context import (
+    fabrication_job_id,
+    fabrication_org_id,
+    fabrication_tool_keys,
+    lookup_tool_key,
+    record_tool_key,
+)
 from registry_recovery import (
     OrphanedRegistryRecordError,
     is_creating_conflict,
@@ -628,7 +635,7 @@ def get_tool_fabricator_prompt():
         
         Step 4 - CALL upload_tool_to_s3 tool (REQUIRED):
         upload_tool_to_s3(file_path="/tmp/validate_email.py")
-        ✓ Step 4 complete - file uploaded to S3
+        ✓ Step 4 complete - file uploaded to S3 (key is recorded automatically for later retrieval)
         
         Step 5 - CALL store_tool_config_registry tool (REQUIRED - MOST CRITICAL STEP):
         store_tool_config_registry(
@@ -1194,29 +1201,61 @@ def publish_intake_progress(session_id: str, agent_index: int, total_agents: int
     # summary embeds the event-derived agent name; log only the numeric pct.
     print(f"Published intake progress: {pct}%")
 
-def upload_to_s3(file_path, folder, record_id=None):
-    """Upload a file to S3 under a record-scoped key.
+def _validate_basename(basename: str) -> str:
+    """Validate and sanitise a filename for use as an S3 key segment.
 
-    Key layout (§2.2-D / scanner C1):
-        ``{folder}/{record_id}/{basename}``   when record_id is provided
-        ``{folder}/{basename}``               legacy fallback (record_id=None)
-
-    The scoped layout isolates fabricated code per-record and aligns with the
-    worker's new key derivation introduced in PR1.  The legacy flat key is
-    NO LONGER written — the worker falls back to the flat key on read during
-    migration, so continuing to write it would leave stale artefacts. A
-    SHA-256 digest of the file content is returned so callers can stamp
-    ``codeSha256`` into custom_metadata for integrity verification.
+    Raises ``ValueError`` on traversal attempts, control characters, or
+    empty input.  Returns the validated basename.
     """
-    # Check env var FIRST so missing-bucket is a pure failure with zero
-    # AWS calls (QB-013-1). Constructing boto3.client('s3') triggers
-    # credential resolution, which fails in credential-less test envs.
+    import re as _re
+
+    if not basename or not isinstance(basename, str):
+        raise ValueError("basename must be a non-empty string")
+    if "/" in basename or "\\" in basename:
+        raise ValueError(f"basename must not contain path separators: {basename!r}")
+    if ".." in basename:
+        raise ValueError(f"basename must not contain '..': {basename!r}")
+    if _re.search(r"[\x00-\x1f\x7f]", basename):
+        raise ValueError(f"basename must not contain control characters: {basename!r}")
+    return basename
+
+
+def upload_to_s3(file_path, folder, record_id=None):
+    """Upload a file to S3 under a tenant-scoped key.
+
+    Key layout (CIT-256 C1 / scanner C1):
+        ``{folder}/{org_id}/{job_id}/{basename}``   tenant-scoped (preferred)
+        ``{folder}/{record_id}/{basename}``         record-scoped fallback
+        ``{folder}/{basename}``                     legacy (record_id=None,
+                                                    no context)
+
+    Tenant-scoped keys derive ``org_id`` and ``job_id`` from the
+    ``fabrication_context`` ContextVars set by ``process_event`` — NEVER from
+    LLM-supplied arguments.  This isolates every fabrication run's artefacts
+    per-organisation and per-job.
+
+    The upload uses ``put_object`` with ``IfNoneMatch='*'`` so that an
+    existing object at the same key is never silently overwritten.  On a
+    ``PreconditionFailed`` (412) the existing object is left intact and the
+    function raises — the caller retries with a different key or reports the
+    collision.
+
+    A SHA-256 digest of the file content is returned alongside the S3 key so
+    callers can stamp ``codeSha256`` into custom_metadata for integrity
+    verification.
+
+    Returns:
+        A ``(code_sha256, s3_key)`` tuple.
+    """
     bucket_name = os.environ.get("AGENT_BUCKET_NAME", None)
     if bucket_name is None:
         raise ValueError("AGENT_BUCKET_NAME environment variable is not set")
+
     s3 = boto3.client('s3')
     print(f"storing {file_path}")
-    filename = file_path.split("/")[-1]
+
+    filename = os.path.basename(file_path)
+    basename = _validate_basename(filename)
 
     # Compute SHA-256 digest of the file content.
     import hashlib
@@ -1226,56 +1265,156 @@ def upload_to_s3(file_path, folder, record_id=None):
             sha256.update(chunk)
     code_sha256 = sha256.hexdigest()
 
-    # Scoped key layout: {folder}/{record_id}/{basename}
-    if record_id:
-        s3_key = f"{folder}/{record_id}/{filename}"
+    # Key layout: prefer tenant-scoped from ContextVars, then record-scoped,
+    # then legacy flat.
+    ctx_org = fabrication_org_id.get("")
+    ctx_job = fabrication_job_id.get("")
+    if ctx_org and ctx_job:
+        s3_key = f"{folder}/{ctx_org}/{ctx_job}/{basename}"
+    elif record_id:
+        s3_key = f"{folder}/{record_id}/{basename}"
     else:
-        s3_key = f"{folder}/{filename}"
-    s3.upload_file(file_path, bucket_name, s3_key)
-    return code_sha256
+        s3_key = f"{folder}/{basename}"
+
+    # Read the file content for put_object.
+    with open(file_path, "rb") as fh:
+        body = fh.read()
+
+    s3.put_object(
+        Bucket=bucket_name,
+        Key=s3_key,
+        Body=body,
+        IfNoneMatch="*",
+    )
+    return code_sha256, s3_key
 
 @tool
 def upload_agent_to_s3(file_path, record_id=None):
     """Upload a agent file to S3"""
-    return upload_to_s3(file_path, "agents", record_id=record_id)
+    _sha, _key = upload_to_s3(file_path, "agents", record_id=record_id)
+    return _sha
 
 @tool
 def upload_tool_to_s3(file_path, record_id=None):
-    """Upload a tool file to S3"""
-    return upload_to_s3(file_path, "tools", record_id=record_id)
+    """Upload a tool file to S3.
+
+    Returns the S3 key the object was stored under.  The key is
+    tenant-scoped when a fabrication context is active (see
+    ``fabrication_context.py``), record-scoped when ``record_id`` is
+    supplied, or flat for legacy callers.
+
+    Side-effect: records the ``{tool_name -> s3_key}`` mapping in the
+    per-job ``fabrication_tool_keys`` ContextVar so ``get_worker_tool``
+    can resolve the key server-side within the same fabrication run.
+    """
+    _sha, s3_key = upload_to_s3(file_path, "tools", record_id=record_id)
+    # Record in per-job map so get_worker_tool resolves server-side.
+    tool_name = os.path.basename(file_path)
+    record_tool_key(tool_name, s3_key)
+    return s3_key
 
 @tool
 def get_worker_tool(tool_name: str) -> str:
-    """Get tool code from s3
-    
+    """Get tool code from S3, resolving the key server-side.
+
+    Key resolution order (no LLM-supplied key parameter):
+    1. Per-job map — ``fabrication_tool_keys`` ContextVar populated by
+       ``upload_tool_to_s3`` during the same fabrication run.
+    2. Registry ``codeKey`` — the scoped key persisted in the CUSTOM
+       descriptor of the tool's registry record, org-filtered to the
+       caller's ``fabrication_org_id``.
+    3. Legacy ``tools/{tool_name}`` — ONLY when an org-owned registry
+       record exists without a ``codeKey``.  A ``LegacyToolKeyFallback``
+       CloudWatch metric is emitted on each hit.
+    4. Otherwise — opaque error (no key source available).
+
     Args:
-        tool_name: Name of the tool file (e.g., 'my_tool.py')
-        
+        tool_name: Name of the tool file (e.g., 'my_tool.py').
+
     Returns:
-        str: The tool code content from S3
-        
+        str: The tool code content from S3.
+
     Raises:
-        ValueError: If AGENT_BUCKET_NAME environment variable is not set
+        ValueError: If AGENT_BUCKET_NAME environment variable is not set,
+            or no key source is available for this tool.
     """
-    s3 = boto3.client('s3')
     bucket_name = os.environ.get("AGENT_BUCKET_NAME", None)
-    
     if bucket_name is None:
         raise ValueError("AGENT_BUCKET_NAME environment variable is not set")
-    
-    # Construct the S3 key for the tool in the tools/ folder
-    s3_key = f"tools/{tool_name}"
-    
-    print(f"Retrieving tool from s3://{bucket_name}/{s3_key}")
-    
-    try:
-        response = s3.get_object(Bucket=bucket_name, Key=s3_key)
+
+    s3 = boto3.client('s3')
+
+    # --- Source 1: per-job map (same fabrication run) ---
+    job_key = lookup_tool_key(tool_name)
+    if job_key:
+        print(f"Retrieving tool from s3://{bucket_name}/{job_key} (per-job map)")
+        response = s3.get_object(Bucket=bucket_name, Key=job_key)
         tool_code = response['Body'].read().decode('utf-8')
-        print(f"Successfully retrieved tool: {tool_name}")
+        print(f"Successfully retrieved tool via per-job map: {job_key}")
         return tool_code
-    except Exception as e:
-        print(f"Error retrieving tool {tool_name}: {str(e)}")
-        raise
+
+    # --- Source 2 & 3: registry lookup (org-filtered) ---
+    registry_id = os.environ.get("REGISTRY_ID")
+    ctx_org = fabrication_org_id.get("")
+    if registry_id:
+        record_id = _find_existing_record_id(registry_id, tool_name, org_id=ctx_org)
+        if record_id:
+            # Read full record to extract codeKey from custom metadata.
+            try:
+                record_resp = _get_registry_client().get_registry_record(
+                    registryId=registry_id, recordId=record_id,
+                )
+                descriptors = (record_resp or {}).get("descriptors") or {}
+                custom = descriptors.get("custom") or {}
+                data_str = custom.get("data", "")
+                code_key = None
+                if data_str and isinstance(data_str, str):
+                    meta = json.loads(data_str)
+                    code_key = meta.get("codeKey") or None
+            except Exception as e:  # noqa: BLE001 — best-effort registry read
+                logger.warning(
+                    "get_worker_tool: registry read for %s failed: %s",
+                    tool_name, type(e).__name__,
+                )
+                code_key = None
+
+            if code_key:
+                print(f"Retrieving tool from s3://{bucket_name}/{code_key} (registry codeKey)")
+                response = s3.get_object(Bucket=bucket_name, Key=code_key)
+                tool_code = response['Body'].read().decode('utf-8')
+                print(f"Successfully retrieved tool via registry codeKey: {code_key}")
+                return tool_code
+
+            # Source 3: legacy flat key, ONLY with an org-owned record without codeKey.
+            flat_key = f"tools/{tool_name}"  # legacy-fallback
+            print(f"Retrieving tool from s3://{bucket_name}/{flat_key} (legacy, org-owned record)")
+            try:
+                response = s3.get_object(Bucket=bucket_name, Key=flat_key)
+                tool_code = response['Body'].read().decode('utf-8')
+                print(f"Successfully retrieved tool (legacy flat key): {tool_name}")
+                # Emit migration-tracking metric (best-effort, never raises).
+                try:
+                    _cloudwatch().put_metric_data(
+                        Namespace="Citadel/Fabricator",
+                        MetricData=[{
+                            "MetricName": "LegacyToolKeyFallback",
+                            "Value": 1,
+                            "Unit": "Count",
+                            "Dimensions": [{"Name": "Site", "Value": "get_worker_tool"}],
+                        }],
+                    )
+                except Exception:  # noqa: BLE001 — best-effort metric
+                    pass
+                return tool_code
+            except Exception as e:
+                print(f"Error retrieving tool {tool_name} (legacy): {str(e)}")
+                raise
+
+    # --- No key source available ---
+    raise ValueError(
+        f"Cannot resolve S3 key for tool '{tool_name}': no per-job map entry, "
+        f"no org-owned registry record found."
+    )
 
 @tool
 def store_agent_config_dynamo(file_name: str, agent_id: str, llm_tool_schema: Any, agent_description: str, app_id: str = None):
@@ -1954,6 +2093,12 @@ def store_tool_config_registry(
             "createdBy": requested_by,
             "orgId": org_id,
         }
+        # Persist the scoped S3 key so resolve-tool-config.ts (backend) and
+        # get_worker_tool can locate the tool code without LLM-supplied keys.
+        # The key is read from the per-job map populated by upload_tool_to_s3.
+        scoped_key = lookup_tool_key(file_name.split("/")[-1])
+        if scoped_key:
+            custom_metadata["codeKey"] = scoped_key
         if integration_bindings:
             custom_metadata["integrationBindings"] = integration_bindings
         if datastore_bindings:
@@ -2509,6 +2654,12 @@ def process_event(event, context, request_type=None):
     agent_index = event.get("agent_index", 0)
     total_agents = event.get("total_agents", 1)
 
+    # CIT-250 pattern: bind org + job into ContextVars so upload_to_s3
+    # derives tenant-scoped keys from validated event fields, never from
+    # LLM-supplied arguments.
+    fabrication_org_id.set(org_id)
+    fabrication_job_id.set(orchestration_id)
+
     TASK = request.get("taskDetails", None)
     
     # Extract binding metadata from the fabrication request
@@ -2922,6 +3073,11 @@ def process_event(event, context, request_type=None):
         # success path, the clean deadline return, and every re-raise.
         clear_fabrication_deadline()
         _end_registration_run()
+        # Reset tenant-scoped ContextVars so a reused Lambda container
+        # never leaks one run's org/job into the next.
+        fabrication_org_id.set("")
+        fabrication_job_id.set("")
+        fabrication_tool_keys.set(None)
 
     # Fallback: ensure progress is published even if the LLM didn't call complete_task
     publish_intake_progress(orchestration_id, agent_index, total_agents, agent_use_id)

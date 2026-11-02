@@ -170,6 +170,11 @@ class TestUploadToS3ScopedKey:
 
     def test_scoped_key_and_sha256(self, tmp_path):
         """S3 key is agents/{record_id}/{basename} and sha256 is correct."""
+        from fabrication_context import fabrication_org_id, fabrication_job_id
+        # Ensure no ContextVar override.
+        fabrication_org_id.set("")
+        fabrication_job_id.set("")
+
         code = b"print('hello')"
         expected_sha = hashlib.sha256(code).hexdigest()
         test_file = tmp_path / "my_agent.py"
@@ -180,19 +185,24 @@ class TestUploadToS3ScopedKey:
         try:
             with patch("index.boto3") as mock_boto3:
                 mock_boto3.client.return_value = mock_s3
-                sha = upload_to_s3(str(test_file), "agents", record_id="rec-123")
+                sha, key = upload_to_s3(str(test_file), "agents", record_id="rec-123")
         finally:
             os.environ["AGENT_BUCKET_NAME"] = "fake-bucket"
 
         assert sha == expected_sha
-        mock_s3.upload_file.assert_called_once_with(
-            str(test_file),
-            "test-bucket",
-            "agents/rec-123/my_agent.py",
-        )
+        assert key == "agents/rec-123/my_agent.py"
+        mock_s3.put_object.assert_called_once()
+        call_kwargs = mock_s3.put_object.call_args[1]
+        assert call_kwargs["Bucket"] == "test-bucket"
+        assert call_kwargs["Key"] == "agents/rec-123/my_agent.py"
+        assert call_kwargs["IfNoneMatch"] == "*"
 
     def test_no_record_id_uses_flat_key(self, tmp_path):
         """Without record_id, falls back to legacy flat key."""
+        from fabrication_context import fabrication_org_id, fabrication_job_id
+        fabrication_org_id.set("")
+        fabrication_job_id.set("")
+
         test_file = tmp_path / "my_tool.py"
         test_file.write_bytes(b"pass")
 
@@ -201,12 +211,11 @@ class TestUploadToS3ScopedKey:
         try:
             with patch("index.boto3") as mock_boto3:
                 mock_boto3.client.return_value = mock_s3
-                upload_to_s3(str(test_file), "tools")
+                _sha, key = upload_to_s3(str(test_file), "tools")
         finally:
             os.environ["AGENT_BUCKET_NAME"] = "fake-bucket"
 
-        mock_s3.upload_file.assert_called_once_with(
-            str(test_file),
-            "test-bucket",
-            "tools/my_tool.py",
-        )
+        assert key == "tools/my_tool.py"
+        mock_s3.put_object.assert_called_once()
+        call_kwargs = mock_s3.put_object.call_args[1]
+        assert call_kwargs["Key"] == "tools/my_tool.py"
