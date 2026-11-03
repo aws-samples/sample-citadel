@@ -197,5 +197,6 @@ class TestReconcileLostEvent:
         ev.publish_workflow_failed.assert_not_called()
         ev.publish_workflow_completed.assert_not_called()
         assert result == {'scanned': 1, 'timedOut': 0, 'reconciled': 0,
-                          'reDispatched': 0, 'nodeFailed': 0}
+                          'reDispatched': 0, 'nodeFailed': 0,
+                          'errors': 0, 'errorExecutionIds': []}
         assert ex_table.current('exec')['nodeResults']['n0']['status'] == 'running'
