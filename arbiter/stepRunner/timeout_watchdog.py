@@ -337,7 +337,7 @@ def _has_reconcilable_frontier(execution: dict, nodes: list, edges: list) -> boo
     if find_ready_nodes(nodes, edges, status_map):
         return True
     if nodes and all(
-        status_map.get(n['id'], 'pending') in ('completed', 'skipped', 'failed') for n in nodes
+        status_map.get(n['id'], 'pending') in ('completed', 'skipped', 'failed', 'unreachable') for n in nodes
     ):
         return execution.get('status') == 'running'
     return False

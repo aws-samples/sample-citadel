@@ -94,7 +94,7 @@ def find_ready_nodes(nodes: list[dict], edges: list[dict], node_results: dict) -
             continue
         # Check all predecessors are completed or skipped
         preds = predecessors.get(nid, set())
-        if all(node_results.get(p) in ('completed', 'skipped') for p in preds):
+        if all(node_results.get(p) in ('completed', 'skipped', 'unreachable') for p in preds):
             ready.append(nid)
 
     return ready
@@ -130,3 +130,40 @@ def find_downstream_subgraph(node_id: str, edges: list[dict]) -> set[str]:
                 queue.append(neighbor)
 
     return visited
+
+
+def propagate_skips(
+    initially_skipped: set[str],
+    nodes: list[dict],
+    edges: list[dict],
+) -> set[str]:
+    """Compute the full set of nodes that become unreachable given a set
+    of already-skipped nodes.
+
+    A node is unreachable iff ALL of its incoming edges originate from
+    nodes that are either in ``initially_skipped`` or themselves
+    unreachable (transitive closure). A node with at least one live
+    (non-skipped) incoming path stays runnable.
+
+    Returns the set of NEWLY unreachable node IDs (excludes
+    ``initially_skipped`` — those are already marked).
+    """
+    # Build predecessors map
+    predecessors: dict[str, set[str]] = {}
+    for edge in edges:
+        predecessors.setdefault(edge['target'], set()).add(edge['source'])
+
+    dead = set(initially_skipped)
+    changed = True
+    while changed:
+        changed = False
+        for node in nodes:
+            nid = node['id']
+            if nid in dead:
+                continue
+            preds = predecessors.get(nid, set())
+            if preds and preds <= dead:
+                dead.add(nid)
+                changed = True
+
+    return dead - initially_skipped
