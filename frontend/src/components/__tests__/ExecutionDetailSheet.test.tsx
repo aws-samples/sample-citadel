@@ -692,6 +692,35 @@ describe('ExecutionDetailSheet — compensation states', () => {
   });
 });
 
+describe('ExecutionDetailSheet — unreachable status', () => {
+  it('does not fall through to the grey pending dot style for unreachable status', () => {
+    const exec = {
+      ...baseExecution,
+      nodeResults: JSON.stringify({
+        'node-a': {
+          nodeId: 'node-a',
+          status: 'unreachable',
+          startedAt: null,
+          completedAt: null,
+          output: null,
+          error: null,
+          retryCount: 0,
+        },
+      }),
+    };
+    render(<ExecutionDetailSheet execution={exec} open onClose={jest.fn()} />);
+
+    const stepsSection = screen.getByRole('region', { name: /^steps$/i });
+    const dot = within(stepsSection)
+      .getByRole('button', { name: /node-a/ })
+      .querySelector('[aria-hidden="true"]');
+    // unreachable must NOT use pending's bg-muted-foreground (full-opacity)
+    // — it should use bg-muted-foreground/40 (muted opacity)
+    expect(dot?.className).toMatch(/bg-muted-foreground\/40/);
+    expect(dot?.className).not.toBe('size-2 rounded-full flex-shrink-0 bg-muted-foreground');
+  });
+});
+
 describe('ExecutionDetailSheet — execution actions (Pause/Approve/Deny)', () => {
   const runningExec = {
     ...baseExecution,

@@ -152,6 +152,9 @@ const STATUS_STYLES: Record<string, { bg: string; text: string; dot: string }> =
   compensating: { bg: 'bg-chart-4/20', text: 'text-chart-4', dot: 'bg-chart-4' },
   compensated: { bg: 'bg-chart-3/20', text: 'text-chart-3', dot: 'bg-chart-3' },
   compensation_failed: { bg: 'bg-destructive/10', text: 'text-destructive', dot: 'bg-destructive' },
+  // Unreachable: a node skipped because an upstream condition routed around it.
+  // Distinct muted style — never falls through to pending.
+  unreachable: { bg: 'bg-muted/10', text: 'text-muted-foreground/60', dot: 'bg-muted-foreground/40' },
 };
 
 function statusStyle(status?: string | null) {
