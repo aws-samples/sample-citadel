@@ -285,6 +285,37 @@ def _load_workflow(workflow_id: str) -> dict:
     return resp.get('Item') or {}
 
 
+def _load_workflow_for_execution(execution: dict) -> dict:
+    """Load the workflow definition pinned to this execution (CIT-259 H5).
+
+    Uses the inline snapshot when present; falls back to the LIVE row for
+    pre-CIT-259 executions and emits a CloudWatch metric so the fallback
+    rate is observable.
+    """
+    snapshot_def = execution.get('workflowDefinitionSnapshot')
+    snapshot_cfg = execution.get('workflowConfigurationSnapshot')
+    if snapshot_def is not None:
+        return {
+            'workflowId': execution.get('workflowId', ''),
+            'definition': snapshot_def,
+            'configuration': snapshot_cfg or '{}',
+        }
+    # Fallback for pre-CIT-259 executions
+    try:
+        _get_cw_client().put_metric_data(
+            Namespace='Citadel/StepRunner',
+            MetricData=[{
+                'MetricName': 'WorkflowPinFallback',
+                'Value': 1,
+                'Unit': 'Count',
+                'Timestamp': _now(),
+            }],
+        )
+    except Exception:  # noqa: BLE001 — telemetry must not raise
+        pass
+    return _load_workflow(execution.get('workflowId', ''))
+
+
 def _definition_nodes_edges(workflow: dict) -> tuple[list, list]:
     definition = workflow.get('definition', '{}')
     if isinstance(definition, str):
@@ -433,7 +464,7 @@ def _process_execution(execution: dict, now: datetime, exec_timeout: int, node_s
     # to read the graph from. (Executions without nodeResults fall straight to
     # the execution-level backstop.)
     if node_results:
-        workflow = _load_workflow(execution.get('workflowId', ''))
+        workflow = _load_workflow_for_execution(execution)
         if workflow:
             nodes, edges = _definition_nodes_edges(workflow)
             if _has_reconcilable_frontier(execution, nodes, edges):

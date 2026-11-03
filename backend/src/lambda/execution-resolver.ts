@@ -477,6 +477,8 @@ async function startExecution(
     orgId: workflow.orgId,
     status: "pending",
     workflowVersion: workflow.version,
+    workflowDefinitionSnapshot: workflow.definition,
+    workflowConfigurationSnapshot: workflow.configuration || "{}",
     currentNode: null,
     nodeResults,
     input: input || null,

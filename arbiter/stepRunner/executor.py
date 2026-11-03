@@ -700,6 +700,27 @@ def _load_workflow(workflow_id: str) -> dict:
     return resp.get('Item', {})
 
 
+def _load_workflow_for_execution(execution: dict) -> dict:
+    """Load the workflow definition as it existed when the execution started.
+
+    Priority:
+      1. ``workflowDefinitionSnapshot`` on the execution row (CIT-259).
+      2. Fallback: LIVE workflow row (pre-CIT-259 executions).
+         Emits a CloudWatch metric on fallback for migration tracking.
+    """
+    snapshot_def = execution.get('workflowDefinitionSnapshot')
+    snapshot_cfg = execution.get('workflowConfigurationSnapshot')
+    if snapshot_def is not None:
+        return {
+            'workflowId': execution.get('workflowId', ''),
+            'definition': snapshot_def,
+            'configuration': snapshot_cfg or '{}',
+        }
+    # Fallback for pre-CIT-259 executions
+    _emit_metric('WorkflowPinFallback', 1, 'Count')
+    return _load_workflow(execution.get('workflowId', ''))
+
+
 def _load_execution(execution_id: str) -> dict:
     """Load execution item from DynamoDB."""
     resp = _executions_table.get_item(Key={'executionId': execution_id})
@@ -1291,7 +1312,7 @@ def handle_node_completion(
     if not execution:
         return
 
-    workflow = _load_workflow(execution.get('workflowId', ''))
+    workflow = _load_workflow_for_execution(execution)
     if not workflow:
         return
 
@@ -1781,7 +1802,7 @@ def approve_execution(
     if not execution:
         return True
 
-    workflow = _load_workflow(execution.get('workflowId', ''))
+    workflow = _load_workflow_for_execution(execution)
     if not workflow:
         return True
 
@@ -1934,7 +1955,7 @@ def _approve_execution_scoped(
     if not execution:
         return True
 
-    workflow = _load_workflow(execution.get('workflowId', ''))
+    workflow = _load_workflow_for_execution(execution)
     if not workflow:
         return True
 
@@ -2286,7 +2307,7 @@ def resume_execution(execution_id: str, *, approval_decision: dict | None = None
         _log_event('resume_execution_rejected_terminal', executionId=execution_id, status=status)
         return
 
-    workflow = _load_workflow(execution.get('workflowId', ''))
+    workflow = _load_workflow_for_execution(execution)
     if not workflow:
         _log_event('resume_execution_workflow_missing', executionId=execution_id)
         return
@@ -2337,7 +2358,7 @@ def handle_node_failure(execution_id: str, node_id: str, error: str) -> None:
     if not execution:
         return
 
-    workflow = _load_workflow(execution.get('workflowId', ''))
+    workflow = _load_workflow_for_execution(execution)
     if not workflow:
         return
 
@@ -2986,7 +3007,7 @@ def handle_compensation_result(
     if is_last:
         return
 
-    workflow = _load_workflow(workflow_id)
+    workflow = _load_workflow_for_execution(execution)
     if not workflow:
         return
     definition = _parse_definition(workflow)
