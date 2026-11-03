@@ -42,11 +42,15 @@ interface SecretPattern {
 // context-anchored assignments).
 export const SECRET_PATTERNS: readonly SecretPattern[] = [
   // PEM / SSH private-key blocks — the header line alone is sufficient
-  // evidence; we don't need to also match the footer to redact usefully,
-  // but anchoring on BEGIN...PRIVATE KEY is unambiguous and low-noise.
+  // evidence of a secret. We redact from the BEGIN marker through the
+  // matching END marker if present, OR through the rest of the input if
+  // the footer is missing (a truncated key block is still a secret that
+  // must be redacted — H27). The alternation tries the full BEGIN...END
+  // span first (greedy-safe because the END marker is unambiguous), then
+  // falls back to BEGIN-to-end-of-input.
   {
     id: "private-key-block",
-    re: /-----BEGIN (?:RSA |EC |OPENSSH |PGP |DSA )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH |PGP |DSA )?PRIVATE KEY-----/g,
+    re: /-----BEGIN (?:RSA |EC |OPENSSH |PGP |DSA )?PRIVATE KEY-----(?:[\s\S]*?-----END (?:RSA |EC |OPENSSH |PGP |DSA )?PRIVATE KEY-----|[\s\S]*$)/g,
   },
   // AWS secret access keys are a bare 40-char base64-ish string with no
   // structural marker of their own — matching that shape alone would be a
@@ -86,13 +90,19 @@ export const SECRET_PATTERNS: readonly SecretPattern[] = [
     id: "stripe-key",
     re: /\b(?:sk|rk)_live_[A-Za-z0-9]{16,}\b/g,
   },
-  // Generic key=/secret=/password=/token= assignment forms (shell env,
-  // YAML/JSON-ish, query-string). Requires a non-trivial value (>=8 chars,
-  // no whitespace) so `token=` (empty) or placeholder angle-bracket text
-  // like `<your-password-here>` do not fire.
+  // Generic key=/secret=/password=/token=/api_key=/apikey= assignment forms.
+  // H26 fix: the original pattern required `[:=]\s*` directly after a bare
+  // identifier, which missed JSON `"api_key": "value"` (quoted key, colon
+  // after closing quote). The revised pattern accepts:
+  //   - Bare identifier:   key=value, key = "value", key: value (YAML)
+  //   - Quoted identifier: "key": "value", 'key': 'value' (JSON, YAML)
+  // Requires a non-trivial value (>=8 chars, no whitespace) so `token=`
+  // (empty) or placeholder angle-bracket text like `<your-password-here>`
+  // do not fire. UUIDs (8-4-4-4-12 with dashes) are excluded via a
+  // negative lookahead to avoid false positives on config IDs.
   {
     id: "assignment-secret",
-    re: /\b(?:key|secret|password|token|api_key|apikey)\s*[:=]\s*["']?([A-Za-z0-9+/_-]{8,})["']?/gi,
+    re: /(?:["']?(?:key|secret|password|token|api_key|apikey)["']?)\s*[:=]\s*["']?(?![0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b)([A-Za-z0-9+/_\-.]{8,})["']?/gi,
   },
   // DB connection URIs with embedded credentials (proto://user:pass@host).
   // Requires a non-empty user AND password segment — a URI with no
@@ -106,21 +116,23 @@ export const SECRET_PATTERNS: readonly SecretPattern[] = [
   // context anchor required, so it catches a bare high-entropy token
   // pasted without a `key=`/`token=` prefix. To avoid "nuking benign IDs"
   // (design's own caveat) it is deliberately narrow:
-  //   - length-capped to 32-64 chars (below 32, too many benign identifiers
-  //     collide; above 64 is already covered by the more specific classes
-  //     above, e.g. private-key blocks, JWTs)
+  //   - lower bound 32 chars (below 32, too many benign identifiers collide)
+  //   - upper bound 512 chars (H27 fix: the old {32,64} cap missed longer
+  //     tokens; 512 is generous enough for any real credential while
+  //     keeping the pattern bounded to prevent catastrophic backtracking —
+  //     property-tested on 1 MB inputs)
   //   - base64 variant requires BOTH an uppercase and a lowercase letter
   //     and at least one digit, so plain-word runs (all lowercase, no
   //     digits) never match
   //   - hex variant requires the run to be entirely [0-9a-f] and at least
   //     32 chars, which real English text/identifiers essentially never
   //     produce by chance
-  // This is a real detection surface, not just a rename of
-  // assignment-secret — the near-miss test below (`hello world...`, all
-  // lowercase, no digits) proves it does NOT fire on ordinary prose.
+  // UUIDs (8-4-4-4-12 with dashes) cannot match the base64 variant
+  // (dashes break the \b-bounded char class) nor the hex variant (dashes
+  // break the hex run).
   {
     id: "high-entropy-run",
-    re: /\b(?=[A-Za-z0-9+/]{32,64}\b)(?=[A-Za-z0-9+/]*[A-Z])(?=[A-Za-z0-9+/]*[a-z])(?=[A-Za-z0-9+/]*[0-9])[A-Za-z0-9+/]{32,64}\b|\b[0-9a-f]{32,64}\b/g,
+    re: /\b(?=[A-Za-z0-9+/]{32,512}\b)(?=[A-Za-z0-9+/]*[A-Z])(?=[A-Za-z0-9+/]*[a-z])(?=[A-Za-z0-9+/]*[0-9])[A-Za-z0-9+/]{32,512}\b|\b[0-9a-f]{32,512}\b/g,
   },
 ];
 

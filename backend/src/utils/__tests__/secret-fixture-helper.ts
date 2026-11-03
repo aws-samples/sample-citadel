@@ -135,3 +135,48 @@ export function highEntropyHexRun(): string {
 export function awsSecretAccessKeyValueNearMiss(): string {
   return "wJalrXUtnFEMI" + "K7MDENGbPxRfiCYEXAMPLEKEYZZ";
 }
+
+/** High-entropy base64 run of 65 chars (above old {32,64} cap — H27 fix). */
+export function highEntropyBase64Run65(): string {
+  return (
+    "Zk9pQ2xkTVJ2WFRhU2Vj" + "cmV0VmFsdWUxMjM0NTY3ODkwQWJDZEVmR2hJaktsTW5PcA"
+  );
+}
+
+/** High-entropy base64 run of ~200 chars (well above old cap — H27 fix). */
+export function highEntropyBase64Run200(): string {
+  return (
+    "Zk9pQ2xkTVJ2WFRhU2Vj" +
+    "cmV0VmFsdWUxMjM0NTY3ODkw" +
+    "QWJDZEVmR2hJaktsTW5PcFF" +
+    "yU3RVdld4WXpBYkNkRWZHaE" +
+    "lqS2xNbk9wUXJTdFV2V3hZ" +
+    "ekFiQ2RFZkdoSWpLbE1uT3" +
+    "BRclN0VXZXeFl6QWJDZEVm" +
+    "R2hJaktsTW5PcFFyU3RVdld4" +
+    "WXpBYkNkRWZHaElqS2xNbk9w"
+  );
+}
+
+/** High-entropy hex run of 80 chars (above old {32,64} cap — H27 fix). */
+export function highEntropyHexRun80(): string {
+  return (
+    "da39a3ee5e6b4b0d3255bfef95601890afd80709" +
+    "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+  );
+}
+
+/** PEM block with header but no footer (truncated — H27 fix). */
+export function pemHeaderOnly(
+  kind: "RSA" | "EC" | "OPENSSH" | "PLAIN" = "RSA",
+): string {
+  const label = kind === "PLAIN" ? "" : `${kind} `;
+  return (
+    "-----BEGIN " + `${label}PRIVATE KEY-----\nMIIEowIBAAKCAQEA0Z3VS5JJcds3xfn`
+  );
+}
+
+/** Short hex run (31 chars) — below the 32-char floor, must NOT fire. */
+export function shortHexRun31(): string {
+  return "da39a3ee5e6b4b0d3255bfef9560189";
+}
