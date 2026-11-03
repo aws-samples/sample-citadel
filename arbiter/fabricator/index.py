@@ -8,7 +8,14 @@ from datetime import datetime, timezone
 from typing import Any
 from strands import Agent, tool, models
 import os
-from tools_config import load_config_from_dynamodb, create_tool_desc
+from tools_config import (
+    load_config_from_dynamodb,
+    create_tool_desc,
+    FabricationError,
+    is_code_generating,
+    validate_code_tool_binding,
+    assert_spec_approved,
+)
 from design_assessment_gate import check_design_assessment, DesignAssessmentMissingError
 from manifest_proposal import (
     propose_agent_manifest,
@@ -646,7 +653,9 @@ def get_tool_fabricator_prompt():
         ✓ upload_tool_to_s3 - YES  
         ✓ store_tool_config_registry - YES
         
-        ✅ TOOL CREATION COMPLETE - Tool is now discoverable and usable by other agents
+        ✅ TOOL CREATION COMPLETE - Tool is now submitted for approval and will appear on the Approvals page.
+        New tools follow the registry lifecycle: DRAFT → PENDING_APPROVAL → APPROVED (by review or auto-approval).
+        The tool becomes discoverable and usable by other agents once approved.
         
         CRITICAL: You must call ALL THREE tools (write_job_file, upload_tool_to_s3, store_tool_config_registry) for every tool creation request.
         If you skip store_tool_config_registry, the tool will be created but NOT registered, making it invisible to the system.
@@ -690,6 +699,8 @@ def get_tool_fabricator_prompt():
         the tool will NOT be registered in the Registry and CANNOT be discovered or used by other agents.
         
         ✅ SUCCESS CRITERIA: The tool creation is ONLY complete when ALL THREE tools have been called successfully.
+        The tool is created as a DRAFT and submitted for approval — it becomes usable once the registry approves it
+        (automatically if auto-approval is configured, or after manual review).
         
         Do not just return text describing what you did - you must ACTUALLY CALL all three tools.
         After each tool call, verify it succeeded before proceeding to the next step.
@@ -1796,6 +1807,7 @@ def store_tool_config_registry(
     app_id: str = None,
     requested_by: str = "fabricator",
     org_id: str = "",
+    spec_id: str | None = None,
 ) -> bool:
     """Store tool configuration in AgentCore Registry.
 
@@ -1807,13 +1819,22 @@ def store_tool_config_registry(
     Phase 2b) are serialized as JSON and stored in the CUSTOM descriptor's
     inlineContent. Tool records deliberately do NOT carry a ``manifest`` key —
     that is the agent/tool type discriminator (commit 0a42938) and must be
-    preserved. After creation the record status is moved to APPROVED so the
-    tool is immediately usable (APPROVED maps to internal state "active" for
-    fabricator-created tools, per Requirement 8.4). APPROVED is the only
-    "usable" terminal value UpdateRegistryRecordStatus accepts — the service
-    enum is CREATE_FAILED, DRAFT, UPDATING, PENDING_APPROVAL, UPDATE_FAILED,
+    preserved. After creation the record is submitted for approval via
+    SubmitRegistryRecordForApproval: the registry decides the outcome
+    (DRAFT → PENDING_APPROVAL when manual review is enabled, or
+    DRAFT → APPROVED when auto-approval is configured).  This function
+    NEVER writes status APPROVED directly — that is the registry's
+    decision, not the fabricator's.  The service status enum is
+    CREATE_FAILED, DRAFT, UPDATING, PENDING_APPROVAL, UPDATE_FAILED,
     DEPRECATED, APPROVED, CREATING, REJECTED (a former "PUBLISHED" value
     raised a live ValidationException here).
+
+    When ``spec_id`` is provided and the tool schema declares code-generating
+    outputs, the function enforces the spec-approval gate (CIT-256 H2):
+    ``validate_code_tool_binding`` + ``assert_spec_approved`` must both pass
+    BEFORE the registry record is created.  Failure is closed — an opaque
+    error is raised and a ``Citadel/Fabricator ToolRegistrationDenied``
+    CloudWatch metric is emitted.
 
     Requirements:
     - REGISTRY_ID environment variable must be set with the Registry ID.
@@ -1840,6 +1861,11 @@ def store_tool_config_registry(
             ``orgId`` (Phase 2b). Defaults to ``""`` to mirror the resolver's
             defensive null fallback; callers should pass the value threaded
             from the SQS event's ``org_id`` field.
+        spec_id: Optional ExecutionSpecification id. When provided and the
+            tool schema declares code-generating outputs, the spec-approval
+            gate is enforced (CIT-256 H2). ``None`` skips the gate — used
+            for non-code-generating tools or legacy callers that predate
+            spec threading.
 
     Returns:
         bool: True if configuration was successfully stored.
@@ -1853,6 +1879,8 @@ def store_tool_config_registry(
             the failure and move on.
         Exception: Re-raises any error from the Registry API after logging and
             publishing a tool.fabrication.failed event to EventBridge.
+        FabricationError: If a code-generating tool fails the spec-approval
+            gate (CIT-256 H2) — missing or unapproved spec.
     """
     try:
         # Watchdog checkpoint (deadline-aware execution): refuse to START a
@@ -1933,6 +1961,49 @@ def store_tool_config_registry(
         if app_id:
             custom_metadata["appId"] = app_id
 
+        # --- Registration-time spec-binding gate (CIT-256 H2) ---
+        # Mirror the worker's dispatch-time check: code-generating tools MUST
+        # be bound to an APPROVED ExecutionSpecification.  Fail closed at
+        # registration to prevent catalog pollution with ungoverned tools.
+        # The gate runs BEFORE CreateRegistryRecord so no orphaned records
+        # are created on denial.
+        #
+        # When spec_id IS provided: full validation via validate_code_tool_binding
+        # + assert_spec_approved (conservative: missing outputs = code-gen).
+        # When spec_id is NOT provided: only block if the schema EXPLICITLY
+        # declares code outputs (outputs list containing "code").  The
+        # conservative missing-outputs rule is intentionally relaxed here
+        # for backward compatibility — legacy tool registrations that predate
+        # spec threading must not break.  The dispatch-time gate in the worker
+        # (workerWrapper/index.py) still enforces the conservative rule.
+        tool_manifest = {"name": tool_id}
+        if isinstance(tool_schema, dict) and "outputs" in tool_schema:
+            tool_manifest["outputs"] = tool_schema["outputs"]
+        if spec_id is not None:
+            try:
+                validate_code_tool_binding(tool_manifest, spec_id)
+                assert_spec_approved(spec_id)
+            except (FabricationError, ValueError) as gate_err:
+                _emit_tool_registration_denied_metric(tool_id)
+                print(
+                    f"[store_tool_config_registry] Spec-approval gate denied "
+                    f"registration of '{tool_id}': {gate_err}"
+                )
+                raise
+        elif (
+            isinstance(tool_schema, dict)
+            and isinstance(tool_schema.get("outputs"), list)
+            and "code" in tool_schema["outputs"]
+        ):
+            # Explicitly-declared code-generating tool without a spec_id:
+            # fail closed.
+            _emit_tool_registration_denied_metric(tool_id)
+            raise FabricationError(
+                f"tool '{tool_id}' is code-generating and must be bound to "
+                "an approved ExecutionSpecification at registration time "
+                "(spec_id required)"
+            )
+
         print(
             f"[store_tool_config_registry] Creating Registry record for tool: "
             f"{tool_id}"
@@ -1994,17 +2065,17 @@ def store_tool_config_registry(
 
         print(
             f"[store_tool_config_registry] Record created (recordId={record_id}), "
-            f"setting status to APPROVED"
+            f"submitting for approval"
         )
 
-        # APPROVED status => internal state "active" for fabricator-created
-        # tools (Requirement 8.4). Unlike agents, tools are immediately usable
-        # after fabrication. NOTE: UpdateRegistryRecordStatus validates status
-        # against the enum {CREATE_FAILED, DRAFT, UPDATING, PENDING_APPROVAL,
-        # UPDATE_FAILED, DEPRECATED, APPROVED, CREATING, REJECTED} — the old
-        # "PUBLISHED" value raised a live ValidationException. APPROVED is the
-        # value both the intake catalog (_registry_state_from_status) and the
-        # backend (toInternalState) map to "active".
+        # Submit for approval (CIT-256 H2): records are created as DRAFT and
+        # submitted via SubmitRegistryRecordForApproval.  The registry decides
+        # the outcome: APPROVED (auto-approval) or PENDING_APPROVAL (manual
+        # review).  This function NEVER writes APPROVED directly.
+        # NOTE: UpdateRegistryRecordStatus validates status against the enum
+        # {CREATE_FAILED, DRAFT, UPDATING, PENDING_APPROVAL, UPDATE_FAILED,
+        # DEPRECATED, APPROVED, CREATING, REJECTED} — the old "PUBLISHED"
+        # value raised a live ValidationException.
         def _approve(rid: str) -> str:
             """Ensure the record reaches an approved or pending-approval state.
 
@@ -2443,7 +2514,19 @@ def process_event(event, context, request_type=None):
     # Extract binding metadata from the fabrication request
     integration_bindings = request.get("integrationBindings", None)
     datastore_bindings = request.get("dataStoreBindings", None)
-    
+
+    # CIT-256 H2: thread the ExecutionSpecification id so the registration-
+    # time spec-approval gate can verify the tool is bound to an approved
+    # spec.  The field is optional — absent for legacy messages and non-code-
+    # generating tool requests.  Both snake_case and camelCase keys are
+    # accepted (same convention as org_id above).
+    spec_id: str | None = (
+        event.get("spec_id")
+        or event.get("specId")
+        or request.get("spec_id")
+        or request.get("specId")
+        or None
+    )
     if TASK is None:
         # Do not log the full event: agent_input may embed integration/
         # datastore bindings containing credentials. Log only a safe count.
@@ -2588,6 +2671,8 @@ def process_event(event, context, request_type=None):
             # invocation path records the event's requester in custom
             # metadata's createdBy field. org_id (Phase 2b) is bound the same
             # way so the registry record's orgId reflects the caller's org.
+            # spec_id (CIT-256 H2) is bound for the registration-time
+            # spec-approval gate.
             @tool
             def store_tool_config_registry_bound(
                 file_name: str,
@@ -2609,6 +2694,7 @@ def process_event(event, context, request_type=None):
                     app_id=app_id,
                     requested_by=requested_by,
                     org_id=org_id,
+                    spec_id=spec_id,
                 )
 
             # Create and invoke the Tool Fabricator
@@ -2936,6 +3022,35 @@ def _reset_cloudwatch_client_for_test() -> None:
     """Test-only hook — forces the next call to rebuild the cached client."""
     global _cw_client
     _cw_client = None
+
+
+def _emit_tool_registration_denied_metric(tool_id: str) -> None:
+    """Emit ``Citadel/Fabricator ToolRegistrationDenied`` (CIT-256 H2).
+
+    Best-effort — a CloudWatch outage must never change the gate's
+    fail-closed behavior.  The ``ToolId`` dimension is the registry record
+    name (non-sensitive, bounded cardinality per org).
+    """
+    try:
+        _cloudwatch().put_metric_data(
+            Namespace="Citadel/Fabricator",
+            MetricData=[
+                {
+                    "MetricName": "ToolRegistrationDenied",
+                    "Value": 1,
+                    "Unit": "Count",
+                    "Dimensions": [
+                        {"Name": "ToolId", "Value": tool_id},
+                    ],
+                }
+            ],
+        )
+    except Exception as e:  # noqa: BLE001 — best-effort metric
+        logger.warning(
+            "Failed to emit ToolRegistrationDenied metric for tool_id=%s "
+            "(non-fatal): %s",
+            tool_id, type(e).__name__,
+        )
 
 
 def _route_to_reconcile(message_id: str) -> None:
