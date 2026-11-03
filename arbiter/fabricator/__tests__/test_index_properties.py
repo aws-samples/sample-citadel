@@ -149,6 +149,9 @@ class TestUploadToS3:
     def test_s3_key_uses_folder_prefix(self, filename, folder):
         """Uploaded S3 key always starts with the folder prefix."""
         import tempfile as _tf
+        from fabrication_context import fabrication_org_id, fabrication_job_id
+        fabrication_org_id.set("")
+        fabrication_job_id.set("")
 
         mock_s3 = MagicMock()
         # upload_to_s3 now reads the file for SHA-256; write a real temp file.
@@ -159,12 +162,10 @@ class TestUploadToS3:
         try:
             with patch("index.boto3") as mock_boto3:
                 mock_boto3.client.return_value = mock_s3
-                upload_to_s3(real_path, folder)
+                _sha, s3_key = upload_to_s3(real_path, folder)
         finally:
             os.unlink(real_path)
 
-        call_args = mock_s3.upload_file.call_args
-        s3_key = call_args[0][2]
         assert s3_key.startswith(f"{folder}/")
 
     @given(
@@ -177,6 +178,9 @@ class TestUploadToS3:
     def test_s3_key_contains_only_basename(self, filename, folder):
         """S3 key uses only the basename, not the full path."""
         import tempfile as _tf
+        from fabrication_context import fabrication_org_id, fabrication_job_id
+        fabrication_org_id.set("")
+        fabrication_job_id.set("")
 
         mock_s3 = MagicMock()
         basename = filename.split("/")[-1]
@@ -187,12 +191,10 @@ class TestUploadToS3:
         try:
             with patch("index.boto3") as mock_boto3:
                 mock_boto3.client.return_value = mock_s3
-                upload_to_s3(real_path, folder)
+                _sha, s3_key = upload_to_s3(real_path, folder)
         finally:
             os.unlink(real_path)
 
-        call_args = mock_s3.upload_file.call_args
-        s3_key = call_args[0][2]
         real_basename = real_path.split("/")[-1]
         assert s3_key == f"{folder}/{real_basename}"
 
