@@ -242,6 +242,22 @@ def _emit_metric(timed_out_count: int) -> None:
         _logger.warning('watchdog: metric emit failed: %s', exc)
 
 
+def _emit_watchdog_execution_error_metric(error_count: int) -> None:
+    """Best-effort CloudWatch metric for per-execution errors in a sweep."""
+    try:
+        _get_cw_client().put_metric_data(
+            Namespace='Citadel/StepRunner',
+            MetricData=[{
+                'MetricName': 'WatchdogExecutionError',
+                'Value': error_count,
+                'Unit': 'Count',
+                'Timestamp': _now(),
+            }],
+        )
+    except Exception as exc:  # noqa: BLE001 — telemetry must not raise
+        _logger.warning('watchdog: error metric emit failed: %s', exc)
+
+
 def _node_stall_seconds() -> int:
     """Resolve the per-node stall threshold: NODE_STALL_TIMEOUT_SECONDS *
     NODE_STALL_FACTOR, each falling back to its default on unset/invalid/non-
@@ -469,26 +485,50 @@ def handler(event, context):
     reconciled = 0
     re_dispatched = 0
     node_failed = 0
+    errors: list[str] = []
     for execution in _scan_running():
         scanned += 1
-        disposition = _process_execution(execution, now, timeout, node_stall)
-        if disposition == 'execution_failed':
-            timed_out += 1
-        elif disposition == 'reconciled':
-            reconciled += 1
-        elif disposition == 're_dispatched':
-            re_dispatched += 1
-        elif disposition == 'node_failed':
-            node_failed += 1
+        try:
+            disposition = _process_execution(execution, now, timeout, node_stall)
+            if disposition == 'execution_failed':
+                timed_out += 1
+            elif disposition == 'reconciled':
+                reconciled += 1
+            elif disposition == 're_dispatched':
+                re_dispatched += 1
+            elif disposition == 'node_failed':
+                node_failed += 1
+        except Exception:
+            execution_id = execution.get('executionId', 'UNKNOWN')
+            _logger.exception(
+                'Watchdog sweep failed for execution',
+                extra={
+                    'component': 'TimeoutWatchdog',
+                    'executionId': execution_id,
+                    'action': 'process_execution_error',
+                },
+            )
+            errors.append(execution_id)
 
     _emit_metric(timed_out)
-    return {
+
+    summary = {
         'scanned': scanned,
         'timedOut': timed_out,
         'reconciled': reconciled,
         'reDispatched': re_dispatched,
         'nodeFailed': node_failed,
+        'errors': len(errors),
+        'errorExecutionIds': errors[:20],
     }
+    _logger.info(
+        'Watchdog sweep complete',
+        extra={'component': 'TimeoutWatchdog', 'summary': summary},
+    )
+    if errors:
+        _emit_watchdog_execution_error_metric(len(errors))
+
+    return summary
 
 
 # ---------------------------------------------------------------------------
