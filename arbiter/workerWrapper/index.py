@@ -579,11 +579,54 @@ def load_file_from_s3_into_tmp(bucket_name, file_name, record_id=None, expected_
             )
 
 def load_config_from_dynamodb(agent_name: str):
+    """Load agent config by name; follows thin pointers to canonical rows.
+
+    When the name-keyed row is a thin pointer (has ``_canonicalRecordId``
+    and empty/missing ``config``), a second GetItem fetches the canonical
+    recordId-keyed row which carries the full config. The canonical row's
+    ``config`` is merged onto the pointer item so downstream code (tenant
+    guard, approval gate, S3 load) sees a single item with both the
+    dispatch-relevant fields from the pointer AND the full config from
+    the canonical row.
+
+    The ``agentId`` on the returned item is REPLACED with the canonical
+    row's agentId (= recordId) when pointer resolution fires, so
+    ``load_file_from_s3_into_tmp`` derives the scoped S3 key correctly.
+    """
     print(CONFIG_TABLE)
     table = _get_dynamodb().Table(CONFIG_TABLE)
     response = table.get_item(Key={'agentId': agent_name})
     print(response)
-    return response['Item']
+    item = response.get('Item')
+    if not item:
+        raise KeyError(f"Agent config not found: {agent_name}")
+
+    # Thin-pointer resolution: follow _canonicalRecordId to the full-config row
+    canonical_id = item.get('_canonicalRecordId')
+    config = item.get('config')
+    if canonical_id and (not config or config == {}):
+        canonical_resp = table.get_item(Key={'agentId': canonical_id})
+        canonical_item = canonical_resp.get('Item')
+        if canonical_item and canonical_item.get('config'):
+            # Merge: canonical provides config + projection fields;
+            # pointer provides state/approval for dispatch gates.
+            item['config'] = canonical_item['config']
+            # Use the canonical agentId (= recordId) for S3 scoped key
+            item['agentId'] = canonical_item['agentId']
+            print(json.dumps({
+                'level': 'INFO',
+                'component': 'WorkerWrapper',
+                'action': 'pointer_resolved',
+                'agentName': agent_name,
+                'canonicalId': canonical_id,
+            }))
+        else:
+            raise KeyError(
+                f"Canonical row '{canonical_id}' for agent '{agent_name}' "
+                "not found or has no config"
+            )
+
+    return item
 
 def load_tool_configs(tool_ids: list[str], table_name: str) -> list[dict]:
     """Load tool configs via BatchGetItem for minimal latency (Req 10.6).
