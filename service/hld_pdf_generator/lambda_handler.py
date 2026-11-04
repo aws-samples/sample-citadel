@@ -7,6 +7,84 @@ import re
 
 s3 = boto3.client('s3')
 
+# ---------- Security: Pandoc markdown input format ----------
+# Disable raw_tex, raw_html, and raw_attribute extensions so LLM-generated
+# markdown cannot inject TeX commands (\input, \write18) or HTML into the
+# xelatex pipeline.  This is defence layer 1 of 4 (see build_pandoc_command).
+PANDOC_INPUT_FORMAT = 'markdown+hard_line_breaks-raw_tex-raw_html-raw_attribute'
+
+
+def write_lua_filter(tmp_dir):
+    """Write a Lua filter that inserts page breaks before H2 headers and
+    strips any raw TeX/HTML blocks that survive the input-format restriction
+    (defence layer 3 — belt-and-suspenders)."""
+    lua_filter = r'''
+-- Defence layer 3: strip raw blocks/inlines regardless of format flags
+function RawBlock(el)
+  if el.format == 'tex' or el.format == 'latex' or el.format == 'html' then
+    return {}
+  end
+  return el
+end
+
+function RawInline(el)
+  if el.format == 'tex' or el.format == 'latex' or el.format == 'html' then
+    return {}
+  end
+  return el
+end
+
+function Header(el)
+  if el.level == 2 then
+    return {pandoc.RawBlock('tex', '\\newpage'), el}
+  end
+  return el
+end
+'''
+    lua_filter_path = os.path.join(tmp_dir, 'pagebreak.lua')
+    with open(lua_filter_path, 'w') as f:
+        f.write(lua_filter)
+    return lua_filter_path
+
+
+def build_pandoc_command(md_path, pdf_path, lua_filter_path, resource_dir):
+    """Build the pandoc argv list with all security flags.
+
+    Defence layers:
+      1. Input format disables raw_tex / raw_html / raw_attribute.
+      2. --pdf-engine-opt=-no-shell-escape prevents \\write18 shell execution.
+      3. Lua filter strips surviving RawBlock / RawInline nodes.
+      4. openin_any / openout_any env vars (see build_pandoc_env) restrict
+         TeX file access to the working tree.
+    """
+    return [
+        'pandoc',
+        md_path,
+        '-o', pdf_path,
+        '--pdf-engine=xelatex',
+        '--pdf-engine-opt=-no-shell-escape',
+        '-V', 'geometry:margin=1in',
+        '-V', 'pagestyle=plain',
+        f'--from={PANDOC_INPUT_FORMAT}',
+        f'--lua-filter={lua_filter_path}',
+        '--resource-path', resource_dir,
+    ]
+
+
+def build_pandoc_env():
+    """Return the environment dict for the pandoc subprocess.
+
+    Defence layer 4: restrict TeX's file-open scope so even if a raw TeX
+    command slips through, xelatex cannot read files outside the working tree
+    (openin_any=p) or write outside it (openout_any=p).
+    """
+    env = os.environ.copy()
+    env['TEXMFVAR'] = '/tmp/texmf-var'
+    # Paranoid mode: TeX may only open files under the working directory
+    env['openin_any'] = 'p'
+    env['openout_any'] = 'p'
+    return env
+
 def extract_and_render_dot_diagrams(markdown_content, tmp_dir):
     """
     Extract DOT code blocks, render to SVG using graphviz, and replace with image references.
@@ -80,34 +158,15 @@ def handler(event, context):
         # Generate PDF path
         tmp_pdf_path = os.path.join(tmp_dir, 'output.pdf')
         
-        # Create Lua filter for page breaks before each section
-        lua_filter = '''
-function Header(el)
-  if el.level == 2 then
-    return {pandoc.RawBlock('tex', '\\\\newpage'), el}
-  end
-  return el
-end
-'''
-        lua_filter_path = os.path.join(tmp_dir, 'pagebreak.lua')
-        with open(lua_filter_path, 'w') as f:
-            f.write(lua_filter)
+        lua_filter_path = write_lua_filter(tmp_dir)
         
         # Run pandoc to generate PDF
-        env = os.environ.copy()
-        env['TEXMFVAR'] = '/tmp/texmf-var'
+        cmd = build_pandoc_command(tmp_md_path, tmp_pdf_path, lua_filter_path, tmp_dir)
+        env = build_pandoc_env()
         
-        result = subprocess.run([
-            'pandoc',
-            tmp_md_path,
-            '-o', tmp_pdf_path,
-            '--pdf-engine=xelatex',
-            '-V', 'geometry:margin=1in',
-            '-V', 'pagestyle=plain',
-            '--from=markdown+hard_line_breaks',
-            f'--lua-filter={lua_filter_path}',
-            '--resource-path', tmp_dir
-        ], capture_output=True, text=True, check=True, env=env)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, check=True, env=env
+        )
         
         print(f"Pandoc output: {result.stdout}")
         
