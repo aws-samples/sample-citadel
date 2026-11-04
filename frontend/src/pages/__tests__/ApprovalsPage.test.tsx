@@ -15,7 +15,7 @@ jest.mock('@/components/ui/table', () => {
     TableHeader: ({ children }: any) => React.createElement('thead', null, children),
     TableBody: ({ children }: any) => React.createElement('tbody', null, children),
     TableRow: ({ children, ...rest }: any) => React.createElement('tr', rest, children),
-    TableHead: ({ children }: any) => React.createElement('th', null, children),
+    TableHead: ({ children, ...rest }: any) => React.createElement('th', rest, children),
     TableCell: ({ children, ...rest }: any) => React.createElement('td', rest, children),
   };
 });
@@ -30,6 +30,42 @@ jest.mock('@/components/ui/button', () => ({
     React.createElement('button', { onClick, disabled, ...rest }, children),
 }));
 
+jest.mock('@/components/ui/checkbox', () => ({
+  Checkbox: ({ checked, onCheckedChange, disabled, ...rest }: any) =>
+    React.createElement('input', {
+      type: 'checkbox',
+      checked: checked === true,
+      onChange: () => onCheckedChange?.(!checked),
+      disabled,
+      'data-indeterminate': checked === 'indeterminate' ? 'true' : undefined,
+      ...rest,
+    }),
+}));
+
+jest.mock('@/components/ui/select', () => {
+  const R = require('react');
+  return {
+    Select: ({ children, value, onValueChange }: any) =>
+      R.createElement('div', { 'data-testid': 'select-wrapper', 'data-value': value },
+        R.createElement('select', {
+          'data-testid': 'kind-filter-select',
+          value,
+          onChange: (e: any) => onValueChange(e.target.value),
+        },
+          R.createElement('option', { value: 'all' }, 'All'),
+          R.createElement('option', { value: 'agent' }, 'Agents'),
+          R.createElement('option', { value: 'tool' }, 'Tools'),
+          R.createElement('option', { value: 'app' }, 'Apps'),
+        ),
+        children,
+      ),
+    SelectTrigger: ({ children, ...rest }: any) => R.createElement('div', rest, children),
+    SelectContent: ({ children }: any) => R.createElement('div', null, children),
+    SelectItem: ({ children, value }: any) => R.createElement('option', { value }, children),
+    SelectValue: () => null,
+  };
+});
+
 jest.mock('@/components/ApprovalDecisionDialog', () => ({
   ApprovalDecisionDialog: ({ record, decision, onConfirm, onCancel }: any) =>
     React.createElement('div', { 'data-testid': 'decision-dialog', 'data-decision': decision },
@@ -39,11 +75,32 @@ jest.mock('@/components/ApprovalDecisionDialog', () => ({
     ),
 }));
 
+jest.mock('@/components/BulkApprovalDialog', () => ({
+  BulkApprovalDialog: ({ records, decision, results, onConfirm, onRetry, onClose }: any) =>
+    React.createElement('div', { 'data-testid': 'bulk-dialog', 'data-decision': decision },
+      React.createElement('span', { 'data-testid': 'bulk-record-count' }, records.length),
+      React.createElement('button', { 'data-testid': 'bulk-dialog-confirm', onClick: () => onConfirm(decision === 'REJECTED' ? 'Not ready' : undefined) }, 'Confirm'),
+      React.createElement('button', { 'data-testid': 'bulk-dialog-close', onClick: onClose }, 'Close'),
+      results.length > 0 && React.createElement('button', { 'data-testid': 'bulk-dialog-retry', onClick: onRetry }, 'Retry'),
+    ),
+}));
+
 jest.mock('@/services/approvalsService', () => ({
   approvalsService: {
     listPendingApprovals: jest.fn(),
     decideApproval: jest.fn(),
   },
+}));
+
+jest.mock('@/hooks/useBulkApproval', () => ({
+  useBulkApproval: () => ({
+    execute: jest.fn(),
+    results: [],
+    progress: { completed: 0, total: 0 },
+    isExecuting: false,
+    retryFailed: jest.fn(),
+    reset: jest.fn(),
+  }),
 }));
 
 import { toast } from 'sonner';
@@ -114,10 +171,8 @@ describe('ApprovalsPage', () => {
 
     await act(async () => { render(React.createElement(ApprovalsPage)); });
 
-    // Click approve button
     fireEvent.click(screen.getByTestId('approve-r1'));
 
-    // Dialog opens - click confirm
     await act(async () => {
       fireEvent.click(screen.getByTestId('dialog-confirm'));
     });
@@ -152,20 +207,6 @@ describe('ApprovalsPage', () => {
         statusReason: 'Bad agent',
       }),
     );
-  });
-
-  it('tool row shows enabled approve/reject buttons', async () => {
-    mockList.mockResolvedValue({
-      items: [makeRecord({ recordId: 't1', recordType: 'tool' })],
-      nextToken: null,
-    });
-
-    await act(async () => { render(React.createElement(ApprovalsPage)); });
-
-    const approveBtn = screen.getByTestId('approve-t1');
-    const rejectBtn = screen.getByTestId('reject-t1');
-    expect(approveBtn).not.toBeDisabled();
-    expect(rejectBtn).not.toBeDisabled();
   });
 
   it('tool approve calls decideApproval with tool recordType', async () => {
@@ -250,9 +291,183 @@ describe('ApprovalsPage', () => {
     await waitFor(() => {
       expect(toast.error).toHaveBeenCalledWith('This record changed; please review again');
     });
-    // Dialog should be closed
     expect(screen.queryByTestId('decision-dialog')).toBeNull();
-    // Should have re-fetched the list (initial + refresh)
     expect(mockList).toHaveBeenCalledTimes(2);
+  });
+
+  // --- Bulk selection tests ---
+
+  it('select-all checkbox selects all visible items', async () => {
+    mockList.mockResolvedValue({
+      items: [
+        makeRecord({ recordId: 'r1' }),
+        makeRecord({ recordId: 'r2' }),
+        makeRecord({ recordId: 'r3' }),
+      ],
+      nextToken: null,
+    });
+
+    await act(async () => { render(React.createElement(ApprovalsPage)); });
+
+    // Click select-all
+    fireEvent.click(screen.getByTestId('select-all'));
+
+    // All row checkboxes should be checked
+    expect((screen.getByTestId('select-r1') as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByTestId('select-r2') as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByTestId('select-r3') as HTMLInputElement).checked).toBe(true);
+  });
+
+  it('kind filter narrows visible rows', async () => {
+    mockList.mockResolvedValue({
+      items: [
+        makeRecord({ recordId: 'r1', recordType: 'agent', displayName: 'Agent One' }),
+        makeRecord({ recordId: 'r2', recordType: 'tool', displayName: 'Tool One' }),
+      ],
+      nextToken: null,
+    });
+
+    await act(async () => { render(React.createElement(ApprovalsPage)); });
+
+    // Both visible initially
+    expect(screen.getByText('Agent One')).toBeInTheDocument();
+    expect(screen.getByText('Tool One')).toBeInTheDocument();
+
+    // Filter to tools only
+    fireEvent.change(screen.getByTestId('kind-filter-select'), { target: { value: 'tool' } });
+
+    expect(screen.queryByText('Agent One')).toBeNull();
+    expect(screen.getByText('Tool One')).toBeInTheDocument();
+  });
+
+  it('select-all respects kind filter', async () => {
+    mockList.mockResolvedValue({
+      items: [
+        makeRecord({ recordId: 'r1', recordType: 'agent' }),
+        makeRecord({ recordId: 'r2', recordType: 'tool' }),
+        makeRecord({ recordId: 'r3', recordType: 'agent' }),
+      ],
+      nextToken: null,
+    });
+
+    await act(async () => { render(React.createElement(ApprovalsPage)); });
+
+    // Filter to agents
+    fireEvent.change(screen.getByTestId('kind-filter-select'), { target: { value: 'agent' } });
+
+    // Select all (should only select agents)
+    fireEvent.click(screen.getByTestId('select-all'));
+
+    expect((screen.getByTestId('select-r1') as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByTestId('select-r3') as HTMLInputElement).checked).toBe(true);
+    // r2 (tool) should not be in the DOM since it's filtered out
+    expect(screen.queryByTestId('select-r2')).toBeNull();
+  });
+
+  it('bulk approve button appears when items selected', async () => {
+    mockList.mockResolvedValue({
+      items: [makeRecord({ recordId: 'r1' }), makeRecord({ recordId: 'r2' })],
+      nextToken: null,
+    });
+
+    await act(async () => { render(React.createElement(ApprovalsPage)); });
+
+    // No bulk actions initially
+    expect(screen.queryByTestId('bulk-approve')).toBeNull();
+
+    // Select one item
+    fireEvent.click(screen.getByTestId('select-r1'));
+
+    // Bulk actions should appear
+    expect(screen.getByTestId('bulk-approve')).toBeInTheDocument();
+    expect(screen.getByTestId('bulk-reject')).toBeInTheDocument();
+    expect(screen.getByTestId('selection-count')).toHaveTextContent('1 selected');
+  });
+
+  it('cap 25: select-all selects at most 25 items', async () => {
+    // Create 30 items
+    const items = Array.from({ length: 30 }, (_, i) =>
+      makeRecord({ recordId: `r${i}`, displayName: `Record ${i}` }),
+    );
+    mockList.mockResolvedValue({ items, nextToken: null });
+
+    await act(async () => { render(React.createElement(ApprovalsPage)); });
+
+    // Click select-all
+    fireEvent.click(screen.getByTestId('select-all'));
+
+    // Should show 25 selected (not 30)
+    expect(screen.getByTestId('selection-count')).toHaveTextContent('25 selected');
+
+    // Items beyond 25 should have disabled checkboxes
+    const checkbox25 = screen.getByTestId('select-r25') as HTMLInputElement;
+    expect(checkbox25.disabled).toBe(true);
+  });
+
+  it('clear selection button deselects all', async () => {
+    mockList.mockResolvedValue({
+      items: [makeRecord({ recordId: 'r1' })],
+      nextToken: null,
+    });
+
+    await act(async () => { render(React.createElement(ApprovalsPage)); });
+
+    fireEvent.click(screen.getByTestId('select-r1'));
+    expect(screen.getByTestId('bulk-approve')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('clear-selection'));
+    expect(screen.queryByTestId('bulk-approve')).toBeNull();
+  });
+
+  it('bulk approve opens bulk dialog with APPROVED', async () => {
+    mockList.mockResolvedValue({
+      items: [makeRecord({ recordId: 'r1' }), makeRecord({ recordId: 'r2' })],
+      nextToken: null,
+    });
+
+    await act(async () => { render(React.createElement(ApprovalsPage)); });
+
+    fireEvent.click(screen.getByTestId('select-r1'));
+    fireEvent.click(screen.getByTestId('select-r2'));
+    fireEvent.click(screen.getByTestId('bulk-approve'));
+
+    const dialog = screen.getByTestId('bulk-dialog');
+    expect(dialog).toHaveAttribute('data-decision', 'APPROVED');
+    expect(screen.getByTestId('bulk-record-count')).toHaveTextContent('2');
+  });
+
+  it('bulk reject opens bulk dialog with REJECTED', async () => {
+    mockList.mockResolvedValue({
+      items: [makeRecord({ recordId: 'r1' })],
+      nextToken: null,
+    });
+
+    await act(async () => { render(React.createElement(ApprovalsPage)); });
+
+    fireEvent.click(screen.getByTestId('select-r1'));
+    fireEvent.click(screen.getByTestId('bulk-reject'));
+
+    const dialog = screen.getByTestId('bulk-dialog');
+    expect(dialog).toHaveAttribute('data-decision', 'REJECTED');
+  });
+
+  it('kind filter change clears selection', async () => {
+    mockList.mockResolvedValue({
+      items: [
+        makeRecord({ recordId: 'r1', recordType: 'agent' }),
+        makeRecord({ recordId: 'r2', recordType: 'tool' }),
+      ],
+      nextToken: null,
+    });
+
+    await act(async () => { render(React.createElement(ApprovalsPage)); });
+
+    // Select r1
+    fireEvent.click(screen.getByTestId('select-r1'));
+    expect(screen.getByTestId('selection-count')).toHaveTextContent('1 selected');
+
+    // Change filter — selection should clear
+    fireEvent.change(screen.getByTestId('kind-filter-select'), { target: { value: 'tool' } });
+    expect(screen.queryByTestId('selection-count')).toBeNull();
   });
 });
