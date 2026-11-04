@@ -75,3 +75,30 @@ npx ts-node --project tsconfig.scripts.json scripts/resync-datastore-roles.ts \
 ```
 
 Flags: `--table` (required), `--apply`, `--dry-run` (default). Idempotent.
+
+## reconcile-seeded-rows
+
+Collapses twin DDB rows for seeded agents into a canonical recordId-keyed
+row + thin name-keyed pointer, copies S3 modules to scoped keys, and
+rewrites seeded blueprint definitions to reference agents by recordId
+instead of friendly name. Fixes orgId `'Default'` → `'All Organizations'`
+on agent rows and `'Default'` → `'system'` on blueprint rows.
+
+Seeded agents are identified by `createdBy = 'seedConfig'` on the
+recordId-keyed row.
+
+```bash
+# Dry-run — see what would change
+npx ts-node --project tsconfig.scripts.json scripts/reconcile-seeded-rows.ts \
+  --table <AGENT_CONFIG_TABLE> --workflows-table <WORKFLOWS_TABLE> \
+  --bucket <AGENT_BUCKET_NAME>
+
+# Apply (idempotent — safe to re-run)
+npx ts-node --project tsconfig.scripts.json scripts/reconcile-seeded-rows.ts \
+  --table <AGENT_CONFIG_TABLE> --workflows-table <WORKFLOWS_TABLE> \
+  --bucket <AGENT_BUCKET_NAME> --apply
+```
+
+Flags: `--table` (required), `--workflows-table` (required), `--bucket`
+(required), `--apply`, `--dry-run` (default), `--org-sentinel` (default
+`'All Organizations'`), `--names` (comma-separated, restricts to listed agents).

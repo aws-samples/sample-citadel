@@ -10,7 +10,12 @@
 import * as https from "https";
 import * as url from "url";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  PutCommand,
+  GetCommand,
+  ScanCommand,
+} from "@aws-sdk/lib-dynamodb";
 import { createHash } from "crypto";
 import type {
   CloudFormationCustomResourceEvent,
@@ -45,11 +50,12 @@ function smokeFixturesEnabled(): boolean {
  * `seedVersion`. Bump it whenever the seeded blueprint content changes shape
  * so existing SYSTEM seed rows are healed on the next deploy (user rows are
  * never touched — see the ConditionExpression in the handler). Version 2
- * introduced the full canvas-shape WorkflowDefinition envelope; rows seeded
- * before v2 lack the `seedVersion` attribute entirely and are healed exactly
- * once.
+ * introduced the full canvas-shape WorkflowDefinition envelope; version 3
+ * rewrites agent references from friendly names to registry recordIds (+ a
+ * `legacyAgentName` on each node for traceability). Rows seeded before v3
+ * are healed exactly once.
  */
-export const SEED_VERSION = 2;
+export const SEED_VERSION = 3;
 
 /** Deterministic ID from blueprint name so re-deploys don't create duplicates. */
 export function deterministicId(name: string): string {
@@ -69,6 +75,7 @@ export function deterministicId(name: string): string {
 interface SeedBlueprintNode {
   id: string;
   agentId: string;
+  legacyAgentName?: string;
   position: { x: number; y: number };
   configuration: Record<string, unknown>;
 }
@@ -130,24 +137,112 @@ export interface SeedBlueprintItem {
 }
 
 /**
+ * Resolve agent friendly names to registry recordIds by reading the agent
+ * config table. First tries a GetItem on the name (thin pointer row carries
+ * `_canonicalRecordId`); if no pointer exists or the table is unavailable,
+ * falls back to a full scan looking for recordId-keyed rows with a matching
+ * `name` attribute.
+ *
+ * Returns a Map<agentName, recordId>. Names that cannot be resolved are
+ * omitted (blueprints will keep the friendly name — existing behavior).
+ */
+export async function resolveAgentRecordIds(
+  agentNames: string[],
+  ddbDocClient: DynamoDBDocumentClient,
+): Promise<Map<string, string>> {
+  const resolved = new Map<string, string>();
+  // Read lazily so tests can set the env var after module import.
+  const agentConfigTable = process.env.AGENT_CONFIG_TABLE;
+  if (!agentConfigTable) {
+    console.log(
+      "AGENT_CONFIG_TABLE not set — skipping agent recordId resolution",
+    );
+    return resolved;
+  }
+
+  const uniqueNames = [...new Set(agentNames)];
+  for (const name of uniqueNames) {
+    // Attempt 1: GetItem by name — the thin pointer row carries _canonicalRecordId.
+    try {
+      const resp = await ddbDocClient.send(
+        new GetCommand({
+          TableName: agentConfigTable,
+          Key: { agentId: name },
+          ProjectionExpression: "#crid, registryRecordId",
+          ExpressionAttributeNames: { "#crid": "_canonicalRecordId" },
+        }),
+      );
+      const canonId =
+        (resp.Item?._canonicalRecordId as string) ??
+        (resp.Item?.registryRecordId as string);
+      if (canonId && canonId !== name) {
+        resolved.set(name, canonId);
+        continue;
+      }
+    } catch (err) {
+      console.log(
+        `GetItem for agent name "${name}" failed: ${String(err)} — trying scan fallback`,
+      );
+    }
+
+    // Attempt 2: Scan for a recordId-keyed row with `name` attribute matching.
+    try {
+      const scan = await ddbDocClient.send(
+        new ScanCommand({
+          TableName: agentConfigTable,
+          FilterExpression: "#n = :name AND attribute_exists(#ck)",
+          ExpressionAttributeNames: { "#n": "name", "#ck": "citadelKind" },
+          ExpressionAttributeValues: { ":name": name },
+          ProjectionExpression: "agentId",
+        }),
+      );
+      const match = scan.Items?.[0];
+      if (match?.agentId && String(match.agentId) !== name) {
+        resolved.set(name, String(match.agentId));
+      }
+    } catch (err) {
+      console.log(
+        `Scan fallback for agent "${name}" failed: ${String(err)} — blueprint will keep friendly name`,
+      );
+    }
+  }
+
+  return resolved;
+}
+
+/**
  * Build the DynamoDB item for a seed blueprint. Kept separate from the
  * declarative SEED_BLUEPRINTS const so the definitions stay data-only while
  * the envelope (version/id/name/createdAt/updatedAt) is computed here.
+ *
+ * When `agentRecordIds` is provided, node `agentId` values that match a
+ * known agent name are replaced with the corresponding registry recordId,
+ * and a `legacyAgentName` attribute preserving the original name is added.
+ *
  * Exported for the contract test in
  * backend/src/lambda/__tests__/seed-blueprints-contract.test.ts.
  */
 export function buildSeedBlueprintItem(
   blueprint: SeedBlueprint,
   now: string,
+  agentRecordIds?: Map<string, string>,
 ): SeedBlueprintItem {
   const workflowId = deterministicId(blueprint.name);
+  // Rewrite node agentIds from friendly names to recordIds where resolved.
+  const resolvedNodes = blueprint.definition.nodes.map((node) => {
+    const recordId = agentRecordIds?.get(node.agentId);
+    if (recordId) {
+      return { ...node, agentId: recordId, legacyAgentName: node.agentId };
+    }
+    return node;
+  });
   const definition: SeedWorkflowDefinitionEnvelope = {
     version: "1.0.0",
     id: workflowId,
     name: blueprint.name,
     createdAt: now,
     updatedAt: now,
-    nodes: blueprint.definition.nodes,
+    nodes: resolvedNodes,
     edges: blueprint.definition.edges,
   };
   return {
@@ -602,8 +697,24 @@ export const handler: CloudFormationCustomResourceHandler = async (
       ? [...SEED_BLUEPRINTS, ...SMOKE_BLUEPRINTS]
       : SEED_BLUEPRINTS;
 
+    // Collect all real (non-placeholder) agent names referenced in blueprints
+    // and resolve them to registry recordIds via the agent config table.
+    const realAgentNames = blueprintsToSeed
+      .flatMap((bp) => bp.definition.nodes.map((n) => n.agentId))
+      .filter((id) => !id.startsWith("placeholder-"));
+    const agentRecordIds = await resolveAgentRecordIds(
+      realAgentNames,
+      docClient,
+    );
+    if (agentRecordIds.size > 0) {
+      console.log(
+        `Resolved ${agentRecordIds.size} agent name(s) to recordId(s):`,
+        Object.fromEntries(agentRecordIds),
+      );
+    }
+
     for (const blueprint of blueprintsToSeed) {
-      const item = buildSeedBlueprintItem(blueprint, now);
+      const item = buildSeedBlueprintItem(blueprint, now, agentRecordIds);
 
       try {
         // Upsert semantics: create when absent, overwrite SYSTEM seed rows

@@ -1872,6 +1872,7 @@ export class BackendStack extends cdk.Stack {
         timeout: cdk.Duration.seconds(30),
         environment: {
           WORKFLOWS_TABLE: this.workflowsTable.tableName,
+          AGENT_CONFIG_TABLE: this.agentConfigTable.tableName,
           ...(isNonProdSmokeEnv && { SMOKE_FIXTURES_ENABLED: "true" }),
         },
         logGroup: new logs.LogGroup(this, "SeedBlueprintsFunctionLogs", {
@@ -1882,16 +1883,17 @@ export class BackendStack extends cdk.Stack {
     );
 
     this.workflowsTable.grantWriteData(seedBlueprintsLambda);
+    this.agentConfigTable.grantReadData(seedBlueprintsLambda);
 
-    // Bumped Version v1.2.0 → v1.3.0 so the CFN Update event re-fires on the
-    // next non-prod deploy and seeds the new Idempotency Smoke Workflow row.
+    // Bumped Version v1.3.0 → v1.4.0 so the CFN Update event re-fires on the
+    // next deploy and seeds blueprints with recordId-based agent references.
     const seedBlueprintsResource = new cdk.CustomResource(
       this,
       "SeedBlueprintsResource",
       {
         serviceToken: seedBlueprintsLambda.functionArn,
         properties: {
-          Version: "v1.3.0",
+          Version: "v1.4.0",
         },
       },
     );
