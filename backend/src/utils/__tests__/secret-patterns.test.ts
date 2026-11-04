@@ -320,29 +320,92 @@ describe("redactSecrets — idempotency", () => {
 });
 
 describe("SECRET_PATTERNS — ReDoS safety (high-entropy-run {32,512})", () => {
-  // Property test: ensure the expanded upper bound does not cause
-  // catastrophic backtracking. 1 MB of near-miss input (mixed alpha with
-  // no digits, so the base64 lookahead fails but the engine still has to
-  // attempt matching at every position) must complete well under 1 second.
-  // cf. redact-pii ReDoS flake history in practices doc.
-  test("scanForSecrets completes on 1 MB near-miss input in < 1 s", () => {
-    // Near-miss: all lowercase + uppercase but no digits — base64 variant
-    // lookahead fails, hex variant fails (has uppercase). This is the
-    // worst case for backtracking because the engine tries all lookaheads.
-    const chunk = "AbCdEfGhIjKlMnOpQrStUvWxYzAbCdEfGh"; // 34 chars, no digits
+  // Performance regression tests: the two-phase approach (linear tokenizer
+  // + JS diversity check) must handle 1 MB inputs in < 500 ms. The old
+  // lookahead-based regex took ~3824 ms on dense base64.
+  test("scanForSecrets: 1 MB all-'a' completes in < 500 ms", () => {
+    const input = "a".repeat(1_000_000);
+    const start = performance.now();
+    scanForSecrets(input);
+    const elapsed = Math.round(performance.now() - start);
+    console.log(`1 MB all-a: ${elapsed} ms`);
+    expect(elapsed).toBeLessThan(500);
+  });
+
+  test("scanForSecrets: 1 MB dense base64 completes in < 500 ms", () => {
+    // Dense base64: repeating mixed-case + digits, the worst case for the
+    // old lookahead-based regex.
+    const chunk = "Zk9pQ2xkTVJ2WFRhU2VjcmV0VmFsdWUxMjM0NTY3ODkw";
     const input = chunk.repeat(Math.ceil(1_000_000 / chunk.length));
     const start = performance.now();
     scanForSecrets(input);
-    const elapsed = performance.now() - start;
-    expect(elapsed).toBeLessThan(1000);
+    const elapsed = Math.round(performance.now() - start);
+    console.log(`1 MB dense base64: ${elapsed} ms`);
+    expect(elapsed).toBeLessThan(500);
   });
 
-  test("redactSecrets completes on 1 MB near-miss input in < 1 s", () => {
+  test("scanForSecrets: 1 MB JSON-ish completes in < 500 ms", () => {
+    // JSON-ish: keys, colons, braces, short values — realistic payload
+    const chunk = '{"key":"value","id":"abc123","name":"test"},';
+    const input = chunk.repeat(Math.ceil(1_000_000 / chunk.length));
+    const start = performance.now();
+    scanForSecrets(input);
+    const elapsed = Math.round(performance.now() - start);
+    console.log(`1 MB JSON-ish: ${elapsed} ms`);
+    expect(elapsed).toBeLessThan(500);
+  });
+
+  test("redactSecrets: 1 MB near-miss input completes in < 500 ms", () => {
     const chunk = "AbCdEfGhIjKlMnOpQrStUvWxYzAbCdEfGh";
     const input = chunk.repeat(Math.ceil(1_000_000 / chunk.length));
     const start = performance.now();
     redactSecrets(input);
-    const elapsed = performance.now() - start;
-    expect(elapsed).toBeLessThan(1000);
+    const elapsed = Math.round(performance.now() - start);
+    console.log(`1 MB near-miss redact: ${elapsed} ms`);
+    expect(elapsed).toBeLessThan(500);
+  });
+});
+
+describe("high-entropy-run — hex hash exclusions", () => {
+  // SHA-256 / git commit hash (64 lowercase hex) — NOT flagged bare
+  test("64-char lowercase hex (SHA-256 / git commit hash) is NOT flagged bare", () => {
+    const commitHash =
+      "a".repeat(8) +
+      "b".repeat(8) +
+      "c".repeat(8) +
+      "d".repeat(8) +
+      "e".repeat(8) +
+      "f".repeat(8) +
+      "0".repeat(8) +
+      "1".repeat(8);
+    expect(commitHash).toHaveLength(64);
+    expect(scanForSecrets(commitHash)).not.toContain("high-entropy-run");
+  });
+
+  // SHA-1 (40 lowercase hex) — NOT flagged bare
+  test("40-char lowercase hex (SHA-1) is NOT flagged bare", () => {
+    const sha1 = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
+    expect(sha1).toHaveLength(40);
+    expect(scanForSecrets(sha1)).not.toContain("high-entropy-run");
+  });
+
+  // MD5 (32 lowercase hex) — NOT flagged bare
+  test("32-char lowercase hex (MD5) is NOT flagged bare", () => {
+    const md5 = "d41d8cd98f00b204e9800998ecf8427e";
+    expect(md5).toHaveLength(32);
+    expect(scanForSecrets(md5)).not.toContain("high-entropy-run");
+  });
+
+  // Secret-like assignment with 32-hex value — STILL flagged via assignment-secret
+  test("32-hex value in secret_key assignment IS flagged via assignment-secret", () => {
+    const input = "secret_key: d41d8cd98f00b204e9800998ecf8427e";
+    expect(scanForSecrets(input)).toContain("assignment-secret");
+  });
+
+  // Non-standard hex length (e.g. 48) — still flagged by high-entropy-run
+  test("48-char lowercase hex (non-standard length) IS flagged by high-entropy-run", () => {
+    const hex48 = "da39a3ee5e6b4b0d3255bfef95601890afd80709abcdef01";
+    expect(hex48).toHaveLength(48);
+    expect(scanForSecrets(hex48)).toContain("high-entropy-run");
   });
 });

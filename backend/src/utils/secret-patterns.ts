@@ -114,27 +114,88 @@ export const SECRET_PATTERNS: readonly SecretPattern[] = [
   // Bounded high-entropy base64/hex run — a STANDALONE class (design §1b),
   // distinct from `assignment-secret`: it fires on the shape alone with no
   // context anchor required, so it catches a bare high-entropy token
-  // pasted without a `key=`/`token=` prefix. To avoid "nuking benign IDs"
-  // (design's own caveat) it is deliberately narrow:
-  //   - lower bound 32 chars (below 32, too many benign identifiers collide)
-  //   - upper bound 512 chars (H27 fix: the old {32,64} cap missed longer
-  //     tokens; 512 is generous enough for any real credential while
-  //     keeping the pattern bounded to prevent catastrophic backtracking —
-  //     property-tested on 1 MB inputs)
-  //   - base64 variant requires BOTH an uppercase and a lowercase letter
-  //     and at least one digit, so plain-word runs (all lowercase, no
-  //     digits) never match
-  //   - hex variant requires the run to be entirely [0-9a-f] and at least
-  //     32 chars, which real English text/identifiers essentially never
-  //     produce by chance
-  // UUIDs (8-4-4-4-12 with dashes) cannot match the base64 variant
-  // (dashes break the \b-bounded char class) nor the hex variant (dashes
-  // break the hex run).
+  // pasted without a `key=`/`token=` prefix.
+  //
+  // TWO-PHASE APPROACH (performance fix):
+  // The old implementation used three consecutive lookaheads
+  // (`(?=[A-Za-z0-9+/]*[A-Z])(?=...[a-z])(?=...[0-9])`) which caused
+  // catastrophic backtracking on dense base64 input (~3800 ms on 1 MB).
+  // The fix replaces this with a simple linear tokenizer regex (no
+  // lookaheads) followed by a JS diversity check function — the regex
+  // stays O(n) and the diversity check is O(n) per token.
+  //
+  // The tokenizer `HIGH_ENTROPY_TOKENIZER` extracts candidate tokens:
+  //   \b[A-Za-z0-9+/_\-]{32,512}\b
+  // Then `hasHighEntropy()` checks class diversity: a token qualifies if
+  // it has at least one uppercase, one lowercase, AND one digit character.
+  //
+  // HEX EXCLUSIONS (false-positive fix):
+  // Bare lowercase hex tokens of exactly 64, 40, or 32 chars are excluded
+  // from standalone detection because they are overwhelmingly git commit
+  // hashes (SHA-256 = 64, SHA-1 = 40) or MD5 hashes (32), not secrets.
+  // These lengths are already covered by the `assignment-secret` pattern
+  // when they appear in a secret-like assignment context (e.g.
+  // `secret_key: <32-hex>`). The bare hex branch only fires on
+  // non-standard lengths or mixed-case hex.
+  //
+  // UUIDs (8-4-4-4-12 with dashes) cannot match (dashes and the
+  // word-boundary break the token).
   {
     id: "high-entropy-run",
-    re: /\b(?=[A-Za-z0-9+/]{32,512}\b)(?=[A-Za-z0-9+/]*[A-Z])(?=[A-Za-z0-9+/]*[a-z])(?=[A-Za-z0-9+/]*[0-9])[A-Za-z0-9+/]{32,512}\b|\b[0-9a-f]{32,512}\b/g,
+    // Placeholder regex — actual matching is done in scanForSecrets/
+    // redactSecrets via the two-phase HIGH_ENTROPY_TOKENIZER + hasHighEntropy.
+    // This entry exists so the pattern id is registered and iterable.
+    re: /(?!)/g, // never matches — handled specially below
   },
 ];
+
+// ---------------------------------------------------------------------------
+// Two-phase high-entropy detection (linear-time replacement for the old
+// lookahead-based regex that caused catastrophic backtracking on dense
+// base64 — measured 3824 ms on 1 MB; the new approach is O(n)).
+// ---------------------------------------------------------------------------
+
+/** Linear tokenizer: extracts candidate runs of base64/hex-ish chars,
+ *  32–512 chars long, word-bounded. No lookaheads — guaranteed linear. */
+const HIGH_ENTROPY_TOKENIZER = /\b[A-Za-z0-9+/_-]{32,512}\b/g;
+
+/** Standard hex lengths that are almost always hashes, not secrets:
+ *  64 = SHA-256 / git commit hash, 40 = SHA-1, 32 = MD5.
+ *  These are excluded from BARE detection (no assignment context).
+ *  When a secret-like assignment anchor is present, the `assignment-secret`
+ *  pattern already covers them. */
+const EXCLUDED_HEX_LENGTHS = new Set([32, 40, 64]);
+
+/** Returns true when `token` has enough character-class diversity to be
+ *  plausibly a secret rather than a benign identifier/word run.
+ *  For base64-ish tokens: requires at least one uppercase, one lowercase,
+ *  and one digit. For pure hex tokens: only fires if the length is NOT a
+ *  standard hash length (see EXCLUDED_HEX_LENGTHS above). */
+function hasHighEntropy(token: string): boolean {
+  // Check if it's pure lowercase hex
+  const isLowerHex = /^[0-9a-f]+$/.test(token);
+  if (isLowerHex) {
+    // Exclude standard hash lengths (SHA-256=64, SHA-1=40, MD5=32) —
+    // these are overwhelmingly commit hashes or content digests, not secrets.
+    // Non-standard lengths or mixed-case hex still fire.
+    return !EXCLUDED_HEX_LENGTHS.has(token.length);
+  }
+
+  // For mixed tokens: require class diversity (upper + lower + digit)
+  let hasUpper = false;
+  let hasLower = false;
+  let hasDigit = false;
+  for (let i = 0; i < token.length; i++) {
+    const c = token.charCodeAt(i);
+    if (c >= 65 && c <= 90)
+      hasUpper = true; // A-Z
+    else if (c >= 97 && c <= 122)
+      hasLower = true; // a-z
+    else if (c >= 48 && c <= 57) hasDigit = true; // 0-9
+    if (hasUpper && hasLower && hasDigit) return true;
+  }
+  return false;
+}
 
 /**
  * Scans `text` for every secret class in SECRET_PATTERNS. Returns the
@@ -145,6 +206,18 @@ export function scanForSecrets(text: string): string[] {
   if (!text) return [];
   const hits = new Set<string>();
   for (const { id, re } of SECRET_PATTERNS) {
+    if (id === "high-entropy-run") {
+      // Two-phase: linear tokenizer + JS diversity check
+      HIGH_ENTROPY_TOKENIZER.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = HIGH_ENTROPY_TOKENIZER.exec(text)) !== null) {
+        if (hasHighEntropy(m[0])) {
+          hits.add(id);
+          break; // only need to know it fired once
+        }
+      }
+      continue;
+    }
     // Global regexes carry `lastIndex` state on the shared module-level
     // object between calls. `.test()` on a `g`-flagged regex resumes from
     // wherever the previous call left off, so a stale non-zero lastIndex
@@ -169,6 +242,14 @@ export function redactSecrets(text: string): string {
   if (!text) return text;
   let out = text;
   for (const { id, re } of SECRET_PATTERNS) {
+    if (id === "high-entropy-run") {
+      // Two-phase: linear tokenizer + JS diversity check for replacement
+      HIGH_ENTROPY_TOKENIZER.lastIndex = 0;
+      out = out.replace(HIGH_ENTROPY_TOKENIZER, (match) =>
+        hasHighEntropy(match) ? `[REDACTED:${id}]` : match,
+      );
+      continue;
+    }
     // String.prototype.replace on a `g`-flagged regex starts matching from
     // index 0 regardless of a stale lastIndex, but we reset explicitly here
     // anyway so this function's behavior never depends on call ordering
