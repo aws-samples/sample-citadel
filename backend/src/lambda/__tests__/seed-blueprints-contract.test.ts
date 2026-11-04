@@ -18,16 +18,16 @@
  * update both in the same review.
  */
 
-import { mockClient } from 'aws-sdk-client-mock';
-import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
-import type { CloudFormationCustomResourceEvent, Context } from 'aws-lambda';
+import { mockClient } from "aws-sdk-client-mock";
+import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
+import type { CloudFormationCustomResourceEvent, Context } from "aws-lambda";
 
-import { isWorkflowDefinitionEnvelope } from './fixtures/workflow-envelope-guard';
+import { isWorkflowDefinitionEnvelope } from "./fixtures/workflow-envelope-guard";
 
 // Mock the https module so the CFN custom-resource response resolves locally.
-jest.mock('https', () => ({
+jest.mock("https", () => ({
   request: (_options: unknown, callback?: () => void) => {
-    if (typeof callback === 'function') {
+    if (typeof callback === "function") {
       callback();
     }
     return { on: jest.fn(), write: jest.fn(), end: jest.fn() };
@@ -40,7 +40,7 @@ import {
   SEED_VERSION,
   buildSeedBlueprintItem,
   deterministicId,
-} from '../seed-blueprints';
+} from "../seed-blueprints";
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 
@@ -54,39 +54,42 @@ const invokeHandler = handler as (
 ) => Promise<void>;
 
 const EXPECTED_CONDITION_EXPRESSION =
-  'attribute_not_exists(workflowId) OR attribute_not_exists(seedVersion) OR seedVersion < :v';
+  "attribute_not_exists(workflowId) OR attribute_not_exists(seedVersion) OR seedVersion < :v";
 
-const NOW = '2026-07-17T00:00:00.000Z';
+const NOW = "2026-07-17T00:00:00.000Z";
 
 // ─── CFN event/context fixtures ────────────────────────────────────────────
 function makeEvent(
-  requestType: 'Create' | 'Update' | 'Delete',
+  requestType: "Create" | "Update" | "Delete",
 ): CloudFormationCustomResourceEvent {
   return {
     RequestType: requestType,
-    ServiceToken: 'arn:aws:lambda:us-east-1:123456789012:function:seed-blueprints',
+    ServiceToken:
+      "arn:aws:lambda:us-east-1:123456789012:function:seed-blueprints",
     ResponseURL:
-      'https://cloudformation-custom-resource-response-useast1.s3.amazonaws.com/response',
-    StackId: 'arn:aws:cloudformation:us-east-1:123456789012:stack/test/guid',
-    RequestId: 'unique-id-1234',
-    ResourceType: 'Custom::SeedBlueprints',
-    LogicalResourceId: 'SeedBlueprintsResource',
+      "https://cloudformation-custom-resource-response-useast1.s3.amazonaws.com/response",
+    StackId: "arn:aws:cloudformation:us-east-1:123456789012:stack/test/guid",
+    RequestId: "unique-id-1234",
+    ResourceType: "Custom::SeedBlueprints",
+    LogicalResourceId: "SeedBlueprintsResource",
     ResourceProperties: {
-      ServiceToken: 'arn:aws:lambda:us-east-1:123456789012:function:seed-blueprints',
-      Version: 'v1.2.0',
+      ServiceToken:
+        "arn:aws:lambda:us-east-1:123456789012:function:seed-blueprints",
+      Version: "v1.2.0",
     },
   } as CloudFormationCustomResourceEvent;
 }
 
 const mockContext: Context = {
   callbackWaitsForEmptyEventLoop: false,
-  functionName: 'seed-blueprints',
-  functionVersion: '$LATEST',
-  invokedFunctionArn: 'arn:aws:lambda:us-east-1:123456789012:function:seed-blueprints',
-  memoryLimitInMB: '128',
-  awsRequestId: 'req-123',
-  logGroupName: '/aws/lambda/seed-blueprints',
-  logStreamName: '2026/07/17/[$LATEST]abc123',
+  functionName: "seed-blueprints",
+  functionVersion: "$LATEST",
+  invokedFunctionArn:
+    "arn:aws:lambda:us-east-1:123456789012:function:seed-blueprints",
+  memoryLimitInMB: "128",
+  awsRequestId: "req-123",
+  logGroupName: "/aws/lambda/seed-blueprints",
+  logStreamName: "2026/07/17/[$LATEST]abc123",
   getRemainingTimeInMillis: () => 30000,
   done: jest.fn(),
   fail: jest.fn(),
@@ -95,20 +98,21 @@ const mockContext: Context = {
 
 function logMessagesContaining(spy: jest.SpyInstance, needle: string): number {
   return spy.mock.calls.filter(
-    (call) => typeof call[0] === 'string' && (call[0] as string).includes(needle),
+    (call) =>
+      typeof call[0] === "string" && (call[0] as string).includes(needle),
   ).length;
 }
 
-describe('seed-blueprints contract', () => {
+describe("seed-blueprints contract", () => {
   let logSpy: jest.SpyInstance;
 
   beforeAll(() => {
-    process.env.WORKFLOWS_TABLE = 'citadel-workflows-test';
+    process.env.WORKFLOWS_TABLE = "citadel-workflows-test";
   });
 
   beforeEach(() => {
     ddbMock.reset();
-    logSpy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
+    logSpy = jest.spyOn(console, "log").mockImplementation(() => undefined);
   });
 
   afterEach(() => {
@@ -121,9 +125,9 @@ describe('seed-blueprints contract', () => {
 
   // ─── Part A: canonical envelope on every built seed definition ──────────
 
-  describe('definition envelope', () => {
-    test('SEED_VERSION starts at 2', () => {
-      expect(SEED_VERSION).toBe(2);
+  describe("definition envelope", () => {
+    test("SEED_VERSION starts at 3", () => {
+      expect(SEED_VERSION).toBe(3);
     });
 
     test.each(SEED_BLUEPRINTS.map((bp) => [bp.name, bp] as const))(
@@ -143,7 +147,7 @@ describe('seed-blueprints contract', () => {
           nodes: unknown[];
           edges: unknown[];
         };
-        expect(envelope.version).toBe('1.0.0');
+        expect(envelope.version).toBe("1.0.0");
         expect(envelope.id).toBe(deterministicId(blueprint.name));
         expect(envelope.id).toBe(item.workflowId);
         expect(envelope.name).toBe(blueprint.name);
@@ -167,80 +171,86 @@ describe('seed-blueprints contract', () => {
 
   // ─── Part B: seedVersion-aware upsert semantics ──────────────────────────
 
-  describe('seedVersion-aware upsert', () => {
-    test('PutCommand uses the seedVersion-aware ConditionExpression with :v bound to SEED_VERSION', async () => {
+  describe("seedVersion-aware upsert", () => {
+    test("PutCommand uses the seedVersion-aware ConditionExpression with :v bound to SEED_VERSION", async () => {
       ddbMock.on(PutCommand).resolves({});
 
-      await invokeHandler(makeEvent('Update'), mockContext);
+      await invokeHandler(makeEvent("Update"), mockContext);
 
       const putCalls = ddbMock.commandCalls(PutCommand);
       expect(putCalls).toHaveLength(SEED_BLUEPRINTS.length);
       for (const call of putCalls) {
         const input = call.args[0].input;
         expect(input.ConditionExpression).toBe(EXPECTED_CONDITION_EXPRESSION);
-        expect(input.ExpressionAttributeValues).toEqual({ ':v': SEED_VERSION });
-        expect(input.ReturnValues).toBe('ALL_OLD');
+        expect(input.ExpressionAttributeValues).toEqual({ ":v": SEED_VERSION });
+        expect(input.ReturnValues).toBe("ALL_OLD");
         expect(input.Item!.seedVersion).toBe(SEED_VERSION);
       }
     });
 
-    test('logs created for each blueprint when no prior row exists (no Attributes returned)', async () => {
+    test("logs created for each blueprint when no prior row exists (no Attributes returned)", async () => {
       ddbMock.on(PutCommand).resolves({});
 
-      await invokeHandler(makeEvent('Create'), mockContext);
+      await invokeHandler(makeEvent("Create"), mockContext);
 
-      expect(logMessagesContaining(logSpy, 'Created blueprint:')).toBe(
+      expect(logMessagesContaining(logSpy, "Created blueprint:")).toBe(
         SEED_BLUEPRINTS.length,
       );
-      expect(logMessagesContaining(logSpy, 'Updated outdated seed blueprint')).toBe(0);
-      expect(logMessagesContaining(logSpy, 'skipping:')).toBe(0);
+      expect(
+        logMessagesContaining(logSpy, "Updated outdated seed blueprint"),
+      ).toBe(0);
+      expect(logMessagesContaining(logSpy, "skipping:")).toBe(0);
     });
 
-    test('logs updated (healed) when an outdated seed row is overwritten (Attributes returned)', async () => {
+    test("logs updated (healed) when an outdated seed row is overwritten (Attributes returned)", async () => {
       // Existing envelope-less seed rows lack seedVersion → the condition
       // passes and Put replaces them, returning the old image.
       ddbMock.on(PutCommand).resolves({
-        Attributes: { workflowId: 'existing-row', orgId: 'system' },
+        Attributes: { workflowId: "existing-row", orgId: "system" },
       });
 
-      await invokeHandler(makeEvent('Update'), mockContext);
+      await invokeHandler(makeEvent("Update"), mockContext);
 
-      expect(logMessagesContaining(logSpy, 'Updated outdated seed blueprint')).toBe(
-        SEED_BLUEPRINTS.length,
-      );
-      expect(logMessagesContaining(logSpy, 'Created blueprint:')).toBe(0);
+      expect(
+        logMessagesContaining(logSpy, "Updated outdated seed blueprint"),
+      ).toBe(SEED_BLUEPRINTS.length);
+      expect(logMessagesContaining(logSpy, "Created blueprint:")).toBe(0);
     });
 
-    test('logs skipped and continues when rows are current (ConditionalCheckFailedException)', async () => {
-      const conditionalError = new Error('The conditional request failed');
-      conditionalError.name = 'ConditionalCheckFailedException';
+    test("logs skipped and continues when rows are current (ConditionalCheckFailedException)", async () => {
+      const conditionalError = new Error("The conditional request failed");
+      conditionalError.name = "ConditionalCheckFailedException";
       ddbMock.on(PutCommand).rejects(conditionalError);
 
       await expect(
-        invokeHandler(makeEvent('Update'), mockContext),
+        invokeHandler(makeEvent("Update"), mockContext),
       ).resolves.not.toThrow();
 
       // All blueprints are still attempted — one current row must not stop the rest.
-      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(SEED_BLUEPRINTS.length);
-      expect(logMessagesContaining(logSpy, 'skipping:')).toBe(SEED_BLUEPRINTS.length);
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(
+        SEED_BLUEPRINTS.length,
+      );
+      expect(logMessagesContaining(logSpy, "skipping:")).toBe(
+        SEED_BLUEPRINTS.length,
+      );
     });
 
-    test('heals exactly the outdated rows in a mixed table state', async () => {
+    test("heals exactly the outdated rows in a mixed table state", async () => {
       // First two rows are current (condition fails), the rest are healed.
-      const conditionalError = new Error('The conditional request failed');
-      conditionalError.name = 'ConditionalCheckFailedException';
+      const conditionalError = new Error("The conditional request failed");
+      conditionalError.name = "ConditionalCheckFailedException";
       ddbMock
         .on(PutCommand)
         .rejectsOnce(conditionalError)
         .rejectsOnce(conditionalError)
-        .resolves({ Attributes: { workflowId: 'stale-row' } });
+        .resolves({ Attributes: { workflowId: "stale-row" } });
 
-      await invokeHandler(makeEvent('Update'), mockContext);
+      await invokeHandler(makeEvent("Update"), mockContext);
 
-      expect(logMessagesContaining(logSpy, 'skipping:')).toBe(2);
-      expect(logMessagesContaining(logSpy, 'Updated outdated seed blueprint')).toBe(
-        SEED_BLUEPRINTS.length - 2,
-      );
+      expect(logMessagesContaining(logSpy, "skipping:")).toBe(2);
+      expect(
+        logMessagesContaining(logSpy, "Updated outdated seed blueprint"),
+      ).toBe(SEED_BLUEPRINTS.length - 2);
     });
   });
 });
