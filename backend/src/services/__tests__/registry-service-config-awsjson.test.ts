@@ -84,7 +84,7 @@ describe("RegistryService — AWSJSON config field invariant", () => {
       expect(result.description).toBe("Answers weather questions");
     });
 
-    it("end-to-end: summary-fallback row (detail GET fails) projects config {} — the incident path", async () => {
+    it("end-to-end: detail GET failure excludes record from results (no descriptor-less summary leak)", async () => {
       sdkMock.on(ListRegistryRecordsCommand).resolves({
         registryRecords: [
           {
@@ -103,14 +103,10 @@ describe("RegistryService — AWSJSON config field invariant", () => {
         );
 
       const records = await service.listResources("tool");
-      expect(records).toHaveLength(1);
-      // The fallback row carries no descriptor content (summaryToRecord).
-      expect(records[0].customDescriptorContent).toBeUndefined();
-
-      const projected = service.mapToToolConfig(records[0]);
-      expect(projected.config).toBe('{"name":"WeatherTool"}');
-      // Description is NOT lost — it stays out of config only.
-      expect(records[0].description).toBe("Fetches weather data");
+      // The record whose detail GET failed is dropped entirely — not
+      // returned as a descriptor-less summary that would bypass the org
+      // visibility filter.
+      expect(records).toHaveLength(0);
     });
   });
 
