@@ -1,4 +1,3 @@
-/* eslint-disable react-refresh/only-export-components -- co-exports helpers/types alongside component */
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { userManagementService, User } from '../services/userManagementService';
 

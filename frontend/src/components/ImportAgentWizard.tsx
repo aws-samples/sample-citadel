@@ -1,4 +1,3 @@
-/* eslint-disable react-refresh/only-export-components -- co-exports helpers/types alongside component */
 import { useState, useEffect } from 'react';
 import {
   ArrowLeft,

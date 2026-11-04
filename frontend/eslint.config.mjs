@@ -76,6 +76,9 @@ export default [
       // Classic react-hooks rules only (not the React Compiler suite)
       "react-hooks/rules-of-hooks": "error",
       "react-hooks/exhaustive-deps": "warn",
+
+      // Dev-only HMR hint; component files here co-export helpers by convention
+      "react-refresh/only-export-components": ["warn", { allowConstantExport: true }],
     },
   },
 ];
