@@ -180,6 +180,33 @@ describe('ExecutionOverlay', () => {
       expect(indicator).toHaveClass('border-dashed');
       expect(indicator).toHaveClass('border-border');
     });
+
+    it('renders unreachable node with dashed muted indicator and ∅ symbol', () => {
+      const nodeResults: Record<string, NodeResultEntry> = {
+        'node-1': { status: 'unreachable', output: null, error: null },
+      };
+      mockUseExecutionSubscription.mockReturnValue({
+        nodeResults,
+        executionStatus: 'completed',
+        events: [],
+      });
+
+      render(
+        <ExecutionOverlay
+          nodeResults={nodeResults}
+          executionStatus="completed"
+          workflowStatus="PUBLISHED"
+          onRun={jest.fn()}
+          onCancel={jest.fn()}
+          executionId="exec-1"
+        />
+      );
+
+      const indicator = screen.getByTestId('node-status-node-1');
+      expect(indicator).toHaveClass('border-dashed');
+      expect(indicator).toHaveTextContent('∅');
+      expect(indicator).toHaveAttribute('title', 'Skipped because an upstream condition routed around this step');
+    });
   });
 
   describe('real-time updates from subscription', () => {

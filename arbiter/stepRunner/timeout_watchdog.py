@@ -242,6 +242,22 @@ def _emit_metric(timed_out_count: int) -> None:
         _logger.warning('watchdog: metric emit failed: %s', exc)
 
 
+def _emit_watchdog_execution_error_metric(error_count: int) -> None:
+    """Best-effort CloudWatch metric for per-execution errors in a sweep."""
+    try:
+        _get_cw_client().put_metric_data(
+            Namespace='Citadel/StepRunner',
+            MetricData=[{
+                'MetricName': 'WatchdogExecutionError',
+                'Value': error_count,
+                'Unit': 'Count',
+                'Timestamp': _now(),
+            }],
+        )
+    except Exception as exc:  # noqa: BLE001 — telemetry must not raise
+        _logger.warning('watchdog: error metric emit failed: %s', exc)
+
+
 def _node_stall_seconds() -> int:
     """Resolve the per-node stall threshold: NODE_STALL_TIMEOUT_SECONDS *
     NODE_STALL_FACTOR, each falling back to its default on unset/invalid/non-
@@ -269,6 +285,37 @@ def _load_workflow(workflow_id: str) -> dict:
     return resp.get('Item') or {}
 
 
+def _load_workflow_for_execution(execution: dict) -> dict:
+    """Load the workflow definition pinned to this execution (CIT-259 H5).
+
+    Uses the inline snapshot when present; falls back to the LIVE row for
+    pre-CIT-259 executions and emits a CloudWatch metric so the fallback
+    rate is observable.
+    """
+    snapshot_def = execution.get('workflowDefinitionSnapshot')
+    snapshot_cfg = execution.get('workflowConfigurationSnapshot')
+    if snapshot_def is not None:
+        return {
+            'workflowId': execution.get('workflowId', ''),
+            'definition': snapshot_def,
+            'configuration': snapshot_cfg or '{}',
+        }
+    # Fallback for pre-CIT-259 executions
+    try:
+        _get_cw_client().put_metric_data(
+            Namespace='Citadel/StepRunner',
+            MetricData=[{
+                'MetricName': 'WorkflowPinFallback',
+                'Value': 1,
+                'Unit': 'Count',
+                'Timestamp': _now(),
+            }],
+        )
+    except Exception:  # noqa: BLE001 — telemetry must not raise
+        pass
+    return _load_workflow(execution.get('workflowId', ''))
+
+
 def _definition_nodes_edges(workflow: dict) -> tuple[list, list]:
     definition = workflow.get('definition', '{}')
     if isinstance(definition, str):
@@ -290,7 +337,7 @@ def _has_reconcilable_frontier(execution: dict, nodes: list, edges: list) -> boo
     if find_ready_nodes(nodes, edges, status_map):
         return True
     if nodes and all(
-        status_map.get(n['id'], 'pending') in ('completed', 'skipped', 'failed') for n in nodes
+        status_map.get(n['id'], 'pending') in ('completed', 'skipped', 'failed', 'unreachable') for n in nodes
     ):
         return execution.get('status') == 'running'
     return False
@@ -417,7 +464,7 @@ def _process_execution(execution: dict, now: datetime, exec_timeout: int, node_s
     # to read the graph from. (Executions without nodeResults fall straight to
     # the execution-level backstop.)
     if node_results:
-        workflow = _load_workflow(execution.get('workflowId', ''))
+        workflow = _load_workflow_for_execution(execution)
         if workflow:
             nodes, edges = _definition_nodes_edges(workflow)
             if _has_reconcilable_frontier(execution, nodes, edges):
@@ -469,26 +516,50 @@ def handler(event, context):
     reconciled = 0
     re_dispatched = 0
     node_failed = 0
+    errors: list[str] = []
     for execution in _scan_running():
         scanned += 1
-        disposition = _process_execution(execution, now, timeout, node_stall)
-        if disposition == 'execution_failed':
-            timed_out += 1
-        elif disposition == 'reconciled':
-            reconciled += 1
-        elif disposition == 're_dispatched':
-            re_dispatched += 1
-        elif disposition == 'node_failed':
-            node_failed += 1
+        try:
+            disposition = _process_execution(execution, now, timeout, node_stall)
+            if disposition == 'execution_failed':
+                timed_out += 1
+            elif disposition == 'reconciled':
+                reconciled += 1
+            elif disposition == 're_dispatched':
+                re_dispatched += 1
+            elif disposition == 'node_failed':
+                node_failed += 1
+        except Exception:
+            execution_id = execution.get('executionId', 'UNKNOWN')
+            _logger.exception(
+                'Watchdog sweep failed for execution',
+                extra={
+                    'component': 'TimeoutWatchdog',
+                    'executionId': execution_id,
+                    'action': 'process_execution_error',
+                },
+            )
+            errors.append(execution_id)
 
     _emit_metric(timed_out)
-    return {
+
+    summary = {
         'scanned': scanned,
         'timedOut': timed_out,
         'reconciled': reconciled,
         'reDispatched': re_dispatched,
         'nodeFailed': node_failed,
+        'errors': len(errors),
+        'errorExecutionIds': errors[:20],
     }
+    _logger.info(
+        'Watchdog sweep complete',
+        extra={'component': 'TimeoutWatchdog', 'summary': summary},
+    )
+    if errors:
+        _emit_watchdog_execution_error_metric(len(errors))
+
+    return summary
 
 
 # ---------------------------------------------------------------------------

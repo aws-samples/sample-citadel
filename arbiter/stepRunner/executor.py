@@ -35,6 +35,7 @@ from dag import (
     find_convergence_nodes,
     merge_node_configuration,
     topological_sort,
+    propagate_skips,
 )
 from approval_requests import AWAITING_APPROVAL, EXECUTION_SENTINEL, build_approval_request, is_awaiting
 from condition import evaluate_condition
@@ -700,6 +701,27 @@ def _load_workflow(workflow_id: str) -> dict:
     return resp.get('Item', {})
 
 
+def _load_workflow_for_execution(execution: dict) -> dict:
+    """Load the workflow definition as it existed when the execution started.
+
+    Priority:
+      1. ``workflowDefinitionSnapshot`` on the execution row (CIT-259).
+      2. Fallback: LIVE workflow row (pre-CIT-259 executions).
+         Emits a CloudWatch metric on fallback for migration tracking.
+    """
+    snapshot_def = execution.get('workflowDefinitionSnapshot')
+    snapshot_cfg = execution.get('workflowConfigurationSnapshot')
+    if snapshot_def is not None:
+        return {
+            'workflowId': execution.get('workflowId', ''),
+            'definition': snapshot_def,
+            'configuration': snapshot_cfg or '{}',
+        }
+    # Fallback for pre-CIT-259 executions
+    _emit_metric('WorkflowPinFallback', 1, 'Count')
+    return _load_workflow(execution.get('workflowId', ''))
+
+
 def _load_execution(execution_id: str) -> dict:
     """Load execution item from DynamoDB."""
     resp = _executions_table.get_item(Key={'executionId': execution_id})
@@ -1291,7 +1313,7 @@ def handle_node_completion(
     if not execution:
         return
 
-    workflow = _load_workflow(execution.get('workflowId', ''))
+    workflow = _load_workflow_for_execution(execution)
     if not workflow:
         return
 
@@ -1402,7 +1424,7 @@ def handle_node_completion(
 
     # Evaluate this node's outgoing conditional edges (mark + persist skips of
     # false-branch targets), then advance via the shared re-entry primitive.
-    _evaluate_and_persist_skips(execution_id, node_id, output, edges, node_results)
+    _evaluate_and_persist_skips(execution_id, node_id, output, edges, node_results, nodes)
 
     # Advance-only via schedule_frontier: dispatch pending-ready nodes
     # (conditional) and finalize when all nodes are terminal (conditional). The
@@ -1412,17 +1434,20 @@ def handle_node_completion(
     schedule_frontier(execution_view, workflow, default_input=output)
 
 
-def _evaluate_and_persist_skips(execution_id, node_id, output, edges, node_results):
+def _evaluate_and_persist_skips(execution_id, node_id, output, edges, node_results, nodes=None):
     """Evaluate a completed node's outgoing conditional edges and mark every
     false-branch target 'skipped' (both in the passed local ``node_results``
-    view and persisted to DynamoDB).
+    view and persisted to DynamoDB).  Then propagate skips transitively:
+    downstream nodes whose ALL incoming paths are skipped/unreachable are
+    marked 'unreachable' (CIT-259 H4).
 
     Extracted from handle_node_completion so the resume/reconcile paths can
     re-run edge evaluation for a completed node whose conditional successors
     are still 'pending' — the §6 edge-case where a lost signal stranded a
-    false branch. Idempotent: re-marking a 'skipped' node writes the identical
-    value (skipped is terminal, never re-dispatched).
+    false branch. Idempotent: re-marking a 'skipped'/'unreachable' node writes
+    the identical value (both are terminal, never re-dispatched).
     """
+    direct_skips: set[str] = set()
     for edge in [e for e in edges if e.get('source') == node_id]:
         condition = edge.get('condition')
         if condition and not evaluate_condition(condition, output):
@@ -1433,6 +1458,25 @@ def _evaluate_and_persist_skips(execution_id, node_id, output, edges, node_resul
                 UpdateExpression='SET nodeResults.#nid.#status = :status',
                 ExpressionAttributeNames={'#nid': target_id, '#status': 'status'},
                 ExpressionAttributeValues={':status': 'skipped'},
+            )
+            direct_skips.add(target_id)
+
+    # CIT-259 H4: propagate to transitively unreachable nodes.
+    if direct_skips and nodes is not None:
+        all_dead = set()
+        for nid_iter, nr_iter in node_results.items():
+            st = nr_iter.get('status') if isinstance(nr_iter, dict) else nr_iter
+            if st in ('skipped', 'unreachable'):
+                all_dead.add(nid_iter)
+        all_dead |= direct_skips
+        newly_unreachable = propagate_skips(all_dead, nodes, edges)
+        for nid_u in newly_unreachable:
+            node_results[nid_u] = {**node_results.get(nid_u, {}), 'status': 'unreachable'}
+            _executions_table.update_item(
+                Key={'executionId': execution_id},
+                UpdateExpression='SET nodeResults.#nid.#status = :status',
+                ExpressionAttributeNames={'#nid': nid_u, '#status': 'status'},
+                ExpressionAttributeValues={':status': 'unreachable'},
             )
 
 
@@ -1541,7 +1585,7 @@ def schedule_frontier(execution, workflow, *, default_input=None) -> list:
             dispatched.append(ready_id)
 
     all_terminal = bool(nodes) and all(
-        status_map.get(n['id'], 'pending') in ('completed', 'skipped', 'failed')
+        status_map.get(n['id'], 'pending') in ('completed', 'skipped', 'failed', 'unreachable')
         for n in nodes
     )
     if all_terminal:
@@ -1559,7 +1603,7 @@ def schedule_frontier(execution, workflow, *, default_input=None) -> list:
         _any_awaiting = any(
             status_map.get(n['id']) == AWAITING_APPROVAL for n in nodes
         )
-        _settled_or_parked = ('completed', 'skipped', 'failed', AWAITING_APPROVAL)
+        _settled_or_parked = ('completed', 'skipped', 'failed', 'unreachable', AWAITING_APPROVAL)
         _all_settled = bool(nodes) and all(
             status_map.get(n['id'], 'pending') in _settled_or_parked
             for n in nodes
@@ -1627,12 +1671,13 @@ def _reconcile_completed_edges(execution, workflow) -> None:
     """
     definition = _parse_definition(workflow)
     edges = definition.get('edges', [])
+    nodes = definition.get('nodes', [])
     node_results = execution.get('nodeResults', {})
     execution_id = execution['executionId']
     for nid, nr in list(node_results.items()):
         if nr.get('status') == 'completed':
             _evaluate_and_persist_skips(
-                execution_id, nid, nr.get('output', {}) or {}, edges, node_results,
+                execution_id, nid, nr.get('output', {}) or {}, edges, node_results, nodes,
             )
 
 
@@ -1781,7 +1826,7 @@ def approve_execution(
     if not execution:
         return True
 
-    workflow = _load_workflow(execution.get('workflowId', ''))
+    workflow = _load_workflow_for_execution(execution)
     if not workflow:
         return True
 
@@ -1934,7 +1979,7 @@ def _approve_execution_scoped(
     if not execution:
         return True
 
-    workflow = _load_workflow(execution.get('workflowId', ''))
+    workflow = _load_workflow_for_execution(execution)
     if not workflow:
         return True
 
@@ -2286,7 +2331,7 @@ def resume_execution(execution_id: str, *, approval_decision: dict | None = None
         _log_event('resume_execution_rejected_terminal', executionId=execution_id, status=status)
         return
 
-    workflow = _load_workflow(execution.get('workflowId', ''))
+    workflow = _load_workflow_for_execution(execution)
     if not workflow:
         _log_event('resume_execution_workflow_missing', executionId=execution_id)
         return
@@ -2337,7 +2382,7 @@ def handle_node_failure(execution_id: str, node_id: str, error: str) -> None:
     if not execution:
         return
 
-    workflow = _load_workflow(execution.get('workflowId', ''))
+    workflow = _load_workflow_for_execution(execution)
     if not workflow:
         return
 
@@ -2986,7 +3031,7 @@ def handle_compensation_result(
     if is_last:
         return
 
-    workflow = _load_workflow(workflow_id)
+    workflow = _load_workflow_for_execution(execution)
     if not workflow:
         return
     definition = _parse_definition(workflow)

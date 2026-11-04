@@ -13,7 +13,7 @@ import { Button } from './ui/button';
 import { Tooltip, TooltipTrigger, TooltipContent } from './ui/tooltip';
 
 export interface NodeResultEntry {
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'unreachable';
   output: string | null;
   error: string | null;
 }
@@ -41,6 +41,18 @@ function NodeStatusIndicator({ nodeId, result }: { nodeId: string; result: NodeR
         className="border-dashed border-border border-2 rounded-full size-6 flex items-center justify-center text-xs"
         title={error ?? undefined}
       />
+    );
+  }
+
+  if (status === 'unreachable') {
+    return (
+      <div
+        data-testid={`node-status-${nodeId}`}
+        className="border-dashed border-muted-foreground/50 border-2 rounded-full size-6 flex items-center justify-center text-xs text-muted-foreground/60"
+        title="Skipped because an upstream condition routed around this step"
+      >
+        ∅
+      </div>
     );
   }
 

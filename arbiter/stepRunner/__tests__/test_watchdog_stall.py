@@ -203,7 +203,8 @@ class TestStalledNodeReconcileOrFail:
             result = watchdog.handler({}, None)
 
         assert result == {'scanned': 1, 'timedOut': 0, 'reconciled': 0,
-                          'reDispatched': 0, 'nodeFailed': 0}
+                          'reDispatched': 0, 'nodeFailed': 0,
+                          'errors': 0, 'errorExecutionIds': []}
         assert _dispatched(sqs) == []
 
     def test_execution_backstop_fails_old_run_with_no_stalled_node(self, monkeypatch):

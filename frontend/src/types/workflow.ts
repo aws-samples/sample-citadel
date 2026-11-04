@@ -84,7 +84,7 @@ export interface WorkflowConfiguration {
 export interface NodeResult {
   nodeId: string;
   agentId: string;
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'unreachable';
   startedAt?: string;
   completedAt?: string;
   output?: any;
