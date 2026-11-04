@@ -54,7 +54,7 @@ describe('useGovernanceEngine', () => {
   it('returns engine = null and loading = true while any of the 4 are pending', async () => {
     // Authority units never settles in this test (the other three resolve
     // immediately). The hook should remain in loading state, engine = null.
-    let resolveUnits: (() => void) | null = null;
+    const resolveUnits: (() => void) | null = null;
     mockedService.listAuthorityUnits.mockReturnValue(
       new Promise(() => {
         // never resolves

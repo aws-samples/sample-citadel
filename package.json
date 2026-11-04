@@ -35,6 +35,9 @@
     "backend/**/*.{ts,js}": [
       "eslint --fix --max-warnings 0",
       "prettier --write"
+    ],
+    "frontend/**/*.{ts,tsx}": [
+      "eslint --fix"
     ]
   },
   "engines": {

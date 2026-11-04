@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- co-exports helpers/types alongside component */
 /**
  * DynamicConnectorForm Component
  * 
@@ -82,19 +83,8 @@ export function DynamicConnectorForm({
   onCancel,
 }: DynamicConnectorFormProps) {
   const connectorDef = getConnectorDefinition(connectorType.id);
-  
-  if (!connectorDef) {
-    return (
-      <Alert variant="destructive">
-        <AlertCircle className="size-4" />
-        <AlertDescription>
-          Connector definition not found for {connectorType.name}
-        </AlertDescription>
-      </Alert>
-    );
-  }
 
-  // Form state
+  // Form state — hooks must be called unconditionally (rules-of-hooks)
   const [name, setName] = useState(initialValues?.name || '');
   const [credentials, setCredentials] = useState<Record<string, string>>({});
   const [config, setConfig] = useState<Record<string, string>>({});
@@ -108,6 +98,8 @@ export function DynamicConnectorForm({
 
   // Initialize form values
   useEffect(() => {
+    if (!connectorDef) return;
+
     setName(initialValues?.name || '');
 
     // Initialize credentials with masked values for sensitive fields in edit mode
@@ -144,6 +136,17 @@ export function DynamicConnectorForm({
     });
     setConfig(initialConfig);
   }, [initialValues, connectorDef, mode]);
+
+  if (!connectorDef) {
+    return (
+      <Alert variant="destructive">
+        <AlertCircle className="size-4" />
+        <AlertDescription>
+          Connector definition not found for {connectorType.name}
+        </AlertDescription>
+      </Alert>
+    );
+  }
 
   /**
    * Decide whether a given field is currently visible based on

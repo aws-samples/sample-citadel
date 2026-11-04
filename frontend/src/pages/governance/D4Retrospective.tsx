@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- co-exports helpers/types alongside component */
 /**
  * Governance D4 defense-in-depth retrospective
  *

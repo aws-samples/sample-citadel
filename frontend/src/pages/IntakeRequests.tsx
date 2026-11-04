@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- co-exports helpers/types alongside component */
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { Plus, FolderOpen } from 'lucide-react';
 import { Button } from '../components/ui/button';
