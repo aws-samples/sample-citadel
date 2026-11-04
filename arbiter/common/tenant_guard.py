@@ -7,8 +7,13 @@ CLOSED — the record is rejected, a structured log is emitted, and a best-effor
 CloudWatch metric is published.
 
 System records:
-    Records with orgId == '' (empty string) are platform-seeded / shared.
+    Records with orgId == '' (empty string, DEPRECATED) or
+    orgId == 'All Organizations' are platform-seeded / shared.
     Callers that need these records set ``allow_system=True``.
+
+    The empty-string convention is retained for backward compatibility
+    with records written before the 'All Organizations' sentinel was
+    adopted. New code paths MUST write 'All Organizations'.
 """
 from __future__ import annotations
 
@@ -20,6 +25,15 @@ logger = logging.getLogger(__name__)
 _METRIC_NAMESPACE = "Citadel/Arbiter"
 _METRIC_NAME = "TenantOrgMismatch"
 _ORG_UNKNOWN_METRIC = "OrgUnknownRecord"
+
+# System/platform-shared sentinel. Records with this orgId (or the
+# deprecated empty-string convention) pass the tenant guard when
+# ``allow_system=True``.
+ALL_ORGS = "All Organizations"
+
+def _is_system_org(org_value: str) -> bool:
+    """True if *org_value* is a recognised system/platform-shared sentinel."""
+    return org_value == "" or org_value == ALL_ORGS
 
 
 class OrgMismatchError(Exception):
@@ -90,8 +104,8 @@ def require_same_org(
         _emit_metric(_ORG_UNKNOWN_METRIC, component, record_id)
         raise OrgMismatchError("<absent>", bound_org, record_id, component)
 
-    # System / shared records (empty-string convention)
-    if allow_system and record_org == "":
+    # System / shared records (empty-string convention or 'All Organizations')
+    if allow_system and _is_system_org(record_org):
         return
 
     if record_org != bound_org:
@@ -150,7 +164,7 @@ def filter_by_org(
             continue
         if item_org == bound_org:
             result.append(item)
-        elif allow_system and item_org == "":
+        elif allow_system and _is_system_org(item_org):
             result.append(item)
         else:
             logger.warning(
