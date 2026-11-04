@@ -610,7 +610,7 @@ export const SEED_BLUEPRINTS: SeedBlueprint[] = [
  * array — never merged into SEED_BLUEPRINTS unconditionally — so a
  * production deploy (SMOKE_FIXTURES_ENABLED unset) never seeds this row.
  */
-const SMOKE_BLUEPRINTS: SeedBlueprint[] = [
+export const SMOKE_BLUEPRINTS: SeedBlueprint[] = [
   {
     name: "Idempotency Smoke Workflow",
     description:
@@ -634,6 +634,16 @@ const SMOKE_BLUEPRINTS: SeedBlueprint[] = [
     },
   },
 ];
+
+/**
+ * The deterministic workflowId set for ALL seeded blueprints (production +
+ * smoke). Derived from the same `deterministicId(name)` used at seed time,
+ * so the reconcile script can import this instead of hard-coding IDs.
+ */
+export const SEEDED_BLUEPRINT_IDS: ReadonlySet<string> = new Set([
+  ...SEED_BLUEPRINTS.map((bp) => deterministicId(bp.name)),
+  ...SMOKE_BLUEPRINTS.map((bp) => deterministicId(bp.name)),
+]);
 
 /** Send CloudFormation Custom Resource response. */
 async function sendCfnResponse(

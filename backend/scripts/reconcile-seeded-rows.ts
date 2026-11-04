@@ -4,6 +4,10 @@
  * modules to scoped keys, and rewrites blueprint definitions to
  * reference agents by recordId instead of friendly name.
  *
+ * The orgId 'Default' → 'system' rewrite applies ONLY to seeded
+ * blueprints (identified via SEEDED_BLUEPRINT_IDS from seed-blueprints).
+ * User-created blueprints are never touched by the org rewrite.
+ *
  * Seeded agents are identified by `createdBy = 'seedConfig'` on the
  * recordId-keyed row. Alternatively, pass `--names` to provide an
  * explicit list.
@@ -12,10 +16,14 @@
  *   npx ts-node --project tsconfig.scripts.json scripts/reconcile-seeded-rows.ts \
  *     --table <AGENT_CONFIG_TABLE> --workflows-table <WORKFLOWS_TABLE> \
  *     --bucket <AGENT_BUCKET_NAME> [--dry-run] [--apply] \
- *     [--org-sentinel 'All Organizations'] [--names demo-echo-agent,fabricator]
+ *     [--org-sentinel 'All Organizations'] [--names demo-echo-agent,fabricator] \
+ *     [--revert-nonseeded-org <org>]
  *
  * --dry-run (default): scans and reports planned changes; no writes.
  * --apply: performs the corrective writes. Idempotent — safe to re-run.
+ * --revert-nonseeded-org <org>: for blueprints NOT in the seeded set whose
+ *   orgId is currently 'system', set orgId to <org>. Dry-run default.
+ *   Idempotent. Prints each affected row.
  */
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
@@ -33,6 +41,7 @@ import {
   REGISTRY_STATUS_FIELD,
   REGISTRY_RECORD_ID_FIELD,
 } from "../src/lambda/approval-cache-fields";
+import { SEEDED_BLUEPRINT_IDS } from "../src/lambda/seed-blueprints";
 
 // ---------------------------------------------------------------------------
 // Types (exported for tests)
@@ -44,6 +53,7 @@ export interface ReconcileSummary {
   twinsCollapsed: number;
   s3Copies: number;
   blueprintsRewritten: number;
+  blueprintsReverted: number;
   conflicts: number;
   errors: number;
 }
@@ -92,6 +102,7 @@ export interface ParsedArgs {
   dryRun: boolean;
   orgSentinel: string;
   names: string[] | null;
+  revertNonseededOrg: string | null;
 }
 
 export function parseArgs(argv: string[]): ParsedArgs {
@@ -101,6 +112,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let dryRun = true;
   let orgSentinel = DEFAULT_ORG_SENTINEL;
   let names: string[] | null = null;
+  let revertNonseededOrg: string | null = null;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -118,6 +130,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       orgSentinel = argv[++i];
     } else if (arg === "--names") {
       names = argv[++i].split(",").map((n) => n.trim());
+    } else if (arg === "--revert-nonseeded-org") {
+      revertNonseededOrg = argv[++i];
     }
   }
 
@@ -125,7 +139,15 @@ export function parseArgs(argv: string[]): ParsedArgs {
   if (!workflowsTable)
     throw new Error("--workflows-table <workflows table> is required");
   if (!bucket) throw new Error("--bucket <agent bucket> is required");
-  return { table, workflowsTable, bucket, dryRun, orgSentinel, names };
+  return {
+    table,
+    workflowsTable,
+    bucket,
+    dryRun,
+    orgSentinel,
+    names,
+    revertNonseededOrg,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -283,6 +305,7 @@ export interface ReconcileOptions {
   dryRun: boolean;
   orgSentinel: string;
   names: string[] | null;
+  revertNonseededOrg: string | null;
   docClient: DynamoDBDocumentClient;
   s3Client: S3Client;
 }
@@ -307,6 +330,7 @@ export async function runReconcile(
     twinsCollapsed: 0,
     s3Copies: 0,
     blueprintsRewritten: 0,
+    blueprintsReverted: 0,
     conflicts: 0,
     errors: 0,
   };
@@ -530,6 +554,18 @@ export async function runReconcile(
     );
   }
 
+  // Step 5: Revert non-seeded blueprints whose orgId was incorrectly set to 'system'
+  if (opts.revertNonseededOrg) {
+    await revertNonseededBlueprints(
+      workflowsTable,
+      opts.revertNonseededOrg,
+      dryRun,
+      docClient,
+      summary,
+      planned,
+    );
+  }
+
   return { summary, planned };
 }
 
@@ -599,8 +635,9 @@ async function rewriteBlueprints(
         }
       }
 
-      // Fix orgId from 'Default' to 'system' for seeded blueprints
-      const needsOrgFix = item.orgId === "Default";
+      // Fix orgId from 'Default' to 'system' ONLY for seeded blueprints
+      const isSeeded = SEEDED_BLUEPRINT_IDS.has(workflowId);
+      const needsOrgFix = isSeeded && item.orgId === "Default";
       if (needsOrgFix) changed = true;
 
       if (!changed) continue;
@@ -647,6 +684,96 @@ async function rewriteBlueprints(
         log(
           "info",
           `WOULD REWRITE blueprint: ${item.name as string} (${workflowId})`,
+        );
+      }
+    }
+
+    exclusiveStartKey = page.LastEvaluatedKey as
+      Record<string, NativeAttributeValue> | undefined;
+  } while (exclusiveStartKey);
+}
+
+// ---------------------------------------------------------------------------
+// Revert non-seeded blueprints
+// ---------------------------------------------------------------------------
+
+async function revertNonseededBlueprints(
+  workflowsTable: string,
+  targetOrg: string,
+  dryRun: boolean,
+  docClient: DynamoDBDocumentClient,
+  summary: ReconcileSummary,
+  planned: PlannedChange[],
+): Promise<void> {
+  let exclusiveStartKey: Record<string, NativeAttributeValue> | undefined;
+
+  log("info", `Revert non-seeded blueprints: orgId 'system' → '${targetOrg}'`);
+
+  do {
+    let page;
+    try {
+      page = await docClient.send(
+        new ScanCommand({
+          TableName: workflowsTable,
+          ExclusiveStartKey: exclusiveStartKey,
+          FilterExpression: "isBlueprint = :bp AND orgId = :sys",
+          ExpressionAttributeValues: {
+            ":bp": "true",
+            ":sys": BLUEPRINT_ORG_ID,
+          },
+        }),
+      );
+    } catch (err) {
+      log("error", `Revert blueprint scan failed: ${String(err)}`);
+      summary.errors++;
+      return;
+    }
+
+    for (const item of page.Items ?? []) {
+      const workflowId = item.workflowId as string;
+
+      // Skip seeded blueprints — they should keep orgId 'system'
+      if (SEEDED_BLUEPRINT_IDS.has(workflowId)) continue;
+
+      planned.push({
+        type: "blueprint-rewrite",
+        key: `revert:${workflowId}`,
+        before: {
+          name: item.name,
+          orgId: item.orgId,
+        },
+        after: {
+          orgId: targetOrg,
+        },
+      });
+
+      if (!dryRun) {
+        const updatedItem = {
+          ...item,
+          orgId: targetOrg,
+          updatedAt: new Date().toISOString(),
+        };
+        try {
+          await docClient.send(
+            new PutCommand({ TableName: workflowsTable, Item: updatedItem }),
+          );
+          summary.blueprintsReverted++;
+          log(
+            "info",
+            `REVERTED blueprint orgId: ${item.name as string} (${workflowId}) → '${targetOrg}'`,
+          );
+        } catch (err) {
+          log(
+            "error",
+            `Revert PutItem failed for ${workflowId}: ${String(err)}`,
+          );
+          summary.errors++;
+        }
+      } else {
+        summary.blueprintsReverted++;
+        log(
+          "info",
+          `WOULD REVERT blueprint orgId: ${item.name as string} (${workflowId}) → '${targetOrg}'`,
         );
       }
     }

@@ -34,6 +34,10 @@ import {
   type ReconcileOptions,
   type TwinPair,
 } from "../reconcile-seeded-rows";
+import {
+  deterministicId,
+  SEEDED_BLUEPRINT_IDS,
+} from "../../src/lambda/seed-blueprints";
 
 // ---------------------------------------------------------------------------
 // Stateful fakes
@@ -128,8 +132,10 @@ function makeBlueprint(
   name: string,
   agentIds: string[],
   orgId = "Default",
+  workflowIdOverride?: string,
 ): Record<string, NativeAttributeValue> {
-  const workflowId = `wf-${name.replace(/\s/g, "-").toLowerCase()}`;
+  const workflowId =
+    workflowIdOverride ?? `wf-${name.replace(/\s/g, "-").toLowerCase()}`;
   const nodes = agentIds.map((id, i) => ({
     id: `node-${i + 1}`,
     agentId: id,
@@ -189,12 +195,18 @@ function setupMocksFromFakes(
     const table = tableName === "agents-table" ? agentTable : workflowTable;
     let items = table.getAll();
 
-    // Apply FilterExpression for blueprint scan (simple pattern match)
+    // Apply FilterExpression for blueprint scans (simple pattern match)
     if (input.FilterExpression?.includes("isBlueprint")) {
+      const vals = input.ExpressionAttributeValues ?? {};
+      const allowedOrgIds: string[] = [];
+      if (vals[":sys"]) allowedOrgIds.push(String(vals[":sys"]));
+      if (vals[":def"]) allowedOrgIds.push(String(vals[":def"]));
+
       items = items.filter(
         (item) =>
           item.isBlueprint === "true" &&
-          (item.orgId === "system" || item.orgId === "Default"),
+          (allowedOrgIds.length === 0 ||
+            allowedOrgIds.includes(String(item.orgId ?? ""))),
       );
     }
 
@@ -236,6 +248,7 @@ function makeReconcileOpts(
     dryRun: true,
     orgSentinel: "All Organizations",
     names: null,
+    revertNonseededOrg: null,
     docClient: DynamoDBDocumentClient.from(new DynamoDBClient({})),
     s3Client: new S3Client({}),
     ...overrides,
@@ -628,7 +641,7 @@ describe("reconcile-seeded-rows", () => {
       ).toBe((canonicalAfterFirst.config as Record<string, unknown>).filename);
     });
 
-    test("blueprint orgId 'Default' is fixed to 'system'", async () => {
+    test("blueprint orgId 'Default' is fixed to 'system' for seeded blueprints", async () => {
       const agentTable = new FakeDynamoTable();
       const workflowTable = new FakeDynamoTable();
       const fakeS3 = new FakeS3();
@@ -641,11 +654,15 @@ describe("reconcile-seeded-rows", () => {
         ),
       );
       agentTable.put(makeRecordIdRow("demo-echo-agent", "mjaKkVyqoFGN"));
+
+      // Use the REAL seeded blueprint ID so the org-rewrite filter matches
+      const seededId = deterministicId("Echo Demo Workflow");
       workflowTable.put(
         makeBlueprint(
           "Echo Demo Workflow",
           ["demo-echo-agent", "demo-echo-agent"],
           "Default",
+          seededId,
         ),
       );
 
@@ -655,7 +672,7 @@ describe("reconcile-seeded-rows", () => {
 
       await runReconcile(makeReconcileOpts({ dryRun: false }));
 
-      const bp = workflowTable.get("wf-echo-demo-workflow");
+      const bp = workflowTable.get(seededId);
       expect(bp!.orgId).toBe("system");
     });
   });
@@ -733,6 +750,254 @@ describe("reconcile-seeded-rows", () => {
       const fabricator = agentTable.get("fabricator");
       expect(fabricator!.config).toBeDefined();
       expect(fabricator!._canonicalRecordId).toBeUndefined();
+    });
+  });
+
+  // ── SEEDED_BLUEPRINT_IDS source of truth ─────────────────────
+
+  describe("SEEDED_BLUEPRINT_IDS", () => {
+    test("contains exactly the expected seeded IDs", () => {
+      // The 6 IDs confirmed from the live database
+      const expectedIds = [
+        "ad0cb5d0-1989-f95c-28bd-96ef1c6df5a7", // Echo Demo Workflow
+        "6fdd04e2-089b-013f-515a-f8445381698e", // Conditional Router
+        "041a1913-d7b6-98b3-92f1-f164aa58cb85", // Data Processing Pipeline
+        "c702bbc6-aa85-5076-6ca4-9d9930980399", // Sequential Agent Pipeline
+        "c7fd6c8e-0772-6702-2a1b-3c20b1f30296", // Idempotency Smoke Workflow
+        "ed1012d1-c207-96e2-6793-ce7f0bdf90c7", // Parallel Fan-Out
+      ];
+      expect(SEEDED_BLUEPRINT_IDS.size).toBe(6);
+      for (const id of expectedIds) {
+        expect(SEEDED_BLUEPRINT_IDS.has(id)).toBe(true);
+      }
+    });
+
+    test("deterministicId matches for each known name", () => {
+      expect(deterministicId("Echo Demo Workflow")).toBe(
+        "ad0cb5d0-1989-f95c-28bd-96ef1c6df5a7",
+      );
+      expect(deterministicId("Sequential Agent Pipeline")).toBe(
+        "c702bbc6-aa85-5076-6ca4-9d9930980399",
+      );
+    });
+  });
+
+  // ── Non-seeded blueprint untouched by org rewrite ────────────
+
+  describe("non-seeded blueprint org isolation", () => {
+    test("non-seeded blueprint with orgId Default is NOT rewritten to system", async () => {
+      const agentTable = new FakeDynamoTable();
+      const workflowTable = new FakeDynamoTable();
+      const fakeS3 = new FakeS3();
+
+      agentTable.put(
+        makeNameKeyedRow(
+          "demo-echo-agent",
+          "mjaKkVyqoFGN",
+          "demo_echo_agent.py",
+        ),
+      );
+      agentTable.put(makeRecordIdRow("demo-echo-agent", "mjaKkVyqoFGN"));
+
+      // Seeded blueprint — should get orgId 'system'
+      const seededId = deterministicId("Echo Demo Workflow");
+      workflowTable.put(
+        makeBlueprint(
+          "Echo Demo Workflow",
+          ["demo-echo-agent", "demo-echo-agent"],
+          "Default",
+          seededId,
+        ),
+      );
+
+      // User-created blueprint with a v4 UUID — should stay 'Default'
+      const userBlueprintId = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+      workflowTable.put(
+        makeBlueprint(
+          "My Custom Workflow",
+          ["demo-echo-agent"],
+          "Default",
+          userBlueprintId,
+        ),
+      );
+
+      fakeS3.put("agents/demo_echo_agent.py");
+
+      setupMocksFromFakes(agentTable, workflowTable, fakeS3);
+
+      await runReconcile(makeReconcileOpts({ dryRun: false }));
+
+      // Seeded blueprint gets orgId 'system'
+      const seededBp = workflowTable.get(seededId);
+      expect(seededBp!.orgId).toBe("system");
+
+      // User blueprint keeps orgId 'Default' — NOT rewritten
+      const userBp = workflowTable.get(userBlueprintId);
+      expect(userBp!.orgId).toBe("Default");
+    });
+  });
+
+  // ── Revert non-seeded org ────────────────────────────────────
+
+  describe("--revert-nonseeded-org", () => {
+    test("parseArgs parses --revert-nonseeded-org flag", () => {
+      const result = parseArgs([
+        "--table",
+        "t",
+        "--workflows-table",
+        "w",
+        "--bucket",
+        "b",
+        "--revert-nonseeded-org",
+        "Default",
+      ]);
+      expect(result.revertNonseededOrg).toBe("Default");
+    });
+
+    test("parseArgs defaults revertNonseededOrg to null", () => {
+      const result = parseArgs([
+        "--table",
+        "t",
+        "--workflows-table",
+        "w",
+        "--bucket",
+        "b",
+      ]);
+      expect(result.revertNonseededOrg).toBeNull();
+    });
+
+    test("reverts non-seeded blueprints with orgId system to target org", async () => {
+      const agentTable = new FakeDynamoTable();
+      const workflowTable = new FakeDynamoTable();
+      const fakeS3 = new FakeS3();
+
+      // Seeded blueprint with orgId 'system' — should stay 'system'
+      const seededId = deterministicId("Echo Demo Workflow");
+      workflowTable.put(
+        makeBlueprint(
+          "Echo Demo Workflow",
+          ["demo-echo-agent"],
+          "system",
+          seededId,
+        ),
+      );
+
+      // Non-seeded blueprint with orgId 'system' (the damage) — should revert
+      const userBlueprintId = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+      workflowTable.put(
+        makeBlueprint(
+          "My Custom Workflow",
+          ["demo-echo-agent"],
+          "system",
+          userBlueprintId,
+        ),
+      );
+
+      // Another non-seeded blueprint already at 'Default' — untouched
+      const alreadyDefaultId = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+      workflowTable.put(
+        makeBlueprint(
+          "Already Default Workflow",
+          ["demo-echo-agent"],
+          "Default",
+          alreadyDefaultId,
+        ),
+      );
+
+      setupMocksFromFakes(agentTable, workflowTable, fakeS3);
+
+      const { summary } = await runReconcile(
+        makeReconcileOpts({
+          dryRun: false,
+          revertNonseededOrg: "Default",
+        }),
+      );
+
+      expect(summary.blueprintsReverted).toBe(1);
+      expect(summary.errors).toBe(0);
+
+      // Seeded blueprint untouched — stays 'system'
+      const seededBp = workflowTable.get(seededId);
+      expect(seededBp!.orgId).toBe("system");
+
+      // Non-seeded 'system' blueprint reverted to 'Default'
+      const userBp = workflowTable.get(userBlueprintId);
+      expect(userBp!.orgId).toBe("Default");
+
+      // Already-Default blueprint untouched
+      const defaultBp = workflowTable.get(alreadyDefaultId);
+      expect(defaultBp!.orgId).toBe("Default");
+    });
+
+    test("revert in dry-run makes no writes", async () => {
+      const agentTable = new FakeDynamoTable();
+      const workflowTable = new FakeDynamoTable();
+      const fakeS3 = new FakeS3();
+
+      const userBlueprintId = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+      workflowTable.put(
+        makeBlueprint(
+          "My Custom Workflow",
+          ["demo-echo-agent"],
+          "system",
+          userBlueprintId,
+        ),
+      );
+
+      setupMocksFromFakes(agentTable, workflowTable, fakeS3);
+
+      const { summary } = await runReconcile(
+        makeReconcileOpts({
+          dryRun: true,
+          revertNonseededOrg: "Default",
+        }),
+      );
+
+      expect(summary.blueprintsReverted).toBe(1);
+
+      // Still 'system' — dry-run did not write
+      const bp = workflowTable.get(userBlueprintId);
+      expect(bp!.orgId).toBe("system");
+    });
+
+    test("revert is idempotent — second run is a no-op", async () => {
+      const agentTable = new FakeDynamoTable();
+      const workflowTable = new FakeDynamoTable();
+      const fakeS3 = new FakeS3();
+
+      const userBlueprintId = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+      workflowTable.put(
+        makeBlueprint(
+          "My Custom Workflow",
+          ["demo-echo-agent"],
+          "system",
+          userBlueprintId,
+        ),
+      );
+
+      setupMocksFromFakes(agentTable, workflowTable, fakeS3);
+
+      // First apply
+      await runReconcile(
+        makeReconcileOpts({
+          dryRun: false,
+          revertNonseededOrg: "Default",
+        }),
+      );
+
+      // Reset mocks
+      setupMocksFromFakes(agentTable, workflowTable, fakeS3);
+
+      // Second apply — orgId is already 'Default', scan filter won't match
+      const { summary: summary2 } = await runReconcile(
+        makeReconcileOpts({
+          dryRun: false,
+          revertNonseededOrg: "Default",
+        }),
+      );
+
+      expect(summary2.blueprintsReverted).toBe(0);
+      expect(summary2.errors).toBe(0);
     });
   });
 });
