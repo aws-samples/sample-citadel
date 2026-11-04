@@ -410,6 +410,23 @@ describe("RegistryService CRUD operations", () => {
         ],
         nextToken: undefined,
       });
+      sdkMock
+        .on(GetRegistryRecordCommand)
+        .callsFake((input: { recordId: string }) => ({
+          recordId: input.recordId,
+          name: input.recordId === "agent-1" ? "Agent 1" : "Agent 2",
+          status: input.recordId === "agent-1" ? "APPROVED" : "DRAFT",
+          descriptors: {
+            custom: {
+              data: JSON.stringify({
+                manifest: { name: input.recordId === "agent-1" ? "Agent 1" : "Agent 2" },
+                orgId: "org-1",
+              }),
+            },
+          },
+          createdAt: now,
+          updatedAt: now,
+        }));
 
       const results = await service.listResources("agent");
 
@@ -460,6 +477,21 @@ describe("RegistryService CRUD operations", () => {
           ],
           nextToken: undefined,
         });
+      sdkMock
+        .on(GetRegistryRecordCommand)
+        .callsFake((input: { recordId: string }) => ({
+          recordId: input.recordId,
+          name: input.recordId === "tool-1" ? "Tool 1" : "Tool 2",
+          status: input.recordId === "tool-1" ? "APPROVED" : "DRAFT",
+          descriptors: {
+            custom: {
+              data: JSON.stringify({
+                name: input.recordId === "tool-1" ? "Tool 1" : "Tool 2",
+                orgId: "org-1",
+              }),
+            },
+          },
+        }));
 
       const results = await service.listResources("tool");
 

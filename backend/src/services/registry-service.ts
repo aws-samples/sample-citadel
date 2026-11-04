@@ -1607,6 +1607,7 @@ export class RegistryService {
     const records: RegistryRecord[] = [];
     let nextToken: string | undefined;
     let truncated = false;
+    let droppedCount = 0;
 
     do {
       if (budgetLow()) {
@@ -1636,7 +1637,7 @@ export class RegistryService {
       // order regardless of GET completion order.
       type DetailOutcome =
         | { kind: "full"; record: RegistryRecord }
-        | { kind: "summary" } // GET failed — fall back to the summary shape
+        | { kind: "dropped"; reason: string } // GET failed — excluded to prevent descriptor-less visibility bypass
         | { kind: "filtered" } // wrong type for this listing — drop
         | { kind: "skipped" }; // time budget exhausted — drop (see note above)
       const outcomes: DetailOutcome[] = new Array(summaries.length);
@@ -1650,7 +1651,7 @@ export class RegistryService {
           const rec = summaries[i];
           const recId = rec.recordId ?? "";
           if (!recId) {
-            outcomes[i] = { kind: "summary" };
+            outcomes[i] = { kind: "dropped", reason: "missing_record_id" };
             continue;
           }
           if (budgetLow()) {
@@ -1695,8 +1696,10 @@ export class RegistryService {
             outcomes[i] = typeMatches
               ? { kind: "full", record: full }
               : { kind: "filtered" };
-          } catch {
-            outcomes[i] = { kind: "summary" };
+          } catch (err) {
+            const reason =
+              err instanceof Error ? err.name || err.message : "unknown";
+            outcomes[i] = { kind: "dropped", reason };
           }
         }
       };
@@ -1714,9 +1717,22 @@ export class RegistryService {
           case "full":
             records.push(outcome.record);
             break;
-          case "summary":
-            records.push(this.summaryToRecord(summaries[i]));
+          case "dropped": {
+            const recId = summaries[i].recordId ?? "(unknown)";
+            droppedCount += 1;
+            console.warn(
+              JSON.stringify({
+                level: "WARN",
+                message: "listResources: detail fetch failed — record excluded from results",
+                recordId: recId,
+                reason: outcome.reason,
+                metric: "Citadel/Registry",
+                metricName: "DetailFetchFailed",
+                dimensions: { reason: outcome.reason },
+              }),
+            );
             break;
+          }
           case "filtered":
           case "skipped":
             break;
@@ -1729,6 +1745,19 @@ export class RegistryService {
     if (truncated) {
       console.warn(
         `listResources(${type}): remaining time budget below ${minRemainingTimeMs}ms — returning partial list of ${records.length} records`,
+      );
+    }
+
+    if (droppedCount > 0) {
+      console.warn(
+        JSON.stringify({
+          level: "WARN",
+          message: `listResources(${type}): ${droppedCount} record(s) excluded due to detail-fetch failures`,
+          droppedCount,
+          metric: "Citadel/Registry",
+          metricName: "DetailFetchFailed",
+          metricValue: droppedCount,
+        }),
       );
     }
 

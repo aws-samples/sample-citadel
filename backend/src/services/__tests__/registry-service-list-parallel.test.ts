@@ -180,7 +180,7 @@ describe("RegistryService.listResources — bounded parallel detail fetch", () =
     expect(sdkMock.commandCalls(ListRegistryRecordsCommand)).toHaveLength(1);
   });
 
-  it("falls back to the summary shape when a single GET fails (parallel path preserves the old contract)", async () => {
+  it("excludes records whose detail GET fails instead of returning descriptor-less summaries", async () => {
     sdkMock.on(ListRegistryRecordsCommand).resolves({
       registryRecords: summaries(3),
       nextToken: undefined,
@@ -199,10 +199,103 @@ describe("RegistryService.listResources — bounded parallel detail fetch", () =
 
     const results = await service.listResources("agent");
 
+    // The failed record is excluded entirely — not returned as a descriptor-less summary.
+    expect(results).toHaveLength(2);
+    expect(results.find((r) => r.recordId === "rec-0001")).toBeUndefined();
+    // Successful records still present with full descriptor content.
+    expect(results[0].customDescriptorContent).toBeDefined();
+    expect(results[1].customDescriptorContent).toBeDefined();
+  });
+
+  it("emits structured WARN log with metric info when a detail GET fails", async () => {
+    const warnSpy = jest.spyOn(console, "warn");
+    sdkMock.on(ListRegistryRecordsCommand).resolves({
+      registryRecords: summaries(2),
+      nextToken: undefined,
+    });
+    sdkMock
+      .on(GetRegistryRecordCommand)
+      .callsFake(async (input: { recordId: string }) => {
+        if (input.recordId === "rec-0000") {
+          throw Object.assign(new Error("service down"), {
+            name: "ServiceUnavailableException",
+          });
+        }
+        return agentDetail(input.recordId, "agent-1");
+      });
+
+    await service.listResources("agent");
+
+    const metricLogs = warnSpy.mock.calls
+      .map((args) => {
+        try { return JSON.parse(args[0] as string); } catch { return null; }
+      })
+      .filter((o) => o?.metricName === "DetailFetchFailed");
+
+    // Per-record log
+    const perRecord = metricLogs.find((o: Record<string, unknown>) => o.recordId === "rec-0000");
+    expect(perRecord).toBeDefined();
+    expect(perRecord.reason).toBe("ServiceUnavailableException");
+    expect(perRecord.metric).toBe("Citadel/Registry");
+    expect(perRecord.dimensions).toEqual({ reason: "ServiceUnavailableException" });
+
+    // Summary log with count
+    const summaryLog = metricLogs.find((o: Record<string, unknown>) => o.droppedCount !== undefined);
+    expect(summaryLog).toBeDefined();
+    expect(summaryLog.droppedCount).toBe(1);
+    expect(summaryLog.metricValue).toBe(1);
+  });
+
+  it("preserves order of successful records when some GETs fail", async () => {
+    sdkMock.on(ListRegistryRecordsCommand).resolves({
+      registryRecords: summaries(5),
+      nextToken: undefined,
+    });
+    sdkMock
+      .on(GetRegistryRecordCommand)
+      .callsFake(async (input: { recordId: string }) => {
+        // Fail records at index 1 and 3
+        if (input.recordId === "rec-0001" || input.recordId === "rec-0003") {
+          throw new Error("fail");
+        }
+        await sleep(Math.floor(Math.random() * 10));
+        const idx = Number(input.recordId.slice(4));
+        return agentDetail(input.recordId, `agent-${idx}`);
+      });
+
+    const results = await service.listResources("agent");
+
     expect(results).toHaveLength(3);
-    const fallback = results.find((r) => r.recordId === "rec-0001");
-    expect(fallback).toBeDefined();
-    expect(fallback?.customDescriptorContent).toBeUndefined();
+    expect(results.map((r) => r.recordId)).toEqual([
+      "rec-0000",
+      "rec-0002",
+      "rec-0004",
+    ]);
+  });
+
+  it("successful rows are unaffected when all GETs succeed (no dropped records)", async () => {
+    sdkMock.on(ListRegistryRecordsCommand).resolves({
+      registryRecords: summaries(4),
+      nextToken: undefined,
+    });
+    sdkMock
+      .on(GetRegistryRecordCommand)
+      .callsFake(async (input: { recordId: string }) => {
+        const idx = Number(input.recordId.slice(4));
+        return agentDetail(input.recordId, `agent-${idx}`);
+      });
+
+    const warnSpy = jest.spyOn(console, "warn");
+    const results = await service.listResources("agent");
+
+    expect(results).toHaveLength(4);
+    // No DetailFetchFailed warnings emitted.
+    const metricLogs = warnSpy.mock.calls
+      .map((args) => {
+        try { return JSON.parse(args[0] as string); } catch { return null; }
+      })
+      .filter((o) => o?.metricName === "DetailFetchFailed");
+    expect(metricLogs).toHaveLength(0);
   });
 
   it("runs without a budget callback exactly as before (no guard)", async () => {
