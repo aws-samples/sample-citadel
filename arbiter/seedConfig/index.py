@@ -49,6 +49,21 @@ SMOKE_FIXTURES_ENABLED = bool(os.environ.get('SMOKE_FIXTURES_ENABLED'))
 
 
 # ---------------------------------------------------------------------------
+# Org sentinel and projection-version constants
+# ---------------------------------------------------------------------------
+# The org sentinel for system/platform-shared agents (TENANCY.md §"All
+# Organizations"). Replaces the legacy empty-string convention, which
+# tenant_guard still accepts for backward compat but should no longer be
+# written by new code paths.
+ALL_ORGS = 'All Organizations'
+
+# Must match the PROJECTION_VERSION constant in
+# backend/src/lambda/registry-sync.ts so canonical rows are
+# indistinguishable from projection rows on the read path.
+SEEDER_PROJECTION_VERSION = 1
+
+
+# ---------------------------------------------------------------------------
 # Registry settle + approve constants
 # ---------------------------------------------------------------------------
 # System agents that must be dispatchable (approval-gate readiness) are
@@ -80,6 +95,135 @@ def _resolve_settled_record(registry_id, agent_id, list_agent_records):
         if attempt < _SETTLE_MAX_ATTEMPTS:
             time.sleep(_SETTLE_SLEEP)
     return None
+
+
+def _write_canonical_and_pointer(
+    table,
+    agent_id: str,
+    record_info: dict | None,
+    config: dict,
+    *,
+    description: str,
+    categories: list,
+    state: str = 'active',
+):
+    """Write a canonical recordId-keyed row + thin name-keyed pointer.
+
+    The canonical row carries the FULL config (filename, schema, action) plus
+    projection fields (citadelKind, projectionVersion) so both the worker
+    dispatch and the frontend projection scan find a complete row.
+
+    The thin pointer (agentId = friendly name) carries only linkage +
+    state — no config. The worker resolves through it via
+    ``_canonicalRecordId``.
+
+    Idempotent: plain ``put_item`` overwrites with identical data on re-run.
+    When *record_info* is None (registry unavailable), falls back to the
+    legacy name-keyed full-config row (the pre-canonical-row path).
+    """
+    from datetime import datetime, timezone
+
+    if record_info is None or record_info.get('recordId') is None:
+        # Registry unavailable — fall back to legacy name-keyed row with
+        # full config (same shape as before this change). No canonical row.
+        legacy_item = {
+            'agentId': agent_id,
+            'config': config,
+            'state': state,
+            'categories': categories,
+            'orgId': ALL_ORGS,
+        }
+        table.put_item(Item=legacy_item)
+        return
+
+    record_id = record_info['recordId']
+    status = record_info.get('status')
+    created_at = record_info.get('createdAt')
+    now = datetime.now(timezone.utc).isoformat()
+
+    manifest = {
+        'name': agent_id,
+        'description': description,
+        'version': 1,
+        'tools': [],
+    }
+
+    # --- Canonical row (agentId = recordId) ---
+    canonical = {
+        'agentId': record_id,
+        'name': agent_id,
+        'config': config,
+        'state': state,
+        'categories': categories,
+        'citadelKind': 'agent',
+        'projectionVersion': SEEDER_PROJECTION_VERSION,
+        'projectedAt': now,
+        'orgId': ALL_ORGS,
+        'manifest': manifest,
+        'createdBy': 'seedConfig',
+        'icon': '',
+        'description': description,
+    }
+    if status is not None:
+        canonical['registryStatus'] = status
+    canonical['registryRecordId'] = record_id
+    if created_at is not None:
+        canonical['createdAt'] = created_at
+
+    table.put_item(Item=canonical)
+    print(
+        f"Wrote canonical row agentId={record_id} for {agent_id} "
+        f"(orgId={ALL_ORGS}, projVer={SEEDER_PROJECTION_VERSION})"
+    )
+
+    # --- Thin pointer (agentId = friendly name) ---
+    pointer = {
+        'agentId': agent_id,
+        '_canonicalRecordId': record_id,
+        'state': state,
+        'orgId': ALL_ORGS,
+    }
+    if status is not None:
+        pointer['registryStatus'] = status
+    pointer['registryRecordId'] = record_id
+
+    table.put_item(Item=pointer)
+    print(f"Wrote thin pointer agentId={agent_id} → {record_id}")
+
+
+def _copy_s3_to_scoped_key(s3_client, bucket, module_filename, record_id):
+    """Ensure agents/{recordId}/{basename} exists in S3.
+
+    Copies from the legacy flat key ``agents/{basename}`` if the scoped
+    key does not exist yet (CopyObject from same bucket). Idempotent:
+    put_object with the same body is a no-op in effect.
+    """
+    basename = os.path.basename(module_filename)
+    scoped_key = f'agents/{record_id}/{basename}'
+    legacy_key = f'agents/{basename}'
+    try:
+        s3_client.head_object(Bucket=bucket, Key=scoped_key)
+        print(f"Scoped key {scoped_key} already exists — skipping copy")
+    except ClientError as exc:
+        error_code = exc.response.get('Error', {}).get('Code', '')
+        if error_code in ('404', 'NoSuchKey'):
+            try:
+                s3_client.copy_object(
+                    Bucket=bucket,
+                    CopySource={'Bucket': bucket, 'Key': legacy_key},
+                    Key=scoped_key,
+                )
+                print(f"Copied {legacy_key} → {scoped_key}")
+            except ClientError as copy_exc:
+                print(
+                    f"WARNING: copy_object {legacy_key} → {scoped_key} "
+                    f"failed: {copy_exc} — scoped key not available"
+                )
+        else:
+            print(
+                f"WARNING: head_object {scoped_key} failed with "
+                f"{error_code} — skipping scoped-key check"
+            )
 
 
 def _seed_agent_registry_record(agent_id, description, module_filename, worker_queue_url):
@@ -220,7 +364,7 @@ def _seed_agent_registry_record(agent_id, description, module_filename, worker_q
         'manifest': manifest,
         'config': config,
         'createdBy': 'seedConfig',
-        'orgId': '',
+        'orgId': 'All Organizations',
     }
 
     client = boto3.client('agent-registry-control')
@@ -407,9 +551,14 @@ def _seed_smoke_idempotency_agent(table, worker_queue_url, agent_bucket):
         SMOKE_IDEMPOTENCY_AGENT_ID, SMOKE_IDEMPOTENCY_DESCRIPTION,
         SMOKE_IDEMPOTENCY_MODULE_FILENAME, worker_queue_url,
     )
-    _stamp_registry_linkage(smoke_agent, smoke_record)
 
-    table.put_item(Item=smoke_agent)
+    # Canonical recordId-keyed row + thin name-keyed pointer.
+    _write_canonical_and_pointer(
+        table, SMOKE_IDEMPOTENCY_AGENT_ID, smoke_record,
+        smoke_agent['config'],
+        description=SMOKE_IDEMPOTENCY_DESCRIPTION,
+        categories=smoke_agent['categories'],
+    )
     print(
         f"Seeded agent: {SMOKE_IDEMPOTENCY_AGENT_ID} (smoke fixture) with "
         f"queue: {worker_queue_url}"
@@ -431,6 +580,12 @@ def _seed_smoke_idempotency_agent(table, worker_queue_url, agent_bucket):
             f"Uploaded smoke-idempotency module to "
             f"s3://{agent_bucket}/agents/{SMOKE_IDEMPOTENCY_MODULE_FILENAME}"
         )
+        # Copy to scoped key agents/{recordId}/{basename} for canonical dispatch.
+        if smoke_record and smoke_record.get('recordId'):
+            _copy_s3_to_scoped_key(
+                s3, agent_bucket, SMOKE_IDEMPOTENCY_MODULE_FILENAME,
+                smoke_record['recordId'],
+            )
     else:
         print(
             "WARNING: AGENT_BUCKET_NAME not set — skipping smoke-idempotency "
@@ -494,9 +649,14 @@ def handler(event, context):
             FABRICATOR_AGENT_ID, FABRICATOR_DESCRIPTION, '',
             fabricator_queue_url,
         )
-        _stamp_registry_linkage(fabricator_agent, fabricator_record)
 
-        table.put_item(Item=fabricator_agent)
+        # Canonical recordId-keyed row + thin name-keyed pointer.
+        _write_canonical_and_pointer(
+            table, FABRICATOR_AGENT_ID, fabricator_record,
+            fabricator_agent['config'],
+            description=FABRICATOR_DESCRIPTION,
+            categories=fabricator_agent['categories'],
+        )
         print(f"Seeded agent: fabricator with queue: {fabricator_queue_url}")
 
         # ------------------------------------------------------------------
@@ -539,9 +699,14 @@ def handler(event, context):
         # single put_item. Non-fatal: any denial or unavailability is caught
         # inside the helper and only lowers registry_seeded.
         echo_record = _seed_demo_agent_registry_record(worker_queue_url)
-        _stamp_registry_linkage(echo_agent, echo_record)
 
-        table.put_item(Item=echo_agent)
+        # Canonical recordId-keyed row + thin name-keyed pointer.
+        _write_canonical_and_pointer(
+            table, DEMO_ECHO_AGENT_ID, echo_record,
+            echo_agent['config'],
+            description=DEMO_ECHO_DESCRIPTION,
+            categories=echo_agent['categories'],
+        )
         print(f"Seeded agent: {DEMO_ECHO_AGENT_ID} with queue: {worker_queue_url}")
 
         registry_seeded = _registry_seeded(echo_record)
@@ -570,6 +735,13 @@ def handler(event, context):
                 f"Uploaded echo module to "
                 f"s3://{agent_bucket}/agents/{DEMO_ECHO_MODULE_FILENAME}"
             )
+            # Copy to scoped key agents/{recordId}/{basename} for the
+            # canonical-row dispatch path.
+            if echo_record and echo_record.get('recordId'):
+                _copy_s3_to_scoped_key(
+                    s3, agent_bucket, DEMO_ECHO_MODULE_FILENAME,
+                    echo_record['recordId'],
+                )
         else:
             print(
                 "WARNING: AGENT_BUCKET_NAME not set — skipping echo module "
