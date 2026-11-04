@@ -235,12 +235,21 @@ class TestRegistryRecordCreated:
             registry_env=True, existing_records=[],
             registry_client=client,
         )
-        assert mock_table.put_item.call_count == 5
+        # 2 agents × 2 rows each (canonical + pointer) + 3 governance = 7
+        assert mock_table.put_item.call_count == 7
         items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
-        echo = [i for i in items if i.get("agentId") == "demo-echo-agent"]
-        assert len(echo) == 1
-        assert echo[0]["state"] == "active"
-        assert echo[0]["config"]["filename"] == "demo_echo_agent.py"
+        # The canonical row carries full config; the pointer does not.
+        record_id = "abc123def456"
+        canonical = [i for i in items if i.get("agentId") == record_id
+                     and i.get("name") == "demo-echo-agent"]
+        assert len(canonical) == 1
+        assert canonical[0]["state"] == "active"
+        assert canonical[0]["config"]["filename"] == "demo_echo_agent.py"
+        # The pointer row exists with no config
+        pointer = [i for i in items if i.get("agentId") == "demo-echo-agent"]
+        assert len(pointer) == 1
+        assert "_canonicalRecordId" in pointer[0]
+        assert "config" not in pointer[0]
 
 
 class TestRegistryLinkageStamped:
@@ -255,10 +264,17 @@ class TestRegistryLinkageStamped:
             registry_client=client,
         )
         items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
-        echo = [i for i in items if i.get("agentId") == "demo-echo-agent"][0]
-        assert echo["registryStatus"] == "APPROVED"
-        assert echo["registryRecordId"] == "echo-rec-001"
-        assert echo["createdAt"] == "2026-09-29T12:00:00Z"
+        # Canonical row is keyed by recordId and carries linkage fields
+        canonical = [i for i in items if i.get("agentId") == "echo-rec-001"
+                     and i.get("name") == "demo-echo-agent"]
+        assert len(canonical) == 1
+        assert canonical[0]["registryStatus"] == "APPROVED"
+        assert canonical[0]["registryRecordId"] == "echo-rec-001"
+        assert canonical[0]["createdAt"] == "2026-09-29T12:00:00Z"
+        # Pointer also carries registryStatus
+        pointer = [i for i in items if i.get("agentId") == "demo-echo-agent"]
+        assert len(pointer) == 1
+        assert pointer[0]["registryStatus"] == "APPROVED"
 
     def test_fabricator_carries_linkage_fields(self):
         client = _make_registry_client(
@@ -269,10 +285,12 @@ class TestRegistryLinkageStamped:
             registry_client=client,
         )
         items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
-        fab = [i for i in items if i.get("agentId") == "fabricator"][0]
-        assert fab["registryStatus"] == "APPROVED"
-        assert fab["registryRecordId"] == "fab-rec-001"
-        assert fab["createdAt"] == "2026-09-29T12:00:00Z"
+        canonical = [i for i in items if i.get("agentId") == "fab-rec-001"
+                     and i.get("name") == "fabricator"]
+        assert len(canonical) == 1
+        assert canonical[0]["registryStatus"] == "APPROVED"
+        assert canonical[0]["registryRecordId"] == "fab-rec-001"
+        assert canonical[0]["createdAt"] == "2026-09-29T12:00:00Z"
 
     def test_linkage_from_existing_approved_record(self):
         """When a record already exists as APPROVED, stamp that status."""
@@ -288,10 +306,13 @@ class TestRegistryLinkageStamped:
             registry_client=client,
         )
         items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
-        echo = [i for i in items if i.get("agentId") == "demo-echo-agent"][0]
-        assert echo["registryStatus"] == "APPROVED"
-        assert echo["registryRecordId"] == "approved-001"
-        assert echo["createdAt"] == "2026-01-01T00:00:00Z"
+        # Canonical row keyed by approved-001
+        canonical = [i for i in items if i.get("agentId") == "approved-001"
+                     and i.get("name") == "demo-echo-agent"]
+        assert len(canonical) == 1
+        assert canonical[0]["registryStatus"] == "APPROVED"
+        assert canonical[0]["registryRecordId"] == "approved-001"
+        assert canonical[0]["createdAt"] == "2026-01-01T00:00:00Z"
 
     def test_registry_denied_leaves_linkage_absent(self):
         """When registry is unavailable, the three linkage fields are absent."""
@@ -398,7 +419,7 @@ class TestIdempotency:
         # Pre-existing DRAFT system agents still get submitted for approval
         assert client.submit_registry_record_for_approval.call_count == 2
         # DDB seeding unchanged.
-        assert mock_table.put_item.call_count == 5
+        assert mock_table.put_item.call_count == 7
 
     def test_name_match_is_exact(self):
         """A prefix-similar record must not suppress the create."""
@@ -659,12 +680,19 @@ class TestSmokeLinkage:
 
         assert mock_send.call_args[0][2] == "SUCCESS"
         items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
-        smoke = [i for i in items
-                 if i.get("agentId") == "smoke-idempotency-agent"][0]
-        # Smoke stays DRAFT — not a system agent, no submit
-        assert smoke["registryStatus"] == "DRAFT"
-        assert smoke["registryRecordId"] == "smoke-rec-001"
-        assert smoke["createdAt"] == "2026-09-30T01:00:00Z"
+        # Canonical row is keyed by recordId
+        smoke_canonical = [i for i in items
+                           if i.get("agentId") == "smoke-rec-001"
+                           and i.get("name") == "smoke-idempotency-agent"]
+        assert len(smoke_canonical) == 1
+        assert smoke_canonical[0]["registryStatus"] == "DRAFT"
+        assert smoke_canonical[0]["registryRecordId"] == "smoke-rec-001"
+        assert smoke_canonical[0]["createdAt"] == "2026-09-30T01:00:00Z"
+        # Pointer row
+        smoke_pointer = [i for i in items
+                         if i.get("agentId") == "smoke-idempotency-agent"]
+        assert len(smoke_pointer) == 1
+        assert smoke_pointer[0]["_canonicalRecordId"] == "smoke-rec-001"
         # No create or submit for smoke (existing record)
         # (fabricator+echo also exist so no create calls at all)
         client.create_registry_record.assert_not_called()

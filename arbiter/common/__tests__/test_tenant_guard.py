@@ -6,6 +6,7 @@ import pytest
 from hypothesis import given, strategies as st, assume
 
 from common.tenant_guard import (
+    ALL_ORGS,
     OrgMismatchError,
     filter_by_org,
     require_same_org,
@@ -23,6 +24,16 @@ class TestRequireSameOrgMatch:
     def test_system_record_passes_when_allow_system(self):
         record = {"agentId": "echo", "orgId": ""}
         require_same_org(record, "org-a", allow_system=True, component="test")
+
+    def test_all_organizations_passes_when_allow_system(self):
+        """The 'All Organizations' sentinel is system-shared."""
+        record = {"agentId": "echo", "orgId": ALL_ORGS}
+        require_same_org(record, "org-a", allow_system=True, component="test")
+
+    def test_all_organizations_rejected_when_allow_system_false(self):
+        record = {"agentId": "echo", "orgId": ALL_ORGS}
+        with pytest.raises(OrgMismatchError):
+            require_same_org(record, "org-a", allow_system=False, component="test")
 
     def test_system_record_rejected_when_allow_system_false(self):
         record = {"agentId": "echo", "orgId": ""}
@@ -105,6 +116,23 @@ class TestFilterByOrg:
         result = filter_by_org(items, "org-a", allow_system=True, component="test")
         assert len(result) == 2
 
+    def test_includes_all_organizations_when_allowed(self):
+        items = [
+            {"agentId": "a1", "orgId": "org-a"},
+            {"agentId": "sys", "orgId": ALL_ORGS},
+        ]
+        result = filter_by_org(items, "org-a", allow_system=True, component="test")
+        assert len(result) == 2
+
+    def test_excludes_all_organizations_when_not_allowed(self):
+        items = [
+            {"agentId": "a1", "orgId": "org-a"},
+            {"agentId": "sys", "orgId": ALL_ORGS},
+        ]
+        result = filter_by_org(items, "org-a", allow_system=False, component="test")
+        assert len(result) == 1
+        assert result[0]["agentId"] == "a1"
+
     def test_excludes_system_when_not_allowed(self):
         items = [
             {"agentId": "a1", "orgId": "org-a"},
@@ -137,12 +165,13 @@ def test_filter_never_returns_another_orgs_record(org_a, org_b, n_a, n_b, n_sys)
         [{"agentId": f"a{i}", "orgId": org_a} for i in range(n_a)]
         + [{"agentId": f"b{i}", "orgId": org_b} for i in range(n_b)]
         + [{"agentId": f"sys{i}", "orgId": ""} for i in range(n_sys)]
+        + [{"agentId": f"allorg{i}", "orgId": ALL_ORGS} for i in range(n_sys)]
     )
     filtered = filter_by_org(items, org_a, allow_system=True, component="test")
     for item in filtered:
-        assert item["orgId"] in (org_a, ""), (
+        assert item["orgId"] in (org_a, "", ALL_ORGS), (
             f"filter_by_org returned item with org={item['orgId']!r}, "
-            f"expected org_a={org_a!r} or system ('')"
+            f"expected org_a={org_a!r} or system (''/'{ALL_ORGS}')"
         )
 
 

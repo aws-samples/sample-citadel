@@ -1238,6 +1238,81 @@ async function emitNameKeyCollisionMetric(
 }
 
 /**
+ * Updates ONLY approval/status fields on a seeder-owned canonical row,
+ * never touching config, orgId, projectionVersion, or citadelKind.
+ * Used by the seeder guard in handleGaUpsert to prevent the GA merge path
+ * from overwriting the seeder's full config with a sparse projection.
+ */
+export async function syncSeederOwnedRow(
+  tableName: string,
+  resourceId: string,
+  record: RegistryRecord,
+): Promise<void> {
+  const now = new Date().toISOString();
+  const names: Record<string, string> = {
+    "#updatedAt": "updatedAt",
+  };
+  const values: Record<string, unknown> = {
+    ":updatedAt": now,
+  };
+  const setClauses: string[] = ["#updatedAt = :updatedAt"];
+
+  if (record.status) {
+    names["#registryStatus"] = "registryStatus";
+    values[":registryStatus"] = record.status;
+    setClauses.push("#registryStatus = :registryStatus");
+
+    names["#statusUpdatedAt"] = "statusUpdatedAt";
+    values[":statusUpdatedAt"] = now;
+    setClauses.push("#statusUpdatedAt = :statusUpdatedAt");
+
+    // Map to internal state
+    const mappedState = toInternalStateFromGaStatus(record.status);
+    if (mappedState !== undefined) {
+      names["#state"] = "state";
+      values[":state"] = mappedState;
+      setClauses.push("#state = :state");
+    }
+  }
+
+  if (record.recordId) {
+    names["#registryRecordId"] = "registryRecordId";
+    values[":registryRecordId"] = record.recordId;
+    setClauses.push("#registryRecordId = :registryRecordId");
+  }
+
+  // Decision audit fields from the descriptor
+  const meta = deserializeCustomMetadata(
+    record.customDescriptorContent ?? null,
+    AGENT_METADATA_DEFAULTS,
+  );
+  if (isPresentNonEmpty(meta.decidedBy as string | undefined)) {
+    names["#decidedBy"] = "decidedBy";
+    values[":decidedBy"] = meta.decidedBy;
+    setClauses.push("#decidedBy = :decidedBy");
+  }
+  if (isPresentNonEmpty(meta.decidedAt as string | undefined)) {
+    names["#decidedAt"] = "decidedAt";
+    values[":decidedAt"] = meta.decidedAt;
+    setClauses.push("#decidedAt = :decidedAt");
+  }
+
+  await docClient.send(
+    new UpdateCommand({
+      TableName: tableName,
+      Key: { agentId: resourceId },
+      UpdateExpression: `SET ${setClauses.join(", ")}`,
+      ExpressionAttributeNames: names,
+      ExpressionAttributeValues: values,
+    }),
+  );
+  console.log(
+    `syncSeederOwnedRow: updated seeder-owned row "${resourceId}" ` +
+      `(status=${record.status}, config preserved)`,
+  );
+}
+
+/**
  * GA upsert — MERGE semantics via UpdateCommand. Only SETs fields derived
  * from the hydrated record; never REMOVEs or overwrites attributes with no
  * source in the record (config, createdBy, sourceProjectId when absent),
@@ -1250,6 +1325,40 @@ export async function handleGaUpsert(
   resourceId: string,
   record: RegistryRecord,
 ): Promise<void> {
+  // -----------------------------------------------------------------------
+  // Seeder guard: if the existing recordId-keyed row was written by
+  // seedConfig (createdBy='seedConfig' AND projectionVersion present),
+  // the canonical row already carries full config + projection fields.
+  // Only update approval/status fields — never overwrite config, orgId,
+  // or projection metadata.
+  // -----------------------------------------------------------------------
+  if (resourceType === "agent") {
+    try {
+      const existing = await docClient.send(
+        new GetCommand({
+          TableName: tableName,
+          Key: { agentId: resourceId },
+          ProjectionExpression: "createdBy, projectionVersion",
+        }),
+      );
+      const isSeederOwned =
+        existing.Item?.createdBy === "seedConfig" &&
+        existing.Item?.projectionVersion != null;
+      if (isSeederOwned) {
+        await syncSeederOwnedRow(tableName, resourceId, record);
+        return;
+      }
+    } catch (err) {
+      // Best-effort: if the guard check fails, fall through to the
+      // standard merge-upsert path (which is safe but may overwrite
+      // config with a sparse projection).
+      console.warn(
+        `handleGaUpsert: seeder-guard check failed for "${resourceId}" (falling through):`,
+        err,
+      );
+    }
+  }
+
   const fields = buildGaMergeFields(resourceType, record);
   const names: Record<string, string> = {};
   const values: Record<string, unknown> = {};
