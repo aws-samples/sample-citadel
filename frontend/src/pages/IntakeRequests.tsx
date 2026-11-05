@@ -8,7 +8,6 @@ import { ProjectCard } from '../components/ProjectCard';
 import { PipelineStatsCards } from '../components/PipelineStatsCards';
 import { AppBuilderWizard } from './AppBuilderWizard';
 import { projectService, type Project } from '../services';
-import { subscribeToProjectUpdates } from '../services/projectService';
 import { PageContainer } from '../components/PageContainer';
 import { cn } from '../components/ui/utils';
 import { filterProjects, getFilterCounts, FILTER_TABS, type FilterTab } from './intakeFilters';
@@ -39,28 +38,13 @@ export function IntakeRequests() {
   );
 
   // Track the latest updatedAt timestamp to detect changes efficiently.
-  // TODO: Replace polling with GraphQL subscriptions (onCreateProject/onUpdateProject/onDeleteProject)
-  // when AppSync subscription support is available on the backend.
   const lastUpdatedAtRef = useRef<string>('');
   const lastCountRef = useRef<number>(-1);
 
   useEffect(() => {
     loadProjects();
 
-    // Real-time updates via AppSync subscriptions
-    const unsubscribe = subscribeToProjectUpdates((project: any) => {
-      setProjects(prev => {
-        const idx = prev.findIndex(p => p.id === project.id);
-        if (idx >= 0) {
-          const updated = [...prev];
-          updated[idx] = { ...updated[idx], ...project };
-          return updated;
-        }
-        return [project, ...prev];
-      });
-    });
-
-    // Fallback: 30-second polling if subscription fails
+    // Poll every 30 seconds while on the list view.
     const interval = setInterval(() => {
       if (subView === 'list') {
         loadProjects(true);
@@ -68,7 +52,6 @@ export function IntakeRequests() {
     }, 30000);
 
     return () => {
-      unsubscribe();
       clearInterval(interval);
     };
   }, [subView]);

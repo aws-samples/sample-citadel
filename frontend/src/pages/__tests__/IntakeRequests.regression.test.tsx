@@ -63,14 +63,10 @@ const mockProjects = [
   { id: 'p3', name: 'Completed Project', status: 'COMPLETED', createdAt: '2025-01-03T00:00:00Z', updatedAt: '2025-01-03T00:00:00Z' },
 ];
 
-const mockUnsubscribe = jest.fn();
 jest.mock('@/services', () => ({
   projectService: {
     listProjects: jest.fn().mockResolvedValue(mockProjects),
   },
-}));
-jest.mock('@/services/projectService', () => ({
-  subscribeToProjectUpdates: jest.fn(() => mockUnsubscribe),
 }));
 
 import { IntakeRequests } from '../IntakeRequests';
@@ -143,16 +139,6 @@ describe('IntakeRequests page — regression', () => {
 
     await waitFor(() => {
       expect(screen.getByTestId('project-workspace')).toBeInTheDocument();
-    });
-  });
-
-  test('subscribes to project updates on mount', async () => {
-    jest.useRealTimers();
-    const { subscribeToProjectUpdates } = require('@/services/projectService');
-    render(<IntakeRequests />);
-
-    await waitFor(() => {
-      expect(subscribeToProjectUpdates).toHaveBeenCalled();
     });
   });
 
