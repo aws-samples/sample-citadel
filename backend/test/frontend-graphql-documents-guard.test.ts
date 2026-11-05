@@ -141,11 +141,8 @@ const PRE_EXISTING_DRIFT: ReadonlySet<string> = new Set([
   // integrationServiceBackend.ts selects `targetStatus` which does not exist.
   "frontend/src/services/integrationServiceBackend.ts:CreateIntegration",
   "frontend/src/services/integrationServiceBackend.ts:ConnectIntegration",
-  // projectService.ts: deleteProject mutation and onCreateProject /
-  // onUpdateProject subscriptions do not exist in the backend schema.
+  // projectService.ts: deleteProject mutation does not exist in the backend schema.
   "frontend/src/services/projectService.ts:DeleteProject",
-  "frontend/src/services/projectService.ts:OnCreateProject",
-  "frontend/src/services/projectService.ts:OnUpdateProject",
 ]);
 
 // ---------------------------------------------------------------------------
