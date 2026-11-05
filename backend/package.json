@@ -28,7 +28,8 @@
     "backfill:org-name-reservations": "ts-node scripts/backfill-org-name-reservations.ts",
     "backfill:registry-status": "ts-node scripts/backfill-registry-status.ts",
     "backfill:user-org-membership": "ts-node scripts/backfill-user-org-membership.ts",
-    "audit:cognito-custom-attributes": "ts-node scripts/audit-cognito-custom-attributes.ts"
+    "audit:cognito-custom-attributes": "ts-node scripts/audit-cognito-custom-attributes.ts",
+    "smoke": "node scripts/smoke/deployed-smoke.mjs"
   },
   "dependencies": {
     "@aws-cdk/aws-bedrock-agentcore-alpha": "^2.273.0-alpha.0",
@@ -94,6 +95,7 @@
     "@types/jest": "^30.0.0",
     "@types/jsonwebtoken": "^9.0.2",
     "@types/node": "^24.19.2",
+    "@types/ws": "^8.18.2",
     "@typescript-eslint/eslint-plugin": "^8.72.1",
     "@typescript-eslint/parser": "^8.65.0",
     "aws-cdk": "^2.1147.0",
@@ -109,7 +111,8 @@
     "ts-jest": "^29.4.15",
     "ts-node": "^10.9.2",
     "typescript": "^5.1.6",
-    "typescript-eslint": "^8.72.1"
+    "typescript-eslint": "^8.72.1",
+    "ws": "^8.22.1"
   },
   "engines": {
     "node": ">=24.0.0"
