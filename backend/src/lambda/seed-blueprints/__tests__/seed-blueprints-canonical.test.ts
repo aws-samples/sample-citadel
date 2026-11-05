@@ -13,13 +13,21 @@
  */
 
 import { mockClient } from "aws-sdk-client-mock";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
 import type { CloudFormationCustomResourceEvent, Context } from "aws-lambda";
 
+// Mock the low-level client so the module-scope DynamoDBClient never creates
+// a real NodeHttpHandler (whose keep-alive https.Agent crashes on teardown
+// when Jest replaces the https module with the mock below).
+const ddbClientMock = mockClient(DynamoDBClient);
 const ddbMock = mockClient(DynamoDBDocumentClient);
 
+// Mock https.request for CFN response while preserving https.Agent (needed
+// by @smithy/node-http-handler during teardown — see #466).
 const mockHttpsRequest = jest.fn();
 jest.mock("https", () => ({
+  ...jest.requireActual("https"),
   request: (...args: unknown[]) => {
     mockHttpsRequest(...args);
     const req = { on: jest.fn(), write: jest.fn(), end: jest.fn() };
@@ -99,6 +107,8 @@ describe("seed-blueprints — recordId resolution", () => {
 
   afterAll(() => {
     process.env = { ...ORIGINAL_ENV };
+    ddbMock.restore();
+    ddbClientMock.restore();
   });
 
   // ─── SEED_VERSION ──────────────────────────────────────────────

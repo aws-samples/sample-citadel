@@ -10,6 +10,10 @@ import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
 
 import { seedModelCatalog } from "../index";
 
+// Mock the low-level client so the module-scope DynamoDBClient never creates
+// a real NodeHttpHandler with keep-alive sockets, preventing open-handle
+// warnings during teardown.
+const ddbClientMock = mockClient(DynamoDBClient);
 const ddbMock = mockClient(DynamoDBDocumentClient);
 
 const CATALOG_TABLE = "citadel-model-catalog-test";
@@ -22,6 +26,11 @@ function makeDoc(): DynamoDBDocumentClient {
 describe("seed-model-catalog Lambda", () => {
   beforeEach(() => {
     ddbMock.reset();
+  });
+
+  afterAll(() => {
+    ddbMock.restore();
+    ddbClientMock.restore();
   });
 
   test("seeds catalog item with modelKey and attribute_not_exists condition", async () => {
