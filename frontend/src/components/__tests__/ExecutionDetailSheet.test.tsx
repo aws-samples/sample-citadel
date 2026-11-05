@@ -687,7 +687,7 @@ describe('ExecutionDetailSheet — compensation states', () => {
     const dot = within(section).getByRole('button', { name: /node-a/ }).querySelector('[aria-hidden="true"]');
     // pending's dot class is bg-muted-foreground — compensating must use a
     // distinct, non-pending style.
-    expect(dot?.className).not.toMatch(/bg-muted-foreground/);
+    expect(dot?.getAttribute('class')).not.toMatch(/bg-muted-foreground/);
     expect(within(section).getByText(/compensating/i)).toBeInTheDocument();
   });
 });
@@ -716,8 +716,8 @@ describe('ExecutionDetailSheet — unreachable status', () => {
       .querySelector('[aria-hidden="true"]');
     // unreachable must NOT use pending's bg-muted-foreground (full-opacity)
     // — it should use bg-muted-foreground/40 (muted opacity)
-    expect(dot?.className).toMatch(/bg-muted-foreground\/40/);
-    expect(dot?.className).not.toBe('size-2 rounded-full flex-shrink-0 bg-muted-foreground');
+    expect(dot?.getAttribute('class')).toMatch(/bg-muted-foreground\/40/);
+    expect(dot?.getAttribute('class')).not.toBe('size-2 rounded-full flex-shrink-0 bg-muted-foreground');
   });
 });
 

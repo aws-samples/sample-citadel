@@ -488,7 +488,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
   const [editBindingSaving, setEditBindingSaving] = useState(false);
 
   // Bind workflow dialog
-  const { selectedOrganization, canApproveExecutions, loading: orgLoading } = useOrganization();
+  const { canApproveExecutions, loading: orgLoading } = useOrganization();
   const [bindWorkflowDialogOpen, setBindWorkflowDialogOpen] = useState(false);
   const [unboundWorkflows, setUnboundWorkflows] = useState<Array<{ workflowId: string; name: string; status: string }>>([]);
   const [loadingUnboundWorkflows, setLoadingUnboundWorkflows] = useState(false);
@@ -911,8 +911,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
     if (!app) return;
     try {
       setLoadingUnboundWorkflows(true);
-      const orgId = app.orgId || selectedOrganization || 'default';
-      const result = await workflowApiService.listWorkflows(orgId);
+      const result = await workflowApiService.listWorkflows();
       const boundIds = new Set(app.workflowIds || []);
       setUnboundWorkflows(
         (result.items || [])

@@ -31,7 +31,7 @@ const GET_WORKFLOW = `
 `;
 
 const LIST_WORKFLOWS = `
-  query ListWorkflows($orgId: String!, $status: WorkflowStatus) {
+  query ListWorkflows($orgId: String, $status: WorkflowStatus) {
     listWorkflows(orgId: $orgId, status: $status) {
       items {
         workflowId
@@ -288,7 +288,7 @@ class WorkflowApiService {
     return response.getWorkflow;
   }
 
-  async listWorkflows(orgId: string, status?: string) {
+  async listWorkflows(orgId?: string, status?: string) {
     const response = await serverService.query<{ listWorkflows: { items: any[]; nextToken: string | null } }>(
       LIST_WORKFLOWS,
       { orgId, status }

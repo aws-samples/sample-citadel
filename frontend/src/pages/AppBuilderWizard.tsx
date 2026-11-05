@@ -162,7 +162,7 @@ export function AppBuilderWizard({ onComplete, prefill }: AppBuilderWizardProps)
   const loadWorkflows = async () => {
     try {
       setLoadingWorkflows(true);
-      const result = await workflowApiService.listWorkflows(orgId);
+      const result = await workflowApiService.listWorkflows();
       setAvailableWorkflows(
         (result.items || []).map((w: { workflowId: string; name: string; description?: string; status: string }) => ({
           workflowId: w.workflowId,
