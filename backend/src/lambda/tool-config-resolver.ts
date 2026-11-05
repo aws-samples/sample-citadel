@@ -593,6 +593,38 @@ function emitToolListSourceMetric(
 }
 
 /**
+ * Emits a DecisionFallback metric when a legacy row requires a per-item
+ * GetItem to fetch decision metadata (the slow path). Best-effort.
+ */
+function emitDecisionFallbackMetric(count: number): void {
+  if (count === 0) return;
+  cwClient
+    .send(
+      new PutMetricDataCommand({
+        Namespace: "Citadel/Resolvers",
+        MetricData: [
+          {
+            MetricName: "DecisionFallback",
+            Dimensions: [{ Name: "Kind", Value: "tool" }],
+            Value: count,
+            Unit: "Count",
+            Timestamp: new Date(),
+          },
+        ],
+      }),
+    )
+    .catch((err) => {
+      console.error(
+        "emitDecisionFallbackMetric: best-effort metric failed:",
+        err,
+      );
+    });
+  console.info(
+    JSON.stringify({ msg: "decision_fallback", kind: "tool", count }),
+  );
+}
+
+/**
  * Scans the tools cache table for projection rows (attribute_exists(projectionVersion)
  * AND citadelKind = 'tool'), applies org + visibility filters, and maps
  * to the ToolConfig API shape. Returns an empty array when no projection
@@ -730,9 +762,17 @@ export async function listToolConfigsRegistry(
         return !n || !projectionNames.has(n);
       });
 
-      const result = await Promise.all(
-        [...projectionConfigs, ...legacyOnly].map(enrichWithDecision),
-      );
+      // Projection rows already carry decision fields (decidedBy, decidedAt,
+      // statusReason) — written by registry-sync and writeToolProjectionRow.
+      // Only legacy rows that lack projected decision data need the per-item
+      // GetItem fallback via enrichWithDecision (CIT-263).
+      const enrichedLegacy =
+        legacyOnly.length > 0
+          ? await Promise.all(legacyOnly.map(enrichWithDecision))
+          : [];
+      emitDecisionFallbackMetric(legacyOnly.length);
+
+      const result = [...projectionConfigs, ...enrichedLegacy];
       emitToolListSourceMetric("projection", result.length);
       return result;
     }
