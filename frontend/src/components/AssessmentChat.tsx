@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { ArrowLeft, Send, Upload, FileText, X } from 'lucide-react';
+import { ArrowLeft, Send, Upload, FileText, X, RefreshCw, WifiOff, AlertTriangle } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -22,6 +22,8 @@ import {
 import { uploadDocument } from '../services/documentService';
 import { projectService } from '../services/projectService';
 import { DesignProgress } from './DesignProgress';
+import { useTurnState, TurnPhase } from '../hooks/useTurnState';
+import { useSubscriptionHealth } from '../hooks/useSubscriptionHealth';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -41,6 +43,15 @@ interface AssessmentChatProps {
   project: Project;
   onBack: () => void;
   onComplete: () => void;
+}
+
+function convertToUIMessage(msg: ConversationMessage): Message {
+  return {
+    id: msg.id,
+    role: msg.messageType === 'USER_INPUT' ? 'user' : 'assistant',
+    content: msg.message,
+    timestamp: new Date(msg.timestamp),
+  };
 }
 
 export function AssessmentChat({ project, onBack, onComplete }: AssessmentChatProps) {
@@ -64,9 +75,35 @@ export function AssessmentChat({ project, onBack, onComplete }: AssessmentChatPr
     { dimension: 'Commercial', completionPercentage: 0, isComplete: false },
     { dimension: 'Governance', completionPercentage: 0, isComplete: false },
   ]);
-  const [sending, setSending] = useState(false);
+  const [turn, turnActions] = useTurnState();
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const lastSeenTsRef = useRef<string | null>(null);
   const hasInitialMessage = useRef(false);
+
+  // Keep lastSeenTimestamp up to date for subscription health refetch.
+  useEffect(() => {
+    if (messages.length > 0) {
+      const last = messages[messages.length - 1];
+      lastSeenTsRef.current = last.timestamp.toISOString();
+    }
+  }, [messages]);
+
+  const mergeNewMessages = useCallback((newMsgs: ConversationMessage[]) => {
+    setMessages((prev) => {
+      const existingIds = new Set(prev.map((m) => m.id));
+      const fresh = newMsgs
+        .filter((m) => !existingIds.has(m.id))
+        .filter((m) => m.messageType !== 'PROGRESS_UPDATE' && m.messageType !== 'TURN_ACCEPTED')
+        .map(convertToUIMessage);
+      return fresh.length > 0 ? [...prev, ...fresh] : prev;
+    });
+  }, []);
+
+  const { connectionStatus, manualReconnect } = useSubscriptionHealth(
+    project.id,
+    lastSeenTsRef.current,
+    mergeNewMessages,
+  );
 
   const loadAssessmentProgress = useCallback(async () => {
     try {
@@ -210,34 +247,27 @@ export function AssessmentChat({ project, onBack, onComplete }: AssessmentChatPr
     }
   };
 
-  const convertToUIMessage = (msg: ConversationMessage): Message => {
-    return {
-      id: msg.id,
-      role: msg.messageType === 'USER_INPUT' ? 'user' : 'assistant',
-      content: msg.message,
-      timestamp: new Date(msg.timestamp),
-    };
-  };
-
   const addConversationMessage = (msg: ConversationMessage) => {
-    // Handle progress updates (agent is thinking)
-    if (msg.messageType === 'PROGRESS_UPDATE') {
-      setSending(true);
-      return; // Don't add progress updates to message list
+    // TURN_ACCEPTED — not rendered; clears T1, arms T2.
+    if (msg.messageType === 'TURN_ACCEPTED') {
+      turnActions.onAck();
+      return;
     }
 
-    // When we receive an actual response, stop the loading state
+    // PROGRESS_UPDATE — keep thinking visuals; reset T2 soft timer.
+    if (msg.messageType === 'PROGRESS_UPDATE') {
+      turnActions.onProgress();
+      return;
+    }
+
+    // AGENT_RESPONSE — turn complete.
     if (msg.messageType === 'AGENT_RESPONSE') {
-      setSending(false);
-      // Refresh assessment progress after agent response
+      turnActions.onReply();
       loadAssessmentProgress();
     }
 
     setMessages((prev) => {
-      // Avoid duplicates
-      if (prev.some((m) => m.id === msg.id)) {
-        return prev;
-      }
+      if (prev.some((m) => m.id === msg.id)) return prev;
       return [...prev, convertToUIMessage(msg)];
     });
   };
@@ -246,26 +276,31 @@ export function AssessmentChat({ project, onBack, onComplete }: AssessmentChatPr
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
-  const handleSend = async () => {
-    if (!input.trim() || sending) return;
+  const handleSend = async (retryText?: string, retryClientId?: string) => {
+    const messageText = retryText ?? input.trim();
+    if (!messageText) return;
+    // Block new sends while a turn is in progress (but allow retry from timeout states).
+    const busyPhases: TurnPhase[] = ['sending', 'awaitingAck', 'awaitingReply'];
+    if (!retryText && busyPhases.includes(turn.phase)) return;
 
-    const messageText = input.trim();
-    setInput('');
+    const clientMessageId = retryClientId ?? crypto.randomUUID();
+    if (!retryText) setInput('');
+
+    turnActions.markSending(clientMessageId, messageText);
 
     try {
-      await sendMessageToAgent(project.id, 'agent1', messageText);
-      // Message will appear via subscription
-      // Loading state will be set by PROGRESS_UPDATE message from backend
-
-      // Update progress based on message count
-      // const userMessageCount = messages.filter(m => m.role === 'user').length + 1;
-      // const newProgress = Math.min((userMessageCount / 7) * 100, 100);
-      // setProgress(newProgress);
+      await sendMessageToAgent(project.id, 'agent1', messageText, undefined, clientMessageId);
+      turnActions.markSent();
     } catch (error) {
-      console.error('Error sending message:', error);
-      toast.error('Failed to send message. Please try again.');
-      setInput(messageText); // Restore message
-      setSending(false);
+      const errMsg = error instanceof Error ? error.message : 'Failed to send message';
+      turnActions.markFailed(errMsg);
+      if (!retryText) setInput(messageText); // Restore input on first send failure.
+    }
+  };
+
+  const handleRetry = () => {
+    if (turn.pendingText && turn.clientMessageId) {
+      handleSend(turn.pendingText, turn.clientMessageId);
     }
   };
 
@@ -461,12 +496,77 @@ export function AssessmentChat({ project, onBack, onComplete }: AssessmentChatPr
                 );
               })}
 
-              {sending && (
-                <div className="flex justify-start">
+              {/* Turn status: thinking / ack-timeout / reply-timeout / failed */}
+              {(turn.phase === 'sending' || turn.phase === 'awaitingAck' || turn.phase === 'awaitingReply') && (
+                <div className="flex justify-start" data-testid="thinking-indicator">
                   <div className="max-w-[80%] rounded-lg p-4 bg-card border border-border">
                     <div className="flex items-center gap-2">
                       <div className="animate-pulse">Agent is thinking...</div>
                     </div>
+                  </div>
+                </div>
+              )}
+
+              {turn.phase === 'ackTimeout' && (
+                <div className="flex justify-start" data-testid="ack-timeout-banner">
+                  <div className="max-w-[80%] rounded-lg p-4 bg-chart-4/10 border border-chart-4">
+                    <div className="flex items-center gap-2 text-sm">
+                      <AlertTriangle className="size-4 text-chart-4 flex-shrink-0" />
+                      <span>{turn.statusText}</span>
+                      <Button variant="ghost" size="sm" className="ml-auto h-7 px-2 text-xs" onClick={handleRetry}>
+                        <RefreshCw className="size-3 mr-1" /> Retry
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {turn.phase === 'replyTimeout' && (
+                <div className="flex justify-start" data-testid="reply-timeout-banner">
+                  <div className="max-w-[80%] rounded-lg p-4 bg-destructive/10 border border-destructive">
+                    <div className="flex items-center gap-2 text-sm">
+                      <AlertTriangle className="size-4 text-destructive flex-shrink-0" />
+                      <span>{turn.statusText}</span>
+                      <Button variant="ghost" size="sm" className="ml-auto h-7 px-2 text-xs" onClick={handleRetry}>
+                        <RefreshCw className="size-3 mr-1" /> Retry
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {turn.phase === 'failed' && (
+                <div className="flex justify-start" data-testid="send-error-banner">
+                  <div className="max-w-[80%] rounded-lg p-4 bg-destructive/10 border border-destructive">
+                    <div className="flex items-center gap-2 text-sm">
+                      <AlertTriangle className="size-4 text-destructive flex-shrink-0" />
+                      <span>{turn.statusText}</span>
+                      <Button variant="ghost" size="sm" className="ml-auto h-7 px-2 text-xs" onClick={handleRetry}>
+                        <RefreshCw className="size-3 mr-1" /> Retry
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Subscription health banner */}
+              {connectionStatus === 'reconnecting' && (
+                <div className="flex justify-center" data-testid="reconnecting-banner">
+                  <div className="rounded-lg px-3 py-2 bg-chart-4/10 border border-chart-4 text-xs flex items-center gap-2">
+                    <RefreshCw className="size-3 animate-spin" />
+                    <span>Reconnecting…</span>
+                  </div>
+                </div>
+              )}
+
+              {connectionStatus === 'disconnected' && (
+                <div className="flex justify-center" data-testid="disconnected-banner">
+                  <div className="rounded-lg px-3 py-2 bg-destructive/10 border border-destructive text-xs flex items-center gap-2">
+                    <WifiOff className="size-3" />
+                    <span>Connection lost</span>
+                    <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={manualReconnect}>
+                      Reconnect
+                    </Button>
                   </div>
                 </div>
               )}
@@ -488,9 +588,9 @@ export function AssessmentChat({ project, onBack, onComplete }: AssessmentChatPr
                     handleSend();
                   }
                 }}
-                disabled={sending || loading}
+                disabled={turn.phase !== 'idle' && turn.phase !== 'done' || loading}
               />
-              <Button onClick={handleSend} size="icon" disabled={!input.trim() || sending || loading}>
+              <Button onClick={() => handleSend()} size="icon" disabled={!input.trim() || (turn.phase !== 'idle' && turn.phase !== 'done') || loading}>
                 <Send className="size-4" />
               </Button>
             </div>

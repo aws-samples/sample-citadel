@@ -41,7 +41,7 @@ export interface ConversationEvent {
   projectId: string;
   agentId: string;
   message: string;
-  messageType: 'USER_INPUT' | 'AGENT_RESPONSE' | 'SYSTEM_NOTIFICATION' | 'PROGRESS_UPDATE';
+  messageType: 'USER_INPUT' | 'AGENT_RESPONSE' | 'SYSTEM_NOTIFICATION' | 'PROGRESS_UPDATE' | 'TURN_ACCEPTED';
   timestamp: string;
   metadata?: string;
   correlationId?: string;
