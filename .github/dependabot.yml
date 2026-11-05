@@ -19,6 +19,24 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: typescript
         update-types: ["version-update:semver-major"]
+      # lucide-react major requires icon-name audit across all components
+      - dependency-name: lucide-react
+        update-types: ["version-update:semver-major"]
+      # react-resizable-panels major has breaking API changes
+      - dependency-name: react-resizable-panels
+        update-types: ["version-update:semver-major"]
+      # @visx packages must be upgraded together as a coordinated batch
+      - dependency-name: "@visx/shape"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@visx/group"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@visx/responsive"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@visx/scale"
+        update-types: ["version-update:semver-major"]
+      # @types/node major tracks Node LTS; runtime is pinned to Node 24
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
     labels:
       - dependencies
 
@@ -40,6 +58,24 @@ updates:
       - dependency-name: vite
         update-types: ["version-update:semver-major"]
       - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
+      # lucide-react major requires icon-name audit across all components
+      - dependency-name: lucide-react
+        update-types: ["version-update:semver-major"]
+      # react-resizable-panels major has breaking API changes
+      - dependency-name: react-resizable-panels
+        update-types: ["version-update:semver-major"]
+      # @visx packages must be upgraded together as a coordinated batch
+      - dependency-name: "@visx/shape"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@visx/group"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@visx/responsive"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@visx/scale"
+        update-types: ["version-update:semver-major"]
+      # @types/node major tracks Node LTS; runtime is pinned to Node 24
+      - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
     labels:
       - dependencies
@@ -90,6 +126,10 @@ updates:
         update-types:
           - minor
           - patch
+    ignore:
+      # pillow major blocked by upstream dependency cap
+      - dependency-name: pillow
+        update-types: ["version-update:semver-major"]
     labels:
       - dependencies
 
@@ -138,6 +178,10 @@ updates:
         update-types:
           - minor
           - patch
+    ignore:
+      # pillow major blocked by upstream dependency cap
+      - dependency-name: pillow
+        update-types: ["version-update:semver-major"]
     labels:
       - dependencies
 
