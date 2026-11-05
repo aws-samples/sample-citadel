@@ -684,7 +684,7 @@ describe('ExecutionDetailSheet — compensation states', () => {
     render(<ExecutionDetailSheet execution={compensatingExec} open onClose={jest.fn()} />);
 
     const section = screen.getByRole('region', { name: /compensations/i });
-    const dot = within(section).getByRole('button', { name: /node-a/ }).querySelector('[aria-hidden="true"]');
+    const dot = within(section).getByRole('button', { name: /node-a/ }).querySelector('[data-testid="node-status-dot"]');
     // pending's dot class is bg-muted-foreground — compensating must use a
     // distinct, non-pending style.
     expect(dot?.getAttribute('class')).not.toMatch(/bg-muted-foreground/);
@@ -713,7 +713,7 @@ describe('ExecutionDetailSheet — unreachable status', () => {
     const stepsSection = screen.getByRole('region', { name: /^steps$/i });
     const dot = within(stepsSection)
       .getByRole('button', { name: /node-a/ })
-      .querySelector('[aria-hidden="true"]');
+      .querySelector('[data-testid="node-status-dot"]');
     // unreachable must NOT use pending's bg-muted-foreground (full-opacity)
     // — it should use bg-muted-foreground/40 (muted opacity)
     expect(dot?.getAttribute('class')).toMatch(/bg-muted-foreground\/40/);
