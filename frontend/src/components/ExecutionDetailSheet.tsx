@@ -711,6 +711,7 @@ export function ExecutionDetailSheet({
                         <span
                           className={cn('size-2 rounded-full flex-shrink-0', nodeStyle.dot)}
                           aria-hidden="true"
+                          data-testid="node-status-dot"
                         />
                         <span className="font-mono text-foreground truncate">{node.nodeId}</span>
                         {node.agentId && (
@@ -800,6 +801,7 @@ export function ExecutionDetailSheet({
                         <span
                           className={cn('size-2 rounded-full flex-shrink-0', nodeStyle.dot)}
                           aria-hidden="true"
+                          data-testid="node-status-dot"
                         />
                         <span className="font-mono text-foreground truncate">{originalNodeId}</span>
                         {/* Text label alongside the dot — state is never colour alone. */}
