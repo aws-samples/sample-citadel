@@ -2,36 +2,36 @@ import React from 'react';
 import { render, screen, fireEvent, waitFor, act, cleanup } from '@testing-library/react';
 import '@testing-library/jest-dom';
 
+// --- Mock prop types ---
+interface MockProps extends Record<string, unknown> { children?: React.ReactNode }
+
 // --- Mocks ---
 
 jest.mock('sonner', () => ({
   toast: { success: jest.fn(), error: jest.fn() },
 }));
 
-jest.mock('@/components/ui/table', () => {
-  const React = require('react');
-  return {
-    Table: ({ children }: any) => React.createElement('table', null, children),
-    TableHeader: ({ children }: any) => React.createElement('thead', null, children),
-    TableBody: ({ children }: any) => React.createElement('tbody', null, children),
-    TableRow: ({ children, ...rest }: any) => React.createElement('tr', rest, children),
-    TableHead: ({ children, ...rest }: any) => React.createElement('th', rest, children),
-    TableCell: ({ children, ...rest }: any) => React.createElement('td', rest, children),
-  };
-});
+jest.mock('@/components/ui/table', () => ({
+  Table: ({ children }: MockProps) => React.createElement('table', null, children),
+  TableHeader: ({ children }: MockProps) => React.createElement('thead', null, children),
+  TableBody: ({ children }: MockProps) => React.createElement('tbody', null, children),
+  TableRow: ({ children, ...rest }: MockProps) => React.createElement('tr', rest, children),
+  TableHead: ({ children, ...rest }: MockProps) => React.createElement('th', rest, children),
+  TableCell: ({ children, ...rest }: MockProps) => React.createElement('td', rest, children),
+}));
 
 jest.mock('@/components/ui/badge', () => ({
-  Badge: ({ children, variant }: any) =>
+  Badge: ({ children, variant }: MockProps & { variant?: string }) =>
     React.createElement('span', { 'data-testid': 'badge', 'data-variant': variant }, children),
 }));
 
 jest.mock('@/components/ui/button', () => ({
-  Button: ({ children, onClick, disabled, ...rest }: any) =>
+  Button: ({ children, onClick, disabled, ...rest }: MockProps & { onClick?: () => void; disabled?: boolean }) =>
     React.createElement('button', { onClick, disabled, ...rest }, children),
 }));
 
 jest.mock('@/components/ui/checkbox', () => ({
-  Checkbox: ({ checked, onCheckedChange, disabled, ...rest }: any) =>
+  Checkbox: ({ checked, onCheckedChange, disabled, ...rest }: MockProps & { checked?: boolean | 'indeterminate'; onCheckedChange?: (v: boolean) => void; disabled?: boolean }) =>
     React.createElement('input', {
       type: 'checkbox',
       checked: checked === true,
@@ -42,44 +42,41 @@ jest.mock('@/components/ui/checkbox', () => ({
     }),
 }));
 
-jest.mock('@/components/ui/select', () => {
-  const R = require('react');
-  return {
-    Select: ({ children, value, onValueChange }: any) =>
-      R.createElement('div', { 'data-testid': 'select-wrapper', 'data-value': value },
-        R.createElement('select', {
-          'data-testid': 'kind-filter-select',
-          value,
-          onChange: (e: any) => onValueChange(e.target.value),
-        },
-          R.createElement('option', { value: 'all' }, 'All'),
-          R.createElement('option', { value: 'agent' }, 'Agents'),
-          R.createElement('option', { value: 'tool' }, 'Tools'),
-          R.createElement('option', { value: 'app' }, 'Apps'),
-        ),
-        children,
+jest.mock('@/components/ui/select', () => ({
+  Select: ({ children, value, onValueChange }: MockProps & { value?: string; onValueChange?: (v: string) => void }) =>
+    React.createElement('div', { 'data-testid': 'select-wrapper', 'data-value': value },
+      React.createElement('select', {
+        'data-testid': 'kind-filter-select',
+        value,
+        onChange: (e: React.ChangeEvent<HTMLSelectElement>) => onValueChange?.(e.target.value),
+      },
+        React.createElement('option', { value: 'all' }, 'All'),
+        React.createElement('option', { value: 'agent' }, 'Agents'),
+        React.createElement('option', { value: 'tool' }, 'Tools'),
+        React.createElement('option', { value: 'app' }, 'Apps'),
       ),
-    SelectTrigger: ({ children, ...rest }: any) => R.createElement('div', rest, children),
-    SelectContent: ({ children }: any) => R.createElement('div', null, children),
-    SelectItem: ({ children, value }: any) => R.createElement('option', { value }, children),
-    SelectValue: () => null,
-  };
-});
+      children,
+    ),
+  SelectTrigger: ({ children, ...rest }: MockProps) => React.createElement('div', rest, children),
+  SelectContent: ({ children }: MockProps) => React.createElement('div', null, children),
+  SelectItem: ({ children, value }: MockProps & { value?: string }) => React.createElement('option', { value }, children),
+  SelectValue: () => null,
+}));
 
 jest.mock('@/components/ApprovalDecisionDialog', () => ({
-  ApprovalDecisionDialog: ({ record, decision, onConfirm, onCancel }: any) =>
+  ApprovalDecisionDialog: ({ record, decision, onConfirm, onCancel }: MockProps & { record: { name: string }; decision?: string; onConfirm?: (reason?: string) => void; onCancel?: () => void }) =>
     React.createElement('div', { 'data-testid': 'decision-dialog', 'data-decision': decision },
       React.createElement('span', null, record.name),
-      React.createElement('button', { 'data-testid': 'dialog-confirm', onClick: () => onConfirm(decision === 'REJECTED' ? 'Bad agent' : undefined) }, 'Confirm'),
+      React.createElement('button', { 'data-testid': 'dialog-confirm', onClick: () => onConfirm?.(decision === 'REJECTED' ? 'Bad agent' : undefined) }, 'Confirm'),
       React.createElement('button', { 'data-testid': 'dialog-cancel', onClick: onCancel }, 'Cancel'),
     ),
 }));
 
 jest.mock('@/components/BulkApprovalDialog', () => ({
-  BulkApprovalDialog: ({ records, decision, results, onConfirm, onRetry, onClose }: any) =>
+  BulkApprovalDialog: ({ records, decision, results, onConfirm, onRetry, onClose }: MockProps & { records: unknown[]; decision?: string; results: unknown[]; onConfirm?: (reason?: string) => void; onRetry?: () => void; onClose?: () => void }) =>
     React.createElement('div', { 'data-testid': 'bulk-dialog', 'data-decision': decision },
       React.createElement('span', { 'data-testid': 'bulk-record-count' }, records.length),
-      React.createElement('button', { 'data-testid': 'bulk-dialog-confirm', onClick: () => onConfirm(decision === 'REJECTED' ? 'Not ready' : undefined) }, 'Confirm'),
+      React.createElement('button', { 'data-testid': 'bulk-dialog-confirm', onClick: () => onConfirm?.(decision === 'REJECTED' ? 'Not ready' : undefined) }, 'Confirm'),
       React.createElement('button', { 'data-testid': 'bulk-dialog-close', onClick: onClose }, 'Close'),
       results.length > 0 && React.createElement('button', { 'data-testid': 'bulk-dialog-retry', onClick: onRetry }, 'Retry'),
     ),
@@ -104,13 +101,13 @@ jest.mock('@/hooks/useBulkApproval', () => ({
 }));
 
 import { toast } from 'sonner';
-import { approvalsService } from '../../services/approvalsService';
+import { approvalsService, type PendingApprovalItem } from '../../services/approvalsService';
 import { ApprovalsPage } from '../ApprovalsPage';
 
 const mockList = approvalsService.listPendingApprovals as jest.Mock;
 const mockDecide = approvalsService.decideApproval as jest.Mock;
 
-function makeRecord(overrides: Partial<any> = {}) {
+function makeRecord(overrides: Partial<PendingApprovalItem> = {}) {
   return {
     recordId: 'r1',
     recordType: 'agent',
