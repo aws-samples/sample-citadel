@@ -453,6 +453,23 @@ frontend/
 - `npm run dev` - Start development server
 - `npm run build` - Build for production
 - `npm run generate-aws-exports` - Generate AWS configuration file
+- `npm run lint` - Run ESLint with warning budget ratchet
+- `npm run lint:fix` - Run ESLint with autofix + budget check
+
+## Linting
+
+The frontend uses ESLint with a flat config (`eslint.config.mjs`) that mirrors the backend's rule set, plus React-specific plugins (`react-hooks`, `react-refresh`).
+
+### Warning Budget Ratchet
+
+A warning budget is stored in `.eslint-budget.json`. The `npm run lint` command enforces two invariants:
+
+1. **Zero errors** — any ESLint error fails the check.
+2. **Warnings ≤ budget** — the warning count must not exceed the budget ceiling.
+
+When warnings drop below the budget, the script prints the new floor so a contributor can lower `.eslint-budget.json` in the same PR.
+
+**Rule: a PR may lower the budget, never raise it.** If your change introduces new warnings, fix them or offset by fixing existing warnings elsewhere. Raising the budget requires explicit team approval.
 
 ---
 

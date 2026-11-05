@@ -300,8 +300,9 @@ function mapIngestionStatusToUi(status?: string): UploadedFile['status'] {
     case 'STARTING':
     case 'PENDING':
     case 'IN_PROGRESS':
-    // IGNORED is a Bedrock dedup/no-op (already indexed), not a failure: show as
-    // transient indexing and let the poller resolve the true status.
+    // IGNORED is a Bedrock dedup/no-op (already indexed), not a failure: show
+    // as transient indexing and let the poller resolve the true status.
+    // falls through
     case 'IGNORED':
       return 'indexing';
     default:

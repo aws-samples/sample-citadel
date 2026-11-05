@@ -80,7 +80,7 @@ describe('Performance Tests', () => {
     it('should invoke callbacks synchronously without event loop overhead', () => {
       const subscriberCount = 100;
       const callbacks: Array<jest.Mock> = [];
-      let callbackOrder: number[] = [];
+      const callbackOrder: number[] = [];
 
       // Subscribe callbacks that track invocation order
       for (let i = 0; i < subscriberCount; i++) {

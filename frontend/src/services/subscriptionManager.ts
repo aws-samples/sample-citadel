@@ -147,7 +147,7 @@ class SubscriptionManager implements SubscriptionManagerInterface {
     try {
       // Wrap the subscription to catch errors
       let hasReceivedData = false;
-      let errorOccurred = false;
+      const errorOccurred = false;
 
       // Create new backend subscription with error handling
       const backendUnsubscribe = serverService.subscribe(

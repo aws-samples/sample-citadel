@@ -106,6 +106,7 @@ import {
   CONNECTOR_REGISTRY,
   type ConnectorType,
 } from '../../config/connectorRegistry';
+import { AlertCircle } from 'lucide-react';
 
 const mcpServerType: ConnectorType = (() => {
   const def = CONNECTOR_REGISTRY.MCP_SERVER;
@@ -420,5 +421,39 @@ describe('isValidArn', () => {
 
   it('rejects an ARN missing the resource segment', () => {
     expect(isValidArn('arn:aws:lambda:us-east-1:123456789012:')).toBe(false);
+  });
+});
+
+/**
+ * When getConnectorDefinition returns undefined (unknown connector id),
+ * the component must render a destructive Alert and never throw — even
+ * though hooks are now called unconditionally above the guard.
+ */
+describe('unknown connector type (connectorDef = undefined)', () => {
+  it('renders the "not found" alert without throwing', () => {
+    const unknownType: ConnectorType = {
+      id: 'NONEXISTENT' as any,
+      name: 'Ghost',
+      description: 'does not exist in registry',
+      icon: AlertCircle as any,
+      authMethod: 'API_KEY',
+      provider: 'other',
+      category: 'other',
+      isPopular: false,
+    };
+
+    expect(() => {
+      render(
+        React.createElement(DynamicConnectorForm, {
+          connectorType: unknownType,
+          mode: 'create',
+          onSubmit: jest.fn().mockResolvedValue(undefined),
+        }),
+      );
+    }).not.toThrow();
+
+    expect(
+      screen.getByText(/connector definition not found for ghost/i),
+    ).toBeInTheDocument();
   });
 });
