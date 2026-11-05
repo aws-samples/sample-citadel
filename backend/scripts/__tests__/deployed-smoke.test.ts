@@ -5,12 +5,14 @@
  */
 
 // CJS helpers — directly importable by ts-jest without ESM gymnastics.
-// eslint-disable-next-line @typescript-eslint/no-require-imports
+/* eslint-disable @typescript-eslint/no-require-imports */
 const {
   classifyMessage,
+  classifySubNegative,
   shapeReport,
   withTimeout,
 } = require("../smoke/smoke-helpers.js");
+/* eslint-enable @typescript-eslint/no-require-imports */
 
 // ---------------------------------------------------------------------------
 // classifyMessage
@@ -143,6 +145,48 @@ describe("classifyMessage", () => {
         },
       }),
     ).toBe("turn_accepted");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// classifySubNegative
+// ---------------------------------------------------------------------------
+describe("classifySubNegative", () => {
+  it("returns pass:false for start_ack (gate missing)", () => {
+    const result = classifySubNegative("start_ack");
+    expect(result.pass).toBe(false);
+    expect(result.error).toBe(
+      "subscription accepted for an unauthorised project; connect-time authoriser missing",
+    );
+    expect(result.detail).toBe("start_ack");
+  });
+
+  it("returns pass:true for start_error (subscription refused)", () => {
+    const result = classifySubNegative("start_error");
+    expect(result.pass).toBe(true);
+    expect(result.error).toBeUndefined();
+    expect(result.detail).toBe("start_error");
+  });
+
+  it("returns pass:true for error (authoriser refusal)", () => {
+    const result = classifySubNegative("error");
+    expect(result.pass).toBe(true);
+    expect(result.error).toBeUndefined();
+    expect(result.detail).toBe("error");
+  });
+
+  it("returns pass:true for connection_error", () => {
+    const result = classifySubNegative("connection_error");
+    expect(result.pass).toBe(true);
+    expect(result.error).toBeUndefined();
+    expect(result.detail).toBe("connection_error");
+  });
+
+  it("returns pass:false for timeout (no response)", () => {
+    const result = classifySubNegative("timeout");
+    expect(result.pass).toBe(false);
+    expect(result.error).toBe("no response");
+    expect(result.detail).toBe("timeout");
   });
 });
 

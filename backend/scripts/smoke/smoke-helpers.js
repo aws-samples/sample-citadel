@@ -64,4 +64,43 @@ function withTimeout(promise, ms, label) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-module.exports = { classifyMessage, shapeReport, withTimeout };
+/**
+ * Classify the outcome of a subscription-negative probe.
+ *
+ * @param {"start_ack"|"start_error"|"error"|"connection_error"|"timeout"} outcome
+ *   The WS message type (or "timeout") observed after sending the subscribe
+ *   frame for the zero-project.
+ * @returns {{ pass: boolean, error?: string, detail?: string }}
+ */
+function classifySubNegative(outcome) {
+  switch (outcome) {
+    case "start_ack":
+      return {
+        pass: false,
+        error:
+          "subscription accepted for an unauthorised project; connect-time authoriser missing",
+        detail: "start_ack",
+      };
+    case "start_error":
+      return { pass: true, detail: "start_error" };
+    case "error":
+      return { pass: true, detail: "error" };
+    case "connection_error":
+      return { pass: true, detail: "connection_error" };
+    case "timeout":
+      return { pass: false, error: "no response", detail: "timeout" };
+    default:
+      return {
+        pass: false,
+        error: `unexpected outcome: ${outcome}`,
+        detail: String(outcome),
+      };
+  }
+}
+
+module.exports = {
+  classifyMessage,
+  classifySubNegative,
+  shapeReport,
+  withTimeout,
+};

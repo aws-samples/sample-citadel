@@ -22,10 +22,10 @@ import { createRequire } from "node:module";
 import { WebSocket } from "ws";
 
 const require = createRequire(import.meta.url);
-const { classifyMessage, shapeReport, withTimeout } = require("./smoke-helpers.js");
+const { classifyMessage, classifySubNegative, shapeReport, withTimeout } = require("./smoke-helpers.js");
 
 // Re-export pure helpers for potential direct-ESM consumers.
-export { classifyMessage, shapeReport, withTimeout };
+export { classifyMessage, classifySubNegative, shapeReport, withTimeout };
 
 // ---------------------------------------------------------------------------
 // Env template (--print-env-template)
@@ -65,8 +65,8 @@ const REQUIRED = [
 
 const missing = REQUIRED.filter((k) => !process.env[k]);
 if (missing.length > 0) {
-  console.error(`Missing env: ${missing.join(", ")}. Run with --print-env-template for a template.`);
-  process.exit(1);
+  console.error(`missing: ${missing.join(", ")}`);
+  process.exit(2);
 }
 
 const {
@@ -195,7 +195,7 @@ async function runChecks() {
   {
     const t0 = Date.now();
     try {
-      await withTimeout(
+      const outcome = await withTimeout(
         new Promise((resolve, reject) => {
           const ws = new WebSocket(wsUrl, ["graphql-ws"]);
           const ZERO = "00000000-0000-0000-0000-000000000000";
@@ -210,22 +210,30 @@ async function runChecks() {
                 idToken,
                 host,
               );
-            } else if (msg.type === "error" || msg.type === "connection_error") {
-              ws.close();
-              resolve("refused");
             } else if (msg.type === "start_ack") {
-              // Accepted — which we also consider a valid outcome since the
-              // authorizer may not reject at subscribe time; we just need to
-              // confirm the WS path works. Wait briefly for a possible error.
-              setTimeout(() => { ws.close(); resolve("accepted_no_error"); }, 3000);
+              ws.close();
+              resolve("start_ack");
+            } else if (msg.type === "start_error") {
+              ws.close();
+              resolve("start_error");
+            } else if (msg.type === "error") {
+              ws.close();
+              resolve("error");
+            } else if (msg.type === "connection_error") {
+              ws.close();
+              resolve("connection_error");
             }
           });
-          ws.on("error", () => { resolve("ws_error"); });
+          ws.on("error", () => { resolve("connection_error"); });
         }),
         10_000,
         "subscription-negative",
-      );
-      record("subscription-negative", true, Date.now() - t0);
+      ).catch((err) => {
+        if (err.message.includes("timed out")) return "timeout";
+        throw err;
+      });
+      const verdict = classifySubNegative(outcome);
+      record("subscription-negative", verdict.pass, Date.now() - t0, verdict.error);
     } catch (err) {
       record("subscription-negative", false, Date.now() - t0, err.message);
     }
