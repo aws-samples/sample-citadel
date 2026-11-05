@@ -360,15 +360,8 @@ const _getIntegrationQuery = `
   }
 `;
 
-const _updateIntegrationStatusMutation = `
-  mutation UpdateIntegrationStatus($id: String!, $status: String!) {
-    updateIntegrationStatus(id: $id, status: $status) {
-      id
-      status
-      lastSync
-    }
-  }
-`;
+// CIT-284: UpdateIntegrationStatus mutation removed — updateIntegrationStatus
+// does not exist in the backend schema.
 
 export const integrationService = {
   async listIntegrations(): Promise<Integration[]> {
@@ -467,4 +460,3 @@ export const integrationService = {
 // Reserved for future GraphQL implementation; references prevent unused-variable warnings
 void _listIntegrationsQuery;
 void _getIntegrationQuery;
-void _updateIntegrationStatusMutation;

@@ -142,13 +142,8 @@ const UPDATE_PROJECT = `
   }
 `;
 
-const DELETE_PROJECT = `
-  mutation DeleteProject($id: ID!) {
-    deleteProject(id: $id) {
-      id
-    }
-  }
-`;
+// CIT-284: DELETE_PROJECT mutation removed — deleteProject does not exist in
+// the backend schema. Implementing it is out of scope; tracked in backlog.
 
 /**
  * Project Service Class
@@ -246,20 +241,7 @@ class ProjectService {
     }
   }
 
-  /**
-   * Delete a project
-   */
-  async deleteProject(id: string): Promise<void> {
-    try {
-      await serverService.mutate<{ deleteProject: { id: string } }>(
-        DELETE_PROJECT,
-        { id }
-      );
-    } catch (error) {
-      console.error("Failed to delete project:", error);
-      throw new Error("Failed to delete project. Please try again.");
-    }
-  }
+  // CIT-284: deleteProject method removed — no backend mutation exists.
 
   /**
    * Mark a project as completed
