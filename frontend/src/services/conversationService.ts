@@ -65,12 +65,15 @@ const onConversationMessage = /* GraphQL */ `
 
 /**
  * Send a message to an agent
+ * @param clientMessageId - Optional client-generated UUID for retry deduplication.
+ *   When provided, the backend uses a GSI to return the existing record on duplicate.
  */
 export async function sendMessageToAgent(
   projectId: string,
   agentId: string,
   message: string,
-  metadata?: Record<string, any>
+  metadata?: Record<string, any>,
+  clientMessageId?: string,
 ): Promise<ConversationMessage> {
   try {
     const response = await serverService.mutate<{ sendMessage: ConversationMessage }>(
@@ -82,6 +85,7 @@ export async function sendMessageToAgent(
           message,
           messageType: "USER_INPUT",
           ...(metadata && { metadata: JSON.stringify(metadata) }),
+          ...(clientMessageId && { clientMessageId }),
         },
       }
     );
