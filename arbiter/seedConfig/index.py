@@ -24,6 +24,15 @@ DEMO_ECHO_AGENT_ID = 'demo-echo-agent'
 DEMO_ECHO_MODULE_FILENAME = 'demo_echo_agent.py'
 DEMO_ECHO_DESCRIPTION = 'Demo agent that echoes its input back as output.'
 
+# Routing demo agent — returns {"route": "<branch>"} for the Conditional
+# Router blueprint's conditional edges. Defaults to "branch-a".
+DEMO_ROUTER_AGENT_ID = 'demo-router-agent'
+DEMO_ROUTER_MODULE_FILENAME = 'demo_router_agent.py'
+DEMO_ROUTER_DESCRIPTION = (
+    'Demo agent that returns a routing decision. '
+    'Input {"route": "branch-b"} selects branch-b; default is branch-a.'
+)
+
 # Fabricator agent — creates capabilities that may be missing.
 FABRICATOR_AGENT_ID = 'fabricator'
 FABRICATOR_DESCRIPTION = (
@@ -69,7 +78,7 @@ SEEDER_PROJECTION_VERSION = 1
 # System agents that must be dispatchable (approval-gate readiness) are
 # auto-submitted for approval after create. The smoke fixture is
 # intentionally excluded — it stays DRAFT.
-SYSTEM_AGENTS = frozenset({FABRICATOR_AGENT_ID, DEMO_ECHO_AGENT_ID})
+SYSTEM_AGENTS = frozenset({FABRICATOR_AGENT_ID, DEMO_ECHO_AGENT_ID, DEMO_ROUTER_AGENT_ID})
 
 # Settle poll: wait for create_registry_record's async transition out of
 # CREATING/UPDATING.  Patchable in tests via ``index._SETTLE_SLEEP``.
@@ -745,6 +754,79 @@ def handler(event, context):
         else:
             print(
                 "WARNING: AGENT_BUCKET_NAME not set — skipping echo module "
+                "upload (partial deploy?). Agent config still seeded."
+            )
+
+        # ------------------------------------------------------------------
+        # Routing demo agent — drives the Conditional Router blueprint
+        # ------------------------------------------------------------------
+        # Returns {"route": "<branch>"} so the conditional edges fire.
+        # Same dual-store + S3 upload pattern as the echo agent above.
+        router_agent = {
+            'agentId': DEMO_ROUTER_AGENT_ID,
+            'config': {
+                'name': DEMO_ROUTER_AGENT_ID,
+                'filename': DEMO_ROUTER_MODULE_FILENAME,
+                'description': DEMO_ROUTER_DESCRIPTION,
+                'schema': {
+                    'type': 'object',
+                    'properties': {
+                        'route': {
+                            'type': 'string',
+                            'description': (
+                                'Target branch: "branch-a" or "branch-b". '
+                                'Defaults to "branch-a" when omitted.'
+                            ),
+                        }
+                    },
+                    'required': []
+                },
+                'version': '1',
+                'action': {
+                    'type': 'sqs',
+                    'target': worker_queue_url
+                }
+            },
+            'state': 'active',
+            'categories': ['built-in', 'worker', 'demo'],
+        }
+
+        router_record = _seed_agent_registry_record(
+            DEMO_ROUTER_AGENT_ID, DEMO_ROUTER_DESCRIPTION,
+            DEMO_ROUTER_MODULE_FILENAME, worker_queue_url,
+        )
+
+        _write_canonical_and_pointer(
+            table, DEMO_ROUTER_AGENT_ID, router_record,
+            router_agent['config'],
+            description=DEMO_ROUTER_DESCRIPTION,
+            categories=router_agent['categories'],
+        )
+        print(f"Seeded agent: {DEMO_ROUTER_AGENT_ID} with queue: {worker_queue_url}")
+
+        if agent_bucket:
+            router_module_path = os.path.join(
+                os.path.dirname(__file__), DEMO_ROUTER_MODULE_FILENAME
+            )
+            with open(router_module_path, 'rb') as module_file:
+                router_module_body = module_file.read()
+            s3.put_object(
+                Bucket=agent_bucket,
+                Key=f'agents/{DEMO_ROUTER_MODULE_FILENAME}',
+                Body=router_module_body,
+            )
+            print(
+                f"Uploaded router module to "
+                f"s3://{agent_bucket}/agents/{DEMO_ROUTER_MODULE_FILENAME}"
+            )
+            if router_record and router_record.get('recordId'):
+                _copy_s3_to_scoped_key(
+                    s3, agent_bucket, DEMO_ROUTER_MODULE_FILENAME,
+                    router_record['recordId'],
+                )
+        else:
+            print(
+                "WARNING: AGENT_BUCKET_NAME not set — skipping router module "
                 "upload (partial deploy?). Agent config still seeded."
             )
 

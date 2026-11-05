@@ -176,14 +176,15 @@ class TestRegistryRecordCreated:
         )
 
         assert mock_send.call_args[0][2] == "SUCCESS"
-        # create called for both fabricator and echo
-        assert client.create_registry_record.call_count == 2
+        # create called for fabricator, echo, and router
+        assert client.create_registry_record.call_count == 3
         created_names = [
             c.kwargs["name"]
             for c in client.create_registry_record.call_args_list
         ]
         assert "fabricator" in created_names
         assert "demo-echo-agent" in created_names
+        assert "demo-router-agent" in created_names
 
     def test_echo_record_has_fabricator_shaped_payload(self):
         client = _make_registry_client()
@@ -227,7 +228,7 @@ class TestRegistryRecordCreated:
         _run_handler(
             registry_env=True, existing_records=[], registry_client=client
         )
-        assert client.submit_registry_record_for_approval.call_count == 2
+        assert client.submit_registry_record_for_approval.call_count == 3
 
     def test_ddb_seeding_unchanged_when_registry_configured(self):
         client = _make_registry_client()
@@ -235,8 +236,8 @@ class TestRegistryRecordCreated:
             registry_env=True, existing_records=[],
             registry_client=client,
         )
-        # 2 agents × 2 rows each (canonical + pointer) + 3 governance = 7
-        assert mock_table.put_item.call_count == 7
+        # 3 agents × 2 rows each (canonical + pointer) + 3 governance = 9
+        assert mock_table.put_item.call_count == 9
         items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
         # The canonical row carries full config; the pointer does not.
         record_id = "abc123def456"
@@ -336,15 +337,17 @@ class TestRegistryLinkageStamped:
              "status": "APPROVED", "createdAt": "2026-01-01T00:00:00Z"},
             {"recordId": "fab456", "name": "fabricator",
              "status": "DRAFT", "createdAt": "2026-02-01T00:00:00Z"},
+            {"recordId": "rtr789", "name": "demo-router-agent",
+             "status": "APPROVED", "createdAt": "2026-03-01T00:00:00Z"},
         ]
         mock_table, _, mock_send, _ = _run_handler(
             registry_env=True, existing_records=existing,
             registry_client=client,
         )
         assert mock_send.call_args[0][2] == "SUCCESS"
-        # No creates — both found by name
+        # No creates — all found by name
         client.create_registry_record.assert_not_called()
-        # Fabricator was DRAFT → submitted for approval; echo already APPROVED
+        # Fabricator was DRAFT → submitted for approval; echo + router already APPROVED
         assert client.submit_registry_record_for_approval.call_count == 1
         # Linkage still stamped from existing records
         items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
@@ -367,7 +370,7 @@ class TestRegistrySkippedWhenNotConfigured:
         client.create_registry_record.assert_not_called()
         client.submit_registry_record_for_approval.assert_not_called()
         # DDB seeding still runs.
-        assert mock_table.put_item.call_count == 5
+        assert mock_table.put_item.call_count == 6
 
     def test_skips_when_catalog_client_unavailable(self):
         """DDB-only envs (no catalog layer) must still seed successfully."""
@@ -394,7 +397,7 @@ class TestRegistrySkippedWhenNotConfigured:
 
         assert mock_send.call_args[0][2] == "SUCCESS"
         client.create_registry_record.assert_not_called()
-        assert mock_table.put_item.call_count == 5
+        assert mock_table.put_item.call_count == 6
 
 
 class TestIdempotency:
@@ -407,19 +410,21 @@ class TestIdempotency:
              "status": "DRAFT", "updatedAt": None, "createdAt": None},
             {"recordId": "fab999fab999", "name": "fabricator",
              "status": "DRAFT", "updatedAt": None, "createdAt": None},
+            {"recordId": "rtr111rtr111", "name": "demo-router-agent",
+             "status": "DRAFT", "updatedAt": None, "createdAt": None},
         ]
         mock_table, _, mock_send, list_mock = _run_handler(
             registry_env=True, existing_records=existing,
             registry_client=client,
         )
         assert mock_send.call_args[0][2] == "SUCCESS"
-        # Idempotency lookup for each agent — at least 2 calls
-        assert list_mock.call_count >= 2
+        # Idempotency lookup for each agent — at least 3 calls
+        assert list_mock.call_count >= 3
         client.create_registry_record.assert_not_called()
         # Pre-existing DRAFT system agents still get submitted for approval
-        assert client.submit_registry_record_for_approval.call_count == 2
+        assert client.submit_registry_record_for_approval.call_count == 3
         # DDB seeding unchanged.
-        assert mock_table.put_item.call_count == 7
+        assert mock_table.put_item.call_count == 9
 
     def test_name_match_is_exact(self):
         """A prefix-similar record must not suppress the create."""
@@ -433,7 +438,7 @@ class TestIdempotency:
             registry_client=client,
         )
         # Both fabricator and echo should attempt create (no exact match)
-        assert client.create_registry_record.call_count == 2
+        assert client.create_registry_record.call_count == 3
 
 
 class TestSettleAndApprove:
@@ -460,11 +465,15 @@ class TestSettleAndApprove:
              "status": "DRAFT", "createdAt": "2026-09-30T00:00:00Z"},
             {"recordId": "settled-echo-001", "name": "demo-echo-agent",
              "status": "DRAFT", "createdAt": "2026-09-30T00:00:00Z"},
+            {"recordId": "settled-rtr-001", "name": "demo-router-agent",
+             "status": "DRAFT", "createdAt": "2026-09-30T00:00:00Z"},
         ]
         approved_records = [
             {"recordId": "settled-fab-001", "name": "fabricator",
              "status": "APPROVED", "createdAt": "2026-09-30T00:00:00Z"},
             {"recordId": "settled-echo-001", "name": "demo-echo-agent",
+             "status": "APPROVED", "createdAt": "2026-09-30T00:00:00Z"},
+            {"recordId": "settled-rtr-001", "name": "demo-router-agent",
              "status": "APPROVED", "createdAt": "2026-09-30T00:00:00Z"},
         ]
 
@@ -477,6 +486,9 @@ class TestSettleAndApprove:
             [],               # echo idempotency lookup
             draft_records,    # echo settle poll
             approved_records, # echo post-submit re-fetch
+            [],               # router idempotency lookup
+            draft_records,    # router settle poll
+            approved_records, # router post-submit re-fetch
         ]
         list_mock = MagicMock(side_effect=call_seq)
 
@@ -503,9 +515,9 @@ class TestSettleAndApprove:
             handler(_cfn_event(), _ctx())
 
         assert mock_send.call_args[0][2] == "SUCCESS"
-        # Both agents created and submitted
-        assert client.create_registry_record.call_count == 2
-        assert client.submit_registry_record_for_approval.call_count == 2
+        # All three agents created and submitted
+        assert client.create_registry_record.call_count == 3
+        assert client.submit_registry_record_for_approval.call_count == 3
 
         # Both DDB items carry APPROVED linkage
         items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
@@ -532,6 +544,8 @@ class TestSettleAndApprove:
              "status": "CREATING", "createdAt": None},
             {"recordId": None, "name": "demo-echo-agent",
              "status": "CREATING", "createdAt": None},
+            {"recordId": None, "name": "demo-router-agent",
+             "status": "CREATING", "createdAt": None},
         ]
 
         # First call per agent: [] (idempotency lookup returns no match),
@@ -540,8 +554,8 @@ class TestSettleAndApprove:
 
         def _list_side_effect(rid):
             call_counter["n"] += 1
-            # First two calls are idempotency lookups
-            if call_counter["n"] <= 2:
+            # First three calls are idempotency lookups
+            if call_counter["n"] <= 3:
                 return []
             return stuck_records
 
@@ -597,6 +611,8 @@ class TestSmokeLinkage:
              "status": "DRAFT", "createdAt": "2026-09-29T00:00:00Z"},
             {"recordId": "echo-draft-001", "name": "demo-echo-agent",
              "status": "DRAFT", "createdAt": "2026-09-29T00:00:00Z"},
+            {"recordId": "rtr-draft-001", "name": "demo-router-agent",
+             "status": "DRAFT", "createdAt": "2026-09-29T00:00:00Z"},
         ]
         mock_table, _, mock_send, _ = _run_handler(
             registry_env=True, existing_records=existing,
@@ -604,8 +620,8 @@ class TestSmokeLinkage:
         )
         assert mock_send.call_args[0][2] == "SUCCESS"
         client.create_registry_record.assert_not_called()
-        # Both DRAFT system agents submitted
-        assert client.submit_registry_record_for_approval.call_count == 2
+        # All three DRAFT system agents submitted
+        assert client.submit_registry_record_for_approval.call_count == 3
         items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
         fab = [i for i in items if i.get("agentId") == "fabricator"][0]
         assert fab["registryStatus"] == "APPROVED"
@@ -621,6 +637,8 @@ class TestSmokeLinkage:
             {"recordId": "fab-appr-001", "name": "fabricator",
              "status": "APPROVED", "createdAt": "2026-09-29T00:00:00Z"},
             {"recordId": "echo-appr-001", "name": "demo-echo-agent",
+             "status": "APPROVED", "createdAt": "2026-09-29T00:00:00Z"},
+            {"recordId": "rtr-appr-001", "name": "demo-router-agent",
              "status": "APPROVED", "createdAt": "2026-09-29T00:00:00Z"},
         ]
         mock_table, _, mock_send, _ = _run_handler(
@@ -649,6 +667,8 @@ class TestSmokeLinkage:
             {"recordId": "fab-001", "name": "fabricator",
              "status": "APPROVED", "createdAt": "2026-01-01T00:00:00Z"},
             {"recordId": "echo-001", "name": "demo-echo-agent",
+             "status": "APPROVED", "createdAt": "2026-01-01T00:00:00Z"},
+            {"recordId": "rtr-001", "name": "demo-router-agent",
              "status": "APPROVED", "createdAt": "2026-01-01T00:00:00Z"},
         ]
 

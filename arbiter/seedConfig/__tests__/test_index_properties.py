@@ -107,10 +107,10 @@ class TestSeedConfigHandler:
             from index import handler
             handler(event, context)
 
-            # --- Deterministic call count: 2 agents (fabricator + echo) +
-            # 2 units + 1 layer = 5. (Per D3: no global fabricator unit.)
-            assert mock_table.put_item.call_count == 5, (
-                f"expected 5 put_item calls (2 agents + 2 units + 1 layer), "
+            # --- Deterministic call count: 3 agents (fabricator + echo + router) +
+            # 2 units + 1 layer = 6. (Per D3: no global fabricator unit.)
+            assert mock_table.put_item.call_count == 6, (
+                f"expected 6 put_item calls (3 agents + 2 units + 1 layer), "
                 f"got {mock_table.put_item.call_count}"
             )
 
@@ -501,7 +501,13 @@ class TestSeedEchoAgent:
         _table, mock_s3, _send, _items = self._run_create(bucket="citadel-code-bucket")
 
         assert mock_s3.put_object.called, "expected the echo module to be uploaded"
-        kwargs = mock_s3.put_object.call_args.kwargs
+        # Find the echo-specific upload (router agent also uploads)
+        echo_calls = [
+            c for c in mock_s3.put_object.call_args_list
+            if c.kwargs.get("Key") == ECHO_MODULE_S3_KEY
+        ]
+        assert len(echo_calls) == 1, f"expected 1 echo upload, got {len(echo_calls)}"
+        kwargs = echo_calls[0].kwargs
         assert kwargs["Bucket"] == "citadel-code-bucket"
         assert kwargs["Key"] == ECHO_MODULE_S3_KEY
         # Body must be the real module source exposing a handler.
