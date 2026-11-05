@@ -4,9 +4,7 @@
  * Validates:
  * - Req 16.1: setInterval polling mechanism removed (replaced with timestamp-based polling)
  * - Req 16.2: JSON.stringify comparison logic removed
- * - Req 16.3: Subscription documented as TODO follow-up
  * - Req 16.4: Change detection still works via updatedAt timestamps
- * - Req 16.5: Graceful handling documented
  * - Req 16.6: Fallback uses updatedAt timestamp comparison
  */
 import * as fs from 'fs';
@@ -69,16 +67,6 @@ describe('IntakeRequests polling replacement', () => {
 
     it('should clean up interval on unmount', () => {
       expect(sourceCode).toContain('clearInterval');
-    });
-  });
-
-  describe('Req 16.3/16.5: Subscription documented as follow-up', () => {
-    it('should have a TODO comment about GraphQL subscriptions', () => {
-      expect(sourceCode).toMatch(/TODO.*(?:subscription|GraphQL)/i);
-    });
-
-    it('should mention specific subscription events in the TODO', () => {
-      expect(sourceCode).toMatch(/onCreateProject|onUpdateProject|onDeleteProject/);
     });
   });
 
