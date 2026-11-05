@@ -56,6 +56,7 @@ export interface ConversationMessage {
   timestamp: string;
   metadata?: Record<string, unknown>;
   correlationId?: string;
+  clientMessageId?: string;
 }
 
 export interface DocumentUploadResult {
@@ -118,6 +119,7 @@ export interface ConversationMessageInput {
   messageType: MessageType;
   metadata?: Record<string, unknown>;
   correlationId?: string;
+  clientMessageId?: string;
 }
 
 export interface S3Object {
@@ -294,6 +296,7 @@ export enum MessageType {
   AGENT_RESPONSE = "AGENT_RESPONSE",
   SYSTEM_NOTIFICATION = "SYSTEM_NOTIFICATION",
   PROGRESS_UPDATE = "PROGRESS_UPDATE",
+  TURN_ACCEPTED = "TURN_ACCEPTED",
 }
 
 // Event types for EventBridge integration

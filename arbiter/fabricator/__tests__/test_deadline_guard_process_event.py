@@ -112,7 +112,7 @@ class TestProcessEventDeadlineGuard:
         failed_kwargs = next(kw for s, kw in statuses if s == "FAILED")
         message = failed_kwargs.get("error_message") or ""
         assert "timed out" in message
-        assert "Re-queue" in message
+        assert "Please try your request again" in message
 
     def test_deadline_trip_publishes_failure_signals_once(self):
         statuses = []

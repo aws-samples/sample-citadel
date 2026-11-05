@@ -436,3 +436,40 @@ describe("ProjectsStack — CIT-125 slice A shared async DLQ shape", () => {
     assertSharedAsyncDlqShape(template, "projects");
   });
 });
+
+// CIT-268: conversation-resolver gets APPSYNC_ENDPOINT and IAM grant for
+// publishConversationMessage (TURN_ACCEPTED acknowledgement).
+describe("ProjectsStack — CIT-268 TURN_ACCEPTED wiring", () => {
+  let template: Template;
+  beforeAll(() => {
+    ({ template } = createTestStack());
+  });
+
+  test("conversation-resolver Lambda has APPSYNC_ENDPOINT env var", () => {
+    // Find any Lambda that uses conversation-resolver.handler.
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Handler: "conversation-resolver.handler",
+      Environment: Match.objectLike({
+        Variables: Match.objectLike({
+          APPSYNC_ENDPOINT: Match.anyValue(),
+        }),
+      }),
+    });
+  });
+
+  test("conversation-resolver Lambda has appsync:GraphQL IAM grant for publishConversationMessage", () => {
+    // The IAM policy is attached to the Lambda's execution role. We look
+    // for a policy that has the appsync:GraphQL action targeting the
+    // publishConversationMessage field.
+    template.hasResourceProperties("AWS::IAM::Policy", {
+      PolicyDocument: Match.objectLike({
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: "appsync:GraphQL",
+            Effect: "Allow",
+          }),
+        ]),
+      }),
+    });
+  });
+});

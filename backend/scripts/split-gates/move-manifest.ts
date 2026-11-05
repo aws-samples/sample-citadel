@@ -2565,4 +2565,21 @@ export const ALLOWED_SATELLITE_ADDED_STATEMENTS: Record<
       conditionKeys: [],
     },
   ],
+
+  // CIT-268: conversation-resolver publishes TURN_ACCEPTED via the
+  // publishConversationMessage IAM-only AppSync mutation to fire the
+  // onConversationMessage subscription before the EventBridge dispatch.
+  // The frozen baseline predates this grant; allowlisted per the
+  // established PR reconciliation pattern rather than regenerating the
+  // baseline.
+  ConversationResolverFunctionA84FB482: [
+    {
+      effect: "Allow",
+      actions: ["appsync:GraphQL"],
+      resources: [
+        "JOIN::GETATT:AgenticAIApiABAE82BE:Arn/types/Mutation/fields/publishConversationMessage",
+      ],
+      conditionKeys: [],
+    },
+  ],
 };

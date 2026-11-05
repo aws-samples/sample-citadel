@@ -232,6 +232,7 @@ export class ProjectsStack extends cdk.Stack {
           CONVERSATIONS_TABLE: props.conversationsTable.tableName,
           AGENT_STATUS_TABLE: props.agentStatusTable.tableName,
           EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+          APPSYNC_ENDPOINT: props.appSyncApi.graphqlUrl,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, "ConversationResolverFunctionLogs", {
@@ -245,6 +246,19 @@ export class ProjectsStack extends cdk.Stack {
     props.agentStatusTable.grantReadWriteData(conversationResolverFunction);
     props.projectsTable.grantReadData(conversationResolverFunction);
     props.agentEventBus.grantPutEventsTo(conversationResolverFunction);
+
+    // CIT-268: conversation-resolver publishes TURN_ACCEPTED via the
+    // publishConversationMessage IAM-only AppSync mutation to fire the
+    // onConversationMessage subscription before the EventBridge dispatch.
+    conversationResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["appsync:GraphQL"],
+        resources: [
+          `${props.appSyncApi.arn}/types/Mutation/fields/publishConversationMessage`,
+        ],
+      }),
+    );
 
     const conversationLambdaDataSource = makeLambdaDataSource(
       "Conversation",

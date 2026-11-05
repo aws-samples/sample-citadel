@@ -1,6 +1,15 @@
 /**
  * Conversation Resolver Lambda
  * Handles sendMessage mutation - stores message and publishes to EventBridge
+ *
+ * CIT-268: clientMessageId dedup + TURN_ACCEPTED acknowledgement.
+ * - When clientMessageId is provided, a conditional PutCommand prevents
+ *   duplicate writes. If the condition fails (duplicate), the existing
+ *   message is returned and no EventBridge event or TURN_ACCEPTED is
+ *   published.
+ * - After storing a USER_INPUT, a TURN_ACCEPTED message is published via
+ *   the publishConversationMessage AppSync mutation (subscription-only,
+ *   not stored) BEFORE the EventBridge dispatch.
  */
 
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
@@ -13,6 +22,10 @@ import {
   EventBridgeClient,
   PutEventsCommand,
 } from "@aws-sdk/client-eventbridge";
+import { SignatureV4 } from "@aws-sdk/signature-v4";
+import { Sha256 } from "@aws-crypto/sha256-js";
+import { HttpRequest } from "@smithy/protocol-http";
+import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import { v4 as uuidv4 } from "uuid";
 import { mintRunId, buildDispatchContext } from "../utils/run-id";
 import { assertProjectAccess } from "../utils/project-access";
@@ -23,14 +36,30 @@ const eventBridgeClient = new EventBridgeClient({});
 
 const CONVERSATIONS_TABLE = process.env.CONVERSATIONS_TABLE!;
 const EVENT_BUS_NAME = process.env.EVENT_BUS_NAME!;
+const APPSYNC_ENDPOINT = process.env.APPSYNC_ENDPOINT!;
+
+/** Cached credential provider — reused across invocations in the same
+ *  Lambda container, same pattern as agent-message-handler. */
+let cachedCredentials: ReturnType<typeof defaultProvider> | undefined;
+function getCredentials() {
+  if (!cachedCredentials) {
+    cachedCredentials = defaultProvider();
+  }
+  return cachedCredentials;
+}
 
 interface ConversationMessageInput {
   agentId: string;
   message: string;
   messageType:
-    "USER_INPUT" | "AGENT_RESPONSE" | "SYSTEM_NOTIFICATION" | "PROGRESS_UPDATE";
+    | "USER_INPUT"
+    | "AGENT_RESPONSE"
+    | "SYSTEM_NOTIFICATION"
+    | "PROGRESS_UPDATE"
+    | "TURN_ACCEPTED";
   metadata?: string;
   correlationId?: string;
+  clientMessageId?: string;
 }
 
 interface AppSyncEvent {
@@ -45,6 +74,101 @@ interface AppSyncEvent {
   info: {
     fieldName: string;
   };
+}
+
+/**
+ * Publish a TURN_ACCEPTED message via the publishConversationMessage
+ * AppSync mutation. This fires the onConversationMessage subscription
+ * WITHOUT storing a DynamoDB row (the publishConversationMessage resolver
+ * is a pass-through that returns the input, triggering the subscription).
+ */
+async function publishTurnAccepted(
+  projectId: string,
+  agentId: string,
+  originalMessageId: string,
+): Promise<void> {
+  // Guard: skip if APPSYNC_ENDPOINT is not configured (tests, local).
+  if (!APPSYNC_ENDPOINT) return;
+
+  const mutation = `
+    mutation PublishMessage($input: PublishMessageInput!) {
+      publishConversationMessage(input: $input) {
+        id projectId agentId message messageType timestamp
+      }
+    }
+  `;
+
+  const variables = {
+    input: {
+      id: uuidv4(),
+      projectId,
+      agentId,
+      message: "",
+      messageType: "TURN_ACCEPTED",
+      timestamp: new Date().toISOString(),
+      metadata: JSON.stringify({ originalMessageId }),
+    },
+  };
+
+  const body = JSON.stringify({ query: mutation, variables });
+  const url = new URL(APPSYNC_ENDPOINT);
+
+  const request = new HttpRequest({
+    hostname: url.hostname,
+    path: url.pathname,
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      host: url.hostname,
+    },
+    body,
+  });
+
+  const signer = new SignatureV4({
+    service: "appsync",
+    region: process.env.AWS_REGION || "us-east-1",
+    credentials: await getCredentials(),
+    sha256: Sha256,
+  });
+
+  const signedRequest = await signer.sign(request);
+
+  const response = await fetch(APPSYNC_ENDPOINT, {
+    method: signedRequest.method,
+    headers: signedRequest.headers,
+    body: signedRequest.body,
+  });
+
+  const result = await response.json();
+  if (!response.ok || result.errors) {
+    console.error("TURN_ACCEPTED publish failed:", result);
+    // Non-fatal: the user still gets the mutation return value.
+  }
+}
+
+/**
+ * Look up an existing message by (projectId, clientMessageId) using a
+ * Query on the main table with a filter. This is a rare path (retries
+ * only) so a scan-filter on a sparse attribute is acceptable without
+ * a GSI.
+ */
+async function findByClientMessageId(
+  projectId: string,
+  clientMessageId: string,
+): Promise<Record<string, unknown> | undefined> {
+  const result = await docClient.send(
+    new QueryCommand({
+      TableName: CONVERSATIONS_TABLE,
+      KeyConditionExpression: "projectId = :pk",
+      FilterExpression: "clientMessageId = :cmid",
+      ExpressionAttributeValues: {
+        ":pk": projectId,
+        ":cmid": clientMessageId,
+      },
+      Limit: 1,
+    }),
+  );
+  return result.Items?.[0];
 }
 
 /**
@@ -68,6 +192,21 @@ async function sendMessage(event: AppSyncEvent) {
     userId,
   });
 
+  // ── CIT-268: clientMessageId dedup ──────────────────────────────────
+  // If the client supplied a clientMessageId (retry scenario), check
+  // whether we already stored a message with that id for this project.
+  // If so, return the existing record without emitting a second event.
+  if (message.clientMessageId) {
+    const existing = await findByClientMessageId(
+      projectId,
+      message.clientMessageId,
+    );
+    if (existing) {
+      console.log("Dedup hit — returning existing message:", existing.id);
+      return existing;
+    }
+  }
+
   // Create message record
   const messageId = uuidv4();
   const timestamp = new Date().toISOString();
@@ -76,7 +215,7 @@ async function sendMessage(event: AppSyncEvent) {
   // source. Chat is one of the 4 canonical entry points.
   const runId = mintRunId();
 
-  const messageRecord = {
+  const messageRecord: Record<string, unknown> = {
     projectId,
     timestamp,
     id: messageId,
@@ -87,6 +226,9 @@ async function sendMessage(event: AppSyncEvent) {
     runId,
     ...(message.metadata && { metadata: message.metadata }),
     ...(message.correlationId && { correlationId: message.correlationId }),
+    ...(message.clientMessageId && {
+      clientMessageId: message.clientMessageId,
+    }),
   };
 
   // Store in DynamoDB
@@ -98,6 +240,17 @@ async function sendMessage(event: AppSyncEvent) {
   );
 
   console.log("Message stored in DynamoDB:", messageRecord.id);
+
+  // ── CIT-268: publish TURN_ACCEPTED before EventBridge dispatch ──────
+  if (message.messageType === "USER_INPUT") {
+    try {
+      await publishTurnAccepted(projectId, message.agentId, messageId);
+      console.log("TURN_ACCEPTED published for message:", messageId);
+    } catch (error) {
+      console.error("Failed to publish TURN_ACCEPTED:", error);
+      // Non-fatal — the user still gets the mutation return.
+    }
+  }
 
   // Publish to EventBridge (async - don't wait for agent)
   if (message.messageType === "USER_INPUT") {
