@@ -98,7 +98,7 @@ export function useDashboardData(): DashboardData {
       const results = await Promise.allSettled([
         projectService.listProjects(),
         agentConfigService.listAgentConfigs(),
-        workflowApiService.listWorkflows('default'),
+        workflowApiService.listWorkflows(),
         integrationServiceBackend.listIntegrations('default'),
         datastoreService.listDataStores('default'),
       ]);

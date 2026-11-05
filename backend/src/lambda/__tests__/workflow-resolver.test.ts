@@ -308,12 +308,12 @@ describe("workflow-resolver", () => {
         ],
       });
 
-      await invoke(makeEvent("listWorkflows", { orgId: "org-real" }));
+      await expect(
+        invoke(makeEvent("listWorkflows", { orgId: "org-real" })),
+      ).rejects.toThrow("Access denied");
 
-      const queryCall = ddbMock.commandCalls(QueryCommand)[0];
-      expect(queryCall.args[0].input.ExpressionAttributeValues[":orgId"]).toBe(
-        "org-1",
-      );
+      // The query must never execute — the mismatch is caught BEFORE DB access.
+      expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
     });
 
     test("a normal non-admin caller still sees their own org's workflows", async () => {
@@ -326,6 +326,20 @@ describe("workflow-resolver", () => {
         makeEvent("listWorkflows", { orgId: "org-1" }),
       );
       expect(result).toEqual({ items, nextToken: undefined });
+    });
+
+    test("derives the caller's org when orgId argument is omitted", async () => {
+      const items = [
+        { workflowId: "wf-1", orgId: "org-1", isBlueprint: "false" },
+      ];
+      ddbMock.on(QueryCommand).resolves({ Items: items });
+
+      const result = await invoke(makeEvent("listWorkflows", {}));
+      expect(result).toEqual({ items, nextToken: undefined });
+      const queryCall = ddbMock.commandCalls(QueryCommand)[0];
+      expect(queryCall.args[0].input.ExpressionAttributeValues[":orgId"]).toBe(
+        "org-1",
+      );
     });
 
     test("an admin caller may still query a specified org explicitly", async () => {
@@ -351,6 +365,42 @@ describe("workflow-resolver", () => {
       const queryCall = ddbMock.commandCalls(QueryCommand)[0];
       expect(queryCall.args[0].input.ExpressionAttributeValues[":orgId"]).toBe(
         "org-real",
+      );
+    });
+
+    test("admin caller without an explicit orgId uses their own org", async () => {
+      cognitoMock.reset();
+      callerOrg = "org-admin";
+      cognitoMock.on(AdminGetUserCommand).resolves({
+        UserAttributes: [
+          { Name: "sub", Value: "admin-1" },
+          { Name: "custom:organization", Value: "org-admin" },
+        ],
+      });
+      const items = [
+        { workflowId: "wf-admin", orgId: "org-admin", isBlueprint: "false" },
+      ];
+      ddbMock.on(QueryCommand).resolves({ Items: items });
+
+      const adminEvent = {
+        info: { fieldName: "listWorkflows" },
+        arguments: {},
+        identity: {
+          sub: "admin-1",
+          "custom:organization": "org-admin",
+          claims: {
+            sub: "admin-1",
+            "custom:organization": "org-admin",
+            "cognito:groups": ["admin"],
+          },
+        },
+      } as unknown as HandlerEvent;
+
+      const result = await invoke(adminEvent);
+      expect(result).toEqual({ items, nextToken: undefined });
+      const queryCall = ddbMock.commandCalls(QueryCommand)[0];
+      expect(queryCall.args[0].input.ExpressionAttributeValues[":orgId"]).toBe(
+        "org-admin",
       );
     });
   });
