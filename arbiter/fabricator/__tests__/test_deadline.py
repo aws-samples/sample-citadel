@@ -196,11 +196,12 @@ class TestCurrentDeadlineRegistry:
 # ---------------------------------------------------------------------------
 
 class TestTimedOutFailureMessage:
-    def test_names_agent_and_says_timed_out_with_requeue_action(self):
+    def test_names_agent_and_says_timed_out_with_retry_action(self):
         msg = timed_out_failure_message("VarianceTriageAgent")
         assert "VarianceTriageAgent" in msg
         assert "timed out" in msg
-        assert "Re-queue" in msg
+        assert "Please try your request again" in msg
+        assert "Re-queue" not in msg
 
     def test_includes_tripped_where_when_available(self):
         d = FabricationDeadline(lambda: 1_000, safety_margin_seconds=60)

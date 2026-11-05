@@ -185,6 +185,6 @@ def timed_out_failure_message(agent_use_id, deadline=None):
         f"Fabrication of '{agent_use_id}' timed out: the Lambda's remaining "
         f"execution time fell below the safety margin at {where}. The job "
         f"was stopped cleanly so this terminal status could be written "
-        f"(instead of the Lambda being killed mid-write). Re-queue the "
-        f"agent to try again."
+        f"(instead of the Lambda being killed mid-write). Please try your "
+        f"request again."
     )

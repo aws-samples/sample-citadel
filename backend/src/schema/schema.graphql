@@ -644,6 +644,7 @@ type ConversationMessage @aws_iam @aws_cognito_user_pools {
   timestamp: AWSDateTime!
   metadata: AWSJSON
   correlationId: String
+  clientMessageId: ID
 }
 
 type DocumentUploadResult {
@@ -1275,6 +1276,7 @@ input ConversationMessageInput {
   messageType: MessageType!
   metadata: AWSJSON
   correlationId: String
+  clientMessageId: ID
 }
 
 input PublishMessageInput {
@@ -1591,6 +1593,7 @@ enum MessageType {
   AGENT_RESPONSE
   SYSTEM_NOTIFICATION
   PROGRESS_UPDATE
+  TURN_ACCEPTED
 }
 
 enum AgentState {
