@@ -82,7 +82,12 @@ Collapses twin DDB rows for seeded agents into a canonical recordId-keyed
 row + thin name-keyed pointer, copies S3 modules to scoped keys, and
 rewrites seeded blueprint definitions to reference agents by recordId
 instead of friendly name. Fixes orgId `'Default'` → `'All Organizations'`
-on agent rows and `'Default'` → `'system'` on blueprint rows.
+on agent rows and `'Default'` → `'system'` on seeded blueprint rows only
+(user-created blueprints are never touched by the org rewrite).
+
+The seeded blueprint set is imported from `seed-blueprints` via
+`SEEDED_BLUEPRINT_IDS` — this is the single source of truth for which
+workflow IDs are seeded.
 
 Seeded agents are identified by `createdBy = 'seedConfig'` on the
 recordId-keyed row.
@@ -99,6 +104,30 @@ npx ts-node --project tsconfig.scripts.json scripts/reconcile-seeded-rows.ts \
   --bucket <AGENT_BUCKET_NAME> --apply
 ```
 
+### Reverting non-seeded blueprint orgId
+
+If the previous (buggy) version of this script already ran and rewrote
+user-created blueprint orgId values from `'Default'` to `'system'`, use
+`--revert-nonseeded-org` to undo the damage. This sets orgId back to the
+specified value for every blueprint that is NOT in the seeded set and whose
+orgId is currently `'system'`.
+
+```bash
+# Dry-run first — see which rows would revert
+npx ts-node --project tsconfig.scripts.json scripts/reconcile-seeded-rows.ts \
+  --table <AGENT_CONFIG_TABLE> --workflows-table <WORKFLOWS_TABLE> \
+  --bucket <AGENT_BUCKET_NAME> \
+  --revert-nonseeded-org Default
+
+# Apply the revert (idempotent)
+npx ts-node --project tsconfig.scripts.json scripts/reconcile-seeded-rows.ts \
+  --table <AGENT_CONFIG_TABLE> --workflows-table <WORKFLOWS_TABLE> \
+  --bucket <AGENT_BUCKET_NAME> \
+  --revert-nonseeded-org Default --apply
+```
+
 Flags: `--table` (required), `--workflows-table` (required), `--bucket`
 (required), `--apply`, `--dry-run` (default), `--org-sentinel` (default
-`'All Organizations'`), `--names` (comma-separated, restricts to listed agents).
+`'All Organizations'`), `--names` (comma-separated, restricts to listed agents),
+`--revert-nonseeded-org <org>` (revert non-seeded blueprints with orgId
+`'system'` to the given org; dry-run default; idempotent).
