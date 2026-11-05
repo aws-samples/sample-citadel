@@ -19,13 +19,16 @@
  */
 
 import { mockClient } from "aws-sdk-client-mock";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
 import type { CloudFormationCustomResourceEvent, Context } from "aws-lambda";
 
 import { isWorkflowDefinitionEnvelope } from "./fixtures/workflow-envelope-guard";
 
-// Mock the https module so the CFN custom-resource response resolves locally.
+// Mock https.request for CFN response while preserving https.Agent (needed
+// by @smithy/node-http-handler during teardown — see #466).
 jest.mock("https", () => ({
+  ...jest.requireActual("https"),
   request: (_options: unknown, callback?: () => void) => {
     if (typeof callback === "function") {
       callback();
@@ -42,6 +45,10 @@ import {
   deterministicId,
 } from "../seed-blueprints";
 
+// Mock the low-level client so the module-scope DynamoDBClient never creates
+// a real NodeHttpHandler (whose keep-alive https.Agent crashes on teardown
+// when Jest replaces the https module with the mock above).
+const ddbClientMock = mockClient(DynamoDBClient);
 const ddbMock = mockClient(DynamoDBDocumentClient);
 
 // aws-lambda's Handler type declares a legacy required callback third
@@ -121,6 +128,8 @@ describe("seed-blueprints contract", () => {
 
   afterAll(() => {
     delete process.env.WORKFLOWS_TABLE;
+    ddbMock.restore();
+    ddbClientMock.restore();
   });
 
   // ─── Part A: canonical envelope on every built seed definition ──────────

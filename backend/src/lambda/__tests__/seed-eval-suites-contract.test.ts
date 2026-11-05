@@ -7,6 +7,7 @@
  * sha256 ids, seedVersion-aware upsert ConditionExpression.
  */
 import { mockClient } from "aws-sdk-client-mock";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
   PutCommand,
@@ -14,7 +15,10 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import type { CloudFormationCustomResourceEvent, Context } from "aws-lambda";
 
+// Mock https.request for CFN response while preserving https.Agent (needed
+// by @smithy/node-http-handler during teardown — see #466).
 jest.mock("https", () => ({
+  ...jest.requireActual("https"),
   request: (_options: unknown, callback?: () => void) => {
     if (typeof callback === "function") {
       callback();
@@ -42,6 +46,10 @@ import {
   deterministicId,
 } from "../seed-eval-suites";
 
+// Mock the low-level client so the module-scope DynamoDBClient never creates
+// a real NodeHttpHandler (whose keep-alive https.Agent crashes on teardown
+// when Jest replaces the https module with the mock above).
+const ddbClientMock = mockClient(DynamoDBClient);
 const ddbMock = mockClient(DynamoDBDocumentClient);
 
 const invokeHandler = handler as (
@@ -109,6 +117,11 @@ describe("seed-eval-suites contract", () => {
 
   afterEach(() => {
     logSpy.mockRestore();
+  });
+
+  afterAll(() => {
+    ddbMock.restore();
+    ddbClientMock.restore();
   });
 
   describe("seed data shape", () => {

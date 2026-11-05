@@ -55,8 +55,10 @@ jest.mock("../../services/registry-service", () => ({
   })),
 }));
 
-// Suppress the https response callback
+// Mock https.request for CFN response while preserving https.Agent (prevents
+// @smithy/node-http-handler teardown crashes — see #466).
 jest.mock("https", () => ({
+  ...jest.requireActual("https"),
   request: jest.fn((_opts: unknown, cb: () => void) => {
     const req = {
       on: jest.fn(),

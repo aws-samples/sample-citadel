@@ -11,6 +11,10 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 
+// Mock the low-level client so the module-scope DynamoDBClient (created when
+// ../index is imported) and per-test clients never open real keep-alive
+// sockets, preventing open-handle warnings during teardown.
+const ddbClientMock = mockClient(DynamoDBClient);
 const ddbMock = mockClient(DynamoDBDocumentClient);
 
 // Import WITHOUT the handler (which pulls in https-dependent CFN response code)
@@ -28,6 +32,8 @@ describe("resolveAgentRecordIds", () => {
 
   afterAll(() => {
     delete process.env.AGENT_CONFIG_TABLE;
+    ddbMock.restore();
+    ddbClientMock.restore();
   });
 
   test("resolves via thin pointer _canonicalRecordId", async () => {
