@@ -25,6 +25,14 @@ import * as crypto from "crypto";
 import { Construct } from "constructs";
 import { NagSuppressions } from "cdk-nag";
 import { REGISTRY_GENERATION } from "./registry-generation";
+import {
+  SEED_VERSION as SEED_BLUEPRINTS_VERSION,
+  computeSeedBlueprintFingerprint,
+} from "../src/lambda/seed-blueprints/definitions";
+import {
+  SEED_VERSION as SEED_EVAL_SUITES_VERSION,
+  computeSeedEvalSuitesFingerprint,
+} from "../src/lambda/seed-eval-suites/definitions";
 
 // Resolve backend/src/lambda/registry-provisioner.ts regardless of whether
 // this module is loaded from source (backend/lib/) via ts-jest or from the
@@ -1885,15 +1893,18 @@ export class BackendStack extends cdk.Stack {
     this.workflowsTable.grantWriteData(seedBlueprintsLambda);
     this.agentConfigTable.grantReadData(seedBlueprintsLambda);
 
-    // Bumped Version v1.3.0 → v1.4.0 so the CFN Update event re-fires on the
-    // next deploy and seeds blueprints with recordId-based agent references.
+    // Content fingerprint: any change to SEED_BLUEPRINTS, SMOKE_BLUEPRINTS,
+    // or SEED_VERSION changes the fingerprint, forcing CloudFormation to
+    // re-invoke the seeder. Closes the defect where a code-only change
+    // (e.g. #476 SEED_VERSION 4) left the CFN resource unchanged.
     const seedBlueprintsResource = new cdk.CustomResource(
       this,
       "SeedBlueprintsResource",
       {
         serviceToken: seedBlueprintsLambda.functionArn,
         properties: {
-          Version: "v1.4.0",
+          Version: `v${SEED_BLUEPRINTS_VERSION}`,
+          SeedFingerprint: computeSeedBlueprintFingerprint(),
         },
       },
     );
@@ -3751,7 +3762,8 @@ export class BackendStack extends cdk.Stack {
       {
         serviceToken: seedEvalSuitesLambda.functionArn,
         properties: {
-          Version: "v1.0.0",
+          Version: `v${SEED_EVAL_SUITES_VERSION}`,
+          SeedFingerprint: computeSeedEvalSuitesFingerprint(),
         },
       },
     );
