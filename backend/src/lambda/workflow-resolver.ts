@@ -66,7 +66,7 @@ interface ImportWorkflowInput {
  */
 interface WorkflowResolverArguments {
   workflowId: string;
-  orgId: string;
+  orgId?: string;
   status?: string;
   category?: string;
   input: CreateWorkflowInput & UpdateWorkflowInput & ImportWorkflowInput;
@@ -214,29 +214,53 @@ async function getWorkflow(
 }
 
 async function listWorkflows(
-  orgId: string,
+  orgId: string | undefined,
   status: string | undefined,
   userId: string,
   event: WorkflowResolverEvent,
 ): Promise<{ items: unknown[]; nextToken?: string }> {
-  // Org scoping (finding f0ce2b00, high): fail closed, mirroring
-  // requireEffectiveOrgId in datastore-resolver.ts/integration-resolver.ts.
-  // An admin uses the supplied argument explicitly; a non-admin uses ONLY
-  // their own resolved org; an unresolved effective org is a hard denial —
-  // it must never fall through to the client-supplied orgId argument (the
-  // prior `userOrg || orgId` coercion did exactly that, handing a caller
-  // with no org claim any tenant's workflows on request).
+  // Org scoping: the caller's organisation is ALWAYS derived server-side
+  // from the JWT's custom:organization claim.  A client-supplied orgId
+  // argument is only honoured for admins; non-admins that pass a
+  // mismatching orgId are refused with an opaque error + metric so the
+  // attempt is visible in dashboards without leaking tenant details.
   let queryOrgId: string;
   if (isAdminFromEvent(event)) {
-    queryOrgId = orgId;
-  } else {
-    const userOrg = await extractOrgFromEvent(event);
-    if (!userOrg) {
-      throw new PermissionError(
-        "Access denied: no organization is provisioned for your account. Contact an administrator.",
-      );
+    // Admin: prefer the explicit argument so cross-org reads remain
+    // possible; fall back to the caller's own org when the argument is
+    // absent (schema is now optional).
+    if (orgId) {
+      queryOrgId = orgId;
+    } else {
+      queryOrgId = await requireCallerOrg(event, "WorkflowResolver");
     }
-    queryOrgId = userOrg;
+  } else {
+    const callerOrg = await requireCallerOrg(event, "WorkflowResolver");
+    if (orgId && orgId !== callerOrg) {
+      // Emit an OrgArgMismatch metric (best-effort) so cross-tenant
+      // enumeration attempts surface in CloudWatch dashboards.
+      try {
+        const { CloudWatchClient, PutMetricDataCommand } =
+          await import("@aws-sdk/client-cloudwatch");
+        await new CloudWatchClient({}).send(
+          new PutMetricDataCommand({
+            Namespace: "Citadel/Resolvers",
+            MetricData: [
+              {
+                MetricName: "OrgArgMismatch",
+                Value: 1,
+                Unit: "Count",
+                Dimensions: [{ Name: "resolver", Value: "WorkflowResolver" }],
+              },
+            ],
+          }),
+        );
+      } catch {
+        // Best effort — metric failure must never block the deny path.
+      }
+      throw new PermissionError("Access denied");
+    }
+    queryOrgId = callerOrg;
   }
 
   const params: QueryCommandInput = {

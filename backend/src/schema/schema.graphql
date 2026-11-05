@@ -34,7 +34,7 @@ type Query {
   listAvailableRoles: [String]
   listOrganizations: [Organization]
   getWorkflow(workflowId: ID!): Workflow
-  listWorkflows(orgId: String!, status: WorkflowStatus): WorkflowConnection
+  listWorkflows(orgId: String, status: WorkflowStatus): WorkflowConnection
   listBlueprints(category: String): BlueprintConnection
   getApp(appId: ID!): RegistryAgentRecord
   listApps(orgId: String!): AppConnection
