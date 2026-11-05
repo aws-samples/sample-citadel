@@ -1,11 +1,14 @@
 /**
- * Guard test: every `subscription { <field> }` document in frontend/src must
- * name a field that actually exists in `type Subscription` of the backend
- * GraphQL schema.  Catches dead subscriptions at CI time instead of at runtime
- * (AppSync FieldUndefined errors in the browser console).
+ * Guard test: every GraphQL operation document (query, mutation, subscription)
+ * in frontend/src must name a root field that actually exists in the matching
+ * root type of the backend GraphQL schema.
  *
- * CIT-278 — the two fields that motivated this guard were onCreateProject and
- * onUpdateProject, both absent from the schema.
+ * Catches dead operations at CI time instead of at runtime (AppSync
+ * FieldUndefined errors in the browser console).
+ *
+ * CIT-278 — originally covered subscriptions only.
+ * CIT-284 — extended to queries and mutations; deleteProject and
+ * updateIntegrationStatus were the first two dead mutations caught.
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -13,18 +16,54 @@ import * as path from 'path';
 const FRONTEND_SRC = path.resolve(__dirname, '..', '..');
 const SCHEMA_PATH = path.resolve(FRONTEND_SRC, '..', '..', 'backend', 'src', 'schema', 'schema.graphql');
 
-/** Extract field names from a top-level GraphQL type block. */
-function extractTypeFields(schema: string, typeName: string): Set<string> {
-  const re = new RegExp(`type\\s+${typeName}\\s*\\{([^}]+)\\}`, 's');
-  const match = schema.match(re);
-  if (!match) return new Set();
-  const block = match[1];
+type OperationKind = 'query' | 'mutation' | 'subscription';
+
+const ROOT_TYPE_MAP: Record<OperationKind, string> = {
+  query: 'Query',
+  mutation: 'Mutation',
+  subscription: 'Subscription',
+};
+
+/**
+ * Extract the body of a top-level `type Foo { ... }` block using brace-depth
+ * tracking, so nested braces in comments or descriptions do not truncate it.
+ */
+function extractTypeBlock(schema: string, typeName: string): string | null {
+  const startRe = new RegExp(`(?:^|\\n)type\\s+${typeName}\\s*\\{`);
+  const m = startRe.exec(schema);
+  if (!m) return null;
+
+  let depth = 1;
+  let i = m.index + m[0].length;
+  const start = i;
+  while (i < schema.length && depth > 0) {
+    if (schema[i] === '{') depth++;
+    else if (schema[i] === '}') depth--;
+    i++;
+  }
+  // `i` now points one past the closing `}`
+  return schema.substring(start, i - 1);
+}
+
+/** Extract field names from a type block body. */
+function extractFieldNames(block: string): Set<string> {
   const fields = new Set<string>();
   for (const line of block.split('\n')) {
-    const m = line.match(/^\s*(\w+)\s*[(:]/);
-    if (m) fields.add(m[1]);
+    // Match lines like `  fieldName(args): Type` or `  fieldName: Type`
+    // Skip comment lines
+    const trimmed = line.trim();
+    if (trimmed.startsWith('#') || trimmed.startsWith('"')) continue;
+    const fieldMatch = trimmed.match(/^(\w+)\s*[(:]/);
+    if (fieldMatch) fields.add(fieldMatch[1]);
   }
   return fields;
+}
+
+/** Extract field names from a top-level GraphQL type. */
+function extractTypeFields(schema: string, typeName: string): Set<string> {
+  const block = extractTypeBlock(schema, typeName);
+  if (!block) return new Set();
+  return extractFieldNames(block);
 }
 
 /** Recursively collect .ts/.tsx files, skipping __tests__ dirs. */
@@ -42,30 +81,32 @@ function collectSourceFiles(dir: string): string[] {
   return results;
 }
 
-/**
- * Detect whether a template literal body is a GraphQL document.
- *
- * A real GraphQL document contains an operation keyword (`query`, `mutation`,
- * or `subscription`) followed by an operation name, optional variables, and a
- * selection set.  Log messages like `"Backend subscription for ${eventType}"`
- * do NOT contain a selection set (opening `{` followed by a plain identifier
- * on a subsequent line or after whitespace).
- *
- * We require the root field to be a plain identifier (no `$` prefix, which
- * would indicate a JS template expression like `${eventType}`).
- */
-function findSubscriptionRootFields(
-  files: string[],
-): Array<{ file: string; field: string }> {
-  const results: Array<{ file: string; field: string }> = [];
+interface OperationRootField {
+  file: string;
+  kind: OperationKind;
+  operationName: string;
+  field: string;
+}
 
-  // Match: subscription <Name>(<vars>) { \n <rootField>
-  // The root field must:
-  //   - follow a `{` + optional whitespace/newline
-  //   - start with a letter (not $ which indicates a JS interpolation)
-  //   - be a plain word (the GraphQL field name)
+/**
+ * Extract root fields from GraphQL operation documents embedded in template
+ * literals.
+ *
+ * Matches backtick-delimited strings whose body contains a GraphQL operation
+ * keyword (query, mutation, subscription) followed by an operation name,
+ * optional variables, and a selection set with a root field.
+ *
+ * Skips template literals that use JS interpolation (`${...}`) — those compose
+ * fragments at runtime and cannot be parsed as standalone GraphQL.
+ */
+function findOperationRootFields(
+  files: string[],
+): OperationRootField[] {
+  const results: OperationRootField[] = [];
+
+  // Match: <kind> <Name>(<vars>) { \n <rootField>
   const opRe =
-    /subscription\s+[A-Z]\w*\s*(?:\([^)]*\))?\s*\{\s*\n\s*([a-zA-Z]\w*)/g;
+    /(query|mutation|subscription)\s+([A-Z]\w*)\s*(?:\([^)]*\))?\s*\{\s*\n\s*([a-zA-Z]\w*)/g;
 
   for (const file of files) {
     const content = fs.readFileSync(file, 'utf-8');
@@ -73,39 +114,87 @@ function findSubscriptionRootFields(
     let tlMatch: RegExpExecArray | null;
     while ((tlMatch = templateLiteralRe.exec(content)) !== null) {
       const body = tlMatch[1];
+
+      // Skip template literals with JS interpolation
+      if (body.includes('${')) continue;
+
       opRe.lastIndex = 0;
       let m: RegExpExecArray | null;
       while ((m = opRe.exec(body)) !== null) {
-        results.push({ file: path.relative(FRONTEND_SRC, file), field: m[1] });
+        results.push({
+          file: path.relative(FRONTEND_SRC, file),
+          kind: m[1] as OperationKind,
+          operationName: m[2],
+          field: m[3],
+        });
       }
     }
   }
   return results;
 }
 
-describe('GraphQL operation guard — subscription fields match schema', () => {
+describe('GraphQL operation guard — every operation root field matches the schema', () => {
   const schema = fs.readFileSync(SCHEMA_PATH, 'utf-8');
-  const subscriptionFields = extractTypeFields(schema, 'Subscription');
+  const schemaFields: Record<OperationKind, Set<string>> = {
+    query: extractTypeFields(schema, ROOT_TYPE_MAP.query),
+    mutation: extractTypeFields(schema, ROOT_TYPE_MAP.mutation),
+    subscription: extractTypeFields(schema, ROOT_TYPE_MAP.subscription),
+  };
+
   const sourceFiles = collectSourceFiles(FRONTEND_SRC);
-  const usedSubscriptions = findSubscriptionRootFields(sourceFiles);
+  const allOps = findOperationRootFields(sourceFiles);
+
+  test('schema Query type is parseable and non-empty', () => {
+    expect(schemaFields.query.size).toBeGreaterThan(0);
+  });
+
+  test('schema Mutation type is parseable and non-empty', () => {
+    expect(schemaFields.mutation.size).toBeGreaterThan(0);
+  });
 
   test('schema Subscription type is parseable and non-empty', () => {
-    expect(subscriptionFields.size).toBeGreaterThan(0);
+    expect(schemaFields.subscription.size).toBeGreaterThan(0);
+  });
+
+  test('found at least one query document in frontend source', () => {
+    expect(allOps.filter(o => o.kind === 'query').length).toBeGreaterThan(0);
+  });
+
+  test('found at least one mutation document in frontend source', () => {
+    expect(allOps.filter(o => o.kind === 'mutation').length).toBeGreaterThan(0);
   });
 
   test('found at least one subscription document in frontend source', () => {
-    // Sanity check — if zero documents are found the guard is vacuously true
-    // and therefore useless.
-    expect(usedSubscriptions.length).toBeGreaterThan(0);
+    expect(allOps.filter(o => o.kind === 'subscription').length).toBeGreaterThan(0);
   });
 
-  test('every subscription document names a field present in the schema', () => {
-    const dead: Array<{ file: string; field: string }> = [];
-    for (const { file, field } of usedSubscriptions) {
-      if (!subscriptionFields.has(field)) {
-        dead.push({ file, field });
-      }
+  test('every query root field exists in schema Query type', () => {
+    const dead = allOps
+      .filter(o => o.kind === 'query')
+      .filter(o => !schemaFields.query.has(o.field));
+    if (dead.length > 0) {
+      const list = dead.map(d => `  ${d.file} → ${d.operationName} → ${d.field}`).join('\n');
+      throw new Error(`Dead query root fields (not in schema Query type):\n${list}`);
     }
-    expect(dead).toEqual([]);
+  });
+
+  test('every mutation root field exists in schema Mutation type', () => {
+    const dead = allOps
+      .filter(o => o.kind === 'mutation')
+      .filter(o => !schemaFields.mutation.has(o.field));
+    if (dead.length > 0) {
+      const list = dead.map(d => `  ${d.file} → ${d.operationName} → ${d.field}`).join('\n');
+      throw new Error(`Dead mutation root fields (not in schema Mutation type):\n${list}`);
+    }
+  });
+
+  test('every subscription root field exists in schema Subscription type', () => {
+    const dead = allOps
+      .filter(o => o.kind === 'subscription')
+      .filter(o => !schemaFields.subscription.has(o.field));
+    if (dead.length > 0) {
+      const list = dead.map(d => `  ${d.file} → ${d.operationName} → ${d.field}`).join('\n');
+      throw new Error(`Dead subscription root fields (not in schema Subscription type):\n${list}`);
+    }
   });
 });
