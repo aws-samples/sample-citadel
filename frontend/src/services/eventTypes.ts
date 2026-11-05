@@ -25,7 +25,7 @@ export interface ChatterEvent {
   timestamp: string;
   source: string;
   detailType: string;
-  detail: any;
+  detail: Record<string, unknown>;
 }
 
 export interface FabricationEvent {

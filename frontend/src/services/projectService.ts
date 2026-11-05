@@ -200,7 +200,7 @@ class ProjectService {
     try {
       // Note: owner/userId is set automatically by the backend based on authenticated user
       // Remove userId from input as backend doesn't accept it
-      const { userId, ...projectInput } = input;
+      const { userId: _userId, ...projectInput } = input;
 
       const response = await serverService.mutate<{ createProject: Project }>(
         CREATE_PROJECT,
@@ -417,7 +417,7 @@ class ProjectService {
       EVENT_TYPES.PROJECT_PROGRESS,
       subscription,
       { projectId },
-      (data: any) => {
+      (data: Record<string, Record<string, unknown> | undefined>) => {
         // Transform backend data to ProjectProgressEvent format
         if (data?.onProjectProgress) {
           return {
@@ -457,7 +457,7 @@ class ProjectService {
       EVENT_TYPES.ASSESSMENT_COMPLETE,
       subscription,
       { projectId },
-      (data: any) => {
+      (data: Record<string, Record<string, unknown> | undefined>) => {
         // Transform backend data to AssessmentCompleteEvent format
         if (data?.onAssessmentCompleted) {
           return {
@@ -492,7 +492,7 @@ class ProjectService {
       EVENT_TYPES.DESIGN_PROGRESS,
       subscription,
       { projectId },
-      (data: any) => {
+      (data: Record<string, Record<string, unknown> | undefined>) => {
         // Transform backend data to DesignProgressEvent format
         if (data?.onDesignProgress) {
           return {

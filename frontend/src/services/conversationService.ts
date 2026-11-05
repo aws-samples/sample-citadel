@@ -72,7 +72,7 @@ export async function sendMessageToAgent(
   projectId: string,
   agentId: string,
   message: string,
-  metadata?: Record<string, any>,
+  metadata?: Record<string, unknown>,
   clientMessageId?: string,
 ): Promise<ConversationMessage> {
   try {
@@ -144,7 +144,7 @@ function initializeConversationSubscription(projectId: string): void {
     eventType,
     onConversationMessage,
     { projectId },
-    (data: any) => {
+    (data: Record<string, Record<string, unknown> | undefined>) => {
       // Transform backend data to ConversationEvent format
       if (data?.onConversationMessage) {
         return data.onConversationMessage;
@@ -170,7 +170,7 @@ function initializeConversationSubscription(projectId: string): void {
 export function subscribeToConversation(
   projectId: string,
   onMessage: (message: ConversationMessage) => void,
-  _onError?: (error: any) => void
+  _onError?: (error: unknown) => void
 ): () => void {
   // Initialize backend subscription if needed
   initializeConversationSubscription(projectId);
@@ -208,7 +208,7 @@ export function subscribeToConversation(
  */
 export function parseMetadata(
   metadata?: string
-): Record<string, any> | undefined {
+): Record<string, unknown> | undefined {
   if (!metadata) return undefined;
 
   try {

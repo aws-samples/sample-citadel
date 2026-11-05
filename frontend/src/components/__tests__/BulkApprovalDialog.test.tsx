@@ -9,44 +9,43 @@ import type { PendingApprovalItem } from '../../services/approvalsService';
 /*  Minimal UI-component mocks (keep tests focused on dialog logic)   */
 /* ------------------------------------------------------------------ */
 
-jest.mock('@/components/ui/dialog', () => {
-  const R = require('react');
-  return {
-    Dialog: ({ children, open, onOpenChange }: any) =>
-      open ? R.createElement('div', { 'data-testid': 'dialog-root', onClick: () => onOpenChange?.(false) }, children) : null,
-    DialogContent: ({ children, ...rest }: any) => R.createElement('div', rest, children),
-    DialogHeader: ({ children }: any) => R.createElement('div', null, children),
-    DialogTitle: ({ children, ...rest }: any) => R.createElement('h2', rest, children),
-    DialogDescription: ({ children }: any) => R.createElement('p', null, children),
-    DialogFooter: ({ children }: any) => R.createElement('div', null, children),
-  };
-});
+interface MockProps extends Record<string, unknown> { children?: React.ReactNode }
+
+jest.mock('@/components/ui/dialog', () => ({
+  Dialog: ({ children, open, onOpenChange }: MockProps & { open?: boolean; onOpenChange?: (v: boolean) => void }) =>
+    open ? React.createElement('div', { 'data-testid': 'dialog-root', onClick: () => onOpenChange?.(false) }, children) : null,
+  DialogContent: ({ children, ...rest }: MockProps) => React.createElement('div', rest, children),
+  DialogHeader: ({ children }: MockProps) => React.createElement('div', null, children),
+  DialogTitle: ({ children, ...rest }: MockProps) => React.createElement('h2', rest, children),
+  DialogDescription: ({ children }: MockProps) => React.createElement('p', null, children),
+  DialogFooter: ({ children }: MockProps) => React.createElement('div', null, children),
+}));
 
 jest.mock('@/components/ui/button', () => ({
-  Button: ({ children, onClick, disabled, ...rest }: any) =>
+  Button: ({ children, onClick, disabled, ...rest }: MockProps & { onClick?: () => void; disabled?: boolean }) =>
     React.createElement('button', { onClick, disabled, ...rest }, children),
 }));
 
 jest.mock('@/components/ui/badge', () => ({
-  Badge: ({ children, variant }: any) =>
+  Badge: ({ children, variant }: MockProps & { variant?: string }) =>
     React.createElement('span', { 'data-testid': 'badge', 'data-variant': variant }, children),
 }));
 
 jest.mock('@/components/ui/textarea', () => ({
-  Textarea: (props: any) => React.createElement('textarea', props),
+  Textarea: (props: Record<string, unknown>) => React.createElement('textarea', props),
 }));
 
 jest.mock('@/components/ui/label', () => ({
-  Label: ({ children, ...rest }: any) => React.createElement('label', rest, children),
+  Label: ({ children, ...rest }: MockProps) => React.createElement('label', rest, children),
 }));
 
 jest.mock('@/components/ui/progress', () => ({
-  Progress: ({ value, ...rest }: any) =>
+  Progress: ({ value, ...rest }: MockProps & { value?: number }) =>
     React.createElement('div', { 'role': 'progressbar', 'aria-valuenow': value, ...rest }),
 }));
 
 jest.mock('@/components/ui/scroll-area', () => ({
-  ScrollArea: ({ children, ...rest }: any) => React.createElement('div', rest, children),
+  ScrollArea: ({ children, ...rest }: MockProps) => React.createElement('div', rest, children),
   ScrollBar: () => null,
 }));
 

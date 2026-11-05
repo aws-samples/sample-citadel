@@ -6,32 +6,36 @@
  */
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
+import type { ReactNode } from 'react';
+
+interface MockProps extends Record<string, unknown> { children?: ReactNode }
+interface MockProject { id: string; name: string; status: string }
 
 jest.mock('@/components/ui/button', () => ({
-  Button: ({ children, onClick, disabled, ...rest }: any) => (
+  Button: ({ children, onClick, disabled, ...rest }: MockProps & { onClick?: () => void; disabled?: boolean }) => (
     <button onClick={onClick} disabled={disabled} {...rest}>{children}</button>
   ),
 }));
 jest.mock('@/components/ui/card', () => ({
-  Card: ({ children, className }: any) => <div className={className}>{children}</div>,
-  CardContent: ({ children }: any) => <div>{children}</div>,
+  Card: ({ children, className }: MockProps & { className?: string }) => <div className={className}>{children}</div>,
+  CardContent: ({ children }: MockProps) => <div>{children}</div>,
 }));
 jest.mock('@/components/ui/utils', () => ({
-  cn: (...args: any[]) => args.filter(Boolean).join(' '),
+  cn: (...args: unknown[]) => (args as string[]).filter(Boolean).join(' '),
 }));
 jest.mock('@/components/PageContainer', () => ({
-  PageContainer: ({ children }: any) => <div>{children}</div>,
+  PageContainer: ({ children }: MockProps) => <div>{children}</div>,
 }));
 jest.mock('@/components/CreateProject', () => ({
-  CreateProject: ({ onBack, onCreated }: any) => (
+  CreateProject: ({ onBack, onCreated }: MockProps & { onBack?: () => void; onCreated?: (p: MockProject) => void }) => (
     <div data-testid="create-project">
       <button onClick={onBack}>Back</button>
-      <button onClick={() => onCreated({ id: 'new-1', name: 'New Project' })}>Create</button>
+      <button onClick={() => onCreated?.({ id: 'new-1', name: 'New Project', status: 'CREATED' })}>Create</button>
     </div>
   ),
 }));
 jest.mock('@/components/ProjectWorkspace', () => ({
-  ProjectWorkspace: ({ project, onBack }: any) => (
+  ProjectWorkspace: ({ project, onBack }: MockProps & { project: MockProject; onBack?: () => void }) => (
     <div data-testid="project-workspace">
       <span>{project.name}</span>
       <button onClick={onBack}>Back</button>
@@ -39,7 +43,7 @@ jest.mock('@/components/ProjectWorkspace', () => ({
   ),
 }));
 jest.mock('@/components/ProjectCard', () => ({
-  ProjectCard: ({ project, onSelectAssess }: any) => (
+  ProjectCard: ({ project, onSelectAssess }: MockProps & { project: MockProject; onSelectAssess?: (p: MockProject) => void }) => (
     <div data-testid={`project-card-${project.id}`} onClick={() => onSelectAssess?.(project)}>
       <span>{project.name}</span>
       <span>{project.status}</span>
@@ -50,7 +54,7 @@ jest.mock('@/components/PipelineStatsCards', () => ({
   PipelineStatsCards: () => <div data-testid="pipeline-stats" />,
 }));
 jest.mock('../AppBuilderWizard', () => ({
-  AppBuilderWizard: ({ onComplete }: any) => (
+  AppBuilderWizard: ({ onComplete }: MockProps & { onComplete?: () => void }) => (
     <div data-testid="app-builder-wizard">
       <button onClick={onComplete}>Complete</button>
     </div>
@@ -70,6 +74,7 @@ jest.mock('@/services', () => ({
 }));
 
 import { IntakeRequests } from '../IntakeRequests';
+import { projectService } from '@/services';
 
 describe('IntakeRequests page — regression', () => {
   beforeEach(() => {
@@ -144,8 +149,8 @@ describe('IntakeRequests page — regression', () => {
 
   test('shows error state when API fails', async () => {
     jest.useRealTimers();
-    const { projectService } = require('@/services');
-    projectService.listProjects.mockRejectedValueOnce(new Error('Network error'));
+    const mockListProjects = projectService.listProjects as jest.Mock;
+    mockListProjects.mockRejectedValueOnce(new Error('Network error'));
 
     render(<IntakeRequests />);
 

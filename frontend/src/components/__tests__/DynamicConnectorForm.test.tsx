@@ -22,54 +22,51 @@ import {
 } from '@testing-library/react';
 import '@testing-library/jest-dom';
 
+// Shared prop interfaces for mock components.
+interface MockProps extends Record<string, unknown> { children?: React.ReactNode }
+
 // Flatten shadcn Select to a native <select>.
-jest.mock('../ui/select', () => {
-  const ReactLib = require('react');
-  return {
-    Select: ({ value, onValueChange, children, disabled }: any) =>
-      ReactLib.createElement(
-        'select',
-        {
-          'data-testid': 'mock-select',
-          value: value ?? '',
-          disabled,
-          onChange: (e: any) => onValueChange?.(e.target.value),
-        },
-        children,
-      ),
-    SelectTrigger: ({ children }: any) =>
-      ReactLib.createElement(ReactLib.Fragment, null, children),
-    SelectValue: () => null,
-    SelectContent: ({ children }: any) =>
-      ReactLib.createElement(ReactLib.Fragment, null, children),
-    SelectItem: ({ children, value, ...rest }: any) =>
-      ReactLib.createElement('option', { value, ...rest }, children),
-  };
-});
+jest.mock('../ui/select', () => ({
+  Select: ({ value, onValueChange, children, disabled }: MockProps & { value?: string; onValueChange?: (v: string) => void; disabled?: boolean }) =>
+    React.createElement(
+      'select',
+      {
+        'data-testid': 'mock-select',
+        value: value ?? '',
+        disabled,
+        onChange: (e: React.ChangeEvent<HTMLSelectElement>) => onValueChange?.(e.target.value),
+      },
+      children,
+    ),
+  SelectTrigger: ({ children }: MockProps) =>
+    React.createElement(React.Fragment, null, children),
+  SelectValue: () => null,
+  SelectContent: ({ children }: MockProps) =>
+    React.createElement(React.Fragment, null, children),
+  SelectItem: ({ children, value, ...rest }: MockProps & { value?: string }) =>
+    React.createElement('option', { value, ...rest }, children),
+}));
 
 // Flatten shadcn Collapsible to a div + button.
-jest.mock('../ui/collapsible', () => {
-  const ReactLib = require('react');
-  return {
-    Collapsible: ({ children, open, ...rest }: any) =>
-      ReactLib.createElement(
-        'div',
-        { 'data-open': open ? 'true' : 'false', ...rest },
-        children,
-      ),
-    CollapsibleTrigger: ({ children, asChild: _asChild }: any) => {
-      // The form passes a real <button> inside via `asChild`; render its child directly.
-      const child = ReactLib.Children.only(children);
-      return child;
-    },
-    CollapsibleContent: ({ children, ...rest }: any) =>
-      ReactLib.createElement('div', { ...rest }, children),
-  };
-});
+jest.mock('../ui/collapsible', () => ({
+  Collapsible: ({ children, open, ...rest }: MockProps & { open?: boolean }) =>
+    React.createElement(
+      'div',
+      { 'data-open': open ? 'true' : 'false', ...rest },
+      children,
+    ),
+  CollapsibleTrigger: ({ children, asChild: _asChild }: MockProps & { asChild?: boolean }) => {
+    // The form passes a real <button> inside via `asChild`; render its child directly.
+    const child = React.Children.only(children);
+    return child;
+  },
+  CollapsibleContent: ({ children, ...rest }: MockProps) =>
+    React.createElement('div', { ...rest }, children),
+}));
 
 // Plain wrappers for Button / Input / Label / Textarea / Alert.
 jest.mock('../ui/button', () => ({
-  Button: ({ children, onClick, disabled, type, ...rest }: any) =>
+  Button: ({ children, onClick, disabled, type, ...rest }: MockProps & { onClick?: () => void; disabled?: boolean; type?: string }) =>
     React.createElement(
       'button',
       { onClick, disabled, type: type ?? 'button', ...rest },
@@ -77,23 +74,23 @@ jest.mock('../ui/button', () => ({
     ),
 }));
 jest.mock('../ui/input', () => ({
-  Input: ({ onChange, value, type, ...rest }: any) =>
+  Input: ({ onChange, value, type, ...rest }: MockProps & { onChange?: React.ChangeEventHandler<HTMLInputElement>; value?: string; type?: string }) =>
     React.createElement('input', { value, onChange, type: type ?? 'text', ...rest }),
 }));
 jest.mock('../ui/label', () => ({
-  Label: ({ children, htmlFor, ...rest }: any) =>
+  Label: ({ children, htmlFor, ...rest }: MockProps & { htmlFor?: string }) =>
     React.createElement('label', { htmlFor, ...rest }, children),
 }));
 jest.mock('../ui/textarea', () => ({
-  Textarea: ({ onChange, value, ...rest }: any) =>
+  Textarea: ({ onChange, value, ...rest }: MockProps & { onChange?: React.ChangeEventHandler<HTMLTextAreaElement>; value?: string }) =>
     React.createElement('textarea', { value, onChange, ...rest }),
 }));
 jest.mock('../ui/alert', () => ({
-  Alert: ({ children, ...rest }: any) =>
+  Alert: ({ children, ...rest }: MockProps) =>
     React.createElement('div', { role: 'alert', ...rest }, children),
-  AlertTitle: ({ children }: any) =>
+  AlertTitle: ({ children }: MockProps) =>
     React.createElement('div', null, children),
-  AlertDescription: ({ children }: any) =>
+  AlertDescription: ({ children }: MockProps) =>
     React.createElement('div', null, children),
 }));
 
@@ -105,8 +102,9 @@ import {
 import {
   CONNECTOR_REGISTRY,
   type ConnectorType,
+  type IntegrationType,
 } from '../../config/connectorRegistry';
-import { AlertCircle } from 'lucide-react';
+import { AlertCircle, type LucideIcon } from 'lucide-react';
 
 const mcpServerType: ConnectorType = (() => {
   const def = CONNECTOR_REGISTRY.MCP_SERVER;
@@ -132,7 +130,7 @@ function renderForm(
     onSubmit,
     ...overrides,
   };
-  render(React.createElement(DynamicConnectorForm, props as any));
+  render(React.createElement(DynamicConnectorForm, props as React.ComponentProps<typeof DynamicConnectorForm>));
   return { onSubmit };
 }
 
@@ -343,8 +341,8 @@ describe('DynamicConnectorForm — MCP_SERVER OAuth2 validation', () => {
     // scopes parsed to deduped array on submit
     expect(submitted.credentials.scopes).toEqual(['read', 'write']);
     // hidden fields not submitted
-    expect((submitted.credentials as any).tokenUrl).toBeUndefined();
-    expect((submitted.credentials as any).authorizationUrl).toBeUndefined();
+    expect((submitted.credentials as Record<string, unknown>).tokenUrl).toBeUndefined();
+    expect((submitted.credentials as Record<string, unknown>).authorizationUrl).toBeUndefined();
     // grantType included
     expect(submitted.credentials.grantType).toBe('AUTHORIZATION_CODE');
     // clientAuthenticationMethod default carried through
@@ -432,10 +430,10 @@ describe('isValidArn', () => {
 describe('unknown connector type (connectorDef = undefined)', () => {
   it('renders the "not found" alert without throwing', () => {
     const unknownType: ConnectorType = {
-      id: 'NONEXISTENT' as any,
+      id: 'NONEXISTENT' as unknown as IntegrationType,
       name: 'Ghost',
       description: 'does not exist in registry',
-      icon: AlertCircle as any,
+      icon: AlertCircle as unknown as LucideIcon,
       authMethod: 'API_KEY',
       provider: 'other',
       category: 'other',
