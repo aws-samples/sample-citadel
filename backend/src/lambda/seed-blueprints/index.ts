@@ -53,9 +53,10 @@ function smokeFixturesEnabled(): boolean {
  * introduced the full canvas-shape WorkflowDefinition envelope; version 3
  * rewrites agent references from friendly names to registry recordIds (+ a
  * `legacyAgentName` on each node for traceability). Rows seeded before v3
- * are healed exactly once.
+ * are healed exactly once. Version 4 made the Conditional Router blueprint
+ * runnable (demo-router-agent + demo-echo-agent instead of placeholders).
  */
-export const SEED_VERSION = 3;
+export const SEED_VERSION = 4;
 
 /** Deterministic ID from blueprint name so re-deploys don't create duplicates. */
 export function deterministicId(name: string): string {
@@ -412,31 +413,31 @@ export const SEED_BLUEPRINTS: SeedBlueprint[] = [
   {
     name: "Conditional Router",
     description:
-      "[Template] One root agent routes to two conditional branches based on output, then converges. Clone and re-map agent IDs before publishing.",
+      'Runnable demo: a router agent selects branch-a or branch-b based on input. Run with input {"route": "branch-b"} to take the branch-b path; default is branch-a. References real seeded agents.',
     category: "conditional",
     definition: {
       nodes: [
         {
           id: "router",
-          agentId: "placeholder-router",
+          agentId: "demo-router-agent",
           position: { x: 400, y: 50 },
           configuration: {},
         },
         {
           id: "branch-true",
-          agentId: "placeholder-true-handler",
+          agentId: "demo-echo-agent",
           position: { x: 200, y: 250 },
           configuration: {},
         },
         {
           id: "branch-false",
-          agentId: "placeholder-false-handler",
+          agentId: "demo-echo-agent",
           position: { x: 600, y: 250 },
           configuration: {},
         },
         {
           id: "merger",
-          agentId: "placeholder-merger",
+          agentId: "demo-echo-agent",
           position: { x: 400, y: 450 },
           configuration: {},
         },

@@ -135,8 +135,8 @@ describe("seed-blueprints contract", () => {
   // ─── Part A: canonical envelope on every built seed definition ──────────
 
   describe("definition envelope", () => {
-    test("SEED_VERSION starts at 3", () => {
-      expect(SEED_VERSION).toBe(3);
+    test("SEED_VERSION starts at 4", () => {
+      expect(SEED_VERSION).toBe(4);
     });
 
     test.each(SEED_BLUEPRINTS.map((bp) => [bp.name, bp] as const))(

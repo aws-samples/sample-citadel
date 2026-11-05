@@ -149,12 +149,13 @@ class TestRegistryDeniedIsNonFatal:
         assert data["registrySeeded"] is False
 
         # DDB seeding stays authoritative: fabricator, demo-echo-agent,
-        # 2 authority units, 1 constitutional layer = 5 put_item calls.
-        assert mock_table.put_item.call_count == 5
+        # demo-router-agent, 2 authority units, 1 constitutional layer = 6 put_item calls.
+        assert mock_table.put_item.call_count == 6
         items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
         agent_ids = {i.get("agentId") for i in items if "agentId" in i}
         assert "fabricator" in agent_ids
         assert "demo-echo-agent" in agent_ids
+        assert "demo-router-agent" in agent_ids
 
     def test_access_denied_leaves_linkage_absent(self):
         """When registry create is denied, linkage fields must not appear."""
@@ -184,10 +185,10 @@ class TestRegistryDeniedIsNonFatal:
         assert mock_send.call_args[0][2] == "SUCCESS"
         data = mock_send.call_args[0][3]
         assert data["registrySeeded"] is True
-        # Both fabricator and echo get a create call
-        assert client.create_registry_record.call_count == 2
-        # Both get submitted for approval (system agents)
-        assert client.submit_registry_record_for_approval.call_count == 2
+        # All three agents (fabricator, echo, router) get a create call
+        assert client.create_registry_record.call_count == 3
+        # All get submitted for approval (system agents)
+        assert client.submit_registry_record_for_approval.call_count == 3
 
     def test_ddb_failure_still_fails_the_deploy(self):
         """DynamoDB/S3 seeding stays authoritative — its own errors must

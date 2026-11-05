@@ -2,7 +2,7 @@
  * Tests for seed-blueprints recordId resolution.
  *
  * Verifies that:
- * - SEED_VERSION is 3 (bumped for recordId rewrite)
+ * - SEED_VERSION is 4 (runnable Conditional Router)
  * - buildSeedBlueprintItem substitutes recordIds and adds legacyAgentName
  * - buildSeedBlueprintItem leaves placeholder agents untouched
  * - handler seeds blueprints with correct seedVersion
@@ -113,8 +113,8 @@ describe("seed-blueprints — recordId resolution", () => {
 
   // ─── SEED_VERSION ──────────────────────────────────────────────
 
-  test("SEED_VERSION is 3 (bumped for recordId rewrite)", () => {
-    expect(SEED_VERSION).toBe(3);
+  test("SEED_VERSION is 4 (runnable Conditional Router)", () => {
+    expect(SEED_VERSION).toBe(4);
   });
 
   // ─── buildSeedBlueprintItem ────────────────────────────────────
@@ -218,7 +218,7 @@ describe("seed-blueprints — recordId resolution", () => {
       await invokeHandler(makeEvent("Create"), mockContext);
 
       for (const call of ddbMock.commandCalls(PutCommand)) {
-        expect(call.args[0].input.Item!.seedVersion).toBe(3);
+        expect(call.args[0].input.Item!.seedVersion).toBe(4);
       }
     });
   });
