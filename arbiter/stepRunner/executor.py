@@ -38,7 +38,7 @@ from dag import (
     propagate_skips,
 )
 from approval_requests import AWAITING_APPROVAL, EXECUTION_SENTINEL, build_approval_request, is_awaiting
-from condition import evaluate_condition
+from condition import evaluate_condition, resolve_field_path
 from retry import calculate_backoff, should_retry
 from common import workflow_contract
 from common import failure_taxonomy
@@ -1450,16 +1450,29 @@ def _evaluate_and_persist_skips(execution_id, node_id, output, edges, node_resul
     direct_skips: set[str] = set()
     for edge in [e for e in edges if e.get('source') == node_id]:
         condition = edge.get('condition')
-        if condition and not evaluate_condition(condition, output):
-            target_id = edge['target']
-            node_results[target_id] = {**node_results.get(target_id, {}), 'status': 'skipped'}
-            _executions_table.update_item(
-                Key={'executionId': execution_id},
-                UpdateExpression='SET nodeResults.#nid.#status = :status',
-                ExpressionAttributeNames={'#nid': target_id, '#status': 'status'},
-                ExpressionAttributeValues={':status': 'skipped'},
+        if condition:
+            matched = evaluate_condition(condition, output)
+            actual = resolve_field_path(output, condition.get('field', ''))
+            _log_event(
+                'condition_evaluated',
+                executionId=execution_id,
+                edge=edge.get('id'),
+                field=condition.get('field'),
+                operator=condition.get('operator'),
+                expected=condition.get('value'),
+                actual=actual,
+                matched=matched,
             )
-            direct_skips.add(target_id)
+            if not matched:
+                target_id = edge['target']
+                node_results[target_id] = {**node_results.get(target_id, {}), 'status': 'skipped'}
+                _executions_table.update_item(
+                    Key={'executionId': execution_id},
+                    UpdateExpression='SET nodeResults.#nid.#status = :status',
+                    ExpressionAttributeNames={'#nid': target_id, '#status': 'status'},
+                    ExpressionAttributeValues={':status': 'skipped'},
+                )
+                direct_skips.add(target_id)
 
     # CIT-259 H4: propagate to transitively unreachable nodes.
     if direct_skips and nodes is not None:
@@ -1478,6 +1491,19 @@ def _evaluate_and_persist_skips(execution_id, node_id, output, edges, node_resul
                 ExpressionAttributeNames={'#nid': nid_u, '#status': 'status'},
                 ExpressionAttributeValues={':status': 'unreachable'},
             )
+        _log_event(
+            'skip_propagated',
+            executionId=execution_id,
+            skipped=sorted(direct_skips),
+            unreachable=sorted(newly_unreachable),
+        )
+    elif direct_skips:
+        _log_event(
+            'skip_propagated',
+            executionId=execution_id,
+            skipped=sorted(direct_skips),
+            unreachable=[],
+        )
 
 
 def _finalize_execution(execution, output) -> bool:
