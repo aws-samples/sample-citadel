@@ -1,4 +1,4 @@
-boto3>=1.43.116
+boto3>=1.43.118
 aws-xray-sdk==2.15.0
 strands-agents==1.61.1
 # Security floors for transitive dependencies; remove when strands-agents requires them directly.
