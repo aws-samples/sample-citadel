@@ -37,7 +37,9 @@ import type { AppSyncResolverEvent } from "aws-lambda";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
+  DeleteCommand,
   GetCommand,
+  QueryCommand,
   ScanCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { getUserId } from "../utils/appsync";
@@ -473,6 +475,121 @@ async function healAgentConfigRows(
   });
 }
 
+/**
+ * Finds an existing DRAFT blueprint created by the same IAM caller for the
+ * same org + name. Used as an idempotency guard so a retry of the intake
+ * flow reuses the previously created draft instead of creating a duplicate.
+ * Returns the workflowId when found, null otherwise.
+ */
+async function findExistingDraftBlueprint(
+  orgId: string,
+  name: string,
+  userId: string,
+): Promise<string | null> {
+  // OrgStatusIndex: PK=orgId, SK=status. Query for DRAFT blueprints,
+  // then filter client-side by name + createdBy + isBlueprint.
+  const result = await docClient.send(
+    new QueryCommand({
+      TableName: workflowsTable(),
+      IndexName: "OrgStatusIndex",
+      KeyConditionExpression: "orgId = :orgId AND #status = :status",
+      FilterExpression:
+        "isBlueprint = :isBlueprint AND #name = :name AND createdBy = :createdBy",
+      ExpressionAttributeNames: { "#status": "status", "#name": "name" },
+      ExpressionAttributeValues: {
+        ":orgId": orgId,
+        ":status": "DRAFT",
+        ":isBlueprint": "true",
+        ":name": name,
+        ":createdBy": userId,
+      },
+    }),
+  );
+  const item = result.Items?.[0];
+  if (item && typeof item.workflowId === "string") {
+    return item.workflowId;
+  }
+  return null;
+}
+
+/**
+ * Best-effort compensating delete of a just-created DRAFT blueprint row
+ * when publishing fails. Emits a CloudWatch metric and always logs the
+ * outcome; never throws (the caller still returns the publish-failure
+ * result shape).
+ */
+async function rollbackDraftBlueprint(
+  workflowId: string,
+  sessionId: string,
+): Promise<void> {
+  try {
+    await docClient.send(
+      new DeleteCommand({
+        TableName: workflowsTable(),
+        Key: { workflowId },
+        // Only delete if still DRAFT — never remove a row that was
+        // concurrently published or otherwise advanced.
+        ConditionExpression: "#status = :draft",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: { ":draft": "DRAFT" },
+      }),
+    );
+    log("intakeCreateBlueprint", sessionId, {
+      stage: "rollback",
+      blueprintId: workflowId,
+      deleted: true,
+    });
+  } catch (deleteErr) {
+    // ConditionalCheckFailed means the row was already advanced — not an
+    // error, just a no-op.
+    if (
+      deleteErr instanceof Error &&
+      deleteErr.name === "ConditionalCheckFailedException"
+    ) {
+      log("intakeCreateBlueprint", sessionId, {
+        stage: "rollback",
+        blueprintId: workflowId,
+        skipped: true,
+        reason: "row_advanced",
+      });
+      return;
+    }
+    // Any other error: log ERROR so it is never silent.
+    console.error(
+      JSON.stringify({
+        resolver: "intake-orchestration-resolver",
+        fieldName: "intakeCreateBlueprint",
+        correlationId: sessionId,
+        stage: "rollback",
+        blueprintId: workflowId,
+        error:
+          deleteErr instanceof Error ? deleteErr.message : String(deleteErr),
+      }),
+    );
+  }
+
+  // Emit CloudWatch metric (best-effort — metric failure must never block
+  // the response path).
+  try {
+    const { CloudWatchClient, PutMetricDataCommand } =
+      await import("@aws-sdk/client-cloudwatch");
+    await new CloudWatchClient({}).send(
+      new PutMetricDataCommand({
+        Namespace: "Citadel/Intake",
+        MetricData: [
+          {
+            MetricName: "BlueprintRolledBack",
+            Value: 1,
+            Unit: "Count",
+          },
+        ],
+      }),
+    );
+  } catch {
+    // Best effort — metric failure must never block the response path.
+  }
+}
+
 async function intakeCreateBlueprint(
   sessionId: string,
   rawName: unknown,
@@ -493,36 +610,54 @@ async function intakeCreateBlueprint(
   const orgId = await resolveOrgId(ctx);
   const nodeCount = countNodes(definition);
 
+  // Idempotency guard (CIT-281): on retry, reuse an existing DRAFT
+  // blueprint created by this same caller for the same org + name instead
+  // of minting a duplicate. Mirrors the intakeCreateApp idempotency
+  // pattern (#428).
   let workflowId: string;
-  try {
-    const created = (await createWorkflow(
-      { orgId, name, isBlueprint: true, definition },
-      userId,
-    )) as { workflowId: string; orgId?: string };
-    workflowId = created.workflowId;
+  const existingDraft = await findExistingDraftBlueprint(orgId, name, userId);
 
-    // Verify the persisted row carries the org we resolved — fail closed if
-    // createWorkflow stamped a different org (should never happen, but the
-    // publish step below trusts this orgId for the assertRowOrg bypass).
-    if (created.orgId !== undefined && created.orgId !== orgId) {
-      throw new CrossOrgAccessError(
-        "Access denied: created workflow org does not match the session org",
-      );
+  if (existingDraft) {
+    workflowId = existingDraft;
+    log("intakeCreateBlueprint", sessionId, {
+      stage: "create",
+      reusedDraft: true,
+      blueprintId: workflowId,
+    });
+  } else {
+    try {
+      const created = (await createWorkflow(
+        { orgId, name, isBlueprint: true, definition },
+        userId,
+      )) as { workflowId: string; orgId?: string };
+      workflowId = created.workflowId;
+
+      // Verify the persisted row carries the org we resolved — fail closed if
+      // createWorkflow stamped a different org (should never happen, but the
+      // publish step below trusts this orgId for the assertRowOrg bypass).
+      if (created.orgId !== undefined && created.orgId !== orgId) {
+        throw new CrossOrgAccessError(
+          "Access denied: created workflow org does not match the session org",
+        );
+      }
+    } catch (err) {
+      if (err instanceof CrossOrgAccessError) {
+        throw err;
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      log("intakeCreateBlueprint", sessionId, {
+        stage: "create",
+        failed: true,
+      });
+      return {
+        ok: false,
+        blueprintId: null,
+        status: "VALIDATION_FAILED",
+        nodeCount,
+        missing: [],
+        errors: [message],
+      };
     }
-  } catch (err) {
-    if (err instanceof CrossOrgAccessError) {
-      throw err;
-    }
-    const message = err instanceof Error ? err.message : String(err);
-    log("intakeCreateBlueprint", sessionId, { stage: "create", failed: true });
-    return {
-      ok: false,
-      blueprintId: null,
-      status: "VALIDATION_FAILED",
-      nodeCount,
-      missing: [],
-      errors: [message],
-    };
   }
 
   // Dual-store self-healing: fabricated agents are registry-only (the
@@ -544,6 +679,12 @@ async function intakeCreateBlueprint(
     const missing = message.includes("do not exist")
       ? parseMissingAgentIds(message)
       : [];
+
+    // CIT-281 compensating action: delete the just-created DRAFT row so
+    // failed publishes don't leave orphan blueprints behind. Same pattern
+    // as the user-creation compensation in #428.
+    await rollbackDraftBlueprint(workflowId, sessionId);
+
     log("intakeCreateBlueprint", sessionId, {
       stage: "publish",
       failed: true,
@@ -552,8 +693,8 @@ async function intakeCreateBlueprint(
     });
     return {
       ok: false,
-      blueprintId: workflowId,
-      status: missing.length > 0 ? "AGENTS_SYNCING" : "VALIDATION_FAILED",
+      blueprintId: null,
+      status: "VALIDATION_FAILED",
       nodeCount,
       missing,
       errors: [message],

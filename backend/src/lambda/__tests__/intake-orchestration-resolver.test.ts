@@ -7,7 +7,9 @@
  */
 import {
   DynamoDBDocumentClient,
+  DeleteCommand,
   GetCommand,
+  QueryCommand,
   ScanCommand,
 } from "@aws-sdk/lib-dynamodb";
 import {
@@ -644,6 +646,13 @@ describe("intake-orchestration-resolver", () => {
         workflowId: "wf-1",
         status: "PUBLISHED",
       });
+      // Draft-reuse query returns no existing draft (happy path: fresh create)
+      ddbMock
+        .on(QueryCommand, {
+          TableName: "citadel-workflows-test",
+          IndexName: "OrgStatusIndex",
+        })
+        .resolves({ Items: [] });
     }
 
     test("normalizes an object-shaped definition to a JSON string exactly once", async () => {
@@ -709,8 +718,14 @@ describe("intake-orchestration-resolver", () => {
       });
     });
 
-    test("maps a missing-agent publish failure to AGENTS_SYNCING with the missing agentIds", async () => {
+    test("maps a missing-agent publish failure to VALIDATION_FAILED after rolling back the draft row", async () => {
       mockSessionLinkage();
+      ddbMock
+        .on(QueryCommand, {
+          TableName: "citadel-workflows-test",
+          IndexName: "OrgStatusIndex",
+        })
+        .resolves({ Items: [] });
       createWorkflowMock.mockResolvedValueOnce({
         workflowId: "wf-1",
         status: "DRAFT",
@@ -721,6 +736,7 @@ describe("intake-orchestration-resolver", () => {
             "Map each node to an existing agent before publishing; the workflow remains DRAFT.",
         ),
       );
+      ddbMock.on(DeleteCommand).resolves({});
 
       const result = await invoke(
         makeEvent("intakeCreateBlueprint", {
@@ -730,16 +746,27 @@ describe("intake-orchestration-resolver", () => {
         }),
       );
 
+      // CIT-281: row is rolled back, blueprintId is null, status is VALIDATION_FAILED
       expect(result).toMatchObject({
         ok: false,
-        blueprintId: "wf-1",
-        status: "AGENTS_SYNCING",
+        blueprintId: null,
+        status: "VALIDATION_FAILED",
         missing: ["rec1", "rec2"],
       });
+      // The draft row was deleted
+      expect(ddbMock.commandCalls(DeleteCommand).length).toBeGreaterThanOrEqual(
+        1,
+      );
     });
 
     test("maps a definition validation failure to VALIDATION_FAILED with errors", async () => {
       mockSessionLinkage();
+      ddbMock
+        .on(QueryCommand, {
+          TableName: "citadel-workflows-test",
+          IndexName: "OrgStatusIndex",
+        })
+        .resolves({ Items: [] });
       createWorkflowMock.mockRejectedValueOnce(
         new Error(
           "Invalid workflow definition: definition.nodes must be an array",
@@ -782,6 +809,13 @@ describe("intake-orchestration-resolver", () => {
       // so publishWorkflow's verifyAgentsExist gate fails without healing.
       mockSessionLinkage();
       mockHappyCreate();
+      // Reset the query mock since mockHappyCreate already set it
+      ddbMock
+        .on(QueryCommand, {
+          TableName: "citadel-workflows-test",
+          IndexName: "OrgStatusIndex",
+        })
+        .resolves({ Items: [] });
 
       await invoke(
         makeEvent("intakeCreateBlueprint", {
@@ -801,6 +835,12 @@ describe("intake-orchestration-resolver", () => {
     test("publishes even when healing reports failures (gate stays the authority)", async () => {
       mockSessionLinkage();
       mockHappyCreate();
+      ddbMock
+        .on(QueryCommand, {
+          TableName: "citadel-workflows-test",
+          IndexName: "OrgStatusIndex",
+        })
+        .resolves({ Items: [] });
       ensureAgentConfigRowsMock.mockResolvedValueOnce({
         ensured: [],
         existing: [],
@@ -826,6 +866,12 @@ describe("intake-orchestration-resolver", () => {
       // OrgUnresolvedError when the project row is org-less and the owner
       // has no membership row (fail-closed instead of stamping 'default').
       mockSessionLinkage({ project: { id: PROJECT_ID, name: "Alpha" } });
+      ddbMock
+        .on(QueryCommand, {
+          TableName: "citadel-workflows-test",
+          IndexName: "OrgStatusIndex",
+        })
+        .resolves({ Items: [] });
 
       await expect(
         invoke(
@@ -840,6 +886,12 @@ describe("intake-orchestration-resolver", () => {
 
     test("throws CrossOrgAccessError when the created row orgId mismatches the session org", async () => {
       mockSessionLinkage();
+      ddbMock
+        .on(QueryCommand, {
+          TableName: "citadel-workflows-test",
+          IndexName: "OrgStatusIndex",
+        })
+        .resolves({ Items: [] });
       // createWorkflow returns a row whose orgId doesn't match the session's
       // resolved org (ORG_ID) — should never happen in practice, but the
       // guard catches it defensively.
@@ -863,6 +915,12 @@ describe("intake-orchestration-resolver", () => {
 
     test("passes the server-derived org claim in the event to publishWorkflow", async () => {
       mockSessionLinkage();
+      ddbMock
+        .on(QueryCommand, {
+          TableName: "citadel-workflows-test",
+          IndexName: "OrgStatusIndex",
+        })
+        .resolves({ Items: [] });
       createWorkflowMock.mockResolvedValueOnce({
         workflowId: "wf-1",
         orgId: ORG_ID,
@@ -891,6 +949,94 @@ describe("intake-orchestration-resolver", () => {
       expect(patchedIdentity["custom:organization"]).toBe(ORG_ID);
       // The original IAM identity fields are preserved.
       expect(patchedIdentity.accountId).toBe(IAM_IDENTITY.accountId);
+    });
+
+    // ── CIT-281: compensating delete on publish failure ────────────────
+
+    test("rollback delete failure is logged as ERROR (never silent)", async () => {
+      mockSessionLinkage();
+      ddbMock
+        .on(QueryCommand, {
+          TableName: "citadel-workflows-test",
+          IndexName: "OrgStatusIndex",
+        })
+        .resolves({ Items: [] });
+      createWorkflowMock.mockResolvedValueOnce({
+        workflowId: "wf-1",
+        status: "DRAFT",
+      });
+      publishWorkflowMock.mockRejectedValueOnce(
+        new Error("Validation failed: some error"),
+      );
+      // Make the compensating delete fail with a non-conditional error
+      ddbMock.on(DeleteCommand).rejects(new Error("DDB throttle"));
+
+      const errorSpy = jest.spyOn(console, "error").mockImplementation();
+
+      const result = await invoke(
+        makeEvent("intakeCreateBlueprint", {
+          sessionId: SESSION_ID,
+          name: "BP",
+          definition: DEFINITION_OBJ,
+        }),
+      );
+
+      // The result still comes back as VALIDATION_FAILED
+      expect(result).toMatchObject({
+        ok: false,
+        blueprintId: null,
+        status: "VALIDATION_FAILED",
+      });
+      // The delete failure was logged as ERROR
+      const errorCalls = errorSpy.mock.calls.map((c) => String(c[0]));
+      expect(
+        errorCalls.some(
+          (msg) => msg.includes("rollback") && msg.includes("wf-1"),
+        ),
+      ).toBe(true);
+
+      errorSpy.mockRestore();
+    });
+
+    // ── CIT-281: draft reuse (idempotency by session) ──────────────────
+
+    test("reuses an existing DRAFT blueprint on retry instead of creating a duplicate", async () => {
+      mockSessionLinkage();
+      // The draft-reuse query finds an existing DRAFT blueprint
+      ddbMock
+        .on(QueryCommand, {
+          TableName: "citadel-workflows-test",
+          IndexName: "OrgStatusIndex",
+        })
+        .resolves({
+          Items: [{ workflowId: "wf-existing-draft", status: "DRAFT" }],
+        });
+      publishWorkflowMock.mockResolvedValueOnce({
+        workflowId: "wf-existing-draft",
+        status: "PUBLISHED",
+      });
+
+      const result = await invoke(
+        makeEvent("intakeCreateBlueprint", {
+          sessionId: SESSION_ID,
+          name: "BP",
+          definition: DEFINITION_OBJ,
+        }),
+      );
+
+      // createWorkflow was NOT called — reused the existing draft
+      expect(createWorkflowMock).not.toHaveBeenCalled();
+      // publishWorkflow was called with the existing draft's id
+      expect(publishWorkflowMock).toHaveBeenCalledWith(
+        "wf-existing-draft",
+        IAM_IDENTITY.userArn,
+        expect.anything(),
+      );
+      expect(result).toMatchObject({
+        ok: true,
+        blueprintId: "wf-existing-draft",
+        status: "PUBLISHED",
+      });
     });
   });
 

@@ -301,3 +301,238 @@ describe("runReconcileLegacy", () => {
     expect(summary.toolOrphansFound).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// CIT-281: Unpublished intake blueprint cleanup
+// ---------------------------------------------------------------------------
+import { QueryCommand } from "@aws-sdk/lib-dynamodb";
+import {
+  runReconcileUnpublishedBlueprints,
+  isUnpublishedIntakeBlueprint,
+  type ReconcileUnpublishedBlueprintsOptions,
+} from "../reconcile-legacy-rows";
+
+const TWENTY_FIVE_HOURS_AGO = new Date(
+  Date.now() - 25 * 60 * 60 * 1000,
+).toISOString();
+const ONE_HOUR_AGO = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+
+function intakeDraftBlueprint(
+  workflowId: string,
+  name: string,
+  createdAt: string = TWENTY_FIVE_HOURS_AGO,
+): Record<string, NativeAttributeValue> {
+  return {
+    workflowId,
+    name,
+    orgId: "org-a",
+    status: "DRAFT",
+    isBlueprint: "true",
+    createdBy:
+      "arn:aws:sts::123456789012:assumed-role/intake-runtime-role/session",
+    createdAt,
+  };
+}
+
+function publishedBlueprint(
+  workflowId: string,
+  name: string,
+): Record<string, NativeAttributeValue> {
+  return {
+    workflowId,
+    name,
+    orgId: "org-a",
+    status: "PUBLISHED",
+    isBlueprint: "true",
+    createdBy:
+      "arn:aws:sts::123456789012:assumed-role/intake-runtime-role/session",
+    createdAt: TWENTY_FIVE_HOURS_AGO,
+  };
+}
+
+function seededBlueprint(
+  workflowId: string,
+  name: string,
+): Record<string, NativeAttributeValue> {
+  return {
+    workflowId,
+    name,
+    orgId: "system",
+    status: "DRAFT",
+    isBlueprint: "true",
+    createdBy: "system",
+    createdAt: TWENTY_FIVE_HOURS_AGO,
+    seedVersion: 3,
+  };
+}
+
+describe("isUnpublishedIntakeBlueprint", () => {
+  const seededIds = new Set(["seeded-1"]);
+  const ageThresholdMs = 24 * 60 * 60 * 1000;
+  const now = Date.now();
+
+  test("identifies an old DRAFT intake blueprint as candidate", () => {
+    expect(
+      isUnpublishedIntakeBlueprint(
+        intakeDraftBlueprint("wf-1", "Smoke-test-1 Process"),
+        seededIds,
+        ageThresholdMs,
+        now,
+      ),
+    ).toBe(true);
+  });
+
+  test("excludes PUBLISHED blueprints", () => {
+    expect(
+      isUnpublishedIntakeBlueprint(
+        publishedBlueprint("wf-2", "Published BP"),
+        seededIds,
+        ageThresholdMs,
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  test("excludes seeded blueprints (by seedVersion attribute)", () => {
+    expect(
+      isUnpublishedIntakeBlueprint(
+        seededBlueprint("seeded-1", "Echo Demo"),
+        seededIds,
+        ageThresholdMs,
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  test("excludes seeded blueprints (by ID set)", () => {
+    const row = intakeDraftBlueprint("seeded-1", "Some Name");
+    expect(
+      isUnpublishedIntakeBlueprint(row, seededIds, ageThresholdMs, now),
+    ).toBe(false);
+  });
+
+  test("excludes blueprints newer than age threshold", () => {
+    expect(
+      isUnpublishedIntakeBlueprint(
+        intakeDraftBlueprint("wf-3", "Recent", ONE_HOUR_AGO),
+        seededIds,
+        ageThresholdMs,
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  test("excludes blueprints created by a Cognito user (non-IAM)", () => {
+    const row = {
+      ...intakeDraftBlueprint("wf-4", "User-created"),
+      createdBy: "3f2a1b7c-9d4e-4f61-8a2b-0c5d6e7f8a9b",
+    };
+    expect(
+      isUnpublishedIntakeBlueprint(row, seededIds, ageThresholdMs, now),
+    ).toBe(false);
+  });
+});
+
+describe("runReconcileUnpublishedBlueprints", () => {
+  const dynamoMock = mockClient(DynamoDBDocumentClient);
+  let workflowsTable: FakeDynamoTable;
+
+  function seedWorkflows(): void {
+    workflowsTable = new FakeDynamoTable();
+    // 4 orphan DRAFT intake blueprints (the CIT-281 incident rows)
+    workflowsTable.put(
+      "542db0c2",
+      intakeDraftBlueprint("542db0c2", "Smoke-test-1 Process"),
+    );
+    workflowsTable.put(
+      "9e683e14",
+      intakeDraftBlueprint("9e683e14", "Smoke-test-1 Process"),
+    );
+    workflowsTable.put(
+      "89419c36",
+      intakeDraftBlueprint("89419c36", "Smoke-test-1 Process"),
+    );
+    workflowsTable.put(
+      "3a44f088",
+      intakeDraftBlueprint("3a44f088", "Smoke-test-1 Process"),
+    );
+    // 1 real PUBLISHED blueprint — must survive
+    workflowsTable.put(
+      "1a8abc78",
+      publishedBlueprint("1a8abc78", "Smoke-test-1 Process"),
+    );
+    // 1 seeded blueprint — must survive
+    workflowsTable.put(
+      "seeded-bp",
+      seededBlueprint("seeded-bp", "Echo Demo Workflow"),
+    );
+  }
+
+  function setupMock(): void {
+    dynamoMock.reset();
+    dynamoMock.on(QueryCommand).callsFake(() => {
+      return { Items: workflowsTable.getAll() };
+    });
+    dynamoMock.on(DeleteCommand).callsFake((input) => {
+      workflowsTable.delete(Object.values(input.Key!)[0] as string);
+      return {};
+    });
+  }
+
+  beforeEach(() => {
+    seedWorkflows();
+    setupMock();
+  });
+
+  afterEach(() => {
+    dynamoMock.reset();
+  });
+
+  function makeOpts(dryRun: boolean): ReconcileUnpublishedBlueprintsOptions {
+    return {
+      tableWorkflows: "test-workflows",
+      dryRun,
+      docClient: DynamoDBDocumentClient.from(new DynamoDBClient({})),
+      seededIds: new Set(["seeded-bp"]),
+      ageThresholdHours: 24,
+    };
+  }
+
+  test("dry-run identifies 4 orphan DRAFT blueprints but deletes nothing", async () => {
+    const initial = workflowsTable.size();
+    const { summary, rows } = await runReconcileUnpublishedBlueprints(
+      makeOpts(true),
+    );
+    expect(summary.found).toBe(4);
+    expect(summary.deleted).toBe(0);
+    expect(summary.errors).toBe(0);
+    expect(workflowsTable.size()).toBe(initial);
+    expect(rows.map((r) => r.workflowId).sort()).toEqual([
+      "3a44f088",
+      "542db0c2",
+      "89419c36",
+      "9e683e14",
+    ]);
+  });
+
+  test("--apply deletes only the orphan DRAFT rows, preserves PUBLISHED and seeded", async () => {
+    const { summary } = await runReconcileUnpublishedBlueprints(
+      makeOpts(false),
+    );
+    expect(summary.deleted).toBe(4);
+    expect(summary.errors).toBe(0);
+    // PUBLISHED and seeded survive
+    expect(workflowsTable.items.has("1a8abc78")).toBe(true);
+    expect(workflowsTable.items.has("seeded-bp")).toBe(true);
+    // Orphans removed
+    expect(workflowsTable.items.has("542db0c2")).toBe(false);
+    expect(workflowsTable.items.has("9e683e14")).toBe(false);
+  });
+
+  test("second run is idempotent — no orphans found", async () => {
+    await runReconcileUnpublishedBlueprints(makeOpts(false));
+    setupMock();
+    const { summary } = await runReconcileUnpublishedBlueprints(makeOpts(true));
+    expect(summary.found).toBe(0);
+  });
+});
