@@ -19,6 +19,7 @@ import {
   PutCommand,
   GetCommand,
   UpdateCommand,
+  ScanCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 import {
@@ -156,6 +157,8 @@ beforeEach(() => {
   cwMock.reset();
   sqsMock.on(SendMessageCommand).resolves({});
   cwMock.on(PutMetricDataCommand).resolves({});
+  // Default: no pointer rows exist (scanPointerTargetIds returns empty set)
+  ddbMock.on(ScanCommand).resolves({ Items: [] });
   jest.clearAllMocks();
   jest.spyOn(console, "log").mockImplementation();
   jest.spyOn(console, "warn").mockImplementation();

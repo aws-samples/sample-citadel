@@ -18,18 +18,63 @@ import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { UpdateCommand } from "@aws-sdk/lib-dynamodb";
 
 /**
+ * Optional context for pointer-based and name-based seeder detection.
+ *
+ * @param pointerTargetIds  Set of `_canonicalRecordId` values found in the
+ *   same table — any row whose primary key appears in this set was the
+ *   target of a seeder pointer and is therefore seeder-owned even if the
+ *   `createdBy` attribute was lost.
+ * @param seededNames  Optional operator-supplied names (e.g. `--seeded-names`).
+ *   If the row's `name` is in this set it is treated as seeder-owned.
+ */
+export interface SeederContext {
+  pointerTargetIds?: ReadonlySet<string>;
+  seededNames?: ReadonlySet<string>;
+}
+
+/**
  * Detects whether a DynamoDB item is a seeder-owned canonical row.
  *
- * A row is seeder-owned when both conditions hold:
- *   1. createdBy === 'seedConfig'
- *   2. projectionVersion is present (not undefined/null)
+ * A row is seeder-owned when ANY of the following hold:
+ *   1. createdBy === 'seedConfig' AND projectionVersion is present
+ *   2. A pointer row exists whose `_canonicalRecordId` equals this row's
+ *      primary key (agentId or toolId) — passed via `ctx.pointerTargetIds`.
+ *   3. The row's `name` is in an explicit operator-supplied list
+ *      (`ctx.seededNames`).
  *
- * This matches the detection logic in registry-sync's handleGaUpsert seeder
- * guard and reconcile-seeded-rows' isSeederOwnedRecordIdRow (minus the
- * recordId shape check, since this guard applies to any key shape).
+ * Condition 1 matches the detection logic in registry-sync's handleGaUpsert
+ * seeder guard and reconcile-seeded-rows' isSeederOwnedRecordIdRow (minus
+ * the recordId shape check, since this guard applies to any key shape).
+ * Conditions 2–3 handle damaged rows where `createdBy` was stripped.
  */
-export function isSeederOwnedRow(item: Record<string, unknown>): boolean {
-  return item.createdBy === "seedConfig" && item.projectionVersion != null;
+export function isSeederOwnedRow(
+  item: Record<string, unknown>,
+  ctx?: SeederContext,
+): boolean {
+  // Condition 1: explicit createdBy marker
+  if (item.createdBy === "seedConfig" && item.projectionVersion != null) {
+    return true;
+  }
+
+  // Condition 2: a pointer row references this row's primary key
+  if (ctx?.pointerTargetIds) {
+    const pk =
+      (item.agentId as string | undefined) ??
+      (item.toolId as string | undefined);
+    if (pk && ctx.pointerTargetIds.has(pk)) {
+      return true;
+    }
+  }
+
+  // Condition 3: operator-supplied name list
+  if (ctx?.seededNames) {
+    const name = item.name as string | undefined;
+    if (name && ctx.seededNames.has(name)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 /**

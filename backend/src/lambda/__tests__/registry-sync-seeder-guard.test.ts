@@ -17,6 +17,7 @@ import {
   GetCommand,
   PutCommand,
   UpdateCommand,
+  ScanCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 import {
@@ -192,6 +193,58 @@ describe("handleGaUpsert seeder guard", () => {
 
     // Should not have checked the seeder guard (no GetCommand for tools)
     // The standard merge path runs: UpdateCommand + PutCommand
+    const putCalls = ddbMock.commandCalls(PutCommand);
+    expect(putCalls.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("uses syncSeederOwnedRow when row is damaged (no createdBy) but has a pointer", async () => {
+    // GetCommand returns a row WITHOUT createdBy (damaged)
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        agentId: RECORD_ID,
+        projectionVersion: PROJECTION_VERSION,
+        // createdBy is MISSING — this is the damage scenario
+      },
+    });
+    // ScanCommand returns a pointer row referencing this recordId
+    ddbMock.on(ScanCommand).resolves({
+      Items: [{ agentId: "demo-echo-agent", _canonicalRecordId: RECORD_ID }],
+    });
+    // UpdateCommand for syncSeederOwnedRow succeeds
+    ddbMock.on(UpdateCommand).resolves({});
+
+    const record = makeRecord({ status: "APPROVED" });
+    await handleGaUpsert(TABLE, "agent", RECORD_ID, record);
+
+    // Should NOT have written a full PutCommand
+    const putCalls = ddbMock.commandCalls(PutCommand);
+    expect(putCalls).toHaveLength(0);
+
+    // Should have done an UpdateCommand (syncSeederOwnedRow)
+    const updateCalls = ddbMock.commandCalls(UpdateCommand);
+    expect(updateCalls).toHaveLength(1);
+    const expr = updateCalls[0].args[0].input.UpdateExpression as string;
+    expect(expr).toContain("registryStatus");
+    expect(expr).not.toContain("config");
+  });
+
+  it("falls through when row is damaged AND has no pointer", async () => {
+    // GetCommand returns a row WITHOUT createdBy (damaged)
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        agentId: RECORD_ID,
+        projectionVersion: PROJECTION_VERSION,
+      },
+    });
+    // ScanCommand returns no pointer rows
+    ddbMock.on(ScanCommand).resolves({ Items: [] });
+    ddbMock.on(UpdateCommand).resolves({});
+    ddbMock.on(PutCommand).resolves({});
+
+    const record = makeRecord();
+    await handleGaUpsert(TABLE, "agent", RECORD_ID, record);
+
+    // Standard merge path runs
     const putCalls = ddbMock.commandCalls(PutCommand);
     expect(putCalls.length).toBeGreaterThanOrEqual(1);
   });

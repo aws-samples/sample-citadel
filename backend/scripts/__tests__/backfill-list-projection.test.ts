@@ -33,6 +33,7 @@ jest.mock("@aws-sdk/lib-dynamodb", () => ({
     }),
   },
   PutCommand: jest.fn(),
+  ScanCommand: jest.fn(),
 }));
 
 // Mock RegistryService — only methods actually invoked at runtime

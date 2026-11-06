@@ -1,7 +1,11 @@
 /**
  * Tests for backend/scripts/lib/seeder-owned-row.ts shared module.
  */
-import { isSeederOwnedRow, mergeOnlySeederRow } from "../lib/seeder-owned-row";
+import {
+  isSeederOwnedRow,
+  mergeOnlySeederRow,
+  type SeederContext,
+} from "../lib/seeder-owned-row";
 import { mockClient } from "aws-sdk-client-mock";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, UpdateCommand } from "@aws-sdk/lib-dynamodb";
@@ -47,6 +51,76 @@ describe("isSeederOwnedRow", () => {
     expect(
       isSeederOwnedRow({ createdBy: "seedConfig", projectionVersion: 0 }),
     ).toBe(true);
+  });
+
+  // Pointer-based detection (condition 2)
+  it("returns true for damaged row lacking createdBy but referenced by a pointer", () => {
+    const ctx: SeederContext = {
+      pointerTargetIds: new Set(["mjaKkVyqoFGN"]),
+    };
+    // Row has NO createdBy but its agentId is in the pointer set
+    expect(
+      isSeederOwnedRow({ agentId: "mjaKkVyqoFGN", projectionVersion: 1 }, ctx),
+    ).toBe(true);
+  });
+
+  it("returns true for damaged row with toolId referenced by a pointer", () => {
+    const ctx: SeederContext = {
+      pointerTargetIds: new Set(["tool123"]),
+    };
+    expect(
+      isSeederOwnedRow({ toolId: "tool123", projectionVersion: 1 }, ctx),
+    ).toBe(true);
+  });
+
+  it("returns false when agentId is NOT in pointer set", () => {
+    const ctx: SeederContext = {
+      pointerTargetIds: new Set(["other-id"]),
+    };
+    expect(
+      isSeederOwnedRow({ agentId: "mjaKkVyqoFGN", projectionVersion: 1 }, ctx),
+    ).toBe(false);
+  });
+
+  it("returns false when pointer set is empty", () => {
+    const ctx: SeederContext = {
+      pointerTargetIds: new Set(),
+    };
+    expect(
+      isSeederOwnedRow({ agentId: "mjaKkVyqoFGN", projectionVersion: 1 }, ctx),
+    ).toBe(false);
+  });
+
+  // Name-based detection (condition 3)
+  it("returns true when row name is in seededNames", () => {
+    const ctx: SeederContext = {
+      seededNames: new Set(["demo-echo-agent"]),
+    };
+    expect(
+      isSeederOwnedRow(
+        { agentId: "mjaKkVyqoFGN", name: "demo-echo-agent" },
+        ctx,
+      ),
+    ).toBe(true);
+  });
+
+  it("returns false when row name is NOT in seededNames", () => {
+    const ctx: SeederContext = {
+      seededNames: new Set(["other-agent"]),
+    };
+    expect(
+      isSeederOwnedRow(
+        { agentId: "mjaKkVyqoFGN", name: "demo-echo-agent" },
+        ctx,
+      ),
+    ).toBe(false);
+  });
+
+  // No context
+  it("returns false for damaged row when no context is provided", () => {
+    expect(
+      isSeederOwnedRow({ agentId: "mjaKkVyqoFGN", projectionVersion: 1 }),
+    ).toBe(false);
   });
 });
 
@@ -124,5 +198,31 @@ describe("mergeOnlySeederRow", () => {
     const expr = calls[0].args[0].input.UpdateExpression as string;
     expect(expr).not.toContain("#decidedBy");
     expect(expr).toContain("#registryStatus");
+  });
+
+  it("never touches config even when source has a string config (damaged row)", async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+
+    // Source carries a string config (as found on the damaged live row
+    // mjaKkVyqoFGN) — mergeOnlySeederRow must NOT include it in the
+    // UpdateExpression.
+    await mergeOnlySeederRow(
+      realClient,
+      "test-table",
+      { agentId: "mjaKkVyqoFGN" },
+      {
+        registryStatus: "APPROVED",
+        state: "active",
+        config: '{"description":"Demo agent"}' as unknown as string,
+      } as unknown as Parameters<typeof mergeOnlySeederRow>[3],
+      false,
+    );
+
+    const calls = ddbMock.commandCalls(UpdateCommand);
+    expect(calls).toHaveLength(1);
+    const expr = calls[0].args[0].input.UpdateExpression as string;
+    // config must never appear — it is excluded from MERGE_FIELDS
+    expect(expr).not.toContain("#config");
+    expect(expr).not.toContain(":config");
   });
 });

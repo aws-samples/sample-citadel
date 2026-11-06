@@ -12,6 +12,7 @@ import {
   DeleteCommand,
   UpdateCommand,
   GetCommand,
+  ScanCommand,
 } from "@aws-sdk/lib-dynamodb";
 import type {
   PutCommandInput,
@@ -1328,6 +1329,7 @@ export async function handleGaUpsert(
   // -----------------------------------------------------------------------
   // Seeder guard: if the existing recordId-keyed row was written by
   // seedConfig (createdBy='seedConfig' AND projectionVersion present),
+  // OR a pointer row references this resourceId via _canonicalRecordId,
   // the canonical row already carries full config + projection fields.
   // Only update approval/status fields — never overwrite config, orgId,
   // or projection metadata.
@@ -1341,9 +1343,32 @@ export async function handleGaUpsert(
           ProjectionExpression: "createdBy, projectionVersion",
         }),
       );
-      const isSeederOwned =
+      let isSeederOwned =
         existing.Item?.createdBy === "seedConfig" &&
         existing.Item?.projectionVersion != null;
+
+      // Fallback: check for a pointer row whose _canonicalRecordId matches
+      // this resourceId (handles damaged rows missing createdBy).
+      if (!isSeederOwned && existing.Item) {
+        try {
+          const pointerScan = await docClient.send(
+            new ScanCommand({
+              TableName: tableName,
+              FilterExpression: "#c = :rid",
+              ExpressionAttributeNames: { "#c": "_canonicalRecordId" },
+              ExpressionAttributeValues: { ":rid": resourceId },
+              ProjectionExpression: "agentId",
+              Limit: 1,
+            }),
+          );
+          if ((pointerScan.Items?.length ?? 0) > 0) {
+            isSeederOwned = true;
+          }
+        } catch {
+          // Best-effort pointer check — fall through if it fails.
+        }
+      }
+
       if (isSeederOwned) {
         await syncSeederOwnedRow(tableName, resourceId, record);
         return;
