@@ -242,3 +242,58 @@ describe("withTimeout", () => {
     ).rejects.toThrow("original");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Smoke step error-message shaping (smoke finding 3)
+//
+// The deployed-smoke.mjs script now wraps "not found" errors from
+// startExecution and testTool to hint at the env-var to check. These tests
+// verify the shaping logic in isolation (pure string matching, no network).
+// ---------------------------------------------------------------------------
+describe("smoke step error-message shaping", () => {
+  /** Mirrors the shaping applied in deployed-smoke.mjs step (5). */
+  function shapeStartExecError(message: string, wfId: string): string {
+    return /not found/i.test(message)
+      ? `workflow ${wfId} not found; check ECHO_WORKFLOW_ID`
+      : message;
+  }
+
+  /** Mirrors the shaping applied in deployed-smoke.mjs step (4). */
+  function shapeTestToolError(
+    errMsg: string | undefined,
+    toolId: string,
+  ): string {
+    const msg = errMsg ?? "unknown";
+    return /not found/i.test(msg)
+      ? `tool ${toolId} not found; check SMOKE_TOOL_ID`
+      : `testTool returned error: ${msg}`;
+  }
+
+  it("startExecution: rewrites 'Workflow not found' to include ECHO_WORKFLOW_ID hint", () => {
+    const msg = shapeStartExecError(
+      '[{"message":"Workflow not found"}]',
+      "wf-abc",
+    );
+    expect(msg).toBe("workflow wf-abc not found; check ECHO_WORKFLOW_ID");
+  });
+
+  it("startExecution: passes through other errors unchanged", () => {
+    const msg = shapeStartExecError("Timeout after 30s", "wf-abc");
+    expect(msg).toBe("Timeout after 30s");
+  });
+
+  it("testTool: rewrites 'not found' error to include SMOKE_TOOL_ID hint", () => {
+    const msg = shapeTestToolError("Tool not found", "tool-xyz");
+    expect(msg).toBe("tool tool-xyz not found; check SMOKE_TOOL_ID");
+  });
+
+  it("testTool: wraps other errors with prefix", () => {
+    const msg = shapeTestToolError("Lambda timeout", "tool-xyz");
+    expect(msg).toBe("testTool returned error: Lambda timeout");
+  });
+
+  it("testTool: handles undefined error gracefully", () => {
+    const msg = shapeTestToolError(undefined, "tool-xyz");
+    expect(msg).toBe("testTool returned error: unknown");
+  });
+});

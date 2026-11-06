@@ -32,13 +32,35 @@ describe("assertProjectAccess", () => {
     delete process.env.PROJECTS_TABLE;
   });
 
-  test("admin bypasses the project lookup entirely", async () => {
+  test("admin is allowed for an existing project (even foreign org)", async () => {
     isAdminFromEventMock.mockReturnValue(true);
+    ddbMock
+      .on(GetCommand)
+      .resolves({ Item: { owner: "other-user", organization: "org-foreign" } });
 
     await expect(
-      assertProjectAccess("any-proj", "user-1", {}),
+      assertProjectAccess("foreign-proj", "user-1", {}),
     ).resolves.toBeUndefined();
-    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(0);
+    // Project existence IS verified — GetCommand must have been called.
+    expect(ddbMock.commandCalls(GetCommand)).toHaveLength(1);
+  });
+
+  test("admin is denied for a non-existent project (identical error to non-admin)", async () => {
+    isAdminFromEventMock.mockReturnValue(true);
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+
+    await expect(
+      assertProjectAccess("missing-proj", "user-1", {}),
+    ).rejects.toThrow(ProjectAccessDeniedError);
+  });
+
+  test("admin is denied when DynamoDB lookup fails", async () => {
+    isAdminFromEventMock.mockReturnValue(true);
+    ddbMock.on(GetCommand).rejects(new Error("DDB unavailable"));
+
+    await expect(
+      assertProjectAccess("some-proj", "user-1", {}),
+    ).rejects.toThrow(ProjectAccessDeniedError);
   });
 
   test("allows the project owner", async () => {

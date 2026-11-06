@@ -443,7 +443,17 @@ async function startExecution(
   // workflow; non-admins are reconciled against their server-derived org
   // and denied (fail-closed) when that org is unresolvable. This must run
   // before the execution row is written (PutCommand below).
-  await assertRowOrg(workflow as { orgId?: unknown }, event);
+  //
+  // System-blueprint exception (smoke finding 2): PUBLISHED workflows with
+  // orgId 'system' (shared blueprints seeded by the platform) are runnable
+  // by any authenticated caller — same rule as importBlueprint/listBlueprints
+  // (PR #428, finding C17/C19). Non-system foreign-org workflows are still
+  // denied for non-admins.
+  const isSystemBlueprint =
+    workflow.orgId === "system" && workflow.status === "PUBLISHED";
+  if (!isSystemBlueprint) {
+    await assertRowOrg(workflow as { orgId?: unknown }, event);
+  }
 
   if (workflow.status !== "PUBLISHED") {
     throw new Error("Only published workflows can be executed");
@@ -470,11 +480,18 @@ async function startExecution(
   // nothing to strip; this mint is the sole source.
   const runId = mintRunId();
 
+  // Stamp the CALLER's org on the execution row (not the workflow's org).
+  // For same-org workflows this is identical; for system blueprints and
+  // admin cross-org runs it ensures the execution is readable by the caller
+  // via getExecution/listExecutions (which reconcile orgId against the
+  // caller's org). requireCallerOrg fail-closes for org-less callers.
+  const callerOrg = await requireCallerOrg(event, "ExecutionResolver");
+
   const execution = {
     executionId,
     workflowId,
     appId: workflow.appId || null,
-    orgId: workflow.orgId,
+    orgId: callerOrg,
     status: "pending",
     workflowVersion: workflow.version,
     workflowDefinitionSnapshot: workflow.definition,
