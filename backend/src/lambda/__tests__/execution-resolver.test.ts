@@ -640,7 +640,9 @@ describe("execution-resolver", () => {
     // Finding b7ef1a41: startExecution threw "Access denied" via an inline
     // org compare with NO admin bypass, unlike getWorkflow/listExecutions
     // (assertRowOrg, since PR #178). Converted to the shared assertRowOrg
-    // gate so admins can start executions across organisations.
+    // gate so admins can start executions across organisations. The
+    // execution row is stamped with the ADMIN's own org (requireCallerOrg)
+    // so the admin can read it back via getExecution/listExecutions.
     test("admin caller may start an execution for a workflow belonging to a different org", async () => {
       ddbMock.on(GetCommand).resolves({
         Item: { ...publishedWorkflow, orgId: "org-other" },
@@ -652,12 +654,17 @@ describe("execution-resolver", () => {
         arguments: { workflowId: "wf-1" },
         identity: {
           sub: "admin-1",
-          claims: { sub: "admin-1", "cognito:groups": ["admin"] },
+          "custom:organization": "org-admin",
+          claims: {
+            sub: "admin-1",
+            "custom:organization": "org-admin",
+            "cognito:groups": ["admin"],
+          },
         },
       } as unknown as HandlerEvent;
 
       const result = await invoke(adminEvent);
-      expect(result.orgId).toBe("org-other");
+      expect(result.orgId).toBe("org-admin"); // stamped with admin's own org
       expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
     });
 
@@ -696,6 +703,102 @@ describe("execution-resolver", () => {
 
       expect(result.orgId).toBe("org-1");
       expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+    });
+
+    // System-blueprint exception (smoke finding 2): PUBLISHED workflows with
+    // orgId 'system' are runnable by any authenticated caller.
+    test("non-admin runs a PUBLISHED system blueprint — execution created with caller's org", async () => {
+      const systemBlueprint = {
+        ...publishedWorkflow,
+        workflowId: "wf-system",
+        orgId: "system",
+        status: "PUBLISHED",
+      };
+      ddbMock.on(GetCommand).resolves({ Item: systemBlueprint });
+      ddbMock.on(PutCommand).resolves({});
+
+      const result = await invoke(
+        makeEvent("startExecution", { workflowId: "wf-system" }),
+      );
+
+      expect(result.orgId).toBe("org-1"); // caller's org, NOT 'system'
+      expect(result.workflowId).toBe("wf-system");
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+      // Verify the PutCommand stamped the caller's org
+      const putCall = ddbMock.commandCalls(PutCommand)[0];
+      expect(putCall.args[0].input.Item!.orgId).toBe("org-1");
+    });
+
+    test("non-admin is denied running a foreign-org non-system workflow", async () => {
+      ddbMock.on(GetCommand).resolves({
+        Item: { ...publishedWorkflow, orgId: "org-foreign" },
+      });
+      ddbMock.on(PutCommand).resolves({});
+
+      await expect(
+        invoke(makeEvent("startExecution", { workflowId: "wf-1" })),
+      ).rejects.toThrow("Access denied");
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    });
+
+    test("non-admin is denied running a DRAFT system workflow", async () => {
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          ...publishedWorkflow,
+          orgId: "system",
+          status: "DRAFT",
+        },
+      });
+      ddbMock.on(PutCommand).resolves({});
+
+      // The system-blueprint exception only applies to PUBLISHED workflows.
+      // A DRAFT system workflow goes through the normal assertRowOrg path.
+      await expect(
+        invoke(makeEvent("startExecution", { workflowId: "wf-1" })),
+      ).rejects.toThrow("Access denied");
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    });
+
+    test("admin running a system blueprint stamps execution with admin's own org", async () => {
+      const systemBlueprint = {
+        ...publishedWorkflow,
+        workflowId: "wf-system",
+        orgId: "system",
+        status: "PUBLISHED",
+      };
+      ddbMock.on(GetCommand).resolves({ Item: systemBlueprint });
+      ddbMock.on(PutCommand).resolves({});
+
+      const adminEvent = {
+        info: { fieldName: "startExecution" },
+        arguments: { workflowId: "wf-system" },
+        identity: {
+          sub: "admin-1",
+          "custom:organization": "org-admin",
+          claims: {
+            sub: "admin-1",
+            "custom:organization": "org-admin",
+            "cognito:groups": ["admin"],
+          },
+        },
+      } as unknown as HandlerEvent;
+
+      const result = await invoke(adminEvent);
+      expect(result.orgId).toBe("org-admin");
+      expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
+    });
+
+    test("execution row orgId is the caller's org (not the workflow's) for same-org workflows", async () => {
+      ddbMock.on(GetCommand).resolves({ Item: publishedWorkflow });
+      ddbMock.on(PutCommand).resolves({});
+
+      const result = await invoke(
+        makeEvent("startExecution", { workflowId: "wf-1" }),
+      );
+
+      expect(result.orgId).toBe("org-1");
+      const putCall = ddbMock.commandCalls(PutCommand)[0];
+      expect(putCall.args[0].input.Item!.orgId).toBe("org-1");
     });
   });
 

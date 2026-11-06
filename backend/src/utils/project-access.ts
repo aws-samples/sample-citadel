@@ -66,10 +66,10 @@ export async function assertProjectAccess(
     throw new ProjectAccessDeniedError("Access denied");
   }
 
-  if (isAdminFromEvent(event)) {
-    return;
-  }
-
+  // Project existence is required for ALL callers, including admins.
+  // An admin may access a project belonging to any org, but must not be
+  // able to subscribe to / read a project that does not exist (smoke
+  // finding 1: the early-return let a non-existent projectId through).
   let project: ProjectAccessRecord | undefined;
   try {
     const result = await docClient.send(
@@ -86,6 +86,11 @@ export async function assertProjectAccess(
 
   if (!project) {
     throw new ProjectAccessDeniedError("Access denied");
+  }
+
+  // Admin bypass: cross-org access to EXISTING projects is permitted.
+  if (isAdminFromEvent(event)) {
+    return;
   }
 
   let userOrganization: string | null = null;

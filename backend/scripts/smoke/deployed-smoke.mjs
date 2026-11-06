@@ -319,7 +319,12 @@ async function runChecks() {
         "testTool",
       );
       if (!data.testTool.success) {
-        throw new Error(`testTool returned error: ${data.testTool.error}`);
+        const errMsg = data.testTool.error ?? "unknown";
+        throw new Error(
+          /not found/i.test(errMsg)
+            ? `tool ${SMOKE_TOOL_ID} not found; check SMOKE_TOOL_ID`
+            : `testTool returned error: ${errMsg}`,
+        );
       }
       record("test-tool", true, Date.now() - t0);
     } catch (err) {
@@ -334,13 +339,22 @@ async function runChecks() {
       const ws = await withTimeout(connectWs(wsUrl), 10_000, "ws-connect-wf");
 
       // Start the execution first so we get the executionId for the subscription.
-      const startData = await gqlFetch(
-        `mutation StartExec($wid: ID!, $input: AWSJSON) {
-          startExecution(workflowId: $wid, input: $input) { executionId status }
-        }`,
-        { wid: ECHO_WORKFLOW_ID, input: JSON.stringify({}) },
-        idToken,
-      );
+      let startData;
+      try {
+        startData = await gqlFetch(
+          `mutation StartExec($wid: ID!, $input: AWSJSON) {
+            startExecution(workflowId: $wid, input: $input) { executionId status }
+          }`,
+          { wid: ECHO_WORKFLOW_ID, input: JSON.stringify({}) },
+          idToken,
+        );
+      } catch (startErr) {
+        throw new Error(
+          /not found/i.test(startErr.message)
+            ? `workflow ${ECHO_WORKFLOW_ID} not found; check ECHO_WORKFLOW_ID`
+            : startErr.message,
+        );
+      }
       const executionId = startData.startExecution.executionId;
       if (!executionId) throw new Error("No executionId returned");
 

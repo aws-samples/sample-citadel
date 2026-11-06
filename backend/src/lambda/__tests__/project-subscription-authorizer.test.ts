@@ -108,6 +108,21 @@ describe("project-subscription-authorizer", () => {
     });
   });
 
+  describe("admin + non-existent project — refused (identical error)", () => {
+    it("rejects an admin subscribing to a non-existent project", async () => {
+      assertProjectAccessMock.mockRejectedValue(new Error("Access denied"));
+
+      await expect(
+        handler(makeEvent("my-missing-proj", "onConversationMessage")),
+      ).rejects.toBeInstanceOf(CrossProjectSubscriptionError);
+      expect(assertProjectAccessMock).toHaveBeenCalledWith(
+        "my-missing-proj",
+        "user-123",
+        expect.anything(),
+      );
+    });
+  });
+
   describe("unknown field — refused (fail closed)", () => {
     it("rejects when fieldName is not in the allowed set", async () => {
       assertProjectAccessMock.mockResolvedValue(undefined);
