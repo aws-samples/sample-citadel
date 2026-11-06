@@ -390,6 +390,21 @@ During first deployment, the following are automatically created:
 - architect
 - developer
 
+### Forcing a seeder re-run
+
+All three seed custom resources (agent config in the arbiter stack, blueprints and eval suites in the backend stack) carry a `HealNonce` property read from CDK context `seedHealNonce`. Setting this to any new value forces CloudFormation to re-invoke the seeder on the next deploy, without any code change. The seeders are idempotent, so a re-run is always safe.
+
+From the `backend/` directory:
+
+```bash
+npx cdk deploy citadel-arbiter-<env> -c seedHealNonce=$(date +%s)
+npx cdk deploy citadel-backend-<env> -c seedHealNonce=$(date +%s)
+```
+
+The first command re-runs the agent config seeder (restores the four canonical agent rows and uploads their module files to S3). The second re-runs both the blueprint seeder and the eval-suites seeder.
+
+Each seeder also carries a `SeedRunVersion` constant that is bumped in code when a merge itself should force a one-time re-run (e.g. to heal externally damaged rows). This is the code-change lever; `seedHealNonce` is the no-code-change operator lever.
+
 ## Post-Deployment
 
 ### 1. Get Application URL
