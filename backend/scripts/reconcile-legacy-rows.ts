@@ -23,6 +23,7 @@ import {
   DynamoDBDocumentClient,
   ScanCommand,
   DeleteCommand,
+  QueryCommand,
   type NativeAttributeValue,
 } from "@aws-sdk/lib-dynamodb";
 
@@ -56,19 +57,28 @@ export interface ParsedArgs {
   tableAgents: string;
   tableTools: string;
   dryRun: boolean;
+  /** CIT-281: when true, scan the workflows table for orphan DRAFT intake blueprints. */
+  deleteUnpublishedIntakeBlueprints: boolean;
+  /** Required when deleteUnpublishedIntakeBlueprints is true. */
+  tableWorkflows: string;
 }
 
 const KNOWN_FLAGS = new Set([
   "--table-agents",
   "--table-tools",
+  "--table-workflows",
   "--dry-run",
   "--delete-orphans",
+  "--delete-unpublished-intake-blueprints",
+  "--apply",
 ]);
 
 export function parseArgs(argv: string[]): ParsedArgs {
   let tableAgents = "";
   let tableTools = "";
+  let tableWorkflows = "";
   let dryRun = true;
+  let deleteUnpublishedIntakeBlueprints = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -83,22 +93,44 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case "--table-tools":
         tableTools = argv[++i];
         break;
+      case "--table-workflows":
+        tableWorkflows = argv[++i];
+        break;
       case "--dry-run":
         dryRun = true;
         break;
       case "--delete-orphans":
         dryRun = false;
         break;
+      case "--delete-unpublished-intake-blueprints":
+        deleteUnpublishedIntakeBlueprints = true;
+        break;
+      case "--apply":
+        dryRun = false;
+        break;
     }
   }
 
-  if (!tableAgents || !tableTools) {
+  if (deleteUnpublishedIntakeBlueprints) {
+    if (!tableWorkflows) {
+      console.error(
+        "Usage: --delete-unpublished-intake-blueprints --table-workflows <table> [--apply]",
+      );
+      process.exit(1);
+    }
+  } else if (!tableAgents || !tableTools) {
     console.error(
       "Usage: --table-agents <table> --table-tools <table> [--dry-run | --delete-orphans]",
     );
     process.exit(1);
   }
-  return { tableAgents, tableTools, dryRun };
+  return {
+    tableAgents,
+    tableTools,
+    tableWorkflows,
+    dryRun,
+    deleteUnpublishedIntakeBlueprints,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -329,6 +361,183 @@ export async function runReconcileLegacy(
 }
 
 // ---------------------------------------------------------------------------
+// CIT-281: Unpublished intake blueprint cleanup
+// ---------------------------------------------------------------------------
+
+export interface UnpublishedBlueprintRow {
+  workflowId: string;
+  name: string;
+  orgId: string;
+  createdBy: string;
+  createdAt: string;
+  status: string;
+}
+
+export interface ReconcileUnpublishedBlueprintsSummary {
+  scanned: number;
+  found: number;
+  deleted: number;
+  errors: number;
+}
+
+export interface ReconcileUnpublishedBlueprintsOptions {
+  tableWorkflows: string;
+  dryRun: boolean;
+  docClient: DynamoDBDocumentClient;
+  /** Seeded blueprint IDs to exclude — never delete seeded rows. */
+  seededIds?: ReadonlySet<string>;
+  /** Age threshold in hours; rows newer than this are not candidates. Default 24. */
+  ageThresholdHours?: number;
+}
+
+/**
+ * Identifies whether a workflow row is an orphan DRAFT intake blueprint:
+ *  - isBlueprint = 'true'
+ *  - status = 'DRAFT' (not PUBLISHED)
+ *  - NOT a seeded row (no seedVersion attribute AND not in seededIds set)
+ *  - Older than ageThresholdHours (default 24)
+ *  - createdBy looks like an IAM assumed-role ARN (intake creates via IAM)
+ *
+ * Exported for unit testing.
+ */
+export function isUnpublishedIntakeBlueprint(
+  item: Record<string, NativeAttributeValue>,
+  seededIds: ReadonlySet<string>,
+  ageThresholdMs: number,
+  now: number,
+): boolean {
+  if (item.isBlueprint !== "true") return false;
+  if (item.status !== "DRAFT") return false;
+  // Never touch seeded rows
+  if (item.seedVersion !== undefined && item.seedVersion !== null) return false;
+  const wfId = typeof item.workflowId === "string" ? item.workflowId : "";
+  if (seededIds.has(wfId)) return false;
+  // Age check
+  const createdAt = typeof item.createdAt === "string" ? item.createdAt : "";
+  if (!createdAt) return false;
+  const createdMs = new Date(createdAt).getTime();
+  if (isNaN(createdMs) || now - createdMs < ageThresholdMs) return false;
+  // IAM caller heuristic: intake-orchestration-resolver runs under IAM
+  // identity, so createdBy is an assumed-role ARN, not a Cognito sub.
+  const createdBy = typeof item.createdBy === "string" ? item.createdBy : "";
+  if (!createdBy.includes("assumed-role")) return false;
+  return true;
+}
+
+export async function runReconcileUnpublishedBlueprints(
+  opts: ReconcileUnpublishedBlueprintsOptions,
+): Promise<{
+  summary: ReconcileUnpublishedBlueprintsSummary;
+  rows: UnpublishedBlueprintRow[];
+}> {
+  const {
+    tableWorkflows,
+    dryRun,
+    docClient: dc,
+    seededIds = new Set(),
+    ageThresholdHours = 24,
+  } = opts;
+
+  const summary: ReconcileUnpublishedBlueprintsSummary = {
+    scanned: 0,
+    found: 0,
+    deleted: 0,
+    errors: 0,
+  };
+  const rows: UnpublishedBlueprintRow[] = [];
+  const now = Date.now();
+  const ageThresholdMs = ageThresholdHours * 60 * 60 * 1000;
+
+  console.log(
+    `[reconcile-legacy-rows] Mode: ${dryRun ? "DRY-RUN" : "APPLY"} ` +
+      `unpublished-intake-blueprints table=${tableWorkflows}`,
+  );
+
+  // Query the BlueprintIndex for all blueprint rows, then filter client-side.
+  let exclusiveStartKey: Record<string, NativeAttributeValue> | undefined;
+  do {
+    const page = await dc.send(
+      new QueryCommand({
+        TableName: tableWorkflows,
+        IndexName: "BlueprintIndex",
+        KeyConditionExpression: "isBlueprint = :isBlueprint",
+        ExpressionAttributeValues: { ":isBlueprint": "true" },
+        ...(exclusiveStartKey && { ExclusiveStartKey: exclusiveStartKey }),
+      }),
+    );
+    for (const item of page.Items ?? []) {
+      summary.scanned++;
+      if (isUnpublishedIntakeBlueprint(item, seededIds, ageThresholdMs, now)) {
+        const wfId = String(item.workflowId ?? "");
+        rows.push({
+          workflowId: wfId,
+          name: String(item.name ?? ""),
+          orgId: String(item.orgId ?? ""),
+          createdBy: String(item.createdBy ?? ""),
+          createdAt: String(item.createdAt ?? ""),
+          status: String(item.status ?? ""),
+        });
+        summary.found++;
+      }
+    }
+    exclusiveStartKey = page.LastEvaluatedKey as
+      Record<string, NativeAttributeValue> | undefined;
+  } while (exclusiveStartKey);
+
+  // Report
+  for (const row of rows) {
+    console.log(
+      `[reconcile-legacy-rows] ${dryRun ? "WOULD DELETE" : "DELETING"} ` +
+        `unpublished intake blueprint: workflowId=${row.workflowId} ` +
+        `name=${row.name} orgId=${row.orgId} createdAt=${row.createdAt}`,
+    );
+  }
+
+  // Delete if not dry-run
+  if (!dryRun) {
+    for (const row of rows) {
+      try {
+        await dc.send(
+          new DeleteCommand({
+            TableName: tableWorkflows,
+            Key: { workflowId: row.workflowId },
+            // Conflict-safe: only delete if still DRAFT and still a blueprint.
+            ConditionExpression:
+              "#status = :draft AND isBlueprint = :isBlueprint",
+            ExpressionAttributeNames: { "#status": "status" },
+            ExpressionAttributeValues: {
+              ":draft": "DRAFT",
+              ":isBlueprint": "true",
+            },
+          }),
+        );
+        summary.deleted++;
+      } catch (err: unknown) {
+        if (
+          err instanceof Error &&
+          err.name === "ConditionalCheckFailedException"
+        ) {
+          console.log(
+            `[reconcile-legacy-rows] Skipped ${row.workflowId} — row was advanced concurrently`,
+          );
+          continue;
+        }
+        console.error(
+          `[reconcile-legacy-rows] Delete failed for ${row.workflowId}:`,
+          err,
+        );
+        summary.errors++;
+      }
+    }
+  }
+
+  console.log("[reconcile-legacy-rows] --- Unpublished Blueprint Summary ---");
+  console.log(JSON.stringify(summary));
+
+  return { summary, rows };
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -337,12 +546,33 @@ export async function main(): Promise<void> {
   const region = process.env.AWS_REGION || "us-west-2";
   const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
 
-  const { summary } = await runReconcileLegacy({
-    ...args,
-    docClient,
-  });
+  if (args.deleteUnpublishedIntakeBlueprints) {
+    // Import seeded IDs to exclude them from deletion
+    let seededIds: ReadonlySet<string> = new Set();
+    try {
+      const { SEEDED_BLUEPRINT_IDS } =
+        await import("../src/lambda/seed-blueprints/definitions");
+      seededIds = SEEDED_BLUEPRINT_IDS;
+    } catch {
+      console.log(
+        "[reconcile-legacy-rows] Could not load SEEDED_BLUEPRINT_IDS; proceeding without exclusion set",
+      );
+    }
 
-  if (summary.errors > 0) process.exit(1);
+    const { summary } = await runReconcileUnpublishedBlueprints({
+      tableWorkflows: args.tableWorkflows,
+      dryRun: args.dryRun,
+      docClient,
+      seededIds,
+    });
+    if (summary.errors > 0) process.exit(1);
+  } else {
+    const { summary } = await runReconcileLegacy({
+      ...args,
+      docClient,
+    });
+    if (summary.errors > 0) process.exit(1);
+  }
 }
 
 const isCjsEntrypoint =
