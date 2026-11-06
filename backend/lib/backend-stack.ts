@@ -3753,7 +3753,10 @@ export class BackendStack extends cdk.Stack {
       },
     );
 
-    this.evalSuitesTable.grantWriteData(seedEvalSuitesLambda);
+    // The handler uses PutCommand (write) + GetCommand (read) on the suites
+    // table — GetCommand is called by handleBlockedSuiteHeal to classify
+    // conditional-check failures. grantWriteData alone omits dynamodb:GetItem.
+    this.evalSuitesTable.grantReadWriteData(seedEvalSuitesLambda);
     this.evalCasesTable.grantWriteData(seedEvalSuitesLambda);
 
     const seedEvalSuitesResource = new cdk.CustomResource(

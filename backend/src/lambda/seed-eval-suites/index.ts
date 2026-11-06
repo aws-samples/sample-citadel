@@ -293,6 +293,7 @@ export const handler: CloudFormationCustomResourceHandler = async (
     const now = new Date().toISOString();
     let suitesSeeded = 0;
     let casesSeeded = 0;
+    let healFailures = 0;
 
     for (const suiteDef of SEED_EVAL_SUITES) {
       const suiteItem = buildSeedSuiteItem(suiteDef, now);
@@ -337,7 +338,18 @@ export const handler: CloudFormationCustomResourceHandler = async (
           err instanceof Error &&
           err.name === "ConditionalCheckFailedException"
         ) {
-          await handleBlockedSuiteHeal(suiteItem.suiteId, suiteDef.name);
+          // Heal-path errors (e.g. read permission gaps, EventBridge
+          // failures) must NOT fail the entire custom resource — log and
+          // continue so the remaining suites still seed.
+          try {
+            await handleBlockedSuiteHeal(suiteItem.suiteId, suiteDef.name);
+          } catch (healErr: unknown) {
+            healFailures += 1;
+            console.error(
+              `ERROR: handleBlockedSuiteHeal failed for suite "${suiteDef.name}" (suiteId=${suiteItem.suiteId}):`,
+              healErr,
+            );
+          }
           continue;
         }
         throw err;
@@ -383,6 +395,7 @@ export const handler: CloudFormationCustomResourceHandler = async (
       Message: "Eval suites seeded successfully",
       SuitesSeeded: suitesSeeded,
       CasesSeeded: casesSeeded,
+      HealFailures: healFailures,
     });
   } catch (err: unknown) {
     console.error("Error seeding eval suites:", err);
