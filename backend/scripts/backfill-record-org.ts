@@ -44,6 +44,7 @@ import {
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { RegistryService } from "../src/services/registry-service";
+import { resolveRegionOrExit } from "./lib/resolve-region";
 
 // ---------------------------------------------------------------------------
 // CLI args
@@ -290,15 +291,21 @@ export async function runBackfillRecordOrg(
   tableTools: string,
   dryRun: boolean,
   includeUnkinded: boolean = false,
+  region?: string,
 ): Promise<BackfillCounters> {
   console.log(
     `Backfill record org: org=${org} registry=${registryId} agents=${tableAgents} tools=${tableTools} dryRun=${dryRun} includeUnkinded=${includeUnkinded}`,
   );
 
+  const resolvedRegion = region ?? process.env.AWS_REGION;
+  if (!resolvedRegion) {
+    throw new Error("Region required: pass --region or set AWS_REGION");
+  }
+
   const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
   const registryService = new RegistryService({
     registryId,
-    region: process.env.AWS_REGION || "us-east-1",
+    region: resolvedRegion,
   });
 
   const counters: BackfillCounters = {
@@ -463,8 +470,9 @@ export async function runBackfillRecordOrg(
 }
 
 async function main(): Promise<void> {
+  const { region, rest } = resolveRegionOrExit(process.argv.slice(2));
   const { org, registryId, tableAgents, tableTools, dryRun, includeUnkinded } =
-    parseArgs(process.argv.slice(2));
+    parseArgs(rest);
 
   const counters = await runBackfillRecordOrg(
     org,
@@ -473,6 +481,7 @@ async function main(): Promise<void> {
     tableTools,
     dryRun,
     includeUnkinded,
+    region,
   );
 
   if (counters.errors > 0) process.exit(1);

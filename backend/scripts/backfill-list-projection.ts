@@ -41,6 +41,7 @@ import {
   mergeOnlySeederRow,
   type SeederContext,
 } from "./lib/seeder-owned-row";
+import { resolveRegionOrExit } from "./lib/resolve-region";
 
 // ---------------------------------------------------------------------------
 // CLI args
@@ -269,14 +270,20 @@ export async function runProjectionBackfill(
   delayMs: number,
   limit: number,
   seededNames: string[] | null = null,
+  region?: string,
 ): Promise<{ agents: number; tools: number; skipped: number; errors: number }> {
   console.log(
     `Backfill list-projection: registry=${registryId} agents=${tableAgents} tools=${tableTools} dryRun=${dryRun} delayMs=${delayMs} limit=${limit || "unlimited"}`,
   );
 
+  const resolvedRegion = region ?? process.env.AWS_REGION;
+  if (!resolvedRegion) {
+    throw new Error("Region required: pass --region or set AWS_REGION");
+  }
+
   const registryService = new RegistryService({
     registryId,
-    region: process.env.AWS_REGION || "us-east-1",
+    region: resolvedRegion,
   });
   const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -484,6 +491,7 @@ export async function runProjectionBackfill(
 }
 
 async function main(): Promise<void> {
+  const { region, rest } = resolveRegionOrExit(process.argv.slice(2));
   const {
     registryId,
     tableAgents,
@@ -492,7 +500,7 @@ async function main(): Promise<void> {
     delayMs,
     limit,
     seededNames,
-  } = parseArgs(process.argv.slice(2));
+  } = parseArgs(rest);
 
   const counters = await runProjectionBackfill(
     registryId,
@@ -502,6 +510,7 @@ async function main(): Promise<void> {
     delayMs,
     limit,
     seededNames,
+    region,
   );
 
   if (counters.errors > 0) process.exit(1);

@@ -28,7 +28,7 @@
  *
  * Required env:
  *   APPS_TABLE   – DynamoDB table name for apps (citadel-apps-{env})
- *   AWS_REGION   – optional, defaults to us-east-1
+ *   AWS_REGION   – required (or pass --region <value>)
  */
 import {
   ApiGatewayV2Client,
@@ -37,6 +37,7 @@ import {
 } from "@aws-sdk/client-apigatewayv2";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, ScanCommand } from "@aws-sdk/lib-dynamodb";
+import { resolveRegionOrExit } from "./lib/resolve-region";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -116,8 +117,7 @@ async function findPublishedAppsWithApi(
       }
     }
     ExclusiveStartKey = page.LastEvaluatedKey as
-      | Record<string, unknown>
-      | undefined;
+      Record<string, unknown> | undefined;
   } while (ExclusiveStartKey);
 
   return results;
@@ -217,12 +217,11 @@ export async function runBackfill(
 // ---------------------------------------------------------------------------
 
 export async function main(): Promise<void> {
-  const args = process.argv.slice(2);
-  const apply = args.includes("--apply");
+  const { region, rest } = resolveRegionOrExit(process.argv.slice(2));
+  const apply = rest.includes("--apply");
 
   const appsTable = process.env.APPS_TABLE;
   if (!appsTable) throw new Error("APPS_TABLE env var required");
-  const region = process.env.AWS_REGION || "us-east-1";
 
   const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
   const apiGwClient = new ApiGatewayV2Client({ region });

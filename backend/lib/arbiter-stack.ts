@@ -1656,6 +1656,12 @@ export class ArbiterStack extends cdk.Stack {
     // prefix: the seed only writes agents/demo_echo_agent.py, so it never needs
     // write access anywhere else in the bucket.
     props.codeBucket.grantPut(seedAgentConfigLambda, "agents/*");
+    // The seed's _copy_s3_to_scoped_key helper calls head_object on
+    // agents/{recordId}/{basename} to check existence before copying. S3
+    // HeadObject is authorised by s3:GetObject, so grant read on the same
+    // agents/* prefix (least privilege — no ListBucket, no DeleteObject,
+    // no access outside agents/*).
+    props.codeBucket.grantRead(seedAgentConfigLambda, "agents/*");
     // The agents/* object-key prefix is the residual (and unavoidable) S3
     // resource wildcard — you cannot PutObject without a key. The app-level
     // IAM5 suppression covers a bucket-wide <Arn>/* but not this narrower
