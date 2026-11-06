@@ -1699,6 +1699,13 @@ export class ArbiterStack extends cdk.Stack {
     const seedModuleDigest = computeSeedModuleDigest(
       path.join(ARBITER_ROOT, "seedConfig"),
     );
+    // HealNonce: operator escape-hatch — pass `-c seedHealNonce=$(date +%s)`
+    // to force a seeder re-run without a code change (e.g. after an
+    // out-of-band table wipe or backfill incident). Default '' so the
+    // property is always present but changes nothing unless explicitly set.
+    const seedHealNonce: string =
+      (this.node.tryGetContext("seedHealNonce") as string | undefined) ?? "";
+
     const seedAgentConfigResource = new cdk.CustomResource(
       this,
       "SeedAgentConfigResource",
@@ -1709,6 +1716,14 @@ export class ArbiterStack extends cdk.Stack {
           Version: "v1.4.1",
           ModuleDigest: seedModuleDigest,
           RegistryGeneration: REGISTRY_GENERATION,
+          // Bump this constant to force a one-time re-run on the next deploy.
+          // Complements ModuleDigest (which tracks source changes): this lever
+          // forces re-invocation even when no source changed, e.g. to heal
+          // externally damaged rows.
+          SeedRunVersion: 2,
+          // Operator escape-hatch: `npx cdk deploy citadel-arbiter-<env> -c seedHealNonce=$(date +%s)`
+          // from backend/ forces a re-run without any code change.
+          HealNonce: seedHealNonce,
         },
       },
     );

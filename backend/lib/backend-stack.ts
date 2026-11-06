@@ -1893,6 +1893,13 @@ export class BackendStack extends cdk.Stack {
     this.workflowsTable.grantWriteData(seedBlueprintsLambda);
     this.agentConfigTable.grantReadData(seedBlueprintsLambda);
 
+    // HealNonce: operator escape-hatch — pass `-c seedHealNonce=$(date +%s)`
+    // to force a seeder re-run without a code change (e.g. after an
+    // out-of-band table wipe or backfill incident). Default '' so the
+    // property is always present but changes nothing unless explicitly set.
+    const seedHealNonce: string =
+      (this.node.tryGetContext("seedHealNonce") as string | undefined) ?? "";
+
     // Content fingerprint: any change to SEED_BLUEPRINTS, SMOKE_BLUEPRINTS,
     // or SEED_VERSION changes the fingerprint, forcing CloudFormation to
     // re-invoke the seeder. Closes the defect where a code-only change
@@ -1905,6 +1912,10 @@ export class BackendStack extends cdk.Stack {
         properties: {
           Version: `v${SEED_BLUEPRINTS_VERSION}`,
           SeedFingerprint: computeSeedBlueprintFingerprint(),
+          // Bump this constant to force a one-time re-run on the next deploy.
+          SeedRunVersion: 2,
+          // Operator escape-hatch: `npx cdk deploy citadel-backend-<env> -c seedHealNonce=$(date +%s)`
+          HealNonce: seedHealNonce,
         },
       },
     );
@@ -3767,6 +3778,10 @@ export class BackendStack extends cdk.Stack {
         properties: {
           Version: `v${SEED_EVAL_SUITES_VERSION}`,
           SeedFingerprint: computeSeedEvalSuitesFingerprint(),
+          // Bump this constant to force a one-time re-run on the next deploy.
+          SeedRunVersion: 2,
+          // Operator escape-hatch: `npx cdk deploy citadel-backend-<env> -c seedHealNonce=$(date +%s)`
+          HealNonce: seedHealNonce,
         },
       },
     );
