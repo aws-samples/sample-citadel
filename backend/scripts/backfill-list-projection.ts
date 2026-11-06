@@ -23,7 +23,11 @@
  * --limit:             max records to process (0 = unlimited, default 0).
  */
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  PutCommand,
+  GetCommand,
+} from "@aws-sdk/lib-dynamodb";
 import {
   RegistryService,
   type RegistryRecord,
@@ -31,6 +35,7 @@ import {
 import { resolveKind } from "../src/utils/citadel-kind";
 import { readRegistrySequentially } from "./lib/registry-sequential-reader";
 import { buildFullToolConfig } from "../src/lambda/registry-sync";
+import { isSeederOwnedRow, mergeOnlySeederRow } from "./lib/seeder-owned-row";
 
 // ---------------------------------------------------------------------------
 // CLI args
@@ -244,6 +249,62 @@ export async function runProjectionBackfill(
 
     try {
       const item = buildProjectionItem(record, "agent", registryService);
+
+      // Seeder-owned guard: check if the existing DDB row was written by
+      // seedConfig. If so, only merge non-ownership fields — never overwrite
+      // config, orgId, citadelKind, or projectionVersion.
+      let existingIsSeederOwned = false;
+      try {
+        const existing = await docClient.send(
+          new GetCommand({
+            TableName: tableAgents,
+            Key: { agentId: record.recordId },
+            ProjectionExpression: "createdBy, projectionVersion",
+          }),
+        );
+        if (
+          existing.Item &&
+          isSeederOwnedRow(existing.Item as Record<string, unknown>)
+        ) {
+          existingIsSeederOwned = true;
+        }
+      } catch {
+        // Best-effort: if the check fails, fall through to the standard
+        // PutCommand path.
+      }
+
+      if (existingIsSeederOwned) {
+        const mergeSource = {
+          registryStatus: item.registryStatus as string | undefined,
+          state: item.state as string | undefined,
+          registryRecordId: item.registryRecordId as string | undefined,
+          decidedBy: item.decidedBy as string | undefined,
+          decidedAt: item.decidedAt as string | undefined,
+          statusReason: item.statusReason as string | undefined,
+        };
+        await mergeOnlySeederRow(
+          docClient,
+          tableAgents,
+          { agentId: record.recordId },
+          mergeSource,
+          dryRun,
+        );
+        counters.agents++;
+        continue;
+      }
+
+      // Defensive orgId mapping: for seeder-owned records in the registry
+      // whose orgId is '' in the descriptor, map to 'All Organizations' on
+      // the projection row so the read path never sees an empty orgId on a
+      // system-shared row.
+      if (
+        item.createdBy === "seedConfig" &&
+        (item.orgId === "" || item.orgId === undefined)
+      ) {
+        item.orgId = "All Organizations";
+        delete item.orgUnknown;
+      }
+
       if (dryRun) {
         console.log(
           `[DRY-RUN] Would write agent projection: ${record.recordId} (${record.name})`,
@@ -267,6 +328,47 @@ export async function runProjectionBackfill(
   for (const record of toolRecords) {
     try {
       const item = buildProjectionItem(record, "tool", registryService);
+
+      // Seeder-owned guard (tools): same logic as agents, keyed by toolId.
+      let existingIsSeederOwned = false;
+      try {
+        const existing = await docClient.send(
+          new GetCommand({
+            TableName: tableTools,
+            Key: { toolId: record.recordId },
+            ProjectionExpression: "createdBy, projectionVersion",
+          }),
+        );
+        if (
+          existing.Item &&
+          isSeederOwnedRow(existing.Item as Record<string, unknown>)
+        ) {
+          existingIsSeederOwned = true;
+        }
+      } catch {
+        // Best-effort
+      }
+
+      if (existingIsSeederOwned) {
+        const mergeSource = {
+          registryStatus: item.registryStatus as string | undefined,
+          state: item.state as string | undefined,
+          registryRecordId: item.registryRecordId as string | undefined,
+          decidedBy: item.decidedBy as string | undefined,
+          decidedAt: item.decidedAt as string | undefined,
+          statusReason: item.statusReason as string | undefined,
+        };
+        await mergeOnlySeederRow(
+          docClient,
+          tableTools,
+          { toolId: record.recordId },
+          mergeSource,
+          dryRun,
+        );
+        counters.tools++;
+        continue;
+      }
+
       if (dryRun) {
         console.log(
           `[DRY-RUN] Would write tool projection: ${record.recordId} (${record.name})`,
