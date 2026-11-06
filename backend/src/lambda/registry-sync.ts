@@ -12,7 +12,6 @@ import {
   DeleteCommand,
   UpdateCommand,
   GetCommand,
-  ScanCommand,
 } from "@aws-sdk/lib-dynamodb";
 import type {
   PutCommandInput,
@@ -1349,23 +1348,39 @@ export async function handleGaUpsert(
 
       // Fallback: check for a pointer row whose _canonicalRecordId matches
       // this resourceId (handles damaged rows missing createdBy).
-      if (!isSeederOwned && existing.Item) {
-        try {
-          const pointerScan = await docClient.send(
-            new ScanCommand({
-              TableName: tableName,
-              FilterExpression: "#c = :rid",
-              ExpressionAttributeNames: { "#c": "_canonicalRecordId" },
-              ExpressionAttributeValues: { ":rid": resourceId },
-              ProjectionExpression: "agentId",
-              Limit: 1,
-            }),
-          );
-          if ((pointerScan.Items?.length ?? 0) > 0) {
-            isSeederOwned = true;
+      // Look up by the record's display name — the seeder creates pointer
+      // rows keyed by name with _canonicalRecordId pointing to the
+      // recordId.  A Scan with Limit would cap evaluated items BEFORE
+      // the filter and miss the pointer unless it happened to be the
+      // first row (CIT-252 lesson).
+      if (!isSeederOwned && existing.Item && record.name) {
+        const namesToCheck = new Set<string>();
+        namesToCheck.add(record.name);
+        // If the sanitised/slug form differs from the display name, check
+        // that variant too (today they are identical, but guard against
+        // future divergence).
+        const sanitised = record.name.toLowerCase().replace(/\s+/g, "-");
+        if (sanitised !== record.name) {
+          namesToCheck.add(sanitised);
+        }
+        for (const candidateName of namesToCheck) {
+          if (candidateName === resourceId) continue; // skip — same key as the canonical row
+          try {
+            const pointerGet = await docClient.send(
+              new GetCommand({
+                TableName: tableName,
+                Key: { agentId: candidateName },
+                ProjectionExpression: "#c",
+                ExpressionAttributeNames: { "#c": "_canonicalRecordId" },
+              }),
+            );
+            if (pointerGet.Item?._canonicalRecordId === resourceId) {
+              isSeederOwned = true;
+              break;
+            }
+          } catch {
+            // Best-effort pointer check — fall through if it fails.
           }
-        } catch {
-          // Best-effort pointer check — fall through if it fails.
         }
       }
 

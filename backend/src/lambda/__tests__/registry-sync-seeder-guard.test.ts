@@ -17,7 +17,6 @@ import {
   GetCommand,
   PutCommand,
   UpdateCommand,
-  ScanCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 import {
@@ -198,18 +197,30 @@ describe("handleGaUpsert seeder guard", () => {
   });
 
   it("uses syncSeederOwnedRow when row is damaged (no createdBy) but has a pointer", async () => {
-    // GetCommand returns a row WITHOUT createdBy (damaged)
-    ddbMock.on(GetCommand).resolves({
-      Item: {
-        agentId: RECORD_ID,
-        projectionVersion: PROJECTION_VERSION,
-        // createdBy is MISSING — this is the damage scenario
-      },
-    });
-    // ScanCommand returns a pointer row referencing this recordId
-    ddbMock.on(ScanCommand).resolves({
-      Items: [{ agentId: "demo-echo-agent", _canonicalRecordId: RECORD_ID }],
-    });
+    // GetCommand: first call returns the damaged canonical row (no createdBy),
+    // second call returns the pointer row keyed by name.
+    ddbMock
+      .on(GetCommand, {
+        TableName: TABLE,
+        Key: { agentId: RECORD_ID },
+      })
+      .resolves({
+        Item: {
+          agentId: RECORD_ID,
+          projectionVersion: PROJECTION_VERSION,
+          // createdBy is MISSING — this is the damage scenario
+        },
+      })
+      .on(GetCommand, {
+        TableName: TABLE,
+        Key: { agentId: "demo-echo-agent" },
+      })
+      .resolves({
+        Item: {
+          agentId: "demo-echo-agent",
+          _canonicalRecordId: RECORD_ID,
+        },
+      });
     // UpdateCommand for syncSeederOwnedRow succeeds
     ddbMock.on(UpdateCommand).resolves({});
 
@@ -229,15 +240,23 @@ describe("handleGaUpsert seeder guard", () => {
   });
 
   it("falls through when row is damaged AND has no pointer", async () => {
-    // GetCommand returns a row WITHOUT createdBy (damaged)
-    ddbMock.on(GetCommand).resolves({
-      Item: {
-        agentId: RECORD_ID,
-        projectionVersion: PROJECTION_VERSION,
-      },
-    });
-    // ScanCommand returns no pointer rows
-    ddbMock.on(ScanCommand).resolves({ Items: [] });
+    // GetCommand: canonical row is damaged, pointer row does not exist
+    ddbMock
+      .on(GetCommand, {
+        TableName: TABLE,
+        Key: { agentId: RECORD_ID },
+      })
+      .resolves({
+        Item: {
+          agentId: RECORD_ID,
+          projectionVersion: PROJECTION_VERSION,
+        },
+      })
+      .on(GetCommand, {
+        TableName: TABLE,
+        Key: { agentId: "demo-echo-agent" },
+      })
+      .resolves({}); // no item — no pointer
     ddbMock.on(UpdateCommand).resolves({});
     ddbMock.on(PutCommand).resolves({});
 
@@ -247,5 +266,48 @@ describe("handleGaUpsert seeder guard", () => {
     // Standard merge path runs
     const putCalls = ddbMock.commandCalls(PutCommand);
     expect(putCalls.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("detects seeder-owned via pointer even when many rows precede it (old Scan+Limit=1 bug)", async () => {
+    // The old ScanCommand with Limit=1 would evaluate ONE item before
+    // filtering — if the pointer wasn't that item, it was missed.
+    // The new GetCommand-by-name approach hits the pointer directly.
+    ddbMock
+      .on(GetCommand, {
+        TableName: TABLE,
+        Key: { agentId: RECORD_ID },
+      })
+      .resolves({
+        Item: {
+          agentId: RECORD_ID,
+          projectionVersion: PROJECTION_VERSION,
+          // createdBy is MISSING — must rely on pointer fallback
+        },
+      })
+      .on(GetCommand, {
+        TableName: TABLE,
+        Key: { agentId: "demo-echo-agent" },
+      })
+      .resolves({
+        Item: {
+          agentId: "demo-echo-agent",
+          _canonicalRecordId: RECORD_ID,
+        },
+      });
+    ddbMock.on(UpdateCommand).resolves({});
+
+    const record = makeRecord({ status: "DRAFT" });
+    await handleGaUpsert(TABLE, "agent", RECORD_ID, record);
+
+    // Must have taken the syncSeederOwnedRow path (no PutCommand)
+    const putCalls = ddbMock.commandCalls(PutCommand);
+    expect(putCalls).toHaveLength(0);
+
+    // syncSeederOwnedRow writes an UpdateCommand with approval fields only
+    const updateCalls = ddbMock.commandCalls(UpdateCommand);
+    expect(updateCalls).toHaveLength(1);
+    const expr = updateCalls[0].args[0].input.UpdateExpression as string;
+    expect(expr).toContain("registryStatus");
+    expect(expr).not.toContain("config");
   });
 });
