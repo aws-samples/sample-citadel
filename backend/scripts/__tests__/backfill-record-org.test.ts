@@ -321,6 +321,7 @@ describe("backfill-record-org", () => {
         "tools-tbl",
         true,
         false,
+        "eu-west-1",
       );
 
       // Only the kinded+absent agent is picked up.
@@ -344,6 +345,7 @@ describe("backfill-record-org", () => {
         "tools-tbl",
         true,
         false,
+        "eu-west-1",
       );
 
       expect(counters.toolProjectionUpdated).toBe(0);
@@ -373,6 +375,7 @@ describe("backfill-record-org", () => {
         "tools-tbl",
         true,
         true,
+        "eu-west-1",
       );
 
       // Both kinded+absent and unkinded+absent should be picked up.
@@ -396,6 +399,7 @@ describe("backfill-record-org", () => {
         "tools-tbl",
         true,
         true,
+        "eu-west-1",
       );
 
       // Unkinded tool picked up; decision# and All Organizations skipped.
@@ -419,6 +423,7 @@ describe("backfill-record-org", () => {
         "tools-tbl",
         false,
         true,
+        "eu-west-1",
       );
 
       expect(counters.toolProjectionUpdated).toBe(0);
@@ -444,6 +449,7 @@ describe("backfill-record-org", () => {
         "tools-tbl",
         false,
         true,
+        "eu-west-1",
       );
 
       expect(counters.agentProjectionUpdated).toBe(0);
@@ -467,6 +473,7 @@ describe("backfill-record-org", () => {
         "tools-tbl",
         false,
         true,
+        "eu-west-1",
       );
 
       expect(counters.agentProjectionUpdated).toBe(0);
@@ -488,6 +495,7 @@ describe("backfill-record-org", () => {
         "tools-tbl",
         false,
         true,
+        "eu-west-1",
       );
 
       expect(counters.toolProjectionUpdated).toBe(0);
@@ -511,6 +519,7 @@ describe("backfill-record-org", () => {
         "tools-tbl",
         true,
         false,
+        "eu-west-1",
       );
 
       expect(counters.agentProjectionUpdated).toBe(1);
@@ -540,6 +549,7 @@ describe("backfill-record-org", () => {
         "tools-tbl",
         false,
         true,
+        "eu-west-1",
       );
 
       // Agent: kinded+absent + unkinded+absent = 2
@@ -586,6 +596,7 @@ describe("backfill-record-org", () => {
         "tools-tbl",
         false,
         true,
+        "eu-west-1",
       );
 
       // The recordId-keyed orphan is the only candidate (twin has orgId)
@@ -622,6 +633,7 @@ describe("backfill-record-org", () => {
         "tools-tbl",
         false,
         true,
+        "eu-west-1",
       );
 
       expect(counters.agentProjectionUpdated).toBe(1);
@@ -650,6 +662,7 @@ describe("backfill-record-org", () => {
         "tools-tbl",
         false,
         true,
+        "eu-west-1",
       );
 
       expect(counters.agentProjectionUpdated).toBe(1);
@@ -685,6 +698,7 @@ describe("backfill-record-org", () => {
         "tools-tbl",
         true,
         true,
+        "eu-west-1",
       );
 
       const dryRunLogs = logSpy.mock.calls
@@ -723,6 +737,7 @@ describe("backfill-record-org", () => {
         "tools-tbl",
         false,
         true,
+        "eu-west-1",
       );
 
       // Only the non-decision agent is updated
@@ -815,6 +830,7 @@ describe("backfill-record-org", () => {
         "tools-tbl",
         false,
         true,
+        "eu-west-1",
       );
 
       // candidate is the only orphan
@@ -875,6 +891,7 @@ describe("backfill-record-org", () => {
         "tools-tbl",
         false,
         true,
+        "eu-west-1",
       );
 
       expect(counters.agentProjectionUpdated).toBe(1);
@@ -926,6 +943,7 @@ describe("backfill-record-org", () => {
         "tools-tbl",
         false,
         true,
+        "eu-west-1",
       );
 
       expect(counters.agentProjectionUpdated).toBe(1);
@@ -935,6 +953,32 @@ describe("backfill-record-org", () => {
       const vals = updateCalls[0].args[0].input
         .ExpressionAttributeValues as Record<string, unknown>;
       expect(vals[":org"]).toBe("Default");
+    });
+  });
+
+  describe("region required", () => {
+    it("throws when neither region arg nor AWS_REGION env is present", async () => {
+      const saved = process.env.AWS_REGION;
+      const savedDefault = process.env.AWS_DEFAULT_REGION;
+      delete process.env.AWS_REGION;
+      delete process.env.AWS_DEFAULT_REGION;
+      try {
+        await expect(
+          runBackfillRecordOrg(
+            "Default",
+            "reg-1",
+            "agents-tbl",
+            "tools-tbl",
+            true,
+            false,
+            // no region argument
+          ),
+        ).rejects.toThrow("Region required");
+      } finally {
+        if (saved !== undefined) process.env.AWS_REGION = saved;
+        if (savedDefault !== undefined)
+          process.env.AWS_DEFAULT_REGION = savedDefault;
+      }
     });
   });
 });

@@ -133,6 +133,8 @@ describe("backfill-list-projection", () => {
         true,
         0,
         0,
+        null,
+        "eu-west-1",
       );
 
       // The shared sequential reader was called
@@ -162,12 +164,40 @@ describe("backfill-list-projection", () => {
         true,
         500,
         10,
+        null,
+        "eu-west-1",
       );
 
       expect(readRegistrySequentially).toHaveBeenCalledWith(expect.anything(), {
         delayMs: 500,
         limit: 10,
       });
+    });
+  });
+
+  describe("region required", () => {
+    it("throws when neither region arg nor AWS_REGION env is present", async () => {
+      const saved = process.env.AWS_REGION;
+      const savedDefault = process.env.AWS_DEFAULT_REGION;
+      delete process.env.AWS_REGION;
+      delete process.env.AWS_DEFAULT_REGION;
+      try {
+        await expect(
+          runProjectionBackfill(
+            "reg-1",
+            "agents-table",
+            "tools-table",
+            true,
+            0,
+            0,
+            // no seededNames, no region
+          ),
+        ).rejects.toThrow("Region required");
+      } finally {
+        if (saved !== undefined) process.env.AWS_REGION = saved;
+        if (savedDefault !== undefined)
+          process.env.AWS_DEFAULT_REGION = savedDefault;
+      }
     });
   });
 });
