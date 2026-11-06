@@ -23,7 +23,12 @@
  * --limit:             max records to process (0 = unlimited, default 0).
  */
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  PutCommand,
+  GetCommand,
+  ScanCommand,
+} from "@aws-sdk/lib-dynamodb";
 import {
   RegistryService,
   type RegistryRecord,
@@ -31,13 +36,18 @@ import {
 import { resolveKind } from "../src/utils/citadel-kind";
 import { readRegistrySequentially } from "./lib/registry-sequential-reader";
 import { buildFullToolConfig } from "../src/lambda/registry-sync";
+import {
+  isSeederOwnedRow,
+  mergeOnlySeederRow,
+  type SeederContext,
+} from "./lib/seeder-owned-row";
 
 // ---------------------------------------------------------------------------
 // CLI args
 // ---------------------------------------------------------------------------
 
 const USAGE =
-  "Usage: --registry-id <id> --table-agents <table> --table-tools <table> [--apply] [--dry-run] [--delay-ms N] [--limit N]";
+  "Usage: --registry-id <id> --table-agents <table> --table-tools <table> [--apply] [--dry-run] [--delay-ms N] [--limit N] [--seeded-names name1,name2]";
 
 const KNOWN_FLAGS = new Set([
   "--registry-id",
@@ -47,6 +57,7 @@ const KNOWN_FLAGS = new Set([
   "--dry-run",
   "--delay-ms",
   "--limit",
+  "--seeded-names",
 ]);
 
 export function parseArgs(argv: string[]): {
@@ -56,6 +67,7 @@ export function parseArgs(argv: string[]): {
   dryRun: boolean;
   delayMs: number;
   limit: number;
+  seededNames: string[] | null;
 } {
   let registryId = "";
   let tableAgents = "";
@@ -63,6 +75,7 @@ export function parseArgs(argv: string[]): {
   let dryRun = true;
   let delayMs = 250;
   let limit = 0;
+  let seededNames: string[] | null = null;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -93,6 +106,9 @@ export function parseArgs(argv: string[]): {
       case "--limit":
         limit = Number(argv[++i]);
         break;
+      case "--seeded-names":
+        seededNames = argv[++i].split(",").map((n) => n.trim());
+        break;
     }
   }
 
@@ -100,7 +116,15 @@ export function parseArgs(argv: string[]): {
     console.error(USAGE);
     process.exit(1);
   }
-  return { registryId, tableAgents, tableTools, dryRun, delayMs, limit };
+  return {
+    registryId,
+    tableAgents,
+    tableTools,
+    dryRun,
+    delayMs,
+    limit,
+    seededNames,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -200,6 +224,40 @@ function buildProjectionItem(
 }
 
 // ---------------------------------------------------------------------------
+// Pointer-index scanner: builds a Set of _canonicalRecordId values from
+// pointer rows in the given table. A canonical row whose PK is in this set
+// is seeder-owned even if its createdBy attribute was lost.
+// ---------------------------------------------------------------------------
+
+async function scanPointerTargetIds(
+  docClient: DynamoDBDocumentClient,
+  tableName: string,
+): Promise<Set<string>> {
+  const ids = new Set<string>();
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+
+  do {
+    const page = await docClient.send(
+      new ScanCommand({
+        TableName: tableName,
+        ProjectionExpression: "#c",
+        FilterExpression: "attribute_exists(#c)",
+        ExpressionAttributeNames: { "#c": "_canonicalRecordId" },
+        ExclusiveStartKey: exclusiveStartKey,
+      }),
+    );
+    for (const item of page.Items ?? []) {
+      const target = item._canonicalRecordId as string | undefined;
+      if (target) ids.add(target);
+    }
+    exclusiveStartKey = page.LastEvaluatedKey as
+      Record<string, unknown> | undefined;
+  } while (exclusiveStartKey);
+
+  return ids;
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -210,6 +268,7 @@ export async function runProjectionBackfill(
   dryRun: boolean,
   delayMs: number,
   limit: number,
+  seededNames: string[] | null = null,
 ): Promise<{ agents: number; tools: number; skipped: number; errors: number }> {
   console.log(
     `Backfill list-projection: registry=${registryId} agents=${tableAgents} tools=${tableTools} dryRun=${dryRun} delayMs=${delayMs} limit=${limit || "unlimited"}`,
@@ -220,6 +279,37 @@ export async function runProjectionBackfill(
     region: process.env.AWS_REGION || "us-east-1",
   });
   const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+
+  // -----------------------------------------------------------------------
+  // Build pointer indexes: scan each cache table for rows that have
+  // `_canonicalRecordId`, collecting the set of target IDs. Any canonical
+  // row whose primary key is in this set is seeder-owned even if its
+  // `createdBy` attribute was lost.
+  // -----------------------------------------------------------------------
+  const agentPointerTargetIds = await scanPointerTargetIds(
+    docClient,
+    tableAgents,
+  );
+  const toolPointerTargetIds = await scanPointerTargetIds(
+    docClient,
+    tableTools,
+  );
+  console.log(
+    `Pointer indexes: agents=${agentPointerTargetIds.size} tools=${toolPointerTargetIds.size}`,
+  );
+
+  const seededNameSet: ReadonlySet<string> | undefined = seededNames
+    ? new Set(seededNames)
+    : undefined;
+
+  const agentCtx: SeederContext = {
+    pointerTargetIds: agentPointerTargetIds,
+    seededNames: seededNameSet,
+  };
+  const toolCtx: SeederContext = {
+    pointerTargetIds: toolPointerTargetIds,
+    seededNames: seededNameSet,
+  };
 
   // Sequential read — no concurrent N+1 fan-out.
   const {
@@ -244,6 +334,64 @@ export async function runProjectionBackfill(
 
     try {
       const item = buildProjectionItem(record, "agent", registryService);
+
+      // Seeder-owned guard: check if the existing DDB row was written by
+      // seedConfig, or is referenced by a pointer row. If so, only merge
+      // non-ownership fields — never overwrite config, orgId, citadelKind,
+      // or projectionVersion.
+      let existingIsSeederOwned = false;
+      try {
+        const existing = await docClient.send(
+          new GetCommand({
+            TableName: tableAgents,
+            Key: { agentId: record.recordId },
+            ProjectionExpression: "agentId, createdBy, projectionVersion, #n",
+            ExpressionAttributeNames: { "#n": "name" },
+          }),
+        );
+        if (
+          existing.Item &&
+          isSeederOwnedRow(existing.Item as Record<string, unknown>, agentCtx)
+        ) {
+          existingIsSeederOwned = true;
+        }
+      } catch {
+        // Best-effort: if the check fails, fall through to the standard
+        // PutCommand path.
+      }
+
+      if (existingIsSeederOwned) {
+        const mergeSource = {
+          registryStatus: item.registryStatus as string | undefined,
+          state: item.state as string | undefined,
+          registryRecordId: item.registryRecordId as string | undefined,
+          decidedBy: item.decidedBy as string | undefined,
+          decidedAt: item.decidedAt as string | undefined,
+          statusReason: item.statusReason as string | undefined,
+        };
+        await mergeOnlySeederRow(
+          docClient,
+          tableAgents,
+          { agentId: record.recordId },
+          mergeSource,
+          dryRun,
+        );
+        counters.agents++;
+        continue;
+      }
+
+      // Defensive orgId mapping: for seeder-owned records in the registry
+      // whose orgId is '' in the descriptor, map to 'All Organizations' on
+      // the projection row so the read path never sees an empty orgId on a
+      // system-shared row.
+      if (
+        item.createdBy === "seedConfig" &&
+        (item.orgId === "" || item.orgId === undefined)
+      ) {
+        item.orgId = "All Organizations";
+        delete item.orgUnknown;
+      }
+
       if (dryRun) {
         console.log(
           `[DRY-RUN] Would write agent projection: ${record.recordId} (${record.name})`,
@@ -267,6 +415,48 @@ export async function runProjectionBackfill(
   for (const record of toolRecords) {
     try {
       const item = buildProjectionItem(record, "tool", registryService);
+
+      // Seeder-owned guard (tools): same logic as agents, keyed by toolId.
+      let existingIsSeederOwned = false;
+      try {
+        const existing = await docClient.send(
+          new GetCommand({
+            TableName: tableTools,
+            Key: { toolId: record.recordId },
+            ProjectionExpression: "toolId, createdBy, projectionVersion, #n",
+            ExpressionAttributeNames: { "#n": "name" },
+          }),
+        );
+        if (
+          existing.Item &&
+          isSeederOwnedRow(existing.Item as Record<string, unknown>, toolCtx)
+        ) {
+          existingIsSeederOwned = true;
+        }
+      } catch {
+        // Best-effort
+      }
+
+      if (existingIsSeederOwned) {
+        const mergeSource = {
+          registryStatus: item.registryStatus as string | undefined,
+          state: item.state as string | undefined,
+          registryRecordId: item.registryRecordId as string | undefined,
+          decidedBy: item.decidedBy as string | undefined,
+          decidedAt: item.decidedAt as string | undefined,
+          statusReason: item.statusReason as string | undefined,
+        };
+        await mergeOnlySeederRow(
+          docClient,
+          tableTools,
+          { toolId: record.recordId },
+          mergeSource,
+          dryRun,
+        );
+        counters.tools++;
+        continue;
+      }
+
       if (dryRun) {
         console.log(
           `[DRY-RUN] Would write tool projection: ${record.recordId} (${record.name})`,
@@ -294,8 +484,15 @@ export async function runProjectionBackfill(
 }
 
 async function main(): Promise<void> {
-  const { registryId, tableAgents, tableTools, dryRun, delayMs, limit } =
-    parseArgs(process.argv.slice(2));
+  const {
+    registryId,
+    tableAgents,
+    tableTools,
+    dryRun,
+    delayMs,
+    limit,
+    seededNames,
+  } = parseArgs(process.argv.slice(2));
 
   const counters = await runProjectionBackfill(
     registryId,
@@ -304,6 +501,7 @@ async function main(): Promise<void> {
     dryRun,
     delayMs,
     limit,
+    seededNames,
   );
 
   if (counters.errors > 0) process.exit(1);
