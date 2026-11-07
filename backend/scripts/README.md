@@ -3,6 +3,16 @@
 One-off migration scripts for stamping missing attributes before
 removing fallback code-paths. All scripts are **dry-run by default**.
 
+## Region requirement
+
+All scripts require an explicit AWS region — there is no silent default. Pass it one of three ways:
+
+1. `--region <value>` CLI flag (highest precedence)
+2. `AWS_REGION` environment variable
+3. `AWS_DEFAULT_REGION` environment variable
+
+If none of the above is set, the script exits with code 2 and a descriptive error.
+
 ## backfill-project-org
 
 Stamps `organization` on project rows that lack it (or have it empty/null).

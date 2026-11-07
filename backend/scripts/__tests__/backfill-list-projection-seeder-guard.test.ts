@@ -192,6 +192,8 @@ describe("backfill-list-projection: seeder-owned row guard", () => {
       false, // apply mode
       0,
       0,
+      null,
+      "eu-west-1",
     );
 
     // Assert: UpdateCommand was used (merge-only), NOT PutCommand
@@ -232,6 +234,8 @@ describe("backfill-list-projection: seeder-owned row guard", () => {
       false,
       0,
       0,
+      null,
+      "eu-west-1",
     );
 
     // Assert: PutCommand was used
@@ -259,6 +263,8 @@ describe("backfill-list-projection: seeder-owned row guard", () => {
       false,
       0,
       0,
+      null,
+      "eu-west-1",
     );
 
     // The UpdateCommand must NOT set config, orgId, or citadelKind
@@ -296,6 +302,8 @@ describe("backfill-list-projection: seeder-owned row guard", () => {
       true, // dry-run
       0,
       0,
+      null,
+      "eu-west-1",
     );
 
     // No DDB writes at all (GetCommand is read-only)
@@ -339,6 +347,8 @@ describe("backfill-list-projection: seeder-owned row guard", () => {
       false,
       0,
       0,
+      null,
+      "eu-west-1",
     );
 
     const putCalls = ddbMock.commandCalls(PutCommand);
