@@ -61,15 +61,24 @@ export interface ParsedArgs {
   deleteUnpublishedIntakeBlueprints: boolean;
   /** Required when deleteUnpublishedIntakeBlueprints is true. */
   tableWorkflows: string;
+  /** CIT-288: when true, scan the workflows table for placeholder-agent copies. */
+  deletePlaceholderCopies: boolean;
+  /** Required when deletePlaceholderCopies is true. */
+  tableExecutions: string;
+  /** Optional: apps table for cross-referencing bound workflows. */
+  tableApps: string;
 }
 
 const KNOWN_FLAGS = new Set([
   "--table-agents",
   "--table-tools",
   "--table-workflows",
+  "--table-executions",
+  "--table-apps",
   "--dry-run",
   "--delete-orphans",
   "--delete-unpublished-intake-blueprints",
+  "--delete-placeholder-copies",
   "--apply",
 ]);
 
@@ -77,8 +86,11 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let tableAgents = "";
   let tableTools = "";
   let tableWorkflows = "";
+  let tableExecutions = "";
+  let tableApps = "";
   let dryRun = true;
   let deleteUnpublishedIntakeBlueprints = false;
+  let deletePlaceholderCopies = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -96,6 +108,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case "--table-workflows":
         tableWorkflows = argv[++i];
         break;
+      case "--table-executions":
+        tableExecutions = argv[++i];
+        break;
+      case "--table-apps":
+        tableApps = argv[++i];
+        break;
       case "--dry-run":
         dryRun = true;
         break;
@@ -105,13 +123,23 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case "--delete-unpublished-intake-blueprints":
         deleteUnpublishedIntakeBlueprints = true;
         break;
+      case "--delete-placeholder-copies":
+        deletePlaceholderCopies = true;
+        break;
       case "--apply":
         dryRun = false;
         break;
     }
   }
 
-  if (deleteUnpublishedIntakeBlueprints) {
+  if (deletePlaceholderCopies) {
+    if (!tableWorkflows || !tableExecutions) {
+      console.error(
+        "Usage: --delete-placeholder-copies --table-workflows <table> --table-executions <table> [--table-apps <table>] [--apply]",
+      );
+      process.exit(1);
+    }
+  } else if (deleteUnpublishedIntakeBlueprints) {
     if (!tableWorkflows) {
       console.error(
         "Usage: --delete-unpublished-intake-blueprints --table-workflows <table> [--apply]",
@@ -128,8 +156,11 @@ export function parseArgs(argv: string[]): ParsedArgs {
     tableAgents,
     tableTools,
     tableWorkflows,
+    tableExecutions,
+    tableApps,
     dryRun,
     deleteUnpublishedIntakeBlueprints,
+    deletePlaceholderCopies,
   };
 }
 
@@ -538,6 +569,289 @@ export async function runReconcileUnpublishedBlueprints(
 }
 
 // ---------------------------------------------------------------------------
+// CIT-288: Placeholder-agent copy cleanup
+// ---------------------------------------------------------------------------
+
+export interface PlaceholderCopyRow {
+  workflowId: string;
+  name: string;
+  appId: string;
+  createdAt: string;
+  status: string;
+  /** Set when the workflow is bound to an app and therefore skipped. */
+  boundSkipped?: boolean;
+}
+
+export interface ReconcilePlaceholderCopiesSummary {
+  scanned: number;
+  found: number;
+  boundSkipped: number;
+  deleted: number;
+  errors: number;
+}
+
+export interface ReconcilePlaceholderCopiesOptions {
+  tableWorkflows: string;
+  tableExecutions: string;
+  /** Optional: apps table name. When provided, scan apps for workflowIds. */
+  tableApps: string;
+  dryRun: boolean;
+  docClient: DynamoDBDocumentClient;
+}
+
+/**
+ * Returns true when any node in a parsed workflow definition has an agentId
+ * starting with 'placeholder-'.
+ */
+export function hasPlaceholderAgent(
+  definition: unknown,
+): boolean {
+  if (!definition || typeof definition !== "object") return false;
+  const def = definition as Record<string, unknown>;
+  const nodes = Array.isArray(def.nodes) ? def.nodes : [];
+  return nodes.some((node: unknown) => {
+    if (!node || typeof node !== "object") return false;
+    const n = node as Record<string, unknown>;
+    const agentId = typeof n.agentId === "string" ? n.agentId
+      : typeof (n as Record<string, unknown>).data === "object" &&
+          (n as Record<string, unknown>).data !== null
+        ? ((n as Record<string, unknown>).data as Record<string, unknown>).agentId
+        : undefined;
+    return typeof agentId === "string" && agentId.startsWith("placeholder-");
+  });
+}
+
+/**
+ * Returns true when the workflow row is a placeholder-agent copy eligible
+ * for cleanup:
+ *   - isBlueprint is NOT 'true' (i.e. 'false', absent, or any other value)
+ *   - status is 'DRAFT'
+ *   - definition has at least one node with agentId starting 'placeholder-'
+ */
+export function isPlaceholderCopy(
+  item: Record<string, NativeAttributeValue>,
+): boolean {
+  if (item.isBlueprint === "true") return false;
+  if (item.status !== "DRAFT") return false;
+  const defStr = typeof item.definition === "string" ? item.definition : "";
+  if (!defStr) return false;
+  try {
+    const def = JSON.parse(defStr);
+    return hasPlaceholderAgent(def);
+  } catch {
+    return false;
+  }
+}
+
+export async function runReconcilePlaceholderCopies(
+  opts: ReconcilePlaceholderCopiesOptions,
+): Promise<{
+  summary: ReconcilePlaceholderCopiesSummary;
+  rows: PlaceholderCopyRow[];
+}> {
+  const {
+    tableWorkflows,
+    tableExecutions,
+    tableApps,
+    dryRun,
+    docClient: dc,
+  } = opts;
+
+  const summary: ReconcilePlaceholderCopiesSummary = {
+    scanned: 0,
+    found: 0,
+    boundSkipped: 0,
+    deleted: 0,
+    errors: 0,
+  };
+  const rows: PlaceholderCopyRow[] = [];
+
+  console.log(
+    `[reconcile-legacy-rows] Mode: ${dryRun ? "DRY-RUN" : "APPLY"} ` +
+      `placeholder-copy-cleanup table=${tableWorkflows} ` +
+      `executions=${tableExecutions}` +
+      (tableApps ? ` apps=${tableApps}` : ""),
+  );
+
+  // ---------------------------------------------------------------------------
+  // Phase 1: collect candidate workflows via full scan
+  // ---------------------------------------------------------------------------
+  const candidates: Array<{
+    workflowId: string;
+    name: string;
+    appId: string;
+    createdAt: string;
+    status: string;
+  }> = [];
+
+  let exclusiveStartKey: Record<string, NativeAttributeValue> | undefined;
+  do {
+    const page = await dc.send(
+      new ScanCommand({
+        TableName: tableWorkflows,
+        ExclusiveStartKey: exclusiveStartKey,
+      }),
+    );
+    for (const item of page.Items ?? []) {
+      summary.scanned++;
+      if (isPlaceholderCopy(item)) {
+        candidates.push({
+          workflowId: String(item.workflowId ?? ""),
+          name: String(item.name ?? ""),
+          appId: String(item.appId ?? ""),
+          createdAt: String(item.createdAt ?? ""),
+          status: String(item.status ?? ""),
+        });
+      }
+    }
+    exclusiveStartKey = page.LastEvaluatedKey as
+      Record<string, NativeAttributeValue> | undefined;
+  } while (exclusiveStartKey);
+
+  // ---------------------------------------------------------------------------
+  // Phase 2: build execution reference set (WorkflowIndex GSI on executions)
+  // ---------------------------------------------------------------------------
+  const executionRefs = new Set<string>();
+  for (const candidate of candidates) {
+    let exStartKey: Record<string, NativeAttributeValue> | undefined;
+    do {
+      const exPage = await dc.send(
+        new QueryCommand({
+          TableName: tableExecutions,
+          IndexName: "WorkflowIndex",
+          KeyConditionExpression: "workflowId = :wfId",
+          ExpressionAttributeValues: { ":wfId": candidate.workflowId },
+          Select: "COUNT",
+          ...(exStartKey && { ExclusiveStartKey: exStartKey }),
+        }),
+      );
+      if ((exPage.Count ?? 0) > 0) {
+        executionRefs.add(candidate.workflowId);
+      }
+      exStartKey = exPage.LastEvaluatedKey as
+        Record<string, NativeAttributeValue> | undefined;
+    } while (exStartKey);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 3: build app-bound set (optional: scan apps for workflowIds)
+  // ---------------------------------------------------------------------------
+  const appBoundIds = new Set<string>();
+  if (tableApps) {
+    let appsStartKey: Record<string, NativeAttributeValue> | undefined;
+    do {
+      const appsPage = await dc.send(
+        new ScanCommand({
+          TableName: tableApps,
+          ProjectionExpression: "workflowIds",
+          ExclusiveStartKey: appsStartKey,
+        }),
+      );
+      for (const item of appsPage.Items ?? []) {
+        const wfIds = Array.isArray(item.workflowIds) ? item.workflowIds : [];
+        for (const wfId of wfIds) {
+          if (typeof wfId === "string") appBoundIds.add(wfId);
+        }
+      }
+      appsStartKey = appsPage.LastEvaluatedKey as
+        Record<string, NativeAttributeValue> | undefined;
+    } while (appsStartKey);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 4: filter candidates
+  // ---------------------------------------------------------------------------
+  for (const c of candidates) {
+    // Skip if execution references exist
+    if (executionRefs.has(c.workflowId)) continue;
+
+    // Check if bound to an app (via appId attribute or via apps table scan)
+    const isBound =
+      (c.appId !== "" && c.appId !== "undefined") ||
+      appBoundIds.has(c.workflowId);
+
+    const row: PlaceholderCopyRow = {
+      workflowId: c.workflowId,
+      name: c.name,
+      appId: c.appId,
+      createdAt: c.createdAt,
+      status: c.status,
+    };
+
+    if (isBound) {
+      row.boundSkipped = true;
+      summary.boundSkipped++;
+      rows.push(row);
+      summary.found++;
+      continue;
+    }
+
+    rows.push(row);
+    summary.found++;
+  }
+
+  // Report
+  for (const row of rows) {
+    if (row.boundSkipped) {
+      console.log(
+        `[reconcile-legacy-rows] BOUND, SKIPPED: workflowId=${row.workflowId} ` +
+          `name=${row.name} appId=${row.appId} createdAt=${row.createdAt}`,
+      );
+    } else {
+      console.log(
+        `[reconcile-legacy-rows] ${dryRun ? "WOULD DELETE" : "DELETING"} ` +
+          `placeholder copy: workflowId=${row.workflowId} ` +
+          `name=${row.name} appId=${row.appId} createdAt=${row.createdAt}`,
+      );
+    }
+  }
+
+  // Delete if not dry-run
+  if (!dryRun) {
+    for (const row of rows) {
+      if (row.boundSkipped) continue;
+      try {
+        await dc.send(
+          new DeleteCommand({
+            TableName: tableWorkflows,
+            Key: { workflowId: row.workflowId },
+            // Conflict-safe: only delete if still DRAFT and not a blueprint.
+            ConditionExpression:
+              "#status = :draft AND (attribute_not_exists(isBlueprint) OR isBlueprint <> :isTrue)",
+            ExpressionAttributeNames: { "#status": "status" },
+            ExpressionAttributeValues: {
+              ":draft": "DRAFT",
+              ":isTrue": "true",
+            },
+          }),
+        );
+        summary.deleted++;
+      } catch (err: unknown) {
+        if (
+          err instanceof Error &&
+          err.name === "ConditionalCheckFailedException"
+        ) {
+          console.log(
+            `[reconcile-legacy-rows] Skipped ${row.workflowId} — row was advanced concurrently`,
+          );
+          continue;
+        }
+        console.error(
+          `[reconcile-legacy-rows] Delete failed for ${row.workflowId}:`,
+          err,
+        );
+        summary.errors++;
+      }
+    }
+  }
+
+  console.log("[reconcile-legacy-rows] --- Placeholder Copies Summary ---");
+  console.log(JSON.stringify(summary));
+
+  return { summary, rows };
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -546,7 +860,16 @@ export async function main(): Promise<void> {
   const region = process.env.AWS_REGION || "us-west-2";
   const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
 
-  if (args.deleteUnpublishedIntakeBlueprints) {
+  if (args.deletePlaceholderCopies) {
+    const { summary } = await runReconcilePlaceholderCopies({
+      tableWorkflows: args.tableWorkflows,
+      tableExecutions: args.tableExecutions,
+      tableApps: args.tableApps,
+      dryRun: args.dryRun,
+      docClient,
+    });
+    if (summary.errors > 0) process.exit(1);
+  } else if (args.deleteUnpublishedIntakeBlueprints) {
     // Import seeded IDs to exclude them from deletion
     let seededIds: ReadonlySet<string> = new Set();
     try {

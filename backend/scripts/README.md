@@ -141,3 +141,41 @@ Flags: `--table` (required), `--workflows-table` (required), `--bucket`
 `'All Organizations'`), `--names` (comma-separated, restricts to listed agents),
 `--revert-nonseeded-org <org>` (revert non-seeded blueprints with orgId
 `'system'` to the given org; dry-run default; idempotent).
+
+## reconcile-legacy-rows --delete-placeholder-copies (CIT-288)
+
+Identifies and optionally deletes non-blueprint DRAFT workflow copies whose definition still contains nodes with `agentId` starting `placeholder-`. These are intermediate copies created during the fabrication flow that were never finalised — the placeholder agent IDs were never replaced with real agent IDs.
+
+Selection criteria (all must hold):
+- `isBlueprint` is NOT `'true'` (copies, not source blueprints)
+- `status` is `'DRAFT'`
+- At least one node in the parsed `definition` has an `agentId` starting `placeholder-`
+- No execution references exist in the executions table (via WorkflowIndex GSI)
+
+Exclusions:
+- **Blueprints** (`isBlueprint = 'true'`) are never touched
+- **PUBLISHED** rows are never touched
+- **Bound workflows** (workflow has an `appId` attribute set, or appears in any app's `workflowIds` array) are reported as `BOUND, SKIPPED`
+
+```bash
+# Dry-run — list candidates
+npx ts-node --project tsconfig.scripts.json scripts/reconcile-legacy-rows.ts \
+  --delete-placeholder-copies \
+  --table-workflows citadel-workflows-dev \
+  --table-executions citadel-executions-dev \
+  [--table-apps citadel-apps-dev] \
+  --region us-west-2
+
+# Apply — delete eligible rows
+npx ts-node --project tsconfig.scripts.json scripts/reconcile-legacy-rows.ts \
+  --delete-placeholder-copies \
+  --table-workflows citadel-workflows-dev \
+  --table-executions citadel-executions-dev \
+  [--table-apps citadel-apps-dev] \
+  --region us-west-2 \
+  --apply
+```
+
+Flags: `--delete-placeholder-copies` (required), `--table-workflows` (required),
+`--table-executions` (required), `--table-apps` (optional — enables app-bound
+detection via `workflowIds`), `--apply`, `--dry-run` (default). Idempotent.
