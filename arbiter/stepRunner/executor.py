@@ -1453,6 +1453,29 @@ def _evaluate_and_persist_skips(execution_id, node_id, output, edges, node_resul
         if condition:
             matched = evaluate_condition(condition, output)
             actual = resolve_field_path(output, condition.get('field', ''))
+            # Diagnostics: when actual is None, surface the reason so
+            # operators can distinguish "field missing" from "output not
+            # JSON-parseable" in the condition_evaluated log event.
+            reason = None
+            if actual is None:
+                field = condition.get('field', '')
+                # Walk the path manually to determine the cause.
+                parts = field.split('.') if field else []
+                current = output
+                for part in parts:
+                    if isinstance(current, str):
+                        import json as _json
+                        try:
+                            current = _json.loads(current)
+                        except (ValueError, TypeError):
+                            reason = 'output_not_json'
+                            break
+                    if not isinstance(current, dict) or part not in current:
+                        reason = 'field_missing'
+                        break
+                    current = current[part]
+                if reason is None and actual is None:
+                    reason = 'field_missing'
             _log_event(
                 'condition_evaluated',
                 executionId=execution_id,
@@ -1462,6 +1485,7 @@ def _evaluate_and_persist_skips(execution_id, node_id, output, edges, node_resul
                 expected=condition.get('value'),
                 actual=actual,
                 matched=matched,
+                reason=reason,
             )
             if not matched:
                 target_id = edge['target']

@@ -988,7 +988,19 @@ def main():
 
     # Write response as JSON to stdout. 'usage' is additive: an empty list
     # is legal and simply means no BedrockModel call was captured this run.
-    print(json.dumps({"response": str(response), "usage": _CAPTURED_USAGE}))
+    #
+    # Serialise dict/list returns as JSON so downstream consumers (the step
+    # runner's condition evaluator in particular) can parse structured fields
+    # out of the response string.  Plain strings are passed through as-is.
+    # ``default=str`` handles non-serialisable values (e.g. datetime) without
+    # raising.  The previous ``str(response)`` produced Python repr notation
+    # (single quotes, no JSON compliance) which broke ``json.loads`` in the
+    # condition evaluator — see fix/worker-json-output-and-condition-actual.
+    if isinstance(response, (dict, list)):
+        serialized_response = json.dumps(response, default=str)
+    else:
+        serialized_response = str(response)
+    print(json.dumps({"response": serialized_response, "usage": _CAPTURED_USAGE}))
 
 
 if __name__ == "__main__":
