@@ -98,9 +98,55 @@ function classifySubNegative(outcome) {
   }
 }
 
+/**
+ * Terminal execution statuses as persisted by the arbiter step runner.
+ * All lowercase — matches DynamoDB values in executor.py.
+ */
+const TERMINAL_EXECUTION_STATUSES = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "timed_out",
+]);
+
+/**
+ * Check whether an execution status string represents a terminal state.
+ *
+ * @param {string|null|undefined} status
+ * @returns {boolean}
+ */
+function isTerminalExecution(status) {
+  return typeof status === "string" && TERMINAL_EXECUTION_STATUSES.has(status);
+}
+
+/**
+ * Classify a workflow progress event's eventType to determine whether
+ * it signals execution-level termination.
+ *
+ * The fanout Lambda maps EventBridge detail-type directly into the
+ * subscription's eventType field:
+ *   - "workflow.completed"  → execution completed successfully
+ *   - "workflow.failed"     → execution failed
+ *   - "workflow.node.*"     → node-level progress, NOT terminal
+ *   - "workflow.started"    → execution started, NOT terminal
+ *
+ * @param {string|null|undefined} eventType
+ * @returns {"completed"|"failed"|"progress"|"unknown"}
+ */
+function classifyWorkflowEvent(eventType) {
+  if (eventType === "workflow.completed") return "completed";
+  if (eventType === "workflow.failed") return "failed";
+  if (typeof eventType === "string" && eventType.startsWith("workflow."))
+    return "progress";
+  return "unknown";
+}
+
 module.exports = {
   classifyMessage,
   classifySubNegative,
+  classifyWorkflowEvent,
+  isTerminalExecution,
   shapeReport,
+  TERMINAL_EXECUTION_STATUSES,
   withTimeout,
 };
