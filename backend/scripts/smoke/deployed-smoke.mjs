@@ -22,10 +22,10 @@ import { createRequire } from "node:module";
 import { WebSocket } from "ws";
 
 const require = createRequire(import.meta.url);
-const { classifyMessage, classifySubNegative, shapeReport, withTimeout } = require("./smoke-helpers.js");
+const { classifyMessage, classifySubNegative, classifyWorkflowEvent, isTerminalExecution, shapeReport, withTimeout } = require("./smoke-helpers.js");
 
 // Re-export pure helpers for potential direct-ESM consumers.
-export { classifyMessage, classifySubNegative, shapeReport, withTimeout };
+export { classifyMessage, classifySubNegative, classifyWorkflowEvent, isTerminalExecution, shapeReport, withTimeout };
 
 // ---------------------------------------------------------------------------
 // Env template (--print-env-template)
@@ -332,13 +332,25 @@ async function runChecks() {
     }
   }
 
-  // ---- (5) startExecution + onWorkflowProgress --------------------------
+  // ---- (5) startExecution + poll getExecution for terminal status -------
+  // Terminal execution statuses persisted by the arbiter step runner.
+  // All lowercase — these are the DynamoDB values used by executor.py.
   {
+    const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled", "timed_out"]);
+    const POLL_INTERVAL_MS = 5_000;
+    const TIMEOUT_MS = 120_000;
+
     const t0 = Date.now();
     try {
+      // Open subscription WebSocket BEFORE starting execution so fast
+      // completions are not missed (the old code subscribed after
+      // startExecution, creating a race).
       const ws = await withTimeout(connectWs(wsUrl), 10_000, "ws-connect-wf");
 
-      // Start the execution first so we get the executionId for the subscription.
+      // We will start the execution after subscribing.  Because we need
+      // the executionId for the subscription filter, we start it first
+      // then subscribe — but add a polling fallback so a missed event
+      // cannot cause a false timeout.
       let startData;
       try {
         startData = await gqlFetch(
@@ -349,6 +361,7 @@ async function runChecks() {
           idToken,
         );
       } catch (startErr) {
+        ws.close();
         throw new Error(
           /not found/i.test(startErr.message)
             ? `workflow ${ECHO_WORKFLOW_ID} not found; check ECHO_WORKFLOW_ID`
@@ -356,18 +369,40 @@ async function runChecks() {
         );
       }
       const executionId = startData.startExecution.executionId;
-      if (!executionId) throw new Error("No executionId returned");
+      if (!executionId) { ws.close(); throw new Error("No executionId returned"); }
 
-      let terminal = false;
-      let allNodesCompleted = true;
-      const nodeStatuses = {};
+      // --- Dual detection: subscription events + getExecution polling ---
+      let resolved = false;
+      let completionPath = "";  // "event" or "poll"
 
-      const done = new Promise((resolve, reject) => {
-        const failTimer = setTimeout(
-          () => reject(new Error("Workflow did not reach terminal status within 120s")),
-          120_000,
-        );
+      const result = await new Promise((resolve, reject) => {
+        const deadline = setTimeout(() => {
+          if (!resolved) {
+            resolved = true;
+            ws.close();
+            reject(new Error("Workflow did not reach terminal status within 120s"));
+          }
+        }, TIMEOUT_MS);
 
+        function finish(status, path) {
+          if (resolved) return;
+          resolved = true;
+          completionPath = path;
+          clearTimeout(deadline);
+          clearInterval(pollTimer);
+          ws.close();
+          if (status === "failed" || status === "cancelled" || status === "timed_out") {
+            reject(new Error(`Execution ${status}`));
+          } else {
+            resolve({ status, path, elapsedMs: Date.now() - t0 });
+          }
+        }
+
+        // Path A: subscription events.
+        // The fanout Lambda maps EventBridge detail-type → eventType:
+        //   workflow.completed, workflow.failed, workflow.node.completed, etc.
+        // Execution-level terminal events have eventType "workflow.completed"
+        // or "workflow.failed"; node-level events are progress only.
         ws.on("message", (raw) => {
           const msg = JSON.parse(raw.toString());
           if (msg.type !== "data") return;
@@ -378,45 +413,47 @@ async function runChecks() {
               : null);
           if (!evt) return;
 
-          if (evt.nodeId) nodeStatuses[evt.nodeId] = evt.status;
-
-          if (
-            evt.status === "COMPLETED" ||
-            evt.status === "FAILED" ||
-            evt.eventType === "EXECUTION_COMPLETED" ||
-            evt.eventType === "EXECUTION_FAILED"
-          ) {
-            terminal = true;
-            clearTimeout(failTimer);
-            ws.close();
-            if (evt.status === "FAILED" || evt.eventType === "EXECUTION_FAILED") {
-              reject(new Error(`Workflow execution failed: ${evt.error ?? "unknown"}`));
-            } else {
-              resolve();
-            }
+          if (evt.eventType === "workflow.completed") {
+            finish("completed", "event");
+          } else if (evt.eventType === "workflow.failed") {
+            finish("failed", "event");
           }
+          // Node-level events (workflow.node.completed, workflow.node.started, etc.)
+          // are treated as progress only — not terminal.
         });
+
+        // Subscribe for this executionId.
+        subscribe(
+          ws,
+          `subscription OnWfProg($eid: ID!) { onWorkflowProgress(executionId: $eid) { executionId workflowId eventType nodeId status output error timestamp } }`,
+          { eid: executionId },
+          idToken,
+          host,
+        );
+
+        // Path B: poll getExecution every 5s as the authoritative check.
+        // This catches completions missed by the subscription (race, dropped
+        // event, or subscription registered after the terminal event fired).
+        const pollTimer = setInterval(async () => {
+          if (resolved) return;
+          try {
+            const data = await gqlFetch(
+              `query GetExec($eid: ID!) { getExecution(executionId: $eid) { executionId status } }`,
+              { eid: executionId },
+              idToken,
+            );
+            const execStatus = data.getExecution?.status;
+            if (execStatus && TERMINAL_STATUSES.has(execStatus)) {
+              finish(execStatus, "poll");
+            }
+          } catch {
+            // Poll errors are non-fatal; rely on the deadline timeout.
+          }
+        }, POLL_INTERVAL_MS);
       });
 
-      subscribe(
-        ws,
-        `subscription OnWfProg($eid: ID!) { onWorkflowProgress(executionId: $eid) { executionId workflowId eventType nodeId status output error timestamp } }`,
-        { eid: executionId },
-        idToken,
-        host,
-      );
-
-      await done;
-
-      // Verify all tracked nodes completed
-      for (const [nodeId, status] of Object.entries(nodeStatuses)) {
-        if (status !== "COMPLETED" && status !== "completed") {
-          allNodesCompleted = false;
-        }
-      }
-
-      if (!terminal) throw new Error("Never reached terminal status");
-      record("workflow-execution", true, Date.now() - t0);
+      record("workflow-execution", true, Date.now() - t0,
+        undefined);
     } catch (err) {
       record("workflow-execution", false, Date.now() - t0, err.message);
     }

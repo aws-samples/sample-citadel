@@ -297,3 +297,269 @@ describe("smoke step error-message shaping", () => {
     expect(msg).toBe("testTool returned error: unknown");
   });
 });
+
+// ---------------------------------------------------------------------------
+// classifyWorkflowEvent
+// ---------------------------------------------------------------------------
+/* eslint-disable @typescript-eslint/no-require-imports */
+const {
+  classifyWorkflowEvent,
+  isTerminalExecution,
+} = require("../smoke/smoke-helpers.js");
+/* eslint-enable @typescript-eslint/no-require-imports */
+
+describe("classifyWorkflowEvent", () => {
+  it("returns 'completed' for workflow.completed", () => {
+    expect(classifyWorkflowEvent("workflow.completed")).toBe("completed");
+  });
+
+  it("returns 'failed' for workflow.failed", () => {
+    expect(classifyWorkflowEvent("workflow.failed")).toBe("failed");
+  });
+
+  it("returns 'progress' for workflow.node.completed", () => {
+    expect(classifyWorkflowEvent("workflow.node.completed")).toBe("progress");
+  });
+
+  it("returns 'progress' for workflow.node.started", () => {
+    expect(classifyWorkflowEvent("workflow.node.started")).toBe("progress");
+  });
+
+  it("returns 'progress' for workflow.node.failed", () => {
+    expect(classifyWorkflowEvent("workflow.node.failed")).toBe("progress");
+  });
+
+  it("returns 'progress' for workflow.started", () => {
+    expect(classifyWorkflowEvent("workflow.started")).toBe("progress");
+  });
+
+  it("returns 'unknown' for null", () => {
+    expect(classifyWorkflowEvent(null)).toBe("unknown");
+  });
+
+  it("returns 'unknown' for undefined", () => {
+    expect(classifyWorkflowEvent(undefined)).toBe("unknown");
+  });
+
+  it("returns 'unknown' for EXECUTION_COMPLETED (old wrong shape)", () => {
+    expect(classifyWorkflowEvent("EXECUTION_COMPLETED")).toBe("unknown");
+  });
+
+  it("returns 'unknown' for EXECUTION_FAILED (old wrong shape)", () => {
+    expect(classifyWorkflowEvent("EXECUTION_FAILED")).toBe("unknown");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isTerminalExecution
+// ---------------------------------------------------------------------------
+describe("isTerminalExecution", () => {
+  it("returns true for 'completed'", () => {
+    expect(isTerminalExecution("completed")).toBe(true);
+  });
+
+  it("returns true for 'failed'", () => {
+    expect(isTerminalExecution("failed")).toBe(true);
+  });
+
+  it("returns true for 'cancelled'", () => {
+    expect(isTerminalExecution("cancelled")).toBe(true);
+  });
+
+  it("returns true for 'timed_out'", () => {
+    expect(isTerminalExecution("timed_out")).toBe(true);
+  });
+
+  it("returns false for 'running'", () => {
+    expect(isTerminalExecution("running")).toBe(false);
+  });
+
+  it("returns false for 'pending'", () => {
+    expect(isTerminalExecution("pending")).toBe(false);
+  });
+
+  it("returns false for uppercase 'COMPLETED' (wrong case)", () => {
+    expect(isTerminalExecution("COMPLETED")).toBe(false);
+  });
+
+  it("returns false for null", () => {
+    expect(isTerminalExecution(null)).toBe(false);
+  });
+
+  it("returns false for undefined", () => {
+    expect(isTerminalExecution(undefined)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Workflow execution smoke step: fake integration scenarios
+//
+// These tests simulate the dual-detection strategy (subscription event
+// + getExecution poll) used in deployed-smoke.mjs step (5).
+// ---------------------------------------------------------------------------
+describe("workflow execution terminal detection (fakes)", () => {
+  /**
+   * Simulates the smoke step (5) dual-detection logic using fakes.
+   *
+   * @param {{eventType?: string, delayMs?: number}|null} eventScenario
+   *   If non-null, a subscription event is delivered after delayMs.
+   * @param {{status: string, pollDelayMs?: number}|null} pollScenario
+   *   If non-null, getExecution returns this status after pollDelayMs.
+   * @param {number} timeoutMs  Overall timeout cap.
+   * @returns {Promise<{pass: boolean, status: string, path: string, error?: string}>}
+   */
+  async function simulateStep5(eventScenario, pollScenario, timeoutMs = 2000) {
+    return new Promise((resolve) => {
+      let resolved = false;
+      const t0 = Date.now();
+
+      const deadline = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          resolve({
+            pass: false,
+            status: "timeout",
+            path: "none",
+            error: "Workflow did not reach terminal status within timeout",
+          });
+        }
+      }, timeoutMs);
+
+      function finish(status, path) {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(deadline);
+        if (pollTimer) clearInterval(pollTimer);
+        if (eventTimer) clearTimeout(eventTimer);
+        const isFailure =
+          status === "failed" ||
+          status === "cancelled" ||
+          status === "timed_out";
+        resolve({
+          pass: !isFailure,
+          status,
+          path,
+          elapsedMs: Date.now() - t0,
+          ...(isFailure ? { error: `Execution ${status}` } : {}),
+        });
+      }
+
+      // Simulate subscription event delivery
+      let eventTimer = null;
+      if (eventScenario) {
+        eventTimer = setTimeout(() => {
+          const cls = classifyWorkflowEvent(eventScenario.eventType);
+          if (cls === "completed") finish("completed", "event");
+          else if (cls === "failed") finish("failed", "event");
+        }, eventScenario.delayMs ?? 50);
+      }
+
+      // Simulate polling
+      let pollTimer = null;
+      if (pollScenario) {
+        const pollStart = pollScenario.pollDelayMs ?? 100;
+        pollTimer = setTimeout(() => {
+          if (!resolved && isTerminalExecution(pollScenario.status)) {
+            finish(pollScenario.status, "poll");
+          }
+        }, pollStart);
+      }
+    });
+  }
+
+  it("completion seen via poll only (no subscription event)", async () => {
+    const result = await simulateStep5(null, {
+      status: "completed",
+      pollDelayMs: 100,
+    });
+    expect(result.pass).toBe(true);
+    expect(result.status).toBe("completed");
+    expect(result.path).toBe("poll");
+  });
+
+  it("completion seen via event only (no poll result)", async () => {
+    const result = await simulateStep5(
+      { eventType: "workflow.completed", delayMs: 50 },
+      null,
+    );
+    expect(result.pass).toBe(true);
+    expect(result.status).toBe("completed");
+    expect(result.path).toBe("event");
+  });
+
+  it("failed execution detected via poll → pass:false with 'Execution failed'", async () => {
+    const result = await simulateStep5(null, {
+      status: "failed",
+      pollDelayMs: 100,
+    });
+    expect(result.pass).toBe(false);
+    expect(result.status).toBe("failed");
+    expect(result.error).toBe("Execution failed");
+  });
+
+  it("failed execution detected via event → pass:false with 'Execution failed'", async () => {
+    const result = await simulateStep5(
+      { eventType: "workflow.failed", delayMs: 50 },
+      null,
+    );
+    expect(result.pass).toBe(false);
+    expect(result.status).toBe("failed");
+    expect(result.error).toBe("Execution failed");
+  });
+
+  it("timeout when neither event nor poll delivers terminal status", async () => {
+    const result = await simulateStep5(null, null, 200);
+    expect(result.pass).toBe(false);
+    expect(result.status).toBe("timeout");
+    expect(result.error).toContain("did not reach terminal status");
+  });
+
+  it("event wins the race when both event and poll would deliver", async () => {
+    const result = await simulateStep5(
+      { eventType: "workflow.completed", delayMs: 30 },
+      { status: "completed", pollDelayMs: 200 },
+    );
+    expect(result.pass).toBe(true);
+    expect(result.path).toBe("event");
+  });
+
+  it("poll wins the race when event is slower", async () => {
+    const result = await simulateStep5(
+      { eventType: "workflow.completed", delayMs: 300 },
+      { status: "completed", pollDelayMs: 30 },
+    );
+    expect(result.pass).toBe(true);
+    expect(result.path).toBe("poll");
+  });
+
+  it("cancelled execution detected via poll → pass:false", async () => {
+    const result = await simulateStep5(null, {
+      status: "cancelled",
+      pollDelayMs: 50,
+    });
+    expect(result.pass).toBe(false);
+    expect(result.status).toBe("cancelled");
+    expect(result.error).toBe("Execution cancelled");
+  });
+
+  it("timed_out execution detected via poll → pass:false", async () => {
+    const result = await simulateStep5(null, {
+      status: "timed_out",
+      pollDelayMs: 50,
+    });
+    expect(result.pass).toBe(false);
+    expect(result.status).toBe("timed_out");
+    expect(result.error).toBe("Execution timed_out");
+  });
+
+  it("node-level event (workflow.node.completed) does NOT cause terminal", async () => {
+    const result = await simulateStep5(
+      { eventType: "workflow.node.completed", delayMs: 30 },
+      null,
+      300,
+    );
+    // Should timeout since node events are progress only
+    expect(result.pass).toBe(false);
+    expect(result.status).toBe("timeout");
+  });
+});
