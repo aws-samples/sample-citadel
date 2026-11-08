@@ -536,3 +536,371 @@ describe("runReconcileUnpublishedBlueprints", () => {
     expect(summary.found).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// CIT-288: Placeholder-agent copy cleanup
+// ---------------------------------------------------------------------------
+
+import {
+  runReconcilePlaceholderCopies,
+  isPlaceholderCopy,
+  hasPlaceholderAgent,
+  type ReconcilePlaceholderCopiesOptions,
+} from "../reconcile-legacy-rows";
+
+function placeholderCopyWorkflow(
+  workflowId: string,
+  name: string,
+  overrides: Partial<Record<string, NativeAttributeValue>> = {},
+): Record<string, NativeAttributeValue> {
+  return {
+    workflowId,
+    name,
+    orgId: "org-a",
+    status: "DRAFT",
+    isBlueprint: "false",
+    appId: "",
+    createdAt: "2026-10-01T00:00:00.000Z",
+    definition: JSON.stringify({
+      nodes: [
+        { id: "n1", agentId: "placeholder-fabricated-1", type: "agent" },
+        { id: "n2", agentId: "real-agent", type: "agent" },
+      ],
+      edges: [],
+    }),
+    ...overrides,
+  };
+}
+
+function realWorkflow(
+  workflowId: string,
+  name: string,
+  overrides: Partial<Record<string, NativeAttributeValue>> = {},
+): Record<string, NativeAttributeValue> {
+  return {
+    workflowId,
+    name,
+    orgId: "org-a",
+    status: "DRAFT",
+    isBlueprint: "false",
+    appId: "",
+    createdAt: "2026-10-01T00:00:00.000Z",
+    definition: JSON.stringify({
+      nodes: [
+        { id: "n1", agentId: "real-agent-1", type: "agent" },
+        { id: "n2", agentId: "real-agent-2", type: "agent" },
+      ],
+      edges: [],
+    }),
+    ...overrides,
+  };
+}
+
+function blueprintWorkflow(
+  workflowId: string,
+  name: string,
+): Record<string, NativeAttributeValue> {
+  return {
+    workflowId,
+    name,
+    orgId: "org-a",
+    status: "DRAFT",
+    isBlueprint: "true",
+    appId: "",
+    createdAt: "2026-10-01T00:00:00.000Z",
+    definition: JSON.stringify({
+      nodes: [{ id: "n1", agentId: "placeholder-bp-agent", type: "agent" }],
+      edges: [],
+    }),
+  };
+}
+
+function publishedWorkflow(
+  workflowId: string,
+  name: string,
+): Record<string, NativeAttributeValue> {
+  return {
+    workflowId,
+    name,
+    orgId: "org-a",
+    status: "PUBLISHED",
+    isBlueprint: "false",
+    appId: "",
+    createdAt: "2026-10-01T00:00:00.000Z",
+    definition: JSON.stringify({
+      nodes: [{ id: "n1", agentId: "placeholder-old", type: "agent" }],
+      edges: [],
+    }),
+  };
+}
+
+describe("hasPlaceholderAgent", () => {
+  test("returns true when any node agentId starts with placeholder-", () => {
+    expect(
+      hasPlaceholderAgent({
+        nodes: [{ id: "n1", agentId: "placeholder-abc", type: "agent" }],
+      }),
+    ).toBe(true);
+  });
+
+  test("returns false when no node has a placeholder agentId", () => {
+    expect(
+      hasPlaceholderAgent({
+        nodes: [{ id: "n1", agentId: "real-agent", type: "agent" }],
+      }),
+    ).toBe(false);
+  });
+
+  test("returns false for empty nodes array", () => {
+    expect(hasPlaceholderAgent({ nodes: [] })).toBe(false);
+  });
+
+  test("returns false for null/undefined input", () => {
+    expect(hasPlaceholderAgent(null)).toBe(false);
+    expect(hasPlaceholderAgent(undefined)).toBe(false);
+  });
+
+  test("detects agentId nested in data object", () => {
+    expect(
+      hasPlaceholderAgent({
+        nodes: [
+          { id: "n1", data: { agentId: "placeholder-nested" }, type: "agent" },
+        ],
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("isPlaceholderCopy", () => {
+  test("identifies DRAFT non-blueprint with placeholder agent", () => {
+    expect(isPlaceholderCopy(placeholderCopyWorkflow("wf-1", "Copy"))).toBe(
+      true,
+    );
+  });
+
+  test("excludes isBlueprint=true rows", () => {
+    expect(isPlaceholderCopy(blueprintWorkflow("bp-1", "Blueprint"))).toBe(
+      false,
+    );
+  });
+
+  test("excludes PUBLISHED rows", () => {
+    expect(isPlaceholderCopy(publishedWorkflow("wf-pub", "Published"))).toBe(
+      false,
+    );
+  });
+
+  test("excludes rows with no placeholder agents", () => {
+    expect(isPlaceholderCopy(realWorkflow("wf-real", "Real"))).toBe(false);
+  });
+
+  test("excludes rows with missing definition", () => {
+    const row = { ...placeholderCopyWorkflow("wf-x", "X"), definition: "" };
+    expect(isPlaceholderCopy(row)).toBe(false);
+  });
+
+  test("handles rows with absent isBlueprint (still eligible)", () => {
+    const row = placeholderCopyWorkflow("wf-y", "Y");
+    delete (row as Record<string, unknown>).isBlueprint;
+    expect(isPlaceholderCopy(row)).toBe(true);
+  });
+});
+
+describe("runReconcilePlaceholderCopies", () => {
+  const dynamoMock = mockClient(DynamoDBDocumentClient);
+  let workflowsTable: FakeDynamoTable;
+  let executionsTable: FakeDynamoTable;
+  let appsTable: FakeDynamoTable;
+
+  function seedTables(): void {
+    workflowsTable = new FakeDynamoTable();
+    executionsTable = new FakeDynamoTable();
+    appsTable = new FakeDynamoTable();
+
+    // 2 placeholder copies eligible for deletion
+    workflowsTable.put("pc-1", placeholderCopyWorkflow("pc-1", "Copy 1"));
+    workflowsTable.put("pc-2", placeholderCopyWorkflow("pc-2", "Copy 2"));
+    // 1 placeholder copy with execution reference — must survive
+    workflowsTable.put(
+      "pc-exec",
+      placeholderCopyWorkflow("pc-exec", "Has Exec"),
+    );
+    executionsTable.put("exec-1", {
+      executionId: "exec-1",
+      workflowId: "pc-exec",
+      startedAt: "2026-10-01T00:00:00.000Z",
+    });
+    // 1 placeholder copy bound via appId attribute — must be reported as bound, skipped
+    workflowsTable.put(
+      "pc-bound-attr",
+      placeholderCopyWorkflow("pc-bound-attr", "Bound via appId", {
+        appId: "app-123",
+      }),
+    );
+    // 1 placeholder copy bound via apps table workflowIds — must be reported as bound, skipped
+    workflowsTable.put(
+      "pc-bound-app",
+      placeholderCopyWorkflow("pc-bound-app", "Bound via app"),
+    );
+    appsTable.put("app-456", {
+      appId: "app-456",
+      workflowIds: ["pc-bound-app", "some-other-wf"],
+    });
+    // 1 real workflow (no placeholder) — must survive
+    workflowsTable.put("wf-real", realWorkflow("wf-real", "Real Workflow"));
+    // 1 blueprint with placeholder — must survive (never touch blueprints)
+    workflowsTable.put(
+      "bp-1",
+      blueprintWorkflow("bp-1", "Blueprint With Placeholder"),
+    );
+    // 1 PUBLISHED workflow with placeholder — must survive
+    workflowsTable.put(
+      "wf-pub",
+      publishedWorkflow("wf-pub", "Published Placeholder"),
+    );
+  }
+
+  function setupMock(): void {
+    dynamoMock.reset();
+
+    dynamoMock.on(ScanCommand).callsFake((input) => {
+      const table = input.TableName as string;
+      if (table === "test-workflows") {
+        return { Items: workflowsTable.getAll() };
+      }
+      if (table === "test-apps") {
+        return { Items: appsTable.getAll() };
+      }
+      return { Items: [] };
+    });
+
+    dynamoMock.on(QueryCommand).callsFake((input) => {
+      const wfId = input.ExpressionAttributeValues?.[":wfId"] as string;
+      const matchingExecs = executionsTable
+        .getAll()
+        .filter((item) => item.workflowId === wfId);
+      return { Count: matchingExecs.length, Items: matchingExecs };
+    });
+
+    dynamoMock.on(DeleteCommand).callsFake((input) => {
+      const key = Object.values(input.Key!)[0] as string;
+      workflowsTable.delete(key);
+      return {};
+    });
+  }
+
+  beforeEach(() => {
+    seedTables();
+    setupMock();
+  });
+
+  afterEach(() => {
+    dynamoMock.reset();
+  });
+
+  function makeOpts(
+    dryRun: boolean,
+    includeApps = true,
+  ): ReconcilePlaceholderCopiesOptions {
+    return {
+      tableWorkflows: "test-workflows",
+      tableExecutions: "test-executions",
+      tableApps: includeApps ? "test-apps" : "",
+      dryRun,
+      docClient: DynamoDBDocumentClient.from(new DynamoDBClient({})),
+    };
+  }
+
+  test("dry-run identifies placeholder copies, reports bound ones, writes nothing", async () => {
+    const initial = workflowsTable.size();
+    const { summary, rows } = await runReconcilePlaceholderCopies(
+      makeOpts(true),
+    );
+
+    // 2 deletable + 2 bound = 4 found
+    expect(summary.found).toBe(4);
+    expect(summary.boundSkipped).toBe(2);
+    expect(summary.deleted).toBe(0);
+    expect(summary.errors).toBe(0);
+    // Table unchanged
+    expect(workflowsTable.size()).toBe(initial);
+
+    // Bound rows correctly flagged
+    const boundRows = rows.filter((r) => r.boundSkipped);
+    expect(boundRows.map((r) => r.workflowId).sort()).toEqual([
+      "pc-bound-app",
+      "pc-bound-attr",
+    ]);
+
+    // Deletable rows correctly identified
+    const deletable = rows.filter((r) => !r.boundSkipped);
+    expect(deletable.map((r) => r.workflowId).sort()).toEqual([
+      "pc-1",
+      "pc-2",
+    ]);
+  });
+
+  test("--apply deletes only eligible placeholder copies", async () => {
+    const { summary } = await runReconcilePlaceholderCopies(makeOpts(false));
+
+    expect(summary.deleted).toBe(2);
+    expect(summary.boundSkipped).toBe(2);
+    expect(summary.errors).toBe(0);
+
+    // Deleted
+    expect(workflowsTable.items.has("pc-1")).toBe(false);
+    expect(workflowsTable.items.has("pc-2")).toBe(false);
+
+    // Survivors
+    expect(workflowsTable.items.has("pc-exec")).toBe(true); // has execution
+    expect(workflowsTable.items.has("pc-bound-attr")).toBe(true); // bound
+    expect(workflowsTable.items.has("pc-bound-app")).toBe(true); // bound
+    expect(workflowsTable.items.has("wf-real")).toBe(true); // real workflow
+    expect(workflowsTable.items.has("bp-1")).toBe(true); // blueprint
+    expect(workflowsTable.items.has("wf-pub")).toBe(true); // published
+  });
+
+  test("excludes workflows with execution references", async () => {
+    const { rows } = await runReconcilePlaceholderCopies(makeOpts(true));
+    const allIds = rows.map((r) => r.workflowId);
+    expect(allIds).not.toContain("pc-exec");
+  });
+
+  test("never touches isBlueprint=true rows", async () => {
+    const { rows } = await runReconcilePlaceholderCopies(makeOpts(true));
+    const allIds = rows.map((r) => r.workflowId);
+    expect(allIds).not.toContain("bp-1");
+  });
+
+  test("never touches PUBLISHED rows", async () => {
+    const { rows } = await runReconcilePlaceholderCopies(makeOpts(true));
+    const allIds = rows.map((r) => r.workflowId);
+    expect(allIds).not.toContain("wf-pub");
+  });
+
+  test("skips app-table lookup when tableApps is empty", async () => {
+    // Without apps table, pc-bound-app has no appId attr and is NOT in
+    // an app's workflowIds, so it becomes deletable.
+    const { summary, rows } = await runReconcilePlaceholderCopies(
+      makeOpts(true, false),
+    );
+    const deletable = rows.filter((r) => !r.boundSkipped);
+    expect(deletable.map((r) => r.workflowId).sort()).toEqual([
+      "pc-1",
+      "pc-2",
+      "pc-bound-app",
+    ]);
+    // pc-bound-attr still has appId attribute, so it's bound
+    expect(summary.boundSkipped).toBe(1);
+  });
+
+  test("second run is idempotent — no more copies found", async () => {
+    await runReconcilePlaceholderCopies(makeOpts(false));
+    setupMock();
+    const { summary } = await runReconcilePlaceholderCopies(makeOpts(true));
+    // Only bound rows remain from the placeholder set
+    expect(summary.found).toBe(2);
+    const deletable = summary.found - summary.boundSkipped;
+    expect(deletable).toBe(0);
+  });
+});
