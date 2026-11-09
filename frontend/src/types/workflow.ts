@@ -47,6 +47,7 @@ export type WorkflowNode = Node<AgentNodeData, 'agentNode'>;
 export type WorkflowEdge = Edge<{
   sourceHandle: string;
   targetHandle: string;
+  condition?: EdgeCondition;
 }>;
 
 /**

@@ -23,10 +23,11 @@ jest.mock('../agentConfigService', () => ({
 import {
   deserializeWorkflow,
   normalizeWorkflowDefinition,
+  serializeWorkflow,
   WorkflowError,
 } from '../workflowService';
 import type { AgentConfig } from '../agentConfigService';
-import type { WorkflowDefinition } from '../../types';
+import type { WorkflowDefinition, WorkflowEdgeDefinition, EdgeCondition, WorkflowEdge } from '../../types';
 
 const echoAgentConfig = {
   agentId: 'demo-echo-agent',
@@ -265,5 +266,192 @@ describe('deserializeWorkflow — node label prefers the definition name', () =>
     await expect(
       deserializeWorkflow(JSON.stringify(badName), fabricatedCatalog),
     ).rejects.toMatchObject({ code: 'INVALID_WORKFLOW_STRUCTURE' });
+  });
+});
+
+describe('serializeWorkflow — edge condition preservation', () => {
+  const liveConditionalRouterCondition: EdgeCondition = {
+    field: 'result.route',
+    operator: 'equals',
+    value: 'branch-a',
+  };
+
+  it('copies condition from edge.data.condition into the serialized edge', () => {
+    const edges: WorkflowEdge[] = [
+      {
+        id: 'e1',
+        source: 'n1',
+        target: 'n2',
+        sourceHandle: 'output',
+        targetHandle: 'input',
+        type: 'smoothstep',
+        data: {
+          sourceHandle: 'output',
+          targetHandle: 'input',
+          condition: liveConditionalRouterCondition,
+        },
+      },
+    ];
+
+    const result = serializeWorkflow([], edges);
+    expect(result.edges[0].condition).toEqual(liveConditionalRouterCondition);
+  });
+
+  it('copies condition from edge.condition (legacy shape) when edge.data is missing', () => {
+    // Legacy edges may carry condition at top level (not in data)
+    const edges = [
+      {
+        id: 'e1',
+        source: 'n1',
+        target: 'n2',
+        sourceHandle: 'output',
+        targetHandle: 'input',
+        condition: liveConditionalRouterCondition,
+      },
+    ] as unknown as WorkflowEdge[];
+
+    const result = serializeWorkflow([], edges);
+    expect(result.edges[0].condition).toEqual(liveConditionalRouterCondition);
+  });
+
+  it('omits condition when edge has no condition', () => {
+    const edges: WorkflowEdge[] = [
+      {
+        id: 'e1',
+        source: 'n1',
+        target: 'n2',
+        sourceHandle: 'output',
+        targetHandle: 'input',
+        type: 'smoothstep',
+        data: { sourceHandle: 'output', targetHandle: 'input' },
+      },
+    ];
+
+    const result = serializeWorkflow([], edges);
+    expect(result.edges[0].condition).toBeUndefined();
+  });
+});
+
+describe('deserializeWorkflow — edge condition loading', () => {
+  const conditionalDefinition: WorkflowDefinition = {
+    version: '1.0.0',
+    id: 'wf-cond',
+    name: 'Conditional Workflow',
+    createdAt: '2024-01-01T00:00:00Z',
+    updatedAt: '2024-01-01T00:00:00Z',
+    nodes: [
+      { id: 'n1', agentId: 'demo-echo-agent', position: { x: 0, y: 0 }, configuration: {} },
+      { id: 'n2', agentId: 'demo-echo-agent', position: { x: 200, y: 0 }, configuration: {} },
+    ],
+    edges: [
+      {
+        id: 'e1',
+        source: 'n1',
+        target: 'n2',
+        sourceHandle: 'output',
+        targetHandle: 'input',
+        condition: { field: 'result.route', operator: 'equals', value: 'branch-a' },
+      },
+    ],
+  };
+
+  it('loads condition onto edge.data.condition', async () => {
+    const { edges } = await deserializeWorkflow(conditionalDefinition, agentConfigMap);
+    expect(edges[0].data?.condition).toEqual({
+      field: 'result.route',
+      operator: 'equals',
+      value: 'branch-a',
+    });
+  });
+
+  it('renders a visible label on conditional edges', async () => {
+    const { edges } = await deserializeWorkflow(conditionalDefinition, agentConfigMap);
+    expect(edges[0].label).toBe('result.route equals branch-a');
+  });
+
+  it('applies dashed stroke style to conditional edges', async () => {
+    const { edges } = await deserializeWorkflow(conditionalDefinition, agentConfigMap);
+    expect(edges[0].style).toEqual(expect.objectContaining({ strokeDasharray: '6 3' }));
+  });
+
+  it('does not set label or dashed style on unconditional edges', async () => {
+    const unconditionalDef: WorkflowDefinition = {
+      ...conditionalDefinition,
+      edges: [
+        { id: 'e1', source: 'n1', target: 'n2', sourceHandle: 'output', targetHandle: 'input' },
+      ],
+    };
+    const { edges } = await deserializeWorkflow(unconditionalDef, agentConfigMap);
+    expect(edges[0].label).toBeUndefined();
+    expect(edges[0].style).toBeUndefined();
+    expect(edges[0].data?.condition).toBeUndefined();
+  });
+});
+
+describe('serialize → deserialize round-trip preserves edge conditions', () => {
+  it('round-trips the live Conditional Router v2 edge shape', async () => {
+    const originalEdges: WorkflowEdgeDefinition[] = [
+      {
+        id: 'e1',
+        source: 'n1',
+        target: 'n2',
+        sourceHandle: 'output',
+        targetHandle: 'input',
+        condition: { field: 'result.route', operator: 'equals', value: 'branch-a' },
+      },
+      {
+        id: 'e2',
+        source: 'n1',
+        target: 'n3',
+        sourceHandle: 'output',
+        targetHandle: 'input',
+      },
+    ];
+
+    const originalDef: WorkflowDefinition = {
+      version: '1.0.0',
+      id: 'wf-rt',
+      name: 'Round Trip',
+      createdAt: '2024-01-01T00:00:00Z',
+      updatedAt: '2024-01-01T00:00:00Z',
+      nodes: [
+        { id: 'n1', agentId: 'demo-echo-agent', position: { x: 0, y: 0 }, configuration: {} },
+        { id: 'n2', agentId: 'demo-echo-agent', position: { x: 200, y: 0 }, configuration: {} },
+        { id: 'n3', agentId: 'demo-echo-agent', position: { x: 200, y: 200 }, configuration: {} },
+      ],
+      edges: originalEdges,
+    };
+
+    // Deserialize → serialize → compare edges
+    const { nodes: rfNodes, edges: rfEdges } = await deserializeWorkflow(
+      originalDef,
+      agentConfigMap,
+    );
+    const reserialized = serializeWorkflow(rfNodes, rfEdges, originalDef);
+
+    // The reserialized edges must deep-equal the originals (condition preserved)
+    expect(reserialized.edges).toEqual(originalEdges);
+  });
+
+  it('round-trips a definition with no conditions (no regression)', async () => {
+    const noCond: WorkflowDefinition = {
+      version: '1.0.0',
+      id: 'wf-nc',
+      name: 'No Cond',
+      createdAt: '2024-01-01T00:00:00Z',
+      updatedAt: '2024-01-01T00:00:00Z',
+      nodes: [
+        { id: 'n1', agentId: 'demo-echo-agent', position: { x: 0, y: 0 }, configuration: {} },
+        { id: 'n2', agentId: 'demo-echo-agent', position: { x: 200, y: 0 }, configuration: {} },
+      ],
+      edges: [
+        { id: 'e1', source: 'n1', target: 'n2', sourceHandle: 'output', targetHandle: 'input' },
+      ],
+    };
+
+    const { nodes: rfNodes, edges: rfEdges } = await deserializeWorkflow(noCond, agentConfigMap);
+    const reserialized = serializeWorkflow(rfNodes, rfEdges, noCond);
+
+    expect(reserialized.edges).toEqual(noCond.edges);
   });
 });
