@@ -63,6 +63,19 @@ jest.mock('@/components/ModelOverrideSelect', () => ({
     }),
 }));
 
+// RunWorkflowDialog: render inline when open, expose a "confirm" button that
+// invokes onRun(workflowId) so the Run flow tests can drive through it.
+jest.mock('@/components/RunWorkflowDialog', () => ({
+  RunWorkflowDialog: ({ open, onRun, workflowId }: { open: boolean; onRun: (wfId: string) => void; workflowId: string }) =>
+    open
+      ? React.createElement('div', { 'data-testid': 'run-workflow-dialog' },
+          React.createElement('button', {
+            'data-testid': 'run-dialog-confirm',
+            onClick: () => onRun(workflowId),
+          }, 'Run'))
+      : null,
+}));
+
 jest.mock('@/contexts/OrganizationContext', () => ({
   useOrganization: () => ({ selectedOrganization: 'org-1' }),
 }));
@@ -218,8 +231,16 @@ describe('AppDetailView — workflow Run action', () => {
 
     fireEvent.click(runButton);
 
+    // Run dialog opens
     await waitFor(() => {
-      expect(executionApiService.startExecution).toHaveBeenCalledWith('wf-1');
+      expect(screen.getByTestId('run-workflow-dialog')).toBeInTheDocument();
+    });
+
+    // Confirm from the dialog
+    fireEvent.click(screen.getByTestId('run-dialog-confirm'));
+
+    await waitFor(() => {
+      expect(executionApiService.startExecution).toHaveBeenCalledWith('wf-1', undefined);
     });
 
     // The execution id is fed into the progress subscription
@@ -238,6 +259,8 @@ describe('AppDetailView — workflow Run action', () => {
     await openWorkflowsTab();
 
     fireEvent.click(screen.getByRole('button', { name: /run test workflow/i }));
+    await waitFor(() => expect(screen.getByTestId('run-workflow-dialog')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('run-dialog-confirm'));
 
     await waitFor(() => {
       expect(progressSubscriptions.some((s) => s.executionId === 'exec-9')).toBe(true);
@@ -292,6 +315,8 @@ describe('AppDetailView — workflow Run action', () => {
     await openWorkflowsTab();
 
     fireEvent.click(screen.getByRole('button', { name: /run test workflow/i }));
+    await waitFor(() => expect(screen.getByTestId('run-workflow-dialog')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('run-dialog-confirm'));
 
     await waitFor(() => {
       expect(progressSubscriptions.some((s) => s.executionId === 'exec-9')).toBe(true);
@@ -329,6 +354,8 @@ describe('AppDetailView — workflow Run action', () => {
     const callsBeforeRun = (executionApiService.listExecutions as jest.Mock).mock.calls.length;
 
     fireEvent.click(screen.getByRole('button', { name: /run test workflow/i }));
+    await waitFor(() => expect(screen.getByTestId('run-workflow-dialog')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('run-dialog-confirm'));
 
     await waitFor(() => {
       expect(progressSubscriptions.some((s) => s.executionId === 'exec-9')).toBe(true);

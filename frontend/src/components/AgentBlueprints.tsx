@@ -8,6 +8,7 @@ import { WorkflowToolbar } from './WorkflowToolbar';
 import { NodeConfigurationPanel } from './NodeConfigurationPanel';
 import { ExecutionOverlay } from './ExecutionOverlay';
 import { ExecutionHistoryPanel } from './ExecutionHistoryPanel';
+import { RunWorkflowDialog } from './RunWorkflowDialog';
 import { Button } from './ui/button';
 import type { WorkflowNode, WorkflowEdge, ValidationResult } from '../types/workflow';
 import { validateWorkflow, serializeWorkflow, deserializeWorkflow } from '../services/workflowService';
@@ -48,6 +49,7 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isPublishing, setIsPublishing] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [runDialogOpen, setRunDialogOpen] = useState(false);
 
   const { currentUser, canApproveExecutions } = useOrganization();
   const orgId = currentUser?.organization || null;
@@ -348,12 +350,16 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
    * Start an execution for the published workflow and hand the returned
    * executionId to the progress subscription so node badges go live.
    */
-  const handleRun = useCallback(async () => {
+  const handleRun = useCallback(async (_wfId?: string, input?: string) => {
     if (!workflowId) return;
+    setRunDialogOpen(false);
     try {
-      const execution = await executionApiService.startExecution(workflowId);
+      const execution = await executionApiService.startExecution(workflowId, input);
       if (execution?.executionId) {
         setExecutionId(execution.executionId);
+      }
+      if (input) {
+        toast.success('Workflow started', { description: `Input: ${input.length > 80 ? input.slice(0, 80) + '…' : input}` });
       }
     } catch (error: any) {
       toast.error('Failed to start execution', {
@@ -500,7 +506,7 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
             nodeResults={nodeResults as any}
             executionStatus={executionStatus}
             workflowStatus={workflowStatus}
-            onRun={handleRun}
+            onRun={() => setRunDialogOpen(true)}
             onCancel={handleCancel}
             executionId={executionId}
             canApproveExecutions={canApproveExecutions}
@@ -575,6 +581,16 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
           onSave={handleSaveConfiguration}
           onRename={handleRenameNode}
         />
+
+        {/* Run workflow dialog */}
+        {workflowId && (
+          <RunWorkflowDialog
+            open={runDialogOpen}
+            onOpenChange={setRunDialogOpen}
+            workflowId={workflowId}
+            onRun={handleRun}
+          />
+        )}
       </div>
     </ReactFlowProvider>
   );

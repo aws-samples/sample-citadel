@@ -84,6 +84,7 @@ import { PageContainer } from '../components/PageContainer';
 import { ExecutionDetailSheet } from '../components/ExecutionDetailSheet';
 import { ExecutionDecisionDialog, ExecutionDecisionKind } from '../components/ExecutionDecisionDialog';
 import { normalizeExecutionStatus, isRunning, isAwaitingApproval } from '../lib/execution-status';
+import { RunWorkflowDialog } from '../components/RunWorkflowDialog';
 
 // ---- Types ----
 
@@ -465,6 +466,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
   // Workflow run state — one live run tracked at a time
   const [activeRun, setActiveRun] = useState<{ executionId: string; workflowId: string } | null>(null);
   const [startingRun, setStartingRun] = useState<string | null>(null);
+  const [runDialogWorkflowId, setRunDialogWorkflowId] = useState<string | null>(null);
   const [publishingWorkflowId, setPublishingWorkflowId] = useState<string | null>(null);
   const { events: runEvents } = useExecutionSubscription(activeRun?.executionId ?? null);
   const runToastRef = useRef<string | null>(null);
@@ -758,10 +760,11 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
     replayService.downloadReplayPackage(result.data.url);
   };
 
-  const handleRunWorkflow = async (workflowId: string) => {
+  const handleRunWorkflow = async (workflowId: string, input?: string) => {
     try {
+      setRunDialogWorkflowId(null);
       setStartingRun(workflowId);
-      const exec = await executionApiService.startExecution(workflowId);
+      const exec = await executionApiService.startExecution(workflowId, input);
       setActiveRun({ executionId: exec.executionId, workflowId });
       // Optimistically prepend the started execution so the Executions tab
       // shows it immediately without waiting for a full reload.
@@ -772,9 +775,13 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
           status: 'running',
           startedAt: new Date().toISOString(),
           triggeredBy: 'user',
+          input: input || undefined,
         },
         ...prev.filter((e) => e.executionId !== exec.executionId),
       ]);
+      if (input) {
+        toast.success('Workflow started', { description: `Input: ${input.length > 80 ? input.slice(0, 80) + '…' : input}` });
+      }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Failed to start workflow run';
       toast.error(message);
@@ -1424,7 +1431,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
                       className="text-xs text-muted-foreground hover:text-foreground h-7 px-2"
                       aria-label={`Run ${wf.name}`}
                       disabled={!isPublished || startingRun === wf.workflowId || (isActiveRun && (runStatus === 'running' || runStatus === 'pending'))}
-                      onClick={() => handleRunWorkflow(wf.workflowId)}
+                      onClick={() => setRunDialogWorkflowId(wf.workflowId)}
                     >
                       {startingRun === wf.workflowId
                         ? <Loader2 className="size-3 mr-1 animate-spin" />
@@ -2412,6 +2419,18 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
         onDeny={canApproveExecutions && !orgLoading ? handleDenyExecution : undefined}
         canApproveExecutions={canApproveExecutions && !orgLoading}
       />
+
+      {/* Run workflow dialog */}
+      {runDialogWorkflowId && (
+        <RunWorkflowDialog
+          open={!!runDialogWorkflowId}
+          onOpenChange={(open) => { if (!open) setRunDialogWorkflowId(null); }}
+          workflowId={runDialogWorkflowId}
+          workflowName={workflows.find((w) => w.workflowId === runDialogWorkflowId)?.name}
+          loading={startingRun === runDialogWorkflowId}
+          onRun={handleRunWorkflow}
+        />
+      )}
 
       {/* Unpublish dialog */}
       <Dialog open={unpublishDialogOpen} onOpenChange={(open) => {
