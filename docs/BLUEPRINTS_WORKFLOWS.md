@@ -180,7 +180,7 @@ Per-node execution overrides are consumed by the Worker Wrapper via exactly two 
 |-----------|------|---------|
 | Step Runner | `arbiter/stepRunner/index.py` | Lambda handler — event routing for execution lifecycle |
 | DAG Module | `arbiter/stepRunner/dag.py` | Pure functions: `topological_sort`, `find_root_nodes`, `find_ready_nodes`, `find_convergence_nodes`, `find_downstream_subgraph` |
-| Condition Module | `arbiter/stepRunner/condition.py` | Pure functions: `evaluate_condition`, `resolve_field_path` |
+| Condition Module | `arbiter/stepRunner/condition.py` | Pure functions: `evaluate_condition`, `resolve_field_path`, `diagnose_resolution_failure` |
 | Retry Module | `arbiter/stepRunner/retry.py` | Pure functions: `calculate_backoff`, `should_retry` |
 | Executor | `arbiter/stepRunner/executor.py` | Orchestration: `start_execution`, `invoke_node`, `handle_node_completion`, `handle_node_failure`, `cancel_execution` |
 | Events Module | `arbiter/stepRunner/events.py` | EventBridge event publishing helpers |
@@ -318,6 +318,29 @@ Node A completes with output: { "result": { "status": "approved" } }
       Edge A→C: condition { field: "result.status", operator: "equals", value: "rejected" }
         → "approved" equals "rejected" → false → skip Node C and downstream subgraph
 ```
+
+#### Worker-envelope unwrapping
+
+The arbiter worker wraps every agent return in a thin envelope: `{"response": "<JSON string>", "usage": [...]}`. Condition fields use the `result.<key>` convention to reference the agent's logical return — e.g. `result.route` — but after the worker envelope is applied, the raw node output has no top-level `result` key.
+
+`resolve_field_path` bridges this transparently with the following precedence when the node output matches the worker-envelope shape (a dict whose keys ⊆ `{response, usage}`):
+
+1. **Full path against the unwrapped inner object** — parse `response` (if it is a JSON string) and try the entire path against the resulting dict. This covers cases where the inner object itself contains the first path segment as a key.
+2. **Sub-path after `result.`** — when the path starts with `result.`, strip the prefix and resolve the remainder against the inner object. This is the primary bridge: `result.route` resolves to `inner["route"]` when the worker envelope wraps the agent return.
+3. **Raw envelope fallback** — if neither inner-object resolution succeeded, resolve against the original envelope dict so that explicit envelope references (`response.route`, `usage`) keep working, and legacy outputs without an envelope are unaffected.
+
+Example with the Conditional Router blueprint:
+
+```
+Worker output: {"response": "{\"route\": \"branch-a\"}", "usage": []}
+Condition field: result.route
+
+  1. Unwrap: parse response → {"route": "branch-a"}
+  2. Full path result.route against inner → no "result" key → skip
+  3. Strip result. prefix → resolve "route" against inner → "branch-a" ✓
+```
+
+Outputs that do not match the envelope shape (e.g. `{"result": {"status": "ok"}}`) bypass the unwrap and resolve via the standard dot-notation walk.
 
 ## Naming Conventions
 
@@ -584,6 +607,7 @@ All implementation follows strict Test-Driven Development (TDD). Property-based 
 | `workflow-validation.test.ts` | Publish validation (disconnected nodes, cycles, agent refs) | PBT |
 | `test_dag_properties.py` | Topological sort, root nodes, ready nodes, convergence, downstream subgraph | PBT |
 | `test_condition_properties.py` | Condition evaluation, field path resolution, operator semantics | PBT |
+| `test_condition_envelope_unwrap.py` | Worker-envelope unwrapping, `result.` prefix resolution, fallback to raw envelope | Unit + PBT |
 | `test_retry_properties.py` | Backoff calculation, retry decision logic | PBT |
 | `test_executor_properties.py` | Execution flow, idempotency, parallel branches | Unit + PBT |
 | `test_events_properties.py` | EventBridge event construction and field completeness | PBT |
@@ -628,6 +652,7 @@ backend/src/lambda/__tests__/
 arbiter/stepRunner/__tests__/
 ├── test_dag_properties.py            # Properties P2, P6 — topological sort, convergence
 ├── test_condition_properties.py      # Property P3 — condition evaluation
+├── test_condition_envelope_unwrap.py # Worker-envelope unwrapping (result. prefix, fallback)
 ├── test_retry_properties.py          # Property P4 — backoff bounds
 ├── test_executor_properties.py       # Property P8 — idempotent execution
 └── test_events_properties.py         # Event construction
