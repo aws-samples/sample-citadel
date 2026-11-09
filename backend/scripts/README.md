@@ -179,3 +179,54 @@ npx ts-node --project tsconfig.scripts.json scripts/reconcile-legacy-rows.ts \
 Flags: `--delete-placeholder-copies` (required), `--table-workflows` (required),
 `--table-executions` (required), `--table-apps` (optional — enables app-bound
 detection via `workflowIds`), `--apply`, `--dry-run` (default). Idempotent.
+
+## reconcile-legacy-rows --delete-untitled-drafts
+
+Identifies and optionally deletes non-blueprint DRAFT workflows whose name starts with a configurable prefix (default `Untitled Workflow`), that have never been executed and are not bound to any app. These are leftover draft workflows created during exploratory canvas sessions that were abandoned without being named, executed, or published.
+
+Selection criteria (all must hold):
+- `isBlueprint` is NOT `'true'`
+- `status` is `'DRAFT'`
+- `name` starts with the `--name-prefix` string (default `Untitled Workflow`)
+- Older than `--min-age-hours` (default 24)
+- No execution references exist in the executions table (via WorkflowIndex GSI)
+- Not bound to any app (neither via `appId` attribute nor via any app's `workflowIds` array)
+
+Exclusions:
+- **Blueprints** (`isBlueprint = 'true'`) are never touched
+- **PUBLISHED** rows are never touched
+- **Executed** workflows (any row in the executions table referencing the workflowId) are never touched
+- **Bound** workflows (appId attribute set, or listed in an app's workflowIds) are silently skipped
+- **Recent** rows (younger than `--min-age-hours`) are skipped
+
+Dry-run output lists each candidate with workflowId, name, createdAt, and nodeCount.
+
+```bash
+# Dry-run — list candidates
+npx ts-node --project tsconfig.scripts.json scripts/reconcile-legacy-rows.ts \
+  --delete-untitled-drafts \
+  --table-workflows citadel-workflows-dev \
+  --table-executions citadel-executions-dev \
+  [--table-apps citadel-apps-dev] \
+  --region us-west-2
+
+# Apply — delete eligible rows
+npx ts-node --project tsconfig.scripts.json scripts/reconcile-legacy-rows.ts \
+  --delete-untitled-drafts \
+  --table-workflows citadel-workflows-dev \
+  --table-executions citadel-executions-dev \
+  [--table-apps citadel-apps-dev] \
+  --region us-west-2 \
+  --apply
+
+# Custom name prefix and age threshold
+npx ts-node --project tsconfig.scripts.json scripts/reconcile-legacy-rows.ts \
+  --delete-untitled-drafts \
+  --table-workflows citadel-workflows-dev \
+  --table-executions citadel-executions-dev \
+  --name-prefix "Draft-" \
+  --min-age-hours 48 \
+  --region us-west-2
+```
+
+Flags: `--delete-untitled-drafts` (required), `--table-workflows` (required), `--table-executions` (required), `--table-apps` (optional — enables app-bound detection via `workflowIds`), `--name-prefix` (optional, default `Untitled Workflow`), `--min-age-hours` (optional, default 24), `--apply`, `--dry-run` (default). Idempotent.
