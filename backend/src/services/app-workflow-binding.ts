@@ -92,6 +92,9 @@ export interface ReconcileBindingsReport {
   missingFromList: string[];
   danglingEntries: string[];
   crossRefMismatches: string[];
+  /** Apps whose registry manifest.workflowIds mirror diverges from the
+   *  authoritative DynamoDB list. Format: "appId:mirror:[...]:desired:[...]". */
+  manifestDrift: string[];
   fixed: number;
   errors: number;
 }
@@ -590,6 +593,7 @@ export async function reconcileBindings(
     missingFromList: [],
     danglingEntries: [],
     crossRefMismatches: [],
+    manifestDrift: [],
     fixed: 0,
     errors: 0,
   };
@@ -761,6 +765,82 @@ export async function reconcileBindings(
               appId,
               err,
             });
+            report.errors++;
+          }
+        }
+      }
+    }
+  }
+
+  // --- Pass 4: Manifest drift detection (registry mirror vs DDB desired) ---
+
+  if (deps.registryService) {
+    for (const app of apps) {
+      const appId = app.appId as string;
+
+      // Skip non-metadata rows (component/APIKEY rows sharing the table)
+      // and legacy UUID-keyed rows. Component rows have '#' in their key
+      // (e.g. appId#AGENT#name, appId#APIKEY#uuid). Legacy UUID rows are
+      // 36-char strings with dashes that the registry rejects.
+      if (
+        !appId ||
+        appId.includes("#") ||
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          appId,
+        )
+      )
+        continue;
+
+      // The desired list is the one the DDB side should already hold after
+      // Pass 3 applied its fixes. For apps that were not in the fix map
+      // (already consistent), the current DDB list IS the desired list.
+      const desired = desiredListPerApp.get(appId) || [];
+
+      let record: RegistryRecordLike | null = null;
+      try {
+        record = await deps.registryService!.getResource("agent", appId);
+      } catch (err) {
+        console.error(
+          "[reconcile-bindings] manifest drift: registry read failed",
+          { appId, error: err instanceof Error ? err.message : String(err) },
+        );
+        // Skip this app — cannot compare without a registry read.
+        continue;
+      }
+
+      if (!record) continue; // No registry record for this app.
+
+      const descriptor = parseDescriptor(record);
+      const manifest = (descriptor.manifest as Record<string, unknown>) || {};
+      const mirrorIds: string[] = Array.isArray(manifest.workflowIds)
+        ? (manifest.workflowIds as string[])
+        : [];
+
+      const sortedMirror = [...mirrorIds].sort();
+      const sortedDesired = [...desired].sort();
+
+      const mirrorMatch =
+        sortedMirror.length === sortedDesired.length &&
+        sortedMirror.every((v, i) => v === sortedDesired[i]);
+
+      if (!mirrorMatch) {
+        const tag = `${appId}:mirror:${JSON.stringify(sortedMirror)}:desired:${JSON.stringify(sortedDesired)}`;
+        report.manifestDrift.push(tag);
+        console.log(
+          `[reconcile-bindings] MANIFEST DRIFT: app=${appId} mirror=${JSON.stringify(sortedMirror)} desired=${JSON.stringify(sortedDesired)}`,
+        );
+
+        if (fix) {
+          const ok = await mirrorToRegistry(deps, appId, desired);
+          if (ok) {
+            report.fixed++;
+          } else {
+            console.error("[reconcile-bindings] manifest drift fix failed", {
+              appId,
+            });
+            await emitMetric(deps.cloudwatch, "BindingMirrorFailed", [
+              { Name: "AppId", Value: appId },
+            ]);
             report.errors++;
           }
         }

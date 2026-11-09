@@ -1225,11 +1225,21 @@ export async function main(): Promise<void> {
   } else if (args.reconcileBindings) {
     const { reconcileBindings: reconcileFn } =
       await import("../src/services/app-workflow-binding");
+    // Wire up the registry service for manifest-drift detection. REGISTRY_ID
+    // is optional — if absent, the manifest-drift pass is silently skipped.
+    let registryService;
+    const registryId = process.env.REGISTRY_ID;
+    if (registryId) {
+      const { RegistryService } =
+        await import("../src/services/registry-service");
+      registryService = new RegistryService({ registryId, region });
+    }
     const report = await reconcileFn({
       deps: {
         docClient,
         workflowsTable: args.tableWorkflows,
         appsTable: args.tableApps,
+        registryService,
       },
       fix: !args.dryRun,
     });
