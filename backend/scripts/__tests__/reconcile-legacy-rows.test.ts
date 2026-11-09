@@ -1162,19 +1162,27 @@ describe("runReconcileUntitledDrafts", () => {
       makeOpts(true),
     );
 
-    expect(summary.found).toBe(3);
+    expect(summary.found).toBe(5);
     expect(summary.boundSkipped).toBe(2);
     expect(summary.deleted).toBe(0);
     expect(summary.errors).toBe(0);
     expect(workflowsTable.size()).toBe(initial);
 
-    const ids = rows.map((r) => r.workflowId).sort();
+    // 3 eligible + 2 bound-skipped
+    const eligible = rows.filter((r) => !r.boundSkipped);
+    const ids = eligible.map((r) => r.workflowId).sort();
     expect(ids).toEqual(["ut-1", "ut-2", "ut-3"]);
 
-    // Verify nodeCount is reported
-    for (const row of rows) {
+    // Verify nodeCount is reported on eligible rows
+    for (const row of eligible) {
       expect(row.nodeCount).toBe(2);
     }
+
+    // Bound-skipped rows are reported in the output
+    const bound = rows.filter((r) => r.boundSkipped);
+    expect(bound).toHaveLength(2);
+    const boundIds = bound.map((r) => r.workflowId).sort();
+    expect(boundIds).toEqual(["ut-bound", "ut-bound-app"]);
   });
 
   test("--apply deletes only eligible untitled drafts", async () => {
@@ -1206,42 +1214,67 @@ describe("runReconcileUntitledDrafts", () => {
 
   test("excludes PUBLISHED rows", async () => {
     const { rows } = await runReconcileUntitledDrafts(makeOpts(true));
-    const allIds = rows.map((r) => r.workflowId);
-    expect(allIds).not.toContain("ut-pub");
+    const eligible = rows.filter((r) => !r.boundSkipped);
+    const ids = eligible.map((r) => r.workflowId);
+    expect(ids).not.toContain("ut-pub");
   });
 
   test("excludes blueprints", async () => {
     const { rows } = await runReconcileUntitledDrafts(makeOpts(true));
-    const allIds = rows.map((r) => r.workflowId);
-    expect(allIds).not.toContain("ut-bp");
+    const eligible = rows.filter((r) => !r.boundSkipped);
+    const ids = eligible.map((r) => r.workflowId);
+    expect(ids).not.toContain("ut-bp");
   });
 
   test("excludes rows newer than min-age-hours", async () => {
     const { rows } = await runReconcileUntitledDrafts(makeOpts(true));
-    const allIds = rows.map((r) => r.workflowId);
-    expect(allIds).not.toContain("ut-new");
+    const eligible = rows.filter((r) => !r.boundSkipped);
+    const ids = eligible.map((r) => r.workflowId);
+    expect(ids).not.toContain("ut-new");
   });
 
   test("excludes rows with non-matching name", async () => {
     const { rows } = await runReconcileUntitledDrafts(makeOpts(true));
-    const allIds = rows.map((r) => r.workflowId);
-    expect(allIds).not.toContain("named-wf");
+    const eligible = rows.filter((r) => !r.boundSkipped);
+    const ids = eligible.map((r) => r.workflowId);
+    expect(ids).not.toContain("named-wf");
   });
 
-  test("skips bound workflows (appId attribute)", async () => {
-    const { summary } = await runReconcileUntitledDrafts(makeOpts(true));
+  test("reports bound workflows with appId attribute as bound-skipped", async () => {
+    const { summary, rows } = await runReconcileUntitledDrafts(makeOpts(true));
     expect(summary.boundSkipped).toBeGreaterThanOrEqual(1);
+    const bound = rows.find((r) => r.workflowId === "ut-bound");
+    expect(bound?.boundSkipped).toBe(true);
+    expect(bound?.appId).toBe("app-999");
   });
 
-  test("skips bound workflows (apps table)", async () => {
-    const { summary } = await runReconcileUntitledDrafts(makeOpts(true));
+  test("reports bound workflows from apps table as bound-skipped", async () => {
+    const { summary, rows } = await runReconcileUntitledDrafts(makeOpts(true));
     expect(summary.boundSkipped).toBe(2);
+    const bound = rows.find((r) => r.workflowId === "ut-bound-app");
+    expect(bound?.boundSkipped).toBe(true);
+    expect(bound?.boundApp).toBe("app-abc");
   });
 
-  test("second run is idempotent — no more drafts found after delete", async () => {
+  test("flags dangling appId when appId attribute set but no app lists it", async () => {
+    const { rows } = await runReconcileUntitledDrafts(makeOpts(true));
+    // ut-bound has appId=app-999 but no app's workflowIds contains ut-bound
+    const dangling = rows.find((r) => r.workflowId === "ut-bound");
+    expect(dangling?.danglingAppId).toBe(true);
+    expect(dangling?.boundSkipped).toBe(true);
+
+    // ut-bound-app has no appId attribute but IS in app-abc's workflowIds
+    const listed = rows.find((r) => r.workflowId === "ut-bound-app");
+    expect(listed?.danglingAppId).toBe(false);
+  });
+
+  test("second run is idempotent — no more eligible drafts found after delete", async () => {
     await runReconcileUntitledDrafts(makeOpts(false));
     setupMock();
-    const { summary } = await runReconcileUntitledDrafts(makeOpts(true));
-    expect(summary.found).toBe(0);
+    const { summary, rows } = await runReconcileUntitledDrafts(makeOpts(true));
+    // Bound-skipped rows persist; only eligible (deletable) rows are gone
+    const eligible = rows.filter((r) => !r.boundSkipped);
+    expect(eligible).toHaveLength(0);
+    expect(summary.boundSkipped).toBe(2);
   });
 });

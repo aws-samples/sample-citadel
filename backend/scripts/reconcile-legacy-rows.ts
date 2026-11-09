@@ -26,6 +26,7 @@ import {
   QueryCommand,
   type NativeAttributeValue,
 } from "@aws-sdk/lib-dynamodb";
+import { resolveRegionOrExit } from "./lib/resolve-region";
 
 // ---------------------------------------------------------------------------
 // Types (exported for tests)
@@ -889,8 +890,19 @@ export async function runReconcilePlaceholderCopies(
 export interface UntitledDraftRow {
   workflowId: string;
   name: string;
+  appId: string;
   createdAt: string;
   nodeCount: number;
+  /** Set when the workflow has an appId attribute or appears in an app's workflowIds. */
+  boundSkipped?: boolean;
+  /** Which app lists this workflow (empty string if none). */
+  boundApp?: string;
+  /**
+   * True when the workflow carries an appId attribute but no app's
+   * workflowIds list contains the workflowId — i.e. a one-sided stamp
+   * left over from an incomplete bind/unbind or a deleted app.
+   */
+  danglingAppId?: boolean;
 }
 
 export interface ReconcileUntitledDraftsSummary {
@@ -1045,23 +1057,24 @@ export async function runReconcileUntitledDrafts(
   }
 
   // ---------------------------------------------------------------------------
-  // Phase 3: build app-bound set (reuse placeholder-copy pattern)
+  // Phase 3: build app-bound map (workflowId → appId that lists it)
   // ---------------------------------------------------------------------------
-  const appBoundIds = new Set<string>();
+  const appBoundMap = new Map<string, string>();
   if (tableApps) {
     let appsStartKey: Record<string, NativeAttributeValue> | undefined;
     do {
       const appsPage = await dc.send(
         new ScanCommand({
           TableName: tableApps,
-          ProjectionExpression: "workflowIds",
+          ProjectionExpression: "appId, workflowIds",
           ExclusiveStartKey: appsStartKey,
         }),
       );
       for (const item of appsPage.Items ?? []) {
+        const aid = typeof item.appId === "string" ? item.appId : "";
         const wfIds = Array.isArray(item.workflowIds) ? item.workflowIds : [];
         for (const wfId of wfIds) {
-          if (typeof wfId === "string") appBoundIds.add(wfId);
+          if (typeof wfId === "string") appBoundMap.set(wfId, aid);
         }
       }
       appsStartKey = appsPage.LastEvaluatedKey as
@@ -1070,23 +1083,42 @@ export async function runReconcileUntitledDrafts(
   }
 
   // ---------------------------------------------------------------------------
-  // Phase 4: filter candidates
+  // Phase 4: filter candidates — report bound-skipped and dangling appIds
   // ---------------------------------------------------------------------------
   for (const c of candidates) {
     if (executionRefs.has(c.workflowId)) continue;
 
-    const isBound =
-      (c.appId !== "" && c.appId !== "undefined") ||
-      appBoundIds.has(c.workflowId);
+    const hasAppIdAttr = c.appId !== "" && c.appId !== "undefined";
+    const listingApp = appBoundMap.get(c.workflowId);
+    const inAppList = listingApp !== undefined;
+    const isBound = hasAppIdAttr || inAppList;
 
     if (isBound) {
+      // A dangling appId is when the workflow carries an appId attribute
+      // but no app's workflowIds list contains it — one-sided stamp from
+      // an incomplete bind, a deleted app, or a race.
+      const isDangling = hasAppIdAttr && !inAppList;
+
+      const row: UntitledDraftRow = {
+        workflowId: c.workflowId,
+        name: c.name,
+        appId: c.appId,
+        createdAt: c.createdAt,
+        nodeCount: c.nodeCount,
+        boundSkipped: true,
+        boundApp: listingApp ?? "",
+        danglingAppId: isDangling,
+      };
       summary.boundSkipped++;
+      rows.push(row);
+      summary.found++;
       continue;
     }
 
     rows.push({
       workflowId: c.workflowId,
       name: c.name,
+      appId: c.appId,
       createdAt: c.createdAt,
       nodeCount: c.nodeCount,
     });
@@ -1095,16 +1127,26 @@ export async function runReconcileUntitledDrafts(
 
   // Report
   for (const row of rows) {
-    console.log(
-      `[reconcile-legacy-rows] ${dryRun ? "WOULD DELETE" : "DELETING"} ` +
-        `untitled draft: workflowId=${row.workflowId} ` +
-        `name=${row.name} createdAt=${row.createdAt} nodeCount=${row.nodeCount}`,
-    );
+    if (row.boundSkipped) {
+      const tag = row.danglingAppId ? "DANGLING_APPID, SKIPPED" : "BOUND, SKIPPED";
+      console.log(
+        `[reconcile-legacy-rows] ${tag}: workflowId=${row.workflowId} ` +
+          `name=${row.name} appId=${row.appId} boundApp=${row.boundApp ?? ""} ` +
+          `createdAt=${row.createdAt}`,
+      );
+    } else {
+      console.log(
+        `[reconcile-legacy-rows] ${dryRun ? "WOULD DELETE" : "DELETING"} ` +
+          `untitled draft: workflowId=${row.workflowId} ` +
+          `name=${row.name} createdAt=${row.createdAt} nodeCount=${row.nodeCount}`,
+      );
+    }
   }
 
   // Delete if not dry-run
   if (!dryRun) {
     for (const row of rows) {
+      if (row.boundSkipped) continue;
       try {
         await dc.send(
           new DeleteCommand({
@@ -1146,8 +1188,8 @@ export async function runReconcileUntitledDrafts(
 // ---------------------------------------------------------------------------
 
 export async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
-  const region = process.env.AWS_REGION || "us-west-2";
+  const { region, rest } = resolveRegionOrExit(process.argv.slice(2));
+  const args = parseArgs(rest);
   const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
 
   if (args.deleteUntitledDrafts) {
