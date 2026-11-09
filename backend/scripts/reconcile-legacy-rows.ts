@@ -63,10 +63,16 @@ export interface ParsedArgs {
   tableWorkflows: string;
   /** CIT-288: when true, scan the workflows table for placeholder-agent copies. */
   deletePlaceholderCopies: boolean;
-  /** Required when deletePlaceholderCopies is true. */
+  /** Required when deletePlaceholderCopies or deleteUntitledDrafts is true. */
   tableExecutions: string;
   /** Optional: apps table for cross-referencing bound workflows. */
   tableApps: string;
+  /** When true, scan workflows for untitled never-run DRAFT workflows. */
+  deleteUntitledDrafts: boolean;
+  /** Name regex pattern for untitled draft matching. Default /^Untitled Workflow/. */
+  namePattern: string;
+  /** Minimum age in hours before a row is eligible. Default 24. */
+  minAgeHours: number;
 }
 
 const KNOWN_FLAGS = new Set([
@@ -79,6 +85,9 @@ const KNOWN_FLAGS = new Set([
   "--delete-orphans",
   "--delete-unpublished-intake-blueprints",
   "--delete-placeholder-copies",
+  "--delete-untitled-drafts",
+  "--name-pattern",
+  "--min-age-hours",
   "--apply",
 ]);
 
@@ -91,6 +100,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let dryRun = true;
   let deleteUnpublishedIntakeBlueprints = false;
   let deletePlaceholderCopies = false;
+  let deleteUntitledDrafts = false;
+  let namePattern = "^Untitled Workflow";
+  let minAgeHours = 24;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -126,13 +138,29 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case "--delete-placeholder-copies":
         deletePlaceholderCopies = true;
         break;
+      case "--delete-untitled-drafts":
+        deleteUntitledDrafts = true;
+        break;
+      case "--name-pattern":
+        namePattern = argv[++i];
+        break;
+      case "--min-age-hours":
+        minAgeHours = Number(argv[++i]);
+        break;
       case "--apply":
         dryRun = false;
         break;
     }
   }
 
-  if (deletePlaceholderCopies) {
+  if (deleteUntitledDrafts) {
+    if (!tableWorkflows || !tableExecutions) {
+      console.error(
+        "Usage: --delete-untitled-drafts --table-workflows <table> --table-executions <table> [--table-apps <table>] [--name-pattern <regex>] [--min-age-hours <n>] [--apply]",
+      );
+      process.exit(1);
+    }
+  } else if (deletePlaceholderCopies) {
     if (!tableWorkflows || !tableExecutions) {
       console.error(
         "Usage: --delete-placeholder-copies --table-workflows <table> --table-executions <table> [--table-apps <table>] [--apply]",
@@ -161,6 +189,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
     dryRun,
     deleteUnpublishedIntakeBlueprints,
     deletePlaceholderCopies,
+    deleteUntitledDrafts,
+    namePattern,
+    minAgeHours,
   };
 }
 
@@ -852,6 +883,265 @@ export async function runReconcilePlaceholderCopies(
 }
 
 // ---------------------------------------------------------------------------
+// Untitled never-run DRAFT workflow cleanup
+// ---------------------------------------------------------------------------
+
+export interface UntitledDraftRow {
+  workflowId: string;
+  name: string;
+  createdAt: string;
+  nodeCount: number;
+}
+
+export interface ReconcileUntitledDraftsSummary {
+  scanned: number;
+  found: number;
+  boundSkipped: number;
+  deleted: number;
+  errors: number;
+}
+
+export interface ReconcileUntitledDraftsOptions {
+  tableWorkflows: string;
+  tableExecutions: string;
+  tableApps: string;
+  dryRun: boolean;
+  docClient: DynamoDBDocumentClient;
+  namePattern: RegExp;
+  minAgeMs: number;
+  now: number;
+}
+
+/**
+ * Returns true when the workflow row is an untitled DRAFT eligible for
+ * cleanup:
+ *   - isBlueprint is NOT 'true'
+ *   - status is 'DRAFT'
+ *   - name matches the given pattern (default /^Untitled Workflow/)
+ *   - older than minAgeMs
+ */
+export function isUntitledDraft(
+  item: Record<string, NativeAttributeValue>,
+  namePattern: RegExp,
+  minAgeMs: number,
+  now: number,
+): boolean {
+  if (item.isBlueprint === "true") return false;
+  if (item.status !== "DRAFT") return false;
+  const name = typeof item.name === "string" ? item.name : "";
+  if (!namePattern.test(name)) return false;
+  const createdAt = typeof item.createdAt === "string" ? item.createdAt : "";
+  if (!createdAt) return false;
+  const createdMs = new Date(createdAt).getTime();
+  if (isNaN(createdMs) || now - createdMs < minAgeMs) return false;
+  return true;
+}
+
+/**
+ * Parse the node count from a workflow definition string.
+ */
+function parseNodeCount(definition: unknown): number {
+  if (typeof definition !== "string" || !definition) return 0;
+  try {
+    const def = JSON.parse(definition) as Record<string, unknown>;
+    return Array.isArray(def.nodes) ? def.nodes.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+export async function runReconcileUntitledDrafts(
+  opts: ReconcileUntitledDraftsOptions,
+): Promise<{
+  summary: ReconcileUntitledDraftsSummary;
+  rows: UntitledDraftRow[];
+}> {
+  const {
+    tableWorkflows,
+    tableExecutions,
+    tableApps,
+    dryRun,
+    docClient: dc,
+    namePattern,
+    minAgeMs,
+    now,
+  } = opts;
+
+  const summary: ReconcileUntitledDraftsSummary = {
+    scanned: 0,
+    found: 0,
+    boundSkipped: 0,
+    deleted: 0,
+    errors: 0,
+  };
+  const rows: UntitledDraftRow[] = [];
+
+  console.log(
+    `[reconcile-legacy-rows] Mode: ${dryRun ? "DRY-RUN" : "APPLY"} ` +
+      `untitled-draft-cleanup table=${tableWorkflows} ` +
+      `executions=${tableExecutions}` +
+      (tableApps ? ` apps=${tableApps}` : "") +
+      ` pattern=${namePattern} minAgeMs=${minAgeMs}`,
+  );
+
+  // ---------------------------------------------------------------------------
+  // Phase 1: collect candidate workflows via full scan
+  // ---------------------------------------------------------------------------
+  const candidates: Array<{
+    workflowId: string;
+    name: string;
+    appId: string;
+    createdAt: string;
+    nodeCount: number;
+  }> = [];
+
+  let exclusiveStartKey: Record<string, NativeAttributeValue> | undefined;
+  do {
+    const page = await dc.send(
+      new ScanCommand({
+        TableName: tableWorkflows,
+        ExclusiveStartKey: exclusiveStartKey,
+      }),
+    );
+    for (const item of page.Items ?? []) {
+      summary.scanned++;
+      if (isUntitledDraft(item, namePattern, minAgeMs, now)) {
+        candidates.push({
+          workflowId: String(item.workflowId ?? ""),
+          name: String(item.name ?? ""),
+          appId: String(item.appId ?? ""),
+          createdAt: String(item.createdAt ?? ""),
+          nodeCount: parseNodeCount(item.definition),
+        });
+      }
+    }
+    exclusiveStartKey = page.LastEvaluatedKey as
+      Record<string, NativeAttributeValue> | undefined;
+  } while (exclusiveStartKey);
+
+  // ---------------------------------------------------------------------------
+  // Phase 2: build execution reference set (reuse placeholder-copy pattern)
+  // ---------------------------------------------------------------------------
+  const executionRefs = new Set<string>();
+  for (const candidate of candidates) {
+    let exStartKey: Record<string, NativeAttributeValue> | undefined;
+    do {
+      const exPage = await dc.send(
+        new QueryCommand({
+          TableName: tableExecutions,
+          IndexName: "WorkflowIndex",
+          KeyConditionExpression: "workflowId = :wfId",
+          ExpressionAttributeValues: { ":wfId": candidate.workflowId },
+          Select: "COUNT",
+          ...(exStartKey && { ExclusiveStartKey: exStartKey }),
+        }),
+      );
+      if ((exPage.Count ?? 0) > 0) {
+        executionRefs.add(candidate.workflowId);
+      }
+      exStartKey = exPage.LastEvaluatedKey as
+        Record<string, NativeAttributeValue> | undefined;
+    } while (exStartKey);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 3: build app-bound set (reuse placeholder-copy pattern)
+  // ---------------------------------------------------------------------------
+  const appBoundIds = new Set<string>();
+  if (tableApps) {
+    let appsStartKey: Record<string, NativeAttributeValue> | undefined;
+    do {
+      const appsPage = await dc.send(
+        new ScanCommand({
+          TableName: tableApps,
+          ProjectionExpression: "workflowIds",
+          ExclusiveStartKey: appsStartKey,
+        }),
+      );
+      for (const item of appsPage.Items ?? []) {
+        const wfIds = Array.isArray(item.workflowIds) ? item.workflowIds : [];
+        for (const wfId of wfIds) {
+          if (typeof wfId === "string") appBoundIds.add(wfId);
+        }
+      }
+      appsStartKey = appsPage.LastEvaluatedKey as
+        Record<string, NativeAttributeValue> | undefined;
+    } while (appsStartKey);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Phase 4: filter candidates
+  // ---------------------------------------------------------------------------
+  for (const c of candidates) {
+    if (executionRefs.has(c.workflowId)) continue;
+
+    const isBound =
+      (c.appId !== "" && c.appId !== "undefined") ||
+      appBoundIds.has(c.workflowId);
+
+    if (isBound) {
+      summary.boundSkipped++;
+      continue;
+    }
+
+    rows.push({
+      workflowId: c.workflowId,
+      name: c.name,
+      createdAt: c.createdAt,
+      nodeCount: c.nodeCount,
+    });
+    summary.found++;
+  }
+
+  // Report
+  for (const row of rows) {
+    console.log(
+      `[reconcile-legacy-rows] ${dryRun ? "WOULD DELETE" : "DELETING"} ` +
+        `untitled draft: workflowId=${row.workflowId} ` +
+        `name=${row.name} createdAt=${row.createdAt} nodeCount=${row.nodeCount}`,
+    );
+  }
+
+  // Delete if not dry-run
+  if (!dryRun) {
+    for (const row of rows) {
+      try {
+        await dc.send(
+          new DeleteCommand({
+            TableName: tableWorkflows,
+            Key: { workflowId: row.workflowId },
+            ConditionExpression: "#status = :draft",
+            ExpressionAttributeNames: { "#status": "status" },
+            ExpressionAttributeValues: { ":draft": "DRAFT" },
+          }),
+        );
+        summary.deleted++;
+      } catch (err: unknown) {
+        if (
+          err instanceof Error &&
+          err.name === "ConditionalCheckFailedException"
+        ) {
+          console.log(
+            `[reconcile-legacy-rows] Skipped ${row.workflowId} — row was advanced concurrently`,
+          );
+          continue;
+        }
+        console.error(
+          `[reconcile-legacy-rows] Delete failed for ${row.workflowId}:`,
+          err,
+        );
+        summary.errors++;
+      }
+    }
+  }
+
+  console.log("[reconcile-legacy-rows] --- Untitled Drafts Summary ---");
+  console.log(JSON.stringify(summary));
+
+  return { summary, rows };
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -860,7 +1150,19 @@ export async function main(): Promise<void> {
   const region = process.env.AWS_REGION || "us-west-2";
   const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
 
-  if (args.deletePlaceholderCopies) {
+  if (args.deleteUntitledDrafts) {
+    const { summary } = await runReconcileUntitledDrafts({
+      tableWorkflows: args.tableWorkflows,
+      tableExecutions: args.tableExecutions,
+      tableApps: args.tableApps,
+      dryRun: args.dryRun,
+      docClient,
+      namePattern: new RegExp(args.namePattern),
+      minAgeMs: args.minAgeHours * 60 * 60 * 1000,
+      now: Date.now(),
+    });
+    if (summary.errors > 0) process.exit(1);
+  } else if (args.deletePlaceholderCopies) {
     const { summary } = await runReconcilePlaceholderCopies({
       tableWorkflows: args.tableWorkflows,
       tableExecutions: args.tableExecutions,

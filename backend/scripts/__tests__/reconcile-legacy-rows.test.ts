@@ -904,3 +904,344 @@ describe("runReconcilePlaceholderCopies", () => {
     expect(deletable).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Untitled never-run DRAFT workflow cleanup
+// ---------------------------------------------------------------------------
+
+import {
+  runReconcileUntitledDrafts,
+  isUntitledDraft,
+  type ReconcileUntitledDraftsOptions,
+} from "../reconcile-legacy-rows";
+
+const FORTY_EIGHT_HOURS_AGO = new Date(
+  Date.now() - 48 * 60 * 60 * 1000,
+).toISOString();
+const TWO_HOURS_AGO = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+const NOW_MS = Date.now();
+const DEFAULT_NAME_PATTERN = /^Untitled Workflow/;
+const DEFAULT_MIN_AGE_MS = 24 * 60 * 60 * 1000;
+
+function untitledDraftWorkflow(
+  workflowId: string,
+  overrides: Partial<Record<string, NativeAttributeValue>> = {},
+): Record<string, NativeAttributeValue> {
+  return {
+    workflowId,
+    name: "Untitled Workflow",
+    orgId: "org-a",
+    status: "DRAFT",
+    isBlueprint: "false",
+    appId: "",
+    createdAt: FORTY_EIGHT_HOURS_AGO,
+    definition: JSON.stringify({
+      nodes: [
+        { id: "n1", agentId: "agent-1", type: "agent" },
+        { id: "n2", agentId: "agent-2", type: "agent" },
+      ],
+      edges: [],
+    }),
+    ...overrides,
+  };
+}
+
+describe("isUntitledDraft", () => {
+  test("identifies an old DRAFT non-blueprint with matching name", () => {
+    expect(
+      isUntitledDraft(
+        untitledDraftWorkflow("wf-1"),
+        DEFAULT_NAME_PATTERN,
+        DEFAULT_MIN_AGE_MS,
+        NOW_MS,
+      ),
+    ).toBe(true);
+  });
+
+  test("rejects isBlueprint=true rows", () => {
+    expect(
+      isUntitledDraft(
+        untitledDraftWorkflow("wf-bp", { isBlueprint: "true" }),
+        DEFAULT_NAME_PATTERN,
+        DEFAULT_MIN_AGE_MS,
+        NOW_MS,
+      ),
+    ).toBe(false);
+  });
+
+  test("rejects PUBLISHED rows", () => {
+    expect(
+      isUntitledDraft(
+        untitledDraftWorkflow("wf-pub", { status: "PUBLISHED" }),
+        DEFAULT_NAME_PATTERN,
+        DEFAULT_MIN_AGE_MS,
+        NOW_MS,
+      ),
+    ).toBe(false);
+  });
+
+  test("rejects rows with non-matching name", () => {
+    expect(
+      isUntitledDraft(
+        untitledDraftWorkflow("wf-named", { name: "My Real Workflow" }),
+        DEFAULT_NAME_PATTERN,
+        DEFAULT_MIN_AGE_MS,
+        NOW_MS,
+      ),
+    ).toBe(false);
+  });
+
+  test("rejects rows newer than min age", () => {
+    expect(
+      isUntitledDraft(
+        untitledDraftWorkflow("wf-new", { createdAt: TWO_HOURS_AGO }),
+        DEFAULT_NAME_PATTERN,
+        DEFAULT_MIN_AGE_MS,
+        NOW_MS,
+      ),
+    ).toBe(false);
+  });
+
+  test("matches with custom name pattern", () => {
+    const custom = /^Draft-/;
+    expect(
+      isUntitledDraft(
+        untitledDraftWorkflow("wf-custom", { name: "Draft-test" }),
+        custom,
+        DEFAULT_MIN_AGE_MS,
+        NOW_MS,
+      ),
+    ).toBe(true);
+    expect(
+      isUntitledDraft(
+        untitledDraftWorkflow("wf-no", { name: "Untitled Workflow" }),
+        custom,
+        DEFAULT_MIN_AGE_MS,
+        NOW_MS,
+      ),
+    ).toBe(false);
+  });
+
+  test("handles absent isBlueprint (still eligible)", () => {
+    const row = untitledDraftWorkflow("wf-no-bp");
+    delete (row as Record<string, unknown>).isBlueprint;
+    expect(
+      isUntitledDraft(row, DEFAULT_NAME_PATTERN, DEFAULT_MIN_AGE_MS, NOW_MS),
+    ).toBe(true);
+  });
+});
+
+describe("runReconcileUntitledDrafts", () => {
+  const dynamoMock = mockClient(DynamoDBDocumentClient);
+  let workflowsTable: FakeDynamoTable;
+  let executionsTable: FakeDynamoTable;
+  let appsTable: FakeDynamoTable;
+
+  function seedTables(): void {
+    workflowsTable = new FakeDynamoTable();
+    executionsTable = new FakeDynamoTable();
+    appsTable = new FakeDynamoTable();
+
+    // 3 untitled DRAFT workflows eligible for deletion
+    workflowsTable.put("ut-1", untitledDraftWorkflow("ut-1"));
+    workflowsTable.put("ut-2", untitledDraftWorkflow("ut-2"));
+    workflowsTable.put(
+      "ut-3",
+      untitledDraftWorkflow("ut-3", { name: "Untitled Workflow (2)" }),
+    );
+
+    // 1 untitled DRAFT with execution reference — must survive
+    workflowsTable.put(
+      "ut-exec",
+      untitledDraftWorkflow("ut-exec"),
+    );
+    executionsTable.put("exec-ut", {
+      executionId: "exec-ut",
+      workflowId: "ut-exec",
+      startedAt: "2026-10-01T00:00:00.000Z",
+    });
+
+    // 1 untitled DRAFT bound via appId — must be skipped
+    workflowsTable.put(
+      "ut-bound",
+      untitledDraftWorkflow("ut-bound", { appId: "app-999" }),
+    );
+
+    // 1 untitled DRAFT bound via apps table — must be skipped
+    workflowsTable.put(
+      "ut-bound-app",
+      untitledDraftWorkflow("ut-bound-app"),
+    );
+    appsTable.put("app-abc", {
+      appId: "app-abc",
+      workflowIds: ["ut-bound-app"],
+    });
+
+    // 1 untitled DRAFT too new — must survive
+    workflowsTable.put(
+      "ut-new",
+      untitledDraftWorkflow("ut-new", { createdAt: TWO_HOURS_AGO }),
+    );
+
+    // 1 PUBLISHED workflow named Untitled — must survive
+    workflowsTable.put(
+      "ut-pub",
+      untitledDraftWorkflow("ut-pub", { status: "PUBLISHED" }),
+    );
+
+    // 1 named DRAFT workflow — must survive
+    workflowsTable.put(
+      "named-wf",
+      untitledDraftWorkflow("named-wf", { name: "My Real Workflow" }),
+    );
+
+    // 1 blueprint with untitled name — must survive
+    workflowsTable.put(
+      "ut-bp",
+      untitledDraftWorkflow("ut-bp", { isBlueprint: "true" }),
+    );
+  }
+
+  function setupMock(): void {
+    dynamoMock.reset();
+
+    dynamoMock.on(ScanCommand).callsFake((input) => {
+      const table = input.TableName as string;
+      if (table === "test-workflows") {
+        return { Items: workflowsTable.getAll() };
+      }
+      if (table === "test-apps") {
+        return { Items: appsTable.getAll() };
+      }
+      return { Items: [] };
+    });
+
+    dynamoMock.on(QueryCommand).callsFake((input) => {
+      const wfId = input.ExpressionAttributeValues?.[":wfId"] as string;
+      const matchingExecs = executionsTable
+        .getAll()
+        .filter((item) => item.workflowId === wfId);
+      return { Count: matchingExecs.length, Items: matchingExecs };
+    });
+
+    dynamoMock.on(DeleteCommand).callsFake((input) => {
+      const key = Object.values(input.Key!)[0] as string;
+      workflowsTable.delete(key);
+      return {};
+    });
+  }
+
+  beforeEach(() => {
+    seedTables();
+    setupMock();
+  });
+
+  afterEach(() => {
+    dynamoMock.reset();
+  });
+
+  function makeOpts(
+    dryRun: boolean,
+    includeApps = true,
+  ): ReconcileUntitledDraftsOptions {
+    return {
+      tableWorkflows: "test-workflows",
+      tableExecutions: "test-executions",
+      tableApps: includeApps ? "test-apps" : "",
+      dryRun,
+      docClient: DynamoDBDocumentClient.from(new DynamoDBClient({})),
+      namePattern: DEFAULT_NAME_PATTERN,
+      minAgeMs: DEFAULT_MIN_AGE_MS,
+      now: NOW_MS,
+    };
+  }
+
+  test("dry-run identifies untitled drafts but writes nothing", async () => {
+    const initial = workflowsTable.size();
+    const { summary, rows } = await runReconcileUntitledDrafts(
+      makeOpts(true),
+    );
+
+    expect(summary.found).toBe(3);
+    expect(summary.boundSkipped).toBe(2);
+    expect(summary.deleted).toBe(0);
+    expect(summary.errors).toBe(0);
+    expect(workflowsTable.size()).toBe(initial);
+
+    const ids = rows.map((r) => r.workflowId).sort();
+    expect(ids).toEqual(["ut-1", "ut-2", "ut-3"]);
+
+    // Verify nodeCount is reported
+    for (const row of rows) {
+      expect(row.nodeCount).toBe(2);
+    }
+  });
+
+  test("--apply deletes only eligible untitled drafts", async () => {
+    const { summary } = await runReconcileUntitledDrafts(makeOpts(false));
+
+    expect(summary.deleted).toBe(3);
+    expect(summary.errors).toBe(0);
+
+    // Deleted
+    expect(workflowsTable.items.has("ut-1")).toBe(false);
+    expect(workflowsTable.items.has("ut-2")).toBe(false);
+    expect(workflowsTable.items.has("ut-3")).toBe(false);
+
+    // Survivors
+    expect(workflowsTable.items.has("ut-exec")).toBe(true);
+    expect(workflowsTable.items.has("ut-bound")).toBe(true);
+    expect(workflowsTable.items.has("ut-bound-app")).toBe(true);
+    expect(workflowsTable.items.has("ut-new")).toBe(true);
+    expect(workflowsTable.items.has("ut-pub")).toBe(true);
+    expect(workflowsTable.items.has("named-wf")).toBe(true);
+    expect(workflowsTable.items.has("ut-bp")).toBe(true);
+  });
+
+  test("excludes workflows with execution references", async () => {
+    const { rows } = await runReconcileUntitledDrafts(makeOpts(true));
+    const allIds = rows.map((r) => r.workflowId);
+    expect(allIds).not.toContain("ut-exec");
+  });
+
+  test("excludes PUBLISHED rows", async () => {
+    const { rows } = await runReconcileUntitledDrafts(makeOpts(true));
+    const allIds = rows.map((r) => r.workflowId);
+    expect(allIds).not.toContain("ut-pub");
+  });
+
+  test("excludes blueprints", async () => {
+    const { rows } = await runReconcileUntitledDrafts(makeOpts(true));
+    const allIds = rows.map((r) => r.workflowId);
+    expect(allIds).not.toContain("ut-bp");
+  });
+
+  test("excludes rows newer than min-age-hours", async () => {
+    const { rows } = await runReconcileUntitledDrafts(makeOpts(true));
+    const allIds = rows.map((r) => r.workflowId);
+    expect(allIds).not.toContain("ut-new");
+  });
+
+  test("excludes rows with non-matching name", async () => {
+    const { rows } = await runReconcileUntitledDrafts(makeOpts(true));
+    const allIds = rows.map((r) => r.workflowId);
+    expect(allIds).not.toContain("named-wf");
+  });
+
+  test("skips bound workflows (appId attribute)", async () => {
+    const { summary } = await runReconcileUntitledDrafts(makeOpts(true));
+    expect(summary.boundSkipped).toBeGreaterThanOrEqual(1);
+  });
+
+  test("skips bound workflows (apps table)", async () => {
+    const { summary } = await runReconcileUntitledDrafts(makeOpts(true));
+    expect(summary.boundSkipped).toBe(2);
+  });
+
+  test("second run is idempotent — no more drafts found after delete", async () => {
+    await runReconcileUntitledDrafts(makeOpts(false));
+    setupMock();
+    const { summary } = await runReconcileUntitledDrafts(makeOpts(true));
+    expect(summary.found).toBe(0);
+  });
+});
