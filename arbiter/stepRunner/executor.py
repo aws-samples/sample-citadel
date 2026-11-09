@@ -38,7 +38,7 @@ from dag import (
     propagate_skips,
 )
 from approval_requests import AWAITING_APPROVAL, EXECUTION_SENTINEL, build_approval_request, is_awaiting
-from condition import evaluate_condition, resolve_field_path
+from condition import evaluate_condition, resolve_field_path, diagnose_resolution_failure
 from retry import calculate_backoff, should_retry
 from common import workflow_contract
 from common import failure_taxonomy
@@ -1458,24 +1458,7 @@ def _evaluate_and_persist_skips(execution_id, node_id, output, edges, node_resul
             # JSON-parseable" in the condition_evaluated log event.
             reason = None
             if actual is None:
-                field = condition.get('field', '')
-                # Walk the path manually to determine the cause.
-                parts = field.split('.') if field else []
-                current = output
-                for part in parts:
-                    if isinstance(current, str):
-                        import json as _json
-                        try:
-                            current = _json.loads(current)
-                        except (ValueError, TypeError):
-                            reason = 'output_not_json'
-                            break
-                    if not isinstance(current, dict) or part not in current:
-                        reason = 'field_missing'
-                        break
-                    current = current[part]
-                if reason is None and actual is None:
-                    reason = 'field_missing'
+                reason = diagnose_resolution_failure(output, condition.get('field', ''))
             _log_event(
                 'condition_evaluated',
                 executionId=execution_id,

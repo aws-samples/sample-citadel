@@ -148,15 +148,37 @@ class TestExecutorConditionDiagnostics:
         assert ce[0].get('reason') == 'output_not_json'
 
     def test_reason_field_missing_for_absent_key(self, capsys):
-        """condition_evaluated carries reason='field_missing' when key absent."""
+        """condition_evaluated carries reason='output_not_json' when the
+        envelope's response is a non-JSON string (the worker returned a
+        plain-text answer instead of structured JSON)."""
         mock_table = _mock_executions_table()
         with patch.object(executor, '_executions_table', mock_table):
             edges = [{
                 'id': 'e1', 'source': 'r', 'target': 'a',
                 'condition': {'field': 'result.route', 'operator': 'equals', 'value': 'branch-a'},
             }]
-            # No 'result' key at all
+            # Worker envelope with non-JSON response
             output = {'response': 'hello'}
+            node_results = {'r': {'status': 'completed'}, 'a': {'status': 'pending'}}
+            executor._evaluate_and_persist_skips('exec-1', 'r', output, edges, node_results)
+
+        events = _capture_log_events(capsys)
+        ce = [e for e in events if e.get('action') == 'condition_evaluated']
+        assert len(ce) == 1
+        assert ce[0]['matched'] is False
+        assert ce[0].get('reason') == 'output_not_json'
+
+    def test_reason_field_missing_for_non_envelope_output(self, capsys):
+        """condition_evaluated carries reason='field_missing' when output
+        is not a worker envelope and the key is absent."""
+        mock_table = _mock_executions_table()
+        with patch.object(executor, '_executions_table', mock_table):
+            edges = [{
+                'id': 'e1', 'source': 'r', 'target': 'a',
+                'condition': {'field': 'result.route', 'operator': 'equals', 'value': 'branch-a'},
+            }]
+            # Non-envelope output: extra keys beyond response/usage
+            output = {'status': 'done', 'data': 'something'}
             node_results = {'r': {'status': 'completed'}, 'a': {'status': 'pending'}}
             executor._evaluate_and_persist_skips('exec-1', 'r', output, edges, node_results)
 
