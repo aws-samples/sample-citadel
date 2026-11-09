@@ -55,6 +55,28 @@
 > detail view. For the end-to-end journey (blueprint → canvas → publish →
 > run → inspect), see [WORKFLOW_USER_GUIDE.md](./WORKFLOW_USER_GUIDE.md).
 
+### Binding model
+
+A workflow is bound to **at most one app** (1:1 binding). Attempting to bind a workflow that is already bound to a different app produces an error. To reuse the same blueprint in two apps, import it separately — each import creates an independent copy.
+
+The binding state is stored on **two DynamoDB sides**:
+
+| Side | Table | Field | Role |
+|---|---|---|---|
+| Workflow side | WORKFLOWS_TABLE | `workflow.appId` | Scalar back-reference (used by `startExecution` to stamp executions) |
+| App side | AppsTable `#META` row | `workflowIds` list | Forward reference (used by `listAppWorkflows`, the OrgIndex list) |
+
+Both sides are written **atomically** in a single `TransactWriteCommand` by the shared binding service (`backend/src/services/app-workflow-binding.ts`). After the DynamoDB transaction succeeds, the Registry manifest `workflowIds` is updated as a **best-effort mirror** with 3× retry. If the mirror write fails:
+
+- A `Citadel/Apps BindingMirrorFailed` CloudWatch metric is emitted.
+- The DynamoDB side is **authoritative for readers** (`listAppWorkflows` reads the `#META` row).
+- The 6-hourly `reconcile-apps-meta` reconciler drifts the manifest back into alignment.
+- The failure is logged but **not thrown** — the bind/unbind mutation succeeds from the caller's perspective.
+
+All callers that mutate the binding — `bindWorkflowToApp`, `unbindWorkflowFromApp`, `importBlueprint`, `deleteWorkflow`, `deleteApp` — go through the binding service. Direct writes to `workflowIds` or `workflow.appId` outside the service are a bug, enforced by a grep-guard test.
+
+A `--reconcile-bindings` mode in `reconcile-legacy-rows` detects and optionally repairs: orphan `appId` (app deleted), missing-from-list, dangling list entries (workflow deleted), and cross-reference mismatches.
+
 The app detail view (Agent Apps → select an app) includes a **Workflows**
 tab for managing the workflows bound to the app:
 

@@ -230,3 +230,31 @@ npx ts-node --project tsconfig.scripts.json scripts/reconcile-legacy-rows.ts \
 ```
 
 Flags: `--delete-untitled-drafts` (required), `--table-workflows` (required), `--table-executions` (required), `--table-apps` (optional — enables app-bound detection via `workflowIds`), `--name-prefix` (optional, default `Untitled Workflow`), `--min-age-hours` (optional, default 24), `--apply`, `--dry-run` (default). Idempotent.
+
+## reconcile-legacy-rows --reconcile-bindings (CIT-286)
+
+Reports and optionally repairs mismatches between the two sides of the app↔workflow binding: `workflow.appId` (scalar on the workflows table) and `workflowIds` (list on the apps table).
+
+Detected mismatch classes:
+
+- **Orphan appId** — `workflow.appId` points at an app that doesn't exist (deleted app, incomplete cleanup). `--apply` clears the `appId` attribute from the workflow.
+- **Missing from list** — `workflow.appId = X` but app X's `workflowIds` doesn't include the workflow. `--apply` appends the workflowId to the app's `workflowIds` list.
+- **Dangling entry** — An app's `workflowIds` contains a workflowId for a workflow that no longer exists. `--apply` removes the entry from the app's list.
+- **Cross-ref mismatch** — App A's `workflowIds` lists workflow W, but `W.appId` points at a different app B. `workflow.appId` is authoritative: `--apply` removes W from app A's `workflowIds` list (app B's list is unchanged).
+
+```bash
+# Dry-run — report mismatches
+AWS_REGION=<region> npx ts-node --project tsconfig.scripts.json scripts/reconcile-legacy-rows.ts \
+  --reconcile-bindings \
+  --table-workflows <workflows-table> \
+  --table-apps <apps-table>
+
+# Apply — fix mismatches
+AWS_REGION=<region> npx ts-node --project tsconfig.scripts.json scripts/reconcile-legacy-rows.ts \
+  --reconcile-bindings \
+  --table-workflows <workflows-table> \
+  --table-apps <apps-table> \
+  --apply
+```
+
+Flags: `--reconcile-bindings` (required), `--table-workflows` (required), `--table-apps` (required), `--apply`, `--dry-run` (default). Idempotent.

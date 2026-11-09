@@ -42,11 +42,17 @@ import {
   GetCommand,
   UpdateCommand,
   DeleteCommand,
+  TransactWriteCommand,
 } from "@aws-sdk/lib-dynamodb";
+import {
+  CloudWatchClient,
+  PutMetricDataCommand,
+} from "@aws-sdk/client-cloudwatch";
 import { mockClient } from "aws-sdk-client-mock";
 
 const ebMock = mockClient(EventBridgeClient);
 const ddbMock = mockClient(DynamoDBDocumentClient);
+const cwMock = mockClient(CloudWatchClient);
 
 /** The 12-char id the (mocked) registry assigns, ignoring the caller's uuid. */
 const REGISTRY_ASSIGNED_ID = "rec123456789";
@@ -261,8 +267,37 @@ describe("registry-agent-record-resolver — appId identity chain", () => {
     registryMock.__reset();
     ebMock.reset();
     ddbMock.reset();
+    cwMock.reset();
     ebMock.on(PutEventsCommand).resolves({});
-    ddbMock.on(GetCommand).resolves({});
+    cwMock.on(PutMetricDataCommand).resolves({});
+    ddbMock.on(TransactWriteCommand).resolves({});
+    ddbMock
+      .on(GetCommand)
+      .callsFake(
+        (input: { TableName: string; Key: Record<string, string> }) => {
+          if (input.TableName === process.env.WORKFLOWS_TABLE) {
+            return {
+              Item: {
+                workflowId: input.Key.workflowId,
+                orgId: "org-1",
+                name: "Test Workflow",
+                status: "DRAFT",
+              },
+            };
+          }
+          if (input.TableName === process.env.APPS_TABLE) {
+            return {
+              Item: {
+                appId: input.Key.appId,
+                orgId: "org-1",
+                name: "Test App",
+                workflowIds: [],
+              },
+            };
+          }
+          return {};
+        },
+      );
     ddbMock.on(UpdateCommand).resolves({});
     ddbMock.on(DeleteCommand).resolves({});
   });

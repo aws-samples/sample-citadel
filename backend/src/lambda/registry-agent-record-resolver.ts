@@ -98,6 +98,12 @@ import {
   revokeFabricatorAuthority,
 } from "./registry-agent-authority-lifecycle";
 import {
+  bind as bindingServiceBind,
+  unbind as bindingServiceUnbind,
+  unbindAll as bindingServiceUnbindAll,
+  type BindingServiceDeps,
+} from "../services/app-workflow-binding";
+import {
   createAppApiKey as createAppApiKeyImpl,
   revokeAppApiKey as revokeAppApiKeyImpl,
   rotateAppApiKey as rotateAppApiKeyImpl,
@@ -294,6 +300,7 @@ function recordFromInput(
 // ---------------------------------------------------------------------------
 
 const APPS_TABLE = process.env.APPS_TABLE!;
+const WORKFLOWS_TABLE = process.env.WORKFLOWS_TABLE!;
 const ENVIRONMENT = process.env.ENVIRONMENT || "dev";
 // Denormalized Registry -> DynamoDB projection (kept in sync by
 // registry-sync.ts off `citadel.agentcore.*` EventBridge events). Used ONLY
@@ -426,6 +433,19 @@ function getCloudWatchClient(): CloudWatchClient {
     _cloudwatchClient = new CloudWatchClient({});
   }
   return _cloudwatchClient;
+}
+
+/** Build the deps struct for app-workflow-binding service calls. */
+function getBindingDeps(): BindingServiceDeps {
+  return {
+    docClient: getDocClient(),
+    workflowsTable: WORKFLOWS_TABLE,
+    appsTable: APPS_TABLE,
+    registryService:
+      getRegistryService() as unknown as BindingServiceDeps["registryService"],
+    emitEvent: async (type: string, detail: unknown) => emitEvent(type, detail),
+    cloudwatch: getCloudWatchClient(),
+  };
 }
 
 /**
@@ -2214,6 +2234,11 @@ async function deleteApp(
   // (already revoked / missing) is swallowed inside revokeFabricatorAuthority.
   await revokeFabricatorAuthority(appId);
 
+  // CIT-286: clear workflow.appId on every bound workflow BEFORE the
+  // registry record and #META row are deleted. Best-effort per-workflow;
+  // errors are logged but not thrown (the app is about to be deleted).
+  await bindingServiceUnbindAll(getBindingDeps(), appId, { userId });
+
   await getRegistryService().deleteResource("agent", appId);
 
   // Eventually-consistent mirror: drop the AppsTable #META row so OrgIndex
@@ -2251,48 +2276,14 @@ async function bindWorkflowToApp(
   if (event !== undefined) {
     await assertManifestAccess(appId, record, event, "editor");
   }
-  const manifest = readManifest(record);
-  const existingIds = manifest.workflowIds || [];
-  if (existingIds.includes(workflowId)) {
-    // Idempotent — already bound, return the current projection unchanged.
-    return projectAgentAppNormalized(record);
-  }
 
-  const nextWorkflowIds = [...existingIds, workflowId];
-  const updatedContent = writeManifestMutation(record, (m) => {
-    m.workflowIds = nextWorkflowIds;
-    m.version = (m.version ?? 1) + 1;
-  });
+  // CIT-286: delegate to the binding service which performs an atomic
+  // TransactWrite (workflow.appId + #META.workflowIds) + registry mirror.
+  await bindingServiceBind(getBindingDeps(), appId, workflowId, { userId });
 
-  const updated = await getRegistryService().updateResource("agent", appId, {
-    customMetadata: updatedContent,
-  });
-
-  // Mirror to the AppsTable #META row (finding 4d69104a): the Agent Apps
-  // list reads workflowIds from the #META row (via OrgIndex), and the
-  // detail-view projection SHADOWS the manifest whenever the mirror's
-  // workflowIds list is non-empty — so a bind that only updates the
-  // manifest goes invisible to both the list and (once any prior bind has
-  // populated the mirror) the detail view. Registry manifest stays
-  // authoritative; this is a best-effort, eventually-consistent write
-  // (updateAppMetaFields logs and returns false on failure rather than
-  // throwing — see apps-table-meta.ts) — a failed write is caught by the
-  // 6-hourly reconciler's workflowIds drift check rather than failing this
-  // mutation.
-  const mirrored = await updateAppMetaFields(APPS_TABLE, appId, {
-    workflowIds: nextWorkflowIds,
-    updatedAt: new Date().toISOString(),
-  });
-  if (!mirrored) {
-    console.error("bindWorkflowToApp: AppsTable #META mirror write failed", {
-      appId,
-      workflowId,
-    });
-  }
-
-  await emitEvent("app.workflow.bound", { appId, workflowId, userId });
-
-  return projectAgentAppNormalized(updated);
+  // Re-fetch the record to return the up-to-date projection.
+  const updated = await getRegistryService().getResource("agent", appId);
+  return projectAgentAppNormalized(updated ?? record);
 }
 
 // `event` is OPTIONAL and gates on 'editor' when present (finding
@@ -2311,37 +2302,15 @@ async function unbindWorkflowFromApp(
   if (event !== undefined) {
     await assertManifestAccess(appId, record, event, "editor");
   }
-  const manifest = readManifest(record);
-  const remaining = (manifest.workflowIds || []).filter(
-    (id) => id !== workflowId,
-  );
 
-  const updatedContent = writeManifestMutation(record, (m) => {
-    m.workflowIds = remaining;
-    m.version = (m.version ?? 1) + 1;
-  });
+  // CIT-286: delegate to the binding service which performs an atomic
+  // TransactWrite (clear workflow.appId + remove from #META.workflowIds)
+  // + registry mirror.
+  await bindingServiceUnbind(getBindingDeps(), appId, workflowId, { userId });
 
-  const updated = await getRegistryService().updateResource("agent", appId, {
-    customMetadata: updatedContent,
-  });
-
-  // Mirror to the AppsTable #META row (finding 4d69104a) — see
-  // bindWorkflowToApp's comment for why this mirror write is required and
-  // why a failure here is non-fatal (reconciler backstop).
-  const mirrored = await updateAppMetaFields(APPS_TABLE, appId, {
-    workflowIds: remaining,
-    updatedAt: new Date().toISOString(),
-  });
-  if (!mirrored) {
-    console.error(
-      "unbindWorkflowFromApp: AppsTable #META mirror write failed",
-      { appId, workflowId },
-    );
-  }
-
-  await emitEvent("app.workflow.unbound", { appId, workflowId, userId });
-
-  return projectAgentAppNormalized(updated);
+  // Re-fetch the record to return the up-to-date projection.
+  const updated = await getRegistryService().getResource("agent", appId);
+  return projectAgentAppNormalized(updated ?? record);
 }
 
 // Exported for reuse by intake-orchestration-resolver (via
