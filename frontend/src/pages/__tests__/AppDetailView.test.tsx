@@ -8,58 +8,62 @@ import '@testing-library/jest-dom';
 import { appApiService } from '../../services/appApiService';
 import { workflowApiService } from '../../services/workflowApiService';
 
+// --- Mock prop types ---
+type P = React.PropsWithChildren<Record<string, unknown>>;
+type ChangeEvent = React.ChangeEvent<HTMLInputElement>;
+
 // Mock UI components to avoid versioned import issues
 jest.mock('@/components/ui/badge', () => ({
-  Badge: ({ children, className }: any) => React.createElement('span', { className }, children),
+  Badge: ({ children, className }: P) => React.createElement('span', { className: className as string }, children),
 }));
 
 jest.mock('@/components/ui/button', () => ({
-  Button: ({ children, onClick, disabled, className, variant, size, ...props }: any) =>
-    React.createElement('button', { onClick, disabled, className, ...props }, children),
+  Button: ({ children, onClick, disabled, className, ...props }: P) =>
+    React.createElement('button', { onClick: onClick as React.MouseEventHandler, disabled: disabled as boolean, className: className as string, ...props }, children),
 }));
 
 // Stateful Tabs mock that tracks active tab
 let tabsOnValueChange: ((v: string) => void) | null = null;
 jest.mock('@/components/ui/tabs', () => ({
-  Tabs: ({ children, value, onValueChange }: any) => {
-    tabsOnValueChange = onValueChange;
-    return React.createElement('div', { 'data-testid': 'tabs', 'data-value': value }, children);
+  Tabs: ({ children, value, onValueChange }: P) => {
+    tabsOnValueChange = onValueChange as (v: string) => void;
+    return React.createElement('div', { 'data-testid': 'tabs', 'data-value': value as string }, children);
   },
-  TabsList: ({ children }: any) => React.createElement('div', { role: 'tablist' }, children),
-  TabsTrigger: ({ children, value, className }: any) =>
+  TabsList: ({ children }: P) => React.createElement('div', { role: 'tablist' }, children),
+  TabsTrigger: ({ children, value, className }: P) =>
     React.createElement('button', {
       role: 'tab',
-      'data-value': value,
-      className,
-      onClick: () => tabsOnValueChange?.(value),
+      'data-value': value as string,
+      className: className as string,
+      onClick: () => tabsOnValueChange?.(value as string),
     }, children),
-  TabsContent: ({ children, value }: any) =>
-    React.createElement('div', { role: 'tabpanel', 'data-tab': value }, children),
+  TabsContent: ({ children, value }: P) =>
+    React.createElement('div', { role: 'tabpanel', 'data-tab': value as string }, children),
 }));
 
 jest.mock('@/components/ui/dialog', () => ({
-  Dialog: ({ children, open }: any) => open ? React.createElement('div', { 'data-testid': 'dialog' }, children) : null,
-  DialogContent: ({ children }: any) => React.createElement('div', null, children),
-  DialogHeader: ({ children }: any) => React.createElement('div', null, children),
-  DialogTitle: ({ children }: any) => React.createElement('h2', null, children),
-  DialogDescription: ({ children }: any) => React.createElement('p', null, children),
-  DialogFooter: ({ children }: any) => React.createElement('div', null, children),
+  Dialog: ({ children, open }: P) => (open as boolean) ? React.createElement('div', { 'data-testid': 'dialog' }, children) : null,
+  DialogContent: ({ children }: P) => React.createElement('div', null, children),
+  DialogHeader: ({ children }: P) => React.createElement('div', null, children),
+  DialogTitle: ({ children }: P) => React.createElement('h2', null, children),
+  DialogDescription: ({ children }: P) => React.createElement('p', null, children),
+  DialogFooter: ({ children }: P) => React.createElement('div', null, children),
 }));
 
 jest.mock('@/components/ui/textarea', () => ({
-  Textarea: (props: any) => React.createElement('textarea', props),
+  Textarea: (props: Record<string, unknown>) => React.createElement('textarea', props as React.TextareaHTMLAttributes<HTMLTextAreaElement>),
 }));
 
 jest.mock('@/components/ui/input', () => ({
-  Input: (props: any) => React.createElement('input', props),
+  Input: (props: Record<string, unknown>) => React.createElement('input', props as React.InputHTMLAttributes<HTMLInputElement>),
 }));
 
 jest.mock('@/components/ModelOverrideSelect', () => ({
-  ModelOverrideSelect: (props: any) =>
+  ModelOverrideSelect: (props: { value?: string; onChange: (v: string) => void }) =>
     React.createElement('input', {
       'data-testid': 'model-override',
       value: props.value || '',
-      onChange: (e: any) => props.onChange(e.target.value),
+      onChange: (e: ChangeEvent) => props.onChange(e.target.value),
     }),
 }));
 
@@ -234,7 +238,7 @@ describe('AppDetailView', () => {
       expect(screen.getByText('Test Workflow')).toBeInTheDocument();
     });
 
-    expect(screen.getByText('2 nodes')).toBeInTheDocument();
+    expect(screen.getByText(/2 nodes/)).toBeInTheDocument();
   });
 
   // Req 11.6: Permissions tab shows table
