@@ -7,59 +7,63 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import '@testing-library/jest-dom';
 
+// --- Mock prop types ---
+type P = React.PropsWithChildren<Record<string, unknown>>;
+type ChangeEvent = React.ChangeEvent<HTMLInputElement>;
+
 // --- UI component mocks (matching project convention) ---
 jest.mock('@/components/ui/badge', () => ({
-  Badge: ({ children, className }: any) => React.createElement('span', { className }, children),
+  Badge: ({ children, className }: P) => React.createElement('span', { className: className as string }, children),
 }));
 jest.mock('@/components/ui/button', () => ({
-  Button: ({ children, onClick, disabled, className, ...props }: any) =>
-    React.createElement('button', { onClick, disabled, className, ...props }, children),
+  Button: ({ children, onClick, disabled, className, ...props }: P) =>
+    React.createElement('button', { onClick: onClick as React.MouseEventHandler, disabled: disabled as boolean, className: className as string, ...props }, children),
 }));
 let tabsOnValueChange: ((v: string) => void) | null = null;
 jest.mock('@/components/ui/tabs', () => ({
-  Tabs: ({ children, value, onValueChange }: any) => {
-    tabsOnValueChange = onValueChange;
-    return React.createElement('div', { 'data-testid': 'tabs', 'data-value': value }, children);
+  Tabs: ({ children, value, onValueChange }: P) => {
+    tabsOnValueChange = onValueChange as (v: string) => void;
+    return React.createElement('div', { 'data-testid': 'tabs', 'data-value': value as string }, children);
   },
-  TabsList: ({ children }: any) => React.createElement('div', { role: 'tablist' }, children),
-  TabsTrigger: ({ children, value, className }: any) =>
-    React.createElement('button', { role: 'tab', 'data-value': value, className, onClick: () => tabsOnValueChange?.(value) }, children),
-  TabsContent: ({ children, value }: any) =>
-    React.createElement('div', { role: 'tabpanel', 'data-tab': value }, children),
+  TabsList: ({ children }: P) => React.createElement('div', { role: 'tablist' }, children),
+  TabsTrigger: ({ children, value, className }: P) =>
+    React.createElement('button', { role: 'tab', 'data-value': value as string, className: className as string, onClick: () => tabsOnValueChange?.(value as string) }, children),
+  TabsContent: ({ children, value }: P) =>
+    React.createElement('div', { role: 'tabpanel', 'data-tab': value as string }, children),
 }));
 jest.mock('@/components/ui/dialog', () => ({
-  Dialog: ({ children, open }: any) => open ? React.createElement('div', { 'data-testid': 'dialog' }, children) : null,
-  DialogContent: ({ children }: any) => React.createElement('div', null, children),
-  DialogHeader: ({ children }: any) => React.createElement('div', null, children),
-  DialogTitle: ({ children }: any) => React.createElement('h2', null, children),
-  DialogDescription: ({ children }: any) => React.createElement('p', null, children),
-  DialogFooter: ({ children }: any) => React.createElement('div', null, children),
+  Dialog: ({ children, open }: P) => (open as boolean) ? React.createElement('div', { 'data-testid': 'dialog' }, children) : null,
+  DialogContent: ({ children }: P) => React.createElement('div', null, children),
+  DialogHeader: ({ children }: P) => React.createElement('div', null, children),
+  DialogTitle: ({ children }: P) => React.createElement('h2', null, children),
+  DialogDescription: ({ children }: P) => React.createElement('p', null, children),
+  DialogFooter: ({ children }: P) => React.createElement('div', null, children),
 }));
 jest.mock('@/components/ui/textarea', () => ({
-  Textarea: (props: any) => React.createElement('textarea', props),
+  Textarea: (props: Record<string, unknown>) => React.createElement('textarea', props as React.TextareaHTMLAttributes<HTMLTextAreaElement>),
 }));
 jest.mock('@/components/ui/input', () => ({
-  Input: (props: any) => React.createElement('input', props),
+  Input: (props: Record<string, unknown>) => React.createElement('input', props as React.InputHTMLAttributes<HTMLInputElement>),
 }));
 jest.mock('@/components/ui/select', () => ({
-  Select: ({ children }: any) => React.createElement('div', null, children),
-  SelectTrigger: ({ children }: any) => React.createElement('div', null, children),
-  SelectContent: ({ children }: any) => React.createElement('div', null, children),
-  SelectItem: ({ children }: any) => React.createElement('div', null, children),
+  Select: ({ children }: P) => React.createElement('div', null, children),
+  SelectTrigger: ({ children }: P) => React.createElement('div', null, children),
+  SelectContent: ({ children }: P) => React.createElement('div', null, children),
+  SelectItem: ({ children }: P) => React.createElement('div', null, children),
   SelectValue: () => null,
 }));
 jest.mock('@/components/ModelOverrideSelect', () => ({
-  ModelOverrideSelect: (props: any) =>
-    React.createElement('input', { 'data-testid': 'model-override', value: props.value || '', onChange: (e: any) => props.onChange(e.target.value) }),
+  ModelOverrideSelect: (props: { value?: string; onChange: (v: string) => void }) =>
+    React.createElement('input', { 'data-testid': 'model-override', value: props.value || '', onChange: (e: ChangeEvent) => props.onChange(e.target.value) }),
 }));
 jest.mock('@/contexts/OrganizationContext', () => ({
   useOrganization: () => ({ selectedOrganization: 'org-1', canApproveExecutions: false, loading: false }),
 }));
 jest.mock('@/components/ui/card', () => ({
-  Card: ({ children, className, ...props }: any) => React.createElement('div', { className, ...props }, children),
+  Card: ({ children, className, ...props }: P) => React.createElement('div', { className: className as string, ...props }, children),
 }));
 jest.mock('@/components/PageContainer', () => ({
-  PageContainer: ({ children }: any) => React.createElement('div', null, children),
+  PageContainer: ({ children }: P) => React.createElement('div', null, children),
 }));
 jest.mock('@/components/ExecutionDetailSheet', () => ({
   ExecutionDetailSheet: () => null,
@@ -73,9 +77,9 @@ jest.mock('@/hooks/useExecutionSubscription', () => ({
 }));
 jest.mock('sonner', () => ({ toast: { success: jest.fn(), error: jest.fn() } }));
 jest.mock('recharts', () => ({
-  ResponsiveContainer: ({ children }: any) => React.createElement('div', null, children),
-  LineChart: ({ children }: any) => React.createElement('div', null, children),
-  AreaChart: ({ children }: any) => React.createElement('div', null, children),
+  ResponsiveContainer: ({ children }: P) => React.createElement('div', null, children),
+  LineChart: ({ children }: P) => React.createElement('div', null, children),
+  AreaChart: ({ children }: P) => React.createElement('div', null, children),
   Line: () => null,
   Area: () => null,
   XAxis: () => null,

@@ -342,14 +342,15 @@ function deriveAwaitingNodeId(exec: Execution): string | null {
   // Prefer the nodeId from the first undecided approval request.
   if (pending?.nodeId) return pending.nodeId;
   try {
-    const nr: Record<string, any> =
+    const nr: Record<string, unknown> =
       typeof exec.nodeResults === 'string'
         ? JSON.parse(exec.nodeResults)
-        : exec.nodeResults;
+        : (exec.nodeResults as Record<string, unknown>) ?? {};
     if (nr && typeof nr === 'object') {
       for (const [key, val] of Object.entries(nr)) {
-        if (val && typeof val === 'object' && (val as any).status === 'awaiting_approval') {
-          return (val as any).nodeId ?? key;
+        const node = val as Record<string, unknown> | null;
+        if (node && typeof node === 'object' && node.status === 'awaiting_approval') {
+          return (typeof node.nodeId === 'string' ? node.nodeId : null) ?? key;
         }
       }
     }
@@ -425,9 +426,7 @@ function buildPreconditions(
   return preconditions;
 }
 
-// ---- Pure helpers for publish flow (moved to publishUtils.ts, re-exported for backward compatibility) ----
-
-export { getHealthStatus, shouldEnablePublish, type HealthStatus };
+// ---- Pure helpers for publish flow (see publishUtils.ts) ----
 
 const HEALTH_COLORS: Record<HealthStatus, { bg: string; text: string; label: string }> = {
   green: { bg: 'bg-chart-2/20', text: 'text-chart-2', label: 'Healthy' },
@@ -550,11 +549,11 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
       unsubscribe = serverService.subscribe(
         ON_APP_STATUS_CHANGE,
         { appId },
-        (data: any) => {
-          const event = data?.onAppStatusChange;
+        (data: Record<string, unknown>) => {
+          const event = data?.onAppStatusChange as Record<string, unknown> | undefined;
           if (event?.newStatus) {
             setApp((prev) =>
-              prev ? { ...prev, status: event.newStatus, updatedAt: event.timestamp } : prev,
+              prev ? { ...prev, status: event.newStatus as RegistryAgentRecordDetail['status'], updatedAt: event.timestamp as string } : prev,
             );
           }
         },
@@ -592,18 +591,21 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
         workflowIds.map((id) => workflowApiService.getWorkflow(id)),
       );
       const loaded: WorkflowInfo[] = results
-        .filter((r): r is PromiseFulfilledResult<any> => r.status === 'fulfilled' && r.value)
-        .map((r) => ({
-          workflowId: r.value.workflowId,
-          name: r.value.name || r.value.workflowId,
-          status: r.value.status || 'UNKNOWN',
-          nodeCount: r.value.nodes?.length ?? parseDefinitionNodes(r.value.definition).length,
-          version: r.value.version ?? 1,
-          createdAt: r.value.createdAt ?? '',
-          updatedAt: r.value.updatedAt ?? '',
-          shortId: shortId(r.value.workflowId),
-          hasPlaceholders: hasPlaceholderNodes(r.value.definition),
-        }))
+        .filter((r): r is PromiseFulfilledResult<Record<string, unknown>> => r.status === 'fulfilled' && !!r.value)
+        .map((r) => {
+          const v = r.value as Record<string, unknown>;
+          return {
+            workflowId: v.workflowId as string,
+            name: (v.name as string) || (v.workflowId as string),
+            status: (v.status as string) || 'UNKNOWN',
+            nodeCount: Array.isArray(v.nodes) ? (v.nodes as unknown[]).length : parseDefinitionNodes(v.definition as string | undefined).length,
+            version: (v.version as number) ?? 1,
+            createdAt: (v.createdAt as string) ?? '',
+            updatedAt: (v.updatedAt as string) ?? '',
+            shortId: shortId(v.workflowId as string),
+            hasPlaceholders: hasPlaceholderNodes(v.definition as string | undefined),
+          };
+        })
         .sort(sortByNameThenDate);
       setWorkflows(loaded);
     } catch {
@@ -632,7 +634,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
         workflowIds.map((id) => executionApiService.listExecutions(id)),
       );
       const items: Execution[] = results
-        .filter((r): r is PromiseFulfilledResult<any> => r.status === 'fulfilled' && !!r.value)
+        .filter((r): r is PromiseFulfilledResult<{ items: Execution[]; nextToken: string | null }> => r.status === 'fulfilled' && !!r.value)
         .flatMap((r) => r.value.items || []);
       items.sort((a, b) => (b.startedAt || '').localeCompare(a.startedAt || ''));
       setExecutions(items);
@@ -672,9 +674,9 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
   // (the hook accumulates events across executions, so filter by executionId).
   const runStatus = useMemo<string | null>(() => {
     if (!activeRun) return null;
-    const evts = runEvents.filter((e: any) => e.executionId === activeRun.executionId);
-    if (evts.some((e: any) => e.eventType === 'workflow.failed')) return 'failed';
-    if (evts.some((e: any) => e.eventType === 'workflow.completed')) return 'completed';
+    const evts = runEvents.filter((e: { executionId?: string }) => e.executionId === activeRun.executionId);
+    if (evts.some((e: { eventType?: string }) => e.eventType === 'workflow.failed')) return 'failed';
+    if (evts.some((e: { eventType?: string }) => e.eventType === 'workflow.completed')) return 'completed';
     if (evts.length > 0) return 'running';
     return 'pending';
   }, [runEvents, activeRun]);
@@ -705,7 +707,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
     const status = selectedExecution.status || '';
     if (!isRunning(status) && normalizeExecutionStatus(status) !== 'pending') return;
     const hasEventForSelected = runEvents.some(
-      (e: any) => e?.executionId === selectedExecution.executionId,
+      (e: { executionId?: string }) => e?.executionId === selectedExecution.executionId,
     );
     if (!hasEventForSelected) return;
     loadExecutions(app.workflowIds);
@@ -845,17 +847,17 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
       const boundIds = new Set((app?.agentBindings || []).map((b: RegistryAgentBinding) => b.agentId));
       setAvailableAgents(
         configs
-          .filter((c: any) => c.state === 'active' && !boundIds.has(c.agentId))
-          .map((c: any) => {
-            const config = typeof c.config === 'object' && c.config !== null ? c.config : {};
+          .filter((c) => c.state === 'active' && !boundIds.has(c.agentId))
+          .map((c) => {
+            const config = typeof c.config === 'object' && c.config !== null ? (c.config as Record<string, unknown>) : {} as Record<string, unknown>;
             return {
               agentId: c.agentId,
               // Prefer Registry top-level name, then legacy config.name, then agentId.
-              name: c.name || config.name || c.agentId,
+              name: c.name || (config.name as string) || c.agentId,
               // Prefer top-level description (record field), then config.description (legacy).
               description:
                 (typeof c.description === 'string' && c.description) ||
-                (typeof config.description === 'string' ? config.description : ''),
+                (typeof config.description === 'string' ? config.description as string : ''),
             };
           }),
       );
@@ -929,15 +931,15 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
       const boundIds = new Set(app.workflowIds || []);
       setUnboundWorkflows(
         (result.items || [])
-          .filter((w: any) => !boundIds.has(w.workflowId))
-          .map((w: any) => ({
-            workflowId: w.workflowId,
-            name: w.name || w.workflowId,
-            status: w.status || 'UNKNOWN',
-            version: w.version ?? 1,
-            createdAt: w.createdAt ?? '',
-            shortId: shortId(w.workflowId),
-            hasPlaceholders: hasPlaceholderNodes(w.definition),
+          .filter((w: Record<string, unknown>) => !boundIds.has(w.workflowId as string))
+          .map((w: Record<string, unknown>) => ({
+            workflowId: w.workflowId as string,
+            name: (w.name as string) || (w.workflowId as string),
+            status: (w.status as string) || 'UNKNOWN',
+            version: (w.version as number) ?? 1,
+            createdAt: (w.createdAt as string) ?? '',
+            shortId: shortId(w.workflowId as string),
+            hasPlaceholders: hasPlaceholderNodes(w.definition as string | undefined),
           }))
           .sort(sortByNameThenDate),
       );
@@ -1593,7 +1595,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
                     const newValues = { ...parsedValues, adminEmail: email };
                     await appApiService.setAppConfigValues(app.appId, JSON.stringify(newValues), app.version);
                     await loadApp();
-                  } catch (err: any) {
+                  } catch (err: unknown) {
                     console.error('Failed to save admin email:', err);
                   }
                 }
@@ -1611,7 +1613,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
                   const newValues = { ...parsedValues, adminEmail: email };
                   await appApiService.setAppConfigValues(app.appId, JSON.stringify(newValues), app.version);
                   await loadApp();
-                } catch (err: any) {
+                } catch (err: unknown) {
                   console.error('Failed to save admin email:', err);
                 }
               }}
