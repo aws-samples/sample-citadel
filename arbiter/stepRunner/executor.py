@@ -791,13 +791,47 @@ def start_execution(execution_id: str, workflow_id: str) -> None:
     if isinstance(configuration, str):
         configuration = json.loads(configuration)
 
+    # Parse execution-level input (AWSJSON string written by startExecution
+    # resolver). Absent or empty → {}; invalid JSON → fail the execution
+    # with a clear error rather than silently discarding the caller's input.
+    raw_input = execution.get('input')
+    if raw_input:
+        try:
+            execution_input = json.loads(raw_input) if isinstance(raw_input, str) else raw_input
+        except (json.JSONDecodeError, TypeError) as exc:
+            _executions_table.update_item(
+                Key={'executionId': execution_id},
+                UpdateExpression='SET #status = :status, #error = :error, #completedAt = :completedAt',
+                ExpressionAttributeNames={
+                    '#status': 'status',
+                    '#error': 'error',
+                    '#completedAt': 'completedAt',
+                },
+                ExpressionAttributeValues={
+                    ':status': 'failed',
+                    ':error': f'Invalid execution input JSON: {exc}',
+                    ':completedAt': _now_iso(),
+                },
+            )
+            _log_event(
+                'execution_input_invalid',
+                executionId=execution_id,
+                workflowId=workflow_id,
+                error=str(exc),
+            )
+            return
+        if not isinstance(execution_input, dict):
+            execution_input = {}
+    else:
+        execution_input = {}
+
     for node_id in root_ids:
         node = next((n for n in nodes if n['id'] == node_id), None)
         if node:
             # Per-node configuration overrides workflow-level per-key
             # (decision 59376546). No node configuration → workflow config
             # unchanged, byte-identical to the pre-feature dispatch.
-            invoke_node(execution_id, workflow_id, node, {},
+            invoke_node(execution_id, workflow_id, node, execution_input,
                         merge_node_configuration(configuration, node),
                         run_id=_run_id)
 
