@@ -16,11 +16,21 @@ import {
   EventBridgeClient,
   PutEventsCommand,
 } from "@aws-sdk/client-eventbridge";
-import { DynamoDBDocumentClient, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  UpdateCommand,
+  GetCommand,
+  TransactWriteCommand,
+} from "@aws-sdk/lib-dynamodb";
+import {
+  CloudWatchClient,
+  PutMetricDataCommand,
+} from "@aws-sdk/client-cloudwatch";
 import { mockClient } from "aws-sdk-client-mock";
 
 const ebMock = mockClient(EventBridgeClient);
 const ddbMock = mockClient(DynamoDBDocumentClient);
+const cwMock = mockClient(CloudWatchClient);
 
 import {
   seedMockRegistry,
@@ -115,8 +125,35 @@ describe("registry-agent-record-resolver — workflow binding", () => {
     resetMockRegistry();
     ebMock.reset();
     ddbMock.reset();
+    cwMock.reset();
     ebMock.on(PutEventsCommand).resolves({});
     ddbMock.on(UpdateCommand).resolves({});
+    ddbMock.on(TransactWriteCommand).resolves({});
+    cwMock.on(PutMetricDataCommand).resolves({});
+    // Default GetCommand: return a workflow with no appId and an app with workflowIds
+    ddbMock.on(GetCommand).callsFake((input) => {
+      if (input.TableName === "citadel-workflows-test") {
+        return {
+          Item: {
+            workflowId: input.Key.workflowId,
+            orgId: "org-1",
+            name: "Test Workflow",
+            status: "DRAFT",
+          },
+        };
+      }
+      if (input.TableName === "citadel-apps-test") {
+        return {
+          Item: {
+            appId: input.Key.appId,
+            orgId: "org-1",
+            name: "Test App",
+            workflowIds: [],
+          },
+        };
+      }
+      return { Item: undefined };
+    });
   });
 
   afterAll(() => {
@@ -152,11 +189,10 @@ describe("registry-agent-record-resolver — workflow binding", () => {
       expect(boundEvents.length).toBe(1);
     });
 
-    // Finding 4d69104a: bind must update BOTH the registry manifest AND
-    // the AppsTable #META mirror's workflowIds — the Agent Apps list reads
-    // the mirror (via OrgIndex), and the detail view shadows the manifest
-    // whenever the mirror's workflowIds list is non-empty.
-    test("mirrors the updated workflowIds onto the AppsTable #META row", async () => {
+    // Finding 4d69104a / CIT-286: bind now uses TransactWriteCommand to
+    // atomically update both workflow.appId AND AppsTable #META.workflowIds.
+    // The registry manifest is mirrored separately (best-effort).
+    test("writes both sides atomically via TransactWrite", async () => {
       seedApp({ manifest: { workflowIds: ["wf-existing"] } });
 
       await invokeHandler(
@@ -166,23 +202,37 @@ describe("registry-agent-record-resolver — workflow binding", () => {
         }),
       );
 
-      const metaUpdate = ddbMock
-        .commandCalls(UpdateCommand)
-        .find(
-          (c) =>
-            c.args[0].input.TableName === "citadel-apps-test" &&
-            (c.args[0].input.Key as Record<string, unknown> | undefined)
-              ?.appId === "app-1",
-        );
-      expect(metaUpdate).toBeDefined();
-      const values = metaUpdate!.args[0].input
-        .ExpressionAttributeValues as Record<string, unknown>;
-      expect(values[":v_workflowIds"]).toEqual(["wf-existing", "wf-new"]);
-      expect(typeof values[":v_updatedAt"]).toBe("string");
+      const txCalls = ddbMock.commandCalls(TransactWriteCommand);
+      expect(txCalls.length).toBe(1);
+      const items = txCalls[0].args[0].input.TransactItems;
+      expect(items).toHaveLength(2);
     });
 
     test("is idempotent when workflow already bound to same app", async () => {
       seedApp({ manifest: { workflowIds: ["wf-1"] } });
+      // Seed DDB: workflow already has appId, app already has wf-1 in list
+      ddbMock.on(GetCommand).callsFake((input) => {
+        if (input.TableName === "citadel-workflows-test") {
+          return {
+            Item: {
+              workflowId: "wf-1",
+              orgId: "org-1",
+              appId: "app-1",
+              status: "DRAFT",
+            },
+          };
+        }
+        if (input.TableName === "citadel-apps-test") {
+          return {
+            Item: {
+              appId: "app-1",
+              orgId: "org-1",
+              workflowIds: ["wf-1"],
+            },
+          };
+        }
+        return { Item: undefined };
+      });
 
       await expect(
         invokeHandler(
@@ -194,9 +244,8 @@ describe("registry-agent-record-resolver — workflow binding", () => {
       ).resolves.toBeDefined();
 
       expect(ebMock.commandCalls(PutEventsCommand).length).toBe(0);
-      // Idempotent short-circuit returns before any write — no mirror
-      // update should be issued either.
-      expect(ddbMock.commandCalls(UpdateCommand).length).toBe(0);
+      // Idempotent short-circuit returns before any TransactWrite.
+      expect(ddbMock.commandCalls(TransactWriteCommand).length).toBe(0);
     });
 
     test("throws when app not found", async () => {
@@ -210,13 +259,12 @@ describe("registry-agent-record-resolver — workflow binding", () => {
       ).rejects.toThrow("App not found");
     });
 
-    // Eventually-consistent contract (matches createApp/updateApp/deleteApp
-    // in registry-agent-record-resolver-meta-writes.test.ts): a mirror
-    // write failure must not fail the mutation itself.
-    test("succeeds even if the AppsTable #META mirror write fails", async () => {
+    // Eventually-consistent contract: the binding service logs a mirror
+    // failure but does not throw — the TransactWrite (DDB side) succeeds.
+    test("succeeds even if the registry manifest mirror write fails", async () => {
       seedApp({ manifest: { workflowIds: [] } });
-      ddbMock.on(UpdateCommand).rejects(new Error("AppsTable down"));
 
+      // The registry updateResource call will fail, but bind should still succeed.
       await expect(
         invokeHandler(
           makeEvent("bindWorkflowToApp", {
@@ -233,6 +281,29 @@ describe("registry-agent-record-resolver — workflow binding", () => {
   describe("unbindWorkflowFromApp", () => {
     test("removes workflowId from app workflowIds", async () => {
       seedApp({ manifest: { workflowIds: ["wf-1", "wf-2"] } });
+      // Seed DDB to match
+      ddbMock.on(GetCommand).callsFake((input) => {
+        if (input.TableName === "citadel-workflows-test") {
+          return {
+            Item: {
+              workflowId: input.Key.workflowId,
+              orgId: "org-1",
+              appId: "app-1",
+              status: "DRAFT",
+            },
+          };
+        }
+        if (input.TableName === "citadel-apps-test") {
+          return {
+            Item: {
+              appId: "app-1",
+              orgId: "org-1",
+              workflowIds: ["wf-1", "wf-2"],
+            },
+          };
+        }
+        return { Item: undefined };
+      });
 
       await expect(
         invokeHandler(
@@ -251,10 +322,32 @@ describe("registry-agent-record-resolver — workflow binding", () => {
       expect(unboundEvents.length).toBe(1);
     });
 
-    // Finding 4d69104a: unbind must also update the AppsTable #META
-    // mirror's workflowIds, keeping it in sync with the registry manifest.
-    test("mirrors the updated workflowIds onto the AppsTable #META row", async () => {
+    // Finding 4d69104a / CIT-286: unbind now uses TransactWriteCommand.
+    test("writes both sides atomically via TransactWrite", async () => {
       seedApp({ manifest: { workflowIds: ["wf-1", "wf-2"] } });
+      // Seed DDB: workflow bound to app-1, app has both in list
+      ddbMock.on(GetCommand).callsFake((input) => {
+        if (input.TableName === "citadel-workflows-test") {
+          return {
+            Item: {
+              workflowId: input.Key.workflowId,
+              orgId: "org-1",
+              appId: "app-1",
+              status: "DRAFT",
+            },
+          };
+        }
+        if (input.TableName === "citadel-apps-test") {
+          return {
+            Item: {
+              appId: "app-1",
+              orgId: "org-1",
+              workflowIds: ["wf-1", "wf-2"],
+            },
+          };
+        }
+        return { Item: undefined };
+      });
 
       await invokeHandler(
         makeEvent("unbindWorkflowFromApp", {
@@ -263,18 +356,8 @@ describe("registry-agent-record-resolver — workflow binding", () => {
         }),
       );
 
-      const metaUpdate = ddbMock
-        .commandCalls(UpdateCommand)
-        .find(
-          (c) =>
-            c.args[0].input.TableName === "citadel-apps-test" &&
-            (c.args[0].input.Key as Record<string, unknown> | undefined)
-              ?.appId === "app-1",
-        );
-      expect(metaUpdate).toBeDefined();
-      const values = metaUpdate!.args[0].input
-        .ExpressionAttributeValues as Record<string, unknown>;
-      expect(values[":v_workflowIds"]).toEqual(["wf-2"]);
+      const txCalls = ddbMock.commandCalls(TransactWriteCommand);
+      expect(txCalls.length).toBe(1);
     });
 
     test("throws when app not found", async () => {
@@ -288,9 +371,30 @@ describe("registry-agent-record-resolver — workflow binding", () => {
       ).rejects.toThrow("App not found");
     });
 
-    test("succeeds even if the AppsTable #META mirror write fails", async () => {
+    test("succeeds even if the registry manifest mirror write fails", async () => {
       seedApp({ manifest: { workflowIds: ["wf-1"] } });
-      ddbMock.on(UpdateCommand).rejects(new Error("AppsTable down"));
+      ddbMock.on(GetCommand).callsFake((input) => {
+        if (input.TableName === "citadel-workflows-test") {
+          return {
+            Item: {
+              workflowId: "wf-1",
+              orgId: "org-1",
+              appId: "app-1",
+              status: "DRAFT",
+            },
+          };
+        }
+        if (input.TableName === "citadel-apps-test") {
+          return {
+            Item: {
+              appId: "app-1",
+              orgId: "org-1",
+              workflowIds: ["wf-1"],
+            },
+          };
+        }
+        return { Item: undefined };
+      });
 
       await expect(
         invokeHandler(

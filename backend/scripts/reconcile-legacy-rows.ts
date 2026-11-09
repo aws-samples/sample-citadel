@@ -70,6 +70,8 @@ export interface ParsedArgs {
   tableApps: string;
   /** When true, scan workflows for untitled never-run DRAFT workflows. */
   deleteUntitledDrafts: boolean;
+  /** CIT-286: when true, reconcile app↔workflow binding consistency. */
+  reconcileBindings: boolean;
   /** Literal name prefix for untitled draft matching. Default 'Untitled Workflow'. */
   namePrefix: string;
   /** Minimum age in hours before a row is eligible. Default 24. */
@@ -87,6 +89,7 @@ const KNOWN_FLAGS = new Set([
   "--delete-unpublished-intake-blueprints",
   "--delete-placeholder-copies",
   "--delete-untitled-drafts",
+  "--reconcile-bindings",
   "--name-prefix",
   "--min-age-hours",
   "--apply",
@@ -102,6 +105,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let deleteUnpublishedIntakeBlueprints = false;
   let deletePlaceholderCopies = false;
   let deleteUntitledDrafts = false;
+  let reconcileBindings = false;
   let namePrefix = "Untitled Workflow";
   let minAgeHours = 24;
 
@@ -142,6 +146,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case "--delete-untitled-drafts":
         deleteUntitledDrafts = true;
         break;
+      case "--reconcile-bindings":
+        reconcileBindings = true;
+        break;
       case "--name-prefix":
         namePrefix = argv[++i];
         break;
@@ -158,6 +165,13 @@ export function parseArgs(argv: string[]): ParsedArgs {
     if (!tableWorkflows || !tableExecutions) {
       console.error(
         "Usage: --delete-untitled-drafts --table-workflows <table> --table-executions <table> [--table-apps <table>] [--name-prefix <prefix>] [--min-age-hours <n>] [--apply]",
+      );
+      process.exit(1);
+    }
+  } else if (reconcileBindings) {
+    if (!tableWorkflows || !tableApps) {
+      console.error(
+        "Usage: --reconcile-bindings --table-workflows <table> --table-apps <table> [--apply]",
       );
       process.exit(1);
     }
@@ -191,6 +205,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     deleteUnpublishedIntakeBlueprints,
     deletePlaceholderCopies,
     deleteUntitledDrafts,
+    reconcileBindings,
     namePrefix,
     minAgeHours,
   };
@@ -635,20 +650,21 @@ export interface ReconcilePlaceholderCopiesOptions {
  * Returns true when any node in a parsed workflow definition has an agentId
  * starting with 'placeholder-'.
  */
-export function hasPlaceholderAgent(
-  definition: unknown,
-): boolean {
+export function hasPlaceholderAgent(definition: unknown): boolean {
   if (!definition || typeof definition !== "object") return false;
   const def = definition as Record<string, unknown>;
   const nodes = Array.isArray(def.nodes) ? def.nodes : [];
   return nodes.some((node: unknown) => {
     if (!node || typeof node !== "object") return false;
     const n = node as Record<string, unknown>;
-    const agentId = typeof n.agentId === "string" ? n.agentId
-      : typeof (n as Record<string, unknown>).data === "object" &&
-          (n as Record<string, unknown>).data !== null
-        ? ((n as Record<string, unknown>).data as Record<string, unknown>).agentId
-        : undefined;
+    const agentId =
+      typeof n.agentId === "string"
+        ? n.agentId
+        : typeof (n as Record<string, unknown>).data === "object" &&
+            (n as Record<string, unknown>).data !== null
+          ? ((n as Record<string, unknown>).data as Record<string, unknown>)
+              .agentId
+          : undefined;
     return typeof agentId === "string" && agentId.startsWith("placeholder-");
   });
 }
@@ -1128,7 +1144,9 @@ export async function runReconcileUntitledDrafts(
   // Report
   for (const row of rows) {
     if (row.boundSkipped) {
-      const tag = row.danglingAppId ? "DANGLING_APPID, SKIPPED" : "BOUND, SKIPPED";
+      const tag = row.danglingAppId
+        ? "DANGLING_APPID, SKIPPED"
+        : "BOUND, SKIPPED";
       console.log(
         `[reconcile-legacy-rows] ${tag}: workflowId=${row.workflowId} ` +
           `name=${row.name} appId=${row.appId} boundApp=${row.boundApp ?? ""} ` +
@@ -1204,6 +1222,20 @@ export async function main(): Promise<void> {
       now: Date.now(),
     });
     if (summary.errors > 0) process.exit(1);
+  } else if (args.reconcileBindings) {
+    const { reconcileBindings: reconcileFn } =
+      await import("../src/services/app-workflow-binding");
+    const report = await reconcileFn({
+      deps: {
+        docClient,
+        workflowsTable: args.tableWorkflows,
+        appsTable: args.tableApps,
+      },
+      fix: !args.dryRun,
+    });
+    console.log("[reconcile-legacy-rows] --- Bindings Summary ---");
+    console.log(JSON.stringify(report));
+    if (report.errors > 0) process.exit(1);
   } else if (args.deletePlaceholderCopies) {
     const { summary } = await runReconcilePlaceholderCopies({
       tableWorkflows: args.tableWorkflows,

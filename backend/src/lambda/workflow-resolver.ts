@@ -25,6 +25,11 @@ import {
   CrossOrgAccessError,
 } from "../utils/auth-event";
 import { PermissionError } from "./adapters/errors";
+import {
+  bind as bindingServiceBind,
+  unbind as bindingServiceUnbind,
+  type BindingServiceDeps,
+} from "../services/app-workflow-binding";
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -33,6 +38,20 @@ const eventBridgeClient = new EventBridgeClient({});
 const WORKFLOWS_TABLE = process.env.WORKFLOWS_TABLE!;
 const APPS_TABLE = process.env.APPS_TABLE!;
 const EVENT_BUS_NAME = process.env.EVENT_BUS_NAME!;
+
+/** Build the deps struct for app-workflow-binding service calls.
+ *  NOTE: workflow-resolver does NOT have REGISTRY_ID, so registryService is
+ *  undefined — the manifest mirror is skipped and the 6-hourly reconciler +
+ *  the registry-agent-record-resolver's bind/unbind (which DO have registry
+ *  access) are the backstop. */
+function getBindingDeps(): BindingServiceDeps {
+  return {
+    docClient,
+    workflowsTable: WORKFLOWS_TABLE,
+    appsTable: APPS_TABLE,
+    emitEvent: async (type: string, detail: unknown) => emitEvent(type, detail),
+  };
+}
 
 export interface CreateWorkflowInput {
   orgId: string;
@@ -547,6 +566,27 @@ async function deleteWorkflow(
 
   if (workflow.status === "PUBLISHED") {
     throw new Error("Cannot delete a published workflow. Unpublish it first.");
+  }
+
+  // CIT-286: unbind from app before deleting so #META.workflowIds and the
+  // registry manifest are cleaned up. Best-effort — if the workflow has a
+  // valid appId, call the binding service's unbind.
+  if (
+    workflow.appId &&
+    workflow.appId !== "" &&
+    workflow.appId !== "undefined"
+  ) {
+    try {
+      await bindingServiceUnbind(getBindingDeps(), workflow.appId, workflowId, {
+        userId,
+      });
+    } catch (err) {
+      console.error("deleteWorkflow: unbind failed (non-fatal)", {
+        workflowId,
+        appId: workflow.appId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   await docClient.send(
@@ -1080,21 +1120,16 @@ export async function importBlueprint(
     }),
   );
 
-  // Append workflowId to app's workflowIds
-  await docClient.send(
-    new UpdateCommand({
-      TableName: APPS_TABLE,
-      Key: { appId },
-      UpdateExpression:
-        "SET #workflowIds = list_append(if_not_exists(#workflowIds, :emptyList), :newWorkflowId)",
-      ExpressionAttributeNames: {
-        "#workflowIds": "workflowIds",
-      },
-      ExpressionAttributeValues: {
-        ":newWorkflowId": [workflowId],
-        ":emptyList": [],
-      },
-    }),
+  // CIT-286: bind via the shared service (atomic TransactWrite +
+  // registry mirror when available). The workflow was just created with
+  // appId set on the row, so the TransactWrite's condition will pass
+  // (appId already equals this app).
+  await bindingServiceBind(
+    getBindingDeps(),
+    appId,
+    workflowId,
+    { userId },
+    { skipWorkflowPreCheck: true },
   );
 
   await emitEvent("workflow.imported", {

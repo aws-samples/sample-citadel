@@ -41,6 +41,20 @@ import { mockClient } from "aws-sdk-client-mock";
 
 const ebMock = mockClient(EventBridgeClient);
 
+// CIT-286: the binding service calls GetCommand + TransactWriteCommand on DDB
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  TransactWriteCommand,
+} from "@aws-sdk/lib-dynamodb";
+import {
+  CloudWatchClient,
+  PutMetricDataCommand,
+} from "@aws-sdk/client-cloudwatch";
+
+const ddbMock = mockClient(DynamoDBDocumentClient);
+const cwMock = mockClient(CloudWatchClient);
+
 import {
   seedMockRegistry,
   resetMockRegistry,
@@ -162,10 +176,52 @@ function expectZeroSideEffects() {
   expect(ebMock.commandCalls(PutEventsCommand)).toHaveLength(0);
 }
 
+// CIT-286: per-test DDB state for the binding service's GetCommand reads
+let ddbState: {
+  workflow: Record<string, unknown>;
+  app: Record<string, unknown>;
+} = {
+  workflow: {},
+  app: { workflowIds: [] },
+};
+
 beforeEach(() => {
+  ddbState = { workflow: {}, app: { workflowIds: [] } };
   resetMockRegistry();
   ebMock.reset();
+  ddbMock.reset();
+  cwMock.reset();
   ebMock.on(PutEventsCommand).resolves({});
+  ddbMock.on(TransactWriteCommand).resolves({});
+  cwMock.on(PutMetricDataCommand).resolves({});
+  // Default GetCommand: return a workflow and app matching the test fixtures.
+  // The binding service reads DDB before the TransactWrite, so the mock must
+  // reflect the test's registry seed. Each test overrides via ddbState if needed.
+  ddbMock.on(GetCommand).callsFake((input) => {
+    if (input.TableName === process.env.WORKFLOWS_TABLE) {
+      return {
+        Item: {
+          workflowId: input.Key.workflowId,
+          orgId: "org-1",
+          name: "Test Workflow",
+          status: "DRAFT",
+          ...ddbState.workflow,
+        },
+      };
+    }
+    if (input.TableName === process.env.APPS_TABLE) {
+      return {
+        Item: {
+          appId: input.Key.appId,
+          orgId: "org-1",
+          name: "Test App",
+          workflowIds: [],
+          ...ddbState.app,
+        },
+      };
+    }
+    return { Item: undefined };
+  });
 });
 
 type OpCase = { name: string; fieldName: string };
@@ -239,6 +295,13 @@ describe("registry-agent-record-resolver — workflow binding editor gate (findi
         seedApp({
           workflowIds: op.fieldName === "bindWorkflowToApp" ? [] : ["wf-1"],
         });
+        // Set DDB state matching the op
+        if (op.fieldName === "unbindWorkflowFromApp") {
+          ddbState = {
+            workflow: { appId: APP_ID },
+            app: { workflowIds: ["wf-1"] },
+          };
+        }
 
         await expect(
           invokeHandler(
@@ -257,6 +320,12 @@ describe("registry-agent-record-resolver — workflow binding editor gate (findi
         seedApp({
           workflowIds: op.fieldName === "bindWorkflowToApp" ? [] : ["wf-1"],
         });
+        if (op.fieldName === "unbindWorkflowFromApp") {
+          ddbState = {
+            workflow: { appId: APP_ID },
+            app: { workflowIds: ["wf-1"] },
+          };
+        }
 
         await expect(
           invokeHandler(
@@ -277,6 +346,12 @@ describe("registry-agent-record-resolver — workflow binding editor gate (findi
           access: {},
           createdBy: "legacy-creator",
         });
+        if (op.fieldName === "unbindWorkflowFromApp") {
+          ddbState = {
+            workflow: { appId: APP_ID },
+            app: { workflowIds: ["wf-1"] },
+          };
+        }
 
         await expect(
           invokeHandler(
@@ -295,6 +370,12 @@ describe("registry-agent-record-resolver — workflow binding editor gate (findi
         seedApp({
           workflowIds: op.fieldName === "bindWorkflowToApp" ? [] : ["wf-1"],
         });
+        if (op.fieldName === "unbindWorkflowFromApp") {
+          ddbState = {
+            workflow: { appId: APP_ID },
+            app: { workflowIds: ["wf-1"] },
+          };
+        }
 
         await expect(
           invokeHandler(

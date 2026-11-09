@@ -10,6 +10,7 @@ import {
   QueryCommand,
   DeleteCommand,
   BatchGetCommand,
+  TransactWriteCommand,
 } from "@aws-sdk/lib-dynamodb";
 import {
   EventBridgeClient,
@@ -119,6 +120,19 @@ describe("workflow-resolver", () => {
     callerOrg = undefined;
     mockCognitoOrg("org-1");
     ebMock.on(PutEventsCommand).resolves({});
+    ddbMock.on(TransactWriteCommand).resolves({});
+    // CIT-286: binding service does additional GetCommand reads. Set a
+    // fallback default that returns basic items when resolvesOnce exhausted.
+    ddbMock.on(GetCommand).resolves({
+      Item: {
+        workflowId: "fallback",
+        orgId: "org-1",
+        name: "Fallback",
+        status: "DRAFT",
+        workflowIds: [],
+        version: 1,
+      },
+    });
   });
 
   afterAll(() => {
@@ -1381,7 +1395,6 @@ describe("workflow-resolver", () => {
     });
 
     test("deep-copies definition from PUBLISHED blueprint, sets DRAFT, isBlueprint=false, appends workflowId to app workflowIds, emits workflow.imported", async () => {
-      // First GetCommand: blueprint lookup
       ddbMock
         .on(GetCommand)
         .resolvesOnce({
@@ -1396,7 +1409,6 @@ describe("workflow-resolver", () => {
             version: 2,
           },
         })
-        // Second GetCommand: app lookup
         .resolvesOnce({
           Item: {
             appId: "app-1",
@@ -1405,6 +1417,10 @@ describe("workflow-resolver", () => {
             workflowIds: ["wf-existing"],
             version: 1,
           },
+        })
+        // CIT-286: fallback for binding service's additional GetCommand reads
+        .resolves({
+          Item: { workflowIds: [], orgId: "org-1", status: "DRAFT" },
         });
       ddbMock.on(PutCommand).resolves({});
       ddbMock.on(UpdateCommand).resolves({});
@@ -1424,15 +1440,17 @@ describe("workflow-resolver", () => {
       // Definition is deep-copied
       expect(result.definition).toBe(blueprintDef);
 
-      // PutCommand for new workflow + UpdateCommand for app
+      // PutCommand for new workflow + TransactWriteCommand for binding
       expect(ddbMock.commandCalls(PutCommand)).toHaveLength(1);
-      expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(1);
+      expect(ddbMock.commandCalls(TransactWriteCommand)).toHaveLength(1);
 
-      // EventBridge: workflow.imported
+      // EventBridge: app.workflow.bound (from binding service) + workflow.imported
       const ebCalls = ebMock.commandCalls(PutEventsCommand);
-      expect(ebCalls).toHaveLength(1);
-      const entry = ebCalls[0].args[0].input.Entries![0];
-      expect(entry.DetailType).toBe("workflow.imported");
+      expect(ebCalls).toHaveLength(2);
+      const allEntries = ebCalls.flatMap((c) => c.args[0].input.Entries || []);
+      const detailTypes = allEntries.map((e) => e?.DetailType);
+      expect(detailTypes).toContain("workflow.imported");
+      expect(detailTypes).toContain("app.workflow.bound");
     });
 
     test("rejects draft blueprints", async () => {
@@ -1513,6 +1531,10 @@ describe("workflow-resolver", () => {
             workflowIds: [],
             version: 1,
           },
+        })
+        // CIT-286: fallback for binding service's additional GetCommand reads
+        .resolves({
+          Item: { workflowIds: [], orgId: "org-1", status: "DRAFT" },
         });
       ddbMock.on(PutCommand).resolves({});
       ddbMock.on(UpdateCommand).resolves({});
@@ -1585,6 +1607,10 @@ describe("workflow-resolver", () => {
             workflowIds: [],
             version: 1,
           },
+        })
+        // CIT-286: fallback for binding service reads
+        .resolves({
+          Item: { workflowIds: [], orgId: "org-1", status: "DRAFT" },
         });
       ddbMock.on(PutCommand).resolves({});
       ddbMock.on(UpdateCommand).resolves({});
@@ -1624,6 +1650,10 @@ describe("workflow-resolver", () => {
             workflowIds: [],
             version: 1,
           },
+        })
+        // CIT-286: fallback for binding service reads
+        .resolves({
+          Item: { workflowIds: [], orgId: "org-1", status: "DRAFT" },
         });
       ddbMock.on(PutCommand).resolves({});
       ddbMock.on(UpdateCommand).resolves({});
@@ -1678,6 +1708,10 @@ describe("workflow-resolver", () => {
             workflowIds: [],
             version: 1,
           },
+        })
+        // CIT-286: fallback for binding service reads
+        .resolves({
+          Item: { workflowIds: [], orgId: "org-1", status: "DRAFT" },
         });
       ddbMock.on(PutCommand).resolves({});
       ddbMock.on(UpdateCommand).resolves({});
@@ -2107,6 +2141,10 @@ describe("workflow-resolver", () => {
             workflowIds: [],
             version: 1,
           },
+        })
+        // CIT-286: fallback for binding service reads
+        .resolves({
+          Item: { workflowIds: [], orgId: "org-1", status: "DRAFT" },
         });
       ddbMock.on(PutCommand).resolves({});
       ddbMock.on(UpdateCommand).resolves({});
@@ -2179,6 +2217,10 @@ describe("workflow-resolver", () => {
             workflowIds: [],
             version: 1,
           },
+        })
+        // CIT-286: fallback for binding service reads
+        .resolves({
+          Item: { workflowIds: [], orgId: "org-1", status: "DRAFT" },
         });
       ddbMock.on(PutCommand).resolves({});
       ddbMock.on(UpdateCommand).resolves({});
@@ -2212,6 +2254,10 @@ describe("workflow-resolver", () => {
             workflowIds: [],
             version: 1,
           },
+        })
+        // CIT-286: fallback for binding service reads
+        .resolves({
+          Item: { workflowIds: [], orgId: "org-1", status: "DRAFT" },
         });
       ddbMock.on(PutCommand).resolves({});
       ddbMock.on(UpdateCommand).resolves({});
