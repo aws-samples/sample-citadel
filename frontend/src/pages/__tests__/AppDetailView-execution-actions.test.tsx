@@ -60,6 +60,19 @@ jest.mock('@/components/ModelOverrideSelect', () => ({
     }),
 }));
 
+// RunWorkflowDialog: render inline when open, expose a "confirm" button that
+// invokes onRun(workflowId) so the Run flow tests can drive through it.
+jest.mock('@/components/RunWorkflowDialog', () => ({
+  RunWorkflowDialog: ({ open, onRun, workflowId }: { open: boolean; onRun: (wfId: string) => void; workflowId: string }) =>
+    open
+      ? React.createElement('div', { 'data-testid': 'run-workflow-dialog' },
+          React.createElement('button', {
+            'data-testid': 'run-dialog-confirm',
+            onClick: () => onRun(workflowId),
+          }, 'Run'))
+      : null,
+}));
+
 jest.mock('@/components/ui/alert-dialog', () => ({
   AlertDialog: ({ children, open }: any) => open ? React.createElement('div', { 'data-testid': 'alert-dialog' }, children) : null,
   AlertDialogAction: ({ children, onClick, disabled, ...props }: any) =>
@@ -316,8 +329,14 @@ describe('AppDetailView execution actions', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: /Run Wf/i }));
 
+    // Run dialog opens; confirm
     await waitFor(() => {
-      expect(executionApiService.startExecution).toHaveBeenCalledWith('wf-1');
+      expect(screen.getByTestId('run-workflow-dialog')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByTestId('run-dialog-confirm'));
+
+    await waitFor(() => {
+      expect(executionApiService.startExecution).toHaveBeenCalledWith('wf-1', undefined);
     });
 
     // Switch to executions tab — should see the optimistically prepended row
@@ -439,8 +458,14 @@ describe('AppDetailView execution actions', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: /Run Wf/i }));
 
+    // Run dialog opens; confirm
     await waitFor(() => {
-      expect(executionApiService.startExecution).toHaveBeenCalledWith('wf-1');
+      expect(screen.getByTestId('run-workflow-dialog')).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByTestId('run-dialog-confirm'));
+
+    await waitFor(() => {
+      expect(executionApiService.startExecution).toHaveBeenCalledWith('wf-1', undefined);
     });
 
     // The optimistic prepend creates a stripped execution without currentNode.

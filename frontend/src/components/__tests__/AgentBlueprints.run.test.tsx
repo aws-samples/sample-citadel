@@ -48,6 +48,21 @@ jest.mock('../AgentTray', () => ({ AgentTray: () => <div data-testid="agent-tray
 jest.mock('../WorkflowToolbar', () => ({ WorkflowToolbar: () => <div data-testid="toolbar" /> }));
 jest.mock('../NodeConfigurationPanel', () => ({ NodeConfigurationPanel: () => null }));
 
+// RunWorkflowDialog: render inline when open, expose a "confirm" button that
+// invokes onRun(workflowId) so existing tests can drive through it.
+jest.mock('../RunWorkflowDialog', () => ({
+  RunWorkflowDialog: ({ open, onRun, workflowId }: { open: boolean; onRun: (wfId: string) => void; workflowId: string }) =>
+    open
+      ? (
+          <div data-testid="run-workflow-dialog">
+            <button data-testid="run-dialog-confirm" onClick={() => onRun(workflowId)}>
+              Run
+            </button>
+          </div>
+        )
+      : null,
+}));
+
 jest.mock('../../contexts/OrganizationContext', () => ({
   useOrganization: () => ({ selectedOrganization: 'org-1', currentUser: { organization: 'org-1' } }),
 }));
@@ -168,7 +183,7 @@ describe('AgentBlueprints run experience', () => {
     expect(screen.getByRole('button', { name: /run workflow/i })).toBeEnabled();
   });
 
-  it('clicking Run calls startExecution and node badges update as progress arrives', async () => {
+  it('clicking Run opens the dialog and confirming calls startExecution; node badges update as progress arrives', async () => {
     await buildWorkflowOnCanvas();
     (workflowApiService.publishWorkflow as jest.Mock).mockResolvedValue({
       workflowId: 'wf-1',
@@ -191,10 +206,18 @@ describe('AgentBlueprints run experience', () => {
     fireEvent.click(screen.getByRole('button', { name: /publish/i }));
     await flush();
 
+    // Clicking "Run Workflow" now opens the dialog
     fireEvent.click(screen.getByRole('button', { name: /run workflow/i }));
     await flush();
 
-    expect(executionApiService.startExecution).toHaveBeenCalledWith('wf-1');
+    // The dialog should be visible
+    expect(screen.getByTestId('run-workflow-dialog')).toBeInTheDocument();
+
+    // Confirm the run from the dialog
+    fireEvent.click(screen.getByTestId('run-dialog-confirm'));
+    await flush();
+
+    expect(executionApiService.startExecution).toHaveBeenCalledWith('wf-1', undefined);
     expect(serverService.subscribe).toHaveBeenCalledWith(
       expect.stringContaining('onWorkflowProgress'),
       { executionId: 'exec-1' },

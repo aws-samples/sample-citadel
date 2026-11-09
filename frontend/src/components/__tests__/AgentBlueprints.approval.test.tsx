@@ -39,6 +39,21 @@ jest.mock('../AgentTray', () => ({ AgentTray: () => <div data-testid="agent-tray
 jest.mock('../WorkflowToolbar', () => ({ WorkflowToolbar: () => <div data-testid="toolbar" /> }));
 jest.mock('../NodeConfigurationPanel', () => ({ NodeConfigurationPanel: () => null }));
 
+// RunWorkflowDialog: render inline when open so approval tests can drive
+// through the dialog to start an execution.
+jest.mock('../RunWorkflowDialog', () => ({
+  RunWorkflowDialog: ({ open, onRun, workflowId }: { open: boolean; onRun: (wfId: string) => void; workflowId: string }) =>
+    open
+      ? (
+          <div data-testid="run-workflow-dialog">
+            <button data-testid="run-dialog-confirm" onClick={() => onRun(workflowId)}>
+              Run
+            </button>
+          </div>
+        )
+      : null,
+}));
+
 // --- Organization mock — swapped per test via mockUseOrganization ---
 const mockUseOrganization = jest.fn();
 jest.mock('../../contexts/OrganizationContext', () => ({
@@ -116,6 +131,10 @@ async function buildAndRun() {
   await flush();
 
   fireEvent.click(screen.getByRole('button', { name: /run workflow/i }));
+  await flush();
+
+  // Confirm from the dialog
+  fireEvent.click(screen.getByTestId('run-dialog-confirm'));
   await flush();
 
   return capturedCallback;
