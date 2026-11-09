@@ -75,7 +75,7 @@ Both sides are written **atomically** in a single `TransactWriteCommand` by the 
 
 All callers that mutate the binding — `bindWorkflowToApp`, `unbindWorkflowFromApp`, `importBlueprint`, `deleteWorkflow`, `deleteApp` — go through the binding service. Direct writes to `workflowIds` or `workflow.appId` outside the service are a bug, enforced by a grep-guard test.
 
-A `--reconcile-bindings` mode in `reconcile-legacy-rows` detects and optionally repairs: orphan `appId` (app deleted), missing-from-list, dangling list entries (workflow deleted), and cross-reference mismatches.
+A `--reconcile-bindings` mode in `reconcile-legacy-rows` detects and optionally repairs: orphan `appId` (app deleted), missing-from-list, dangling list entries (workflow deleted), cross-reference mismatches, and manifest drift (registry manifest mirror diverging from the authoritative DynamoDB list). When `REGISTRY_ID` is set in the environment, the reconciler reads each app's registry manifest and compares `manifest.workflowIds` against the desired list; `--apply` writes the corrected mirror via the same retry-with-backoff path used by bind/unbind.
 
 The app detail view (Agent Apps → select an app) includes a **Workflows**
 tab for managing the workflows bound to the app:

@@ -657,6 +657,7 @@ describe("reconcileBindings", () => {
   it("reports zero issues for a consistent dataset", async () => {
     seedWorkflow("wf-1", "app-1");
     seedApp("app-1", ["wf-1"]);
+    seedRegistry("app-1", { workflowIds: ["wf-1"], version: 1 });
 
     const report = await reconcileBindings({
       deps: makeDeps(),
@@ -666,6 +667,7 @@ describe("reconcileBindings", () => {
     expect(report.missingFromList).toHaveLength(0);
     expect(report.danglingEntries).toHaveLength(0);
     expect(report.crossRefMismatches).toHaveLength(0);
+    expect(report.manifestDrift).toHaveLength(0);
   });
 
   // Regression: missing-from-list fix must not be clobbered by cross-ref pass.
@@ -712,6 +714,10 @@ describe("reconcileBindings", () => {
     seedApp("app-1", ["wf-ok", "wf-dangling"]); // wf-missing absent, wf-dangling gone
     seedApp("app-2", []); // wf-xref points here but not in list
     seedApp("app-3", ["wf-xref"]); // cross-ref: wf-xref.appId = app-2
+    // Seed registry mirrors that are stale — manifest drift on app-1 and app-2.
+    seedRegistry("app-1", { workflowIds: ["wf-ok"], version: 1 }); // missing wf-missing
+    seedRegistry("app-2", { workflowIds: [], version: 1 }); // missing wf-xref
+    seedRegistry("app-3", { workflowIds: ["wf-xref"], version: 1 }); // stale cross-ref
 
     // First fix pass.
     const fixReport = await reconcileBindings({
@@ -720,7 +726,7 @@ describe("reconcileBindings", () => {
     });
     expect(fixReport.errors).toBe(0);
 
-    // Second dry-run: must report zero issues.
+    // Second dry-run: must report zero issues in ALL classes incl. manifestDrift.
     const dryReport = await reconcileBindings({
       deps: makeDeps(),
       fix: false,
@@ -729,6 +735,64 @@ describe("reconcileBindings", () => {
     expect(dryReport.missingFromList).toHaveLength(0);
     expect(dryReport.danglingEntries).toHaveLength(0);
     expect(dryReport.crossRefMismatches).toHaveLength(0);
+    expect(dryReport.manifestDrift).toHaveLength(0);
+  });
+
+  // Manifest-drift-only: DDB is correct, only the registry mirror is stale.
+  it("detects manifest drift when DDB is consistent but registry mirror is stale", async () => {
+    seedWorkflow("wf-1", "app-1");
+    seedWorkflow("wf-2", "app-1");
+    seedApp("app-1", ["wf-1", "wf-2"]); // DDB correct
+    // Registry mirror is stale — still has old list.
+    seedRegistry("app-1", { workflowIds: ["wf-old", "wf-1"], version: 1 });
+
+    const report = await reconcileBindings({
+      deps: makeDeps(),
+      fix: false,
+    });
+    // No DDB-level mismatches.
+    expect(report.orphanAppIds).toHaveLength(0);
+    expect(report.missingFromList).toHaveLength(0);
+    expect(report.danglingEntries).toHaveLength(0);
+    expect(report.crossRefMismatches).toHaveLength(0);
+    // Manifest drift detected.
+    expect(report.manifestDrift).toHaveLength(1);
+    expect(report.manifestDrift[0]).toContain("app-1");
+
+    // Fix mode — write the correct mirror.
+    const fixReport = await reconcileBindings({
+      deps: makeDeps(),
+      fix: true,
+    });
+    expect(fixReport.manifestDrift).toHaveLength(1);
+    expect(fixReport.fixed).toBeGreaterThanOrEqual(1);
+    expect(fixReport.errors).toBe(0);
+
+    // Verify the registry mirror is now correct.
+    const manifest = readRegistryManifest("app-1");
+    expect([...(manifest.workflowIds as string[])].sort()).toEqual([
+      "wf-1",
+      "wf-2",
+    ]);
+
+    // Second dry-run: zero across all classes.
+    const dryReport2 = await reconcileBindings({
+      deps: makeDeps(),
+      fix: false,
+    });
+    expect(dryReport2.manifestDrift).toHaveLength(0);
+  });
+
+  // When registryService is absent, manifestDrift is skipped (no errors).
+  it("skips manifest drift check when registryService is absent", async () => {
+    seedWorkflow("wf-1", "app-1");
+    seedApp("app-1", ["wf-1"]);
+
+    const report = await reconcileBindings({
+      deps: makeDeps({ registryService: undefined }),
+      fix: false,
+    });
+    expect(report.manifestDrift).toHaveLength(0);
   });
 });
 
