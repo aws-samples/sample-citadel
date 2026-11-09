@@ -252,6 +252,40 @@ function wireUpdateCommand(): void {
     const existing = table.get(pk) || { [pkField]: pk };
     const names = input.ExpressionAttributeNames || {};
     const values = input.ExpressionAttributeValues || {};
+
+    // Evaluate ConditionExpression for the reconcile-bindings optimistic lock.
+    // Supports: "#wids = :prev" and "(attribute_not_exists(#wids) OR #wids = :prev)".
+    const cond: string | undefined = input.ConditionExpression;
+    if (cond) {
+      const resolveField = (ref: string): unknown => {
+        const field = names[ref] || ref;
+        return existing[field];
+      };
+
+      if (cond.includes("#wids = :prev")) {
+        const currentVal = resolveField("#wids");
+        const expectedVal = values[":prev"];
+        const eq =
+          JSON.stringify(currentVal ?? null) ===
+          JSON.stringify(expectedVal ?? null);
+
+        if (cond.includes("attribute_not_exists")) {
+          // (attribute_not_exists(#wids) OR #wids = :prev)
+          const fieldName = names["#wids"] || "workflowIds";
+          const notExists = !(fieldName in existing);
+          if (!notExists && !eq) {
+            throw Object.assign(new Error("ConditionalCheckFailedException"), {
+              name: "ConditionalCheckFailedException",
+            });
+          }
+        } else if (!eq) {
+          throw Object.assign(new Error("ConditionalCheckFailedException"), {
+            name: "ConditionalCheckFailedException",
+          });
+        }
+      }
+    }
+
     const updated = { ...existing };
 
     const expr: string = input.UpdateExpression;
@@ -632,6 +666,69 @@ describe("reconcileBindings", () => {
     expect(report.missingFromList).toHaveLength(0);
     expect(report.danglingEntries).toHaveLength(0);
     expect(report.crossRefMismatches).toHaveLength(0);
+  });
+
+  // Regression: missing-from-list fix must not be clobbered by cross-ref pass.
+  // Reproduces the live incident where workflow 74e4554d was 'fixed' (appended)
+  // then overwritten by the cross-ref cleanup writing from a stale snapshot.
+  it("missing-from-list fix is NOT clobbered by cross-ref cleanup (live regression)", async () => {
+    // Setup: app has list [A, B]; A's appId points elsewhere (cross-ref), B is valid.
+    // Workflow C has appId=app but is NOT in the list (missing-from-list).
+    seedWorkflow("wf-A", "app-other"); // cross-ref mismatch
+    seedWorkflow("wf-B", "app-1"); // valid
+    seedWorkflow("wf-C", "app-1"); // missing from list
+    seedApp("app-other", []); // the app A points to
+    seedApp("app-1", ["wf-A", "wf-B"]); // A is cross-ref, B valid, C missing
+
+    const dryReport = await reconcileBindings({
+      deps: makeDeps(),
+      fix: false,
+    });
+    expect(dryReport.missingFromList).toContain("wf-C");
+    expect(dryReport.crossRefMismatches).toContain("app-1:wf-A:app-other");
+
+    // Fix pass.
+    const fixReport = await reconcileBindings({
+      deps: makeDeps(),
+      fix: true,
+    });
+    expect(fixReport.fixed).toBeGreaterThanOrEqual(1);
+    expect(fixReport.errors).toBe(0);
+
+    // The final list for app-1 must be exactly [wf-B, wf-C] (sorted).
+    const app = appsTable.get("app-1");
+    const finalList = [...(app?.workflowIds as string[])].sort();
+    expect(finalList).toEqual(["wf-B", "wf-C"]);
+  });
+
+  // Property: after reconcile --fix, a second dry run reports zero mismatches
+  // (idempotent convergence).
+  it("idempotent convergence: fix then dry-run reports zero mismatches", async () => {
+    // Build a complex inconsistent dataset.
+    seedWorkflow("wf-orphan", "no-such-app");
+    seedWorkflow("wf-missing", "app-1");
+    seedWorkflow("wf-ok", "app-1");
+    seedWorkflow("wf-xref", "app-2");
+    seedApp("app-1", ["wf-ok", "wf-dangling"]); // wf-missing absent, wf-dangling gone
+    seedApp("app-2", []); // wf-xref points here but not in list
+    seedApp("app-3", ["wf-xref"]); // cross-ref: wf-xref.appId = app-2
+
+    // First fix pass.
+    const fixReport = await reconcileBindings({
+      deps: makeDeps(),
+      fix: true,
+    });
+    expect(fixReport.errors).toBe(0);
+
+    // Second dry-run: must report zero issues.
+    const dryReport = await reconcileBindings({
+      deps: makeDeps(),
+      fix: false,
+    });
+    expect(dryReport.orphanAppIds).toHaveLength(0);
+    expect(dryReport.missingFromList).toHaveLength(0);
+    expect(dryReport.danglingEntries).toHaveLength(0);
+    expect(dryReport.crossRefMismatches).toHaveLength(0);
   });
 });
 

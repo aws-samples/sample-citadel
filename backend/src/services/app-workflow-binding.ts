@@ -572,6 +572,14 @@ export interface ReconcileBindingsOptions {
  *   2. workflow.appId = X but X's #META.workflowIds doesn't include it → add it.
  *   3. App's #META.workflowIds contains a workflowId that doesn't exist → remove it.
  *   4. App's list has workflowId W but W.appId = Y (different app) → report conflict.
+ *
+ * Fix strategy: compute each app's DESIRED workflowIds list exactly once
+ * from the authoritative side (every existing workflow whose appId points
+ * at this app), then write the list in a single UpdateItem per app with a
+ * ConditionExpression on the previous value so concurrent edits are
+ * detected. This avoids the previous bug where an incremental list_append
+ * in Check 2 was overwritten by the full SET in Check 3/4 (which read from
+ * the stale in-memory snapshot).
  */
 export async function reconcileBindings(
   opts: ReconcileBindingsOptions,
@@ -586,7 +594,7 @@ export async function reconcileBindings(
     errors: 0,
   };
 
-  // Scan all workflows that have appId set.
+  // Scan all workflows and apps.
   const workflows = await scanTable(deps.docClient, deps.workflowsTable);
   const apps = await scanTable(deps.docClient, deps.appsTable);
 
@@ -601,7 +609,12 @@ export async function reconcileBindings(
     if (wf.workflowId) workflowMap.set(wf.workflowId as string, wf);
   }
 
-  // Check 1 & 2: workflows with appId set.
+  // --- Pass 1: Check workflows with appId set (orphans + missing-from-list detection) ---
+
+  // Build the authoritative desired list per app: every existing workflow
+  // whose appId points at this app and the app itself exists.
+  const desiredListPerApp = new Map<string, string[]>();
+
   for (const wf of workflows) {
     const wfId = wf.workflowId as string;
     const wfAppId = wf.appId as string | undefined;
@@ -637,46 +650,29 @@ export async function reconcileBindings(
       continue;
     }
 
-    // Check 2: workflow.appId = X but not in X's workflowIds list.
+    // This workflow authoritatively belongs to this app. Record it.
+    let desired = desiredListPerApp.get(wfAppId);
+    if (!desired) {
+      desired = [];
+      desiredListPerApp.set(wfAppId, desired);
+    }
+    desired.push(wfId);
+
+    // Check 2: detect for reporting.
     const appWfIds: string[] = (app.workflowIds as string[]) || [];
     if (!appWfIds.includes(wfId)) {
       report.missingFromList.push(wfId);
       console.log(
         `[reconcile-bindings] MISSING from list: workflow=${wfId} appId=${wfAppId}`,
       );
-      if (fix) {
-        try {
-          await deps.docClient.send(
-            new UpdateCommand({
-              TableName: deps.appsTable,
-              Key: { appId: wfAppId },
-              UpdateExpression:
-                "SET #wids = list_append(if_not_exists(#wids, :empty), :add)",
-              ExpressionAttributeNames: { "#wids": "workflowIds" },
-              ExpressionAttributeValues: {
-                ":add": [wfId],
-                ":empty": [],
-              },
-            }),
-          );
-          report.fixed++;
-        } catch (err) {
-          console.error("[reconcile-bindings] fix missing-from-list failed", {
-            wfId,
-            err,
-          });
-          report.errors++;
-        }
-      }
     }
   }
 
-  // Check 3 & 4: apps with workflowIds entries.
+  // --- Pass 2: Check app lists for dangling/cross-ref (detection only) ---
+
   for (const app of apps) {
     const appId = app.appId as string;
     const wfIds: string[] = (app.workflowIds as string[]) || [];
-    const cleanList = [...wfIds];
-    let listChanged = false;
 
     for (const wfId of wfIds) {
       const wf = workflowMap.get(wfId);
@@ -687,11 +683,6 @@ export async function reconcileBindings(
         console.log(
           `[reconcile-bindings] DANGLING entry: app=${appId} workflowId=${wfId} (workflow missing)`,
         );
-        const idx = cleanList.indexOf(wfId);
-        if (idx >= 0) {
-          cleanList.splice(idx, 1);
-          listChanged = true;
-        }
         continue;
       }
 
@@ -707,34 +698,72 @@ export async function reconcileBindings(
         console.log(
           `[reconcile-bindings] CROSS-REF mismatch: app=${appId} has wf=${wfId} but wf.appId=${wfAppId}`,
         );
-        // For cross-ref, the app that workflow.appId points to is authoritative.
-        // Remove from this app's list.
-        const idx = cleanList.indexOf(wfId);
-        if (idx >= 0) {
-          cleanList.splice(idx, 1);
-          listChanged = true;
-        }
       }
     }
+  }
 
-    if (fix && listChanged) {
-      try {
-        await deps.docClient.send(
-          new UpdateCommand({
-            TableName: deps.appsTable,
-            Key: { appId },
-            UpdateExpression: "SET #wids = :list",
-            ExpressionAttributeNames: { "#wids": "workflowIds" },
-            ExpressionAttributeValues: { ":list": cleanList },
-          }),
-        );
-        report.fixed++;
-      } catch (err) {
-        console.error("[reconcile-bindings] fix dangling/xref failed", {
-          appId,
-          err,
-        });
-        report.errors++;
+  // --- Pass 3: Single atomic write per app whose list needs updating ---
+
+  if (fix) {
+    for (const app of apps) {
+      const appId = app.appId as string;
+      const currentList: string[] = (app.workflowIds as string[]) || [];
+      const desired = desiredListPerApp.get(appId) || [];
+
+      // Sort both for stable comparison.
+      const sortedCurrent = [...currentList].sort();
+      const sortedDesired = [...desired].sort();
+
+      const listsMatch =
+        sortedCurrent.length === sortedDesired.length &&
+        sortedCurrent.every((v, i) => v === sortedDesired[i]);
+
+      if (!listsMatch) {
+        try {
+          await deps.docClient.send(
+            new UpdateCommand({
+              TableName: deps.appsTable,
+              Key: { appId },
+              UpdateExpression: "SET #wids = :desired, #updatedAt = :now",
+              // Guard against concurrent edits: only succeed if the list is
+              // still what we scanned. Use size check + equality on the
+              // serialised form. For empty lists, use attribute_not_exists
+              // OR the empty-list sentinel.
+              ConditionExpression:
+                currentList.length === 0
+                  ? "(attribute_not_exists(#wids) OR #wids = :prev)"
+                  : "#wids = :prev",
+              ExpressionAttributeNames: {
+                "#wids": "workflowIds",
+                "#updatedAt": "updatedAt",
+              },
+              ExpressionAttributeValues: {
+                ":desired": desired,
+                ":prev": currentList,
+                ":now": new Date().toISOString(),
+              },
+            }),
+          );
+          report.fixed++;
+        } catch (err) {
+          // ConditionalCheckFailedException means the list was modified
+          // concurrently — safe to skip; next reconcile pass will converge.
+          if (
+            err instanceof Error &&
+            err.name === "ConditionalCheckFailedException"
+          ) {
+            console.warn(
+              "[reconcile-bindings] concurrent edit detected, skipping",
+              { appId },
+            );
+          } else {
+            console.error("[reconcile-bindings] fix app list failed", {
+              appId,
+              err,
+            });
+            report.errors++;
+          }
+        }
       }
     }
   }
