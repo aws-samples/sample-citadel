@@ -15,24 +15,20 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import '@testing-library/jest-dom';
 
 // shadcn Dialog wraps Radix Portal — render inline so jest can query widgets.
-jest.mock('../ui/dialog', () => {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const R = require('react');
-  return {
-    Dialog: ({ children, open }: { children: React.ReactNode; open: boolean }) =>
-      open ? R.createElement('div', { role: 'dialog' }, children) : null,
-    DialogContent: ({ children, ...rest }: React.PropsWithChildren<Record<string, unknown>>) =>
-      R.createElement('div', { ...rest }, children),
-    DialogHeader: ({ children }: { children: React.ReactNode }) =>
-      R.createElement('div', null, children),
-    DialogFooter: ({ children }: { children: React.ReactNode }) =>
-      R.createElement('div', null, children),
-    DialogTitle: ({ children, ...rest }: React.PropsWithChildren<Record<string, unknown>>) =>
-      R.createElement('h2', { ...rest }, children),
-    DialogDescription: ({ children, ...rest }: React.PropsWithChildren<Record<string, unknown>>) =>
-      R.createElement('p', { ...rest }, children),
-  };
-});
+jest.mock('../ui/dialog', () => ({
+  Dialog: ({ children, open }: { children: React.ReactNode; open: boolean }) =>
+    open ? <div role="dialog">{children}</div> : null,
+  DialogContent: ({ children }: React.PropsWithChildren<Record<string, unknown>>) =>
+    <div>{children}</div>,
+  DialogHeader: ({ children }: { children: React.ReactNode }) =>
+    <div>{children}</div>,
+  DialogFooter: ({ children }: { children: React.ReactNode }) =>
+    <div>{children}</div>,
+  DialogTitle: ({ children, ...rest }: React.PropsWithChildren<Record<string, unknown>>) =>
+    <h2 {...rest}>{children}</h2>,
+  DialogDescription: ({ children, ...rest }: React.PropsWithChildren<Record<string, unknown>>) =>
+    <p {...rest}>{children}</p>,
+}));
 
 jest.mock('../ui/button', () => ({
   Button: ({ children, onClick, disabled, ...rest }: React.ButtonHTMLAttributes<HTMLButtonElement> & { children: React.ReactNode }) =>
