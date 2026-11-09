@@ -8,6 +8,7 @@ export type {
   WorkflowEdge,
   WorkflowNodeDefinition,
   WorkflowEdgeDefinition,
+  EdgeCondition,
   WorkflowDefinition,
   ValidationErrorType,
   ValidationWarningType,

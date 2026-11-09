@@ -12,6 +12,7 @@ import type {
   WorkflowDefinition,
   WorkflowNodeDefinition,
   WorkflowEdgeDefinition,
+  EdgeCondition,
   ValidationResult,
   ValidationError,
   ValidationWarning,
@@ -66,13 +67,21 @@ export function serializeWorkflow(
         },
         configuration: node.data.configuration || {},
       })),
-      edges: edges.map((edge): WorkflowEdgeDefinition => ({
-        id: edge.id,
-        source: edge.source,
-        target: edge.target,
-        sourceHandle: edge.sourceHandle || 'output',
-        targetHandle: edge.targetHandle || 'input',
-      })),
+      edges: edges.map((edge): WorkflowEdgeDefinition => {
+        const def: WorkflowEdgeDefinition = {
+          id: edge.id,
+          source: edge.source,
+          target: edge.target,
+          sourceHandle: edge.sourceHandle || 'output',
+          targetHandle: edge.targetHandle || 'input',
+        };
+        const condition = edge.data?.condition
+          ?? (edge as unknown as Record<string, unknown>).condition as EdgeCondition | undefined;
+        if (condition) {
+          def.condition = condition;
+        }
+        return def;
+      }),
       metadata: metadata?.metadata,
     };
 
@@ -226,14 +235,27 @@ export async function deserializeWorkflow(
     });
 
     // Convert to ReactFlow edges
-    const edges: WorkflowEdge[] = workflow.edges.map((edgeDef): WorkflowEdge => ({
-      id: edgeDef.id,
-      source: edgeDef.source,
-      target: edgeDef.target,
-      sourceHandle: edgeDef.sourceHandle,
-      targetHandle: edgeDef.targetHandle,
-      type: 'smoothstep',
-    }));
+    const edges: WorkflowEdge[] = workflow.edges.map((edgeDef): WorkflowEdge => {
+      const edge: WorkflowEdge = {
+        id: edgeDef.id,
+        source: edgeDef.source,
+        target: edgeDef.target,
+        sourceHandle: edgeDef.sourceHandle,
+        targetHandle: edgeDef.targetHandle,
+        type: 'smoothstep',
+        data: {
+          sourceHandle: edgeDef.sourceHandle,
+          targetHandle: edgeDef.targetHandle,
+          condition: edgeDef.condition,
+        },
+      };
+      if (edgeDef.condition) {
+        edge.style = { strokeDasharray: '6 3' };
+        edge.label = `${edgeDef.condition.field} ${edgeDef.condition.operator} ${String(edgeDef.condition.value)}`;
+        edge.labelStyle = { fontSize: 10, fill: '#94a3b8' };
+      }
+      return edge;
+    });
 
     return { nodes, edges };
   } catch (error) {
