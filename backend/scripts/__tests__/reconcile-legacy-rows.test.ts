@@ -920,7 +920,7 @@ const FORTY_EIGHT_HOURS_AGO = new Date(
 ).toISOString();
 const TWO_HOURS_AGO = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
 const NOW_MS = Date.now();
-const DEFAULT_NAME_PATTERN = /^Untitled Workflow/;
+const DEFAULT_NAME_PATTERN = "Untitled Workflow";
 const DEFAULT_MIN_AGE_MS = 24 * 60 * 60 * 1000;
 
 function untitledDraftWorkflow(
@@ -1002,8 +1002,8 @@ describe("isUntitledDraft", () => {
     ).toBe(false);
   });
 
-  test("matches with custom name pattern", () => {
-    const custom = /^Draft-/;
+  test("matches with custom name prefix", () => {
+    const custom = "Draft-";
     expect(
       isUntitledDraft(
         untitledDraftWorkflow("wf-custom", { name: "Draft-test" }),
@@ -1016,6 +1016,27 @@ describe("isUntitledDraft", () => {
       isUntitledDraft(
         untitledDraftWorkflow("wf-no", { name: "Untitled Workflow" }),
         custom,
+        DEFAULT_MIN_AGE_MS,
+        NOW_MS,
+      ),
+    ).toBe(false);
+  });
+
+  test("prefix with regex metacharacters is matched literally", () => {
+    const meta = "Untitled (v2)";
+    expect(
+      isUntitledDraft(
+        untitledDraftWorkflow("wf-meta", { name: "Untitled (v2) Workflow" }),
+        meta,
+        DEFAULT_MIN_AGE_MS,
+        NOW_MS,
+      ),
+    ).toBe(true);
+    // Should NOT match 'Untitled xv2y Workflow' — metacharacters are literal
+    expect(
+      isUntitledDraft(
+        untitledDraftWorkflow("wf-meta-no", { name: "Untitled xv2y Workflow" }),
+        meta,
         DEFAULT_MIN_AGE_MS,
         NOW_MS,
       ),
@@ -1150,7 +1171,7 @@ describe("runReconcileUntitledDrafts", () => {
       tableApps: includeApps ? "test-apps" : "",
       dryRun,
       docClient: DynamoDBDocumentClient.from(new DynamoDBClient({})),
-      namePattern: DEFAULT_NAME_PATTERN,
+      namePrefix: DEFAULT_NAME_PATTERN,
       minAgeMs: DEFAULT_MIN_AGE_MS,
       now: NOW_MS,
     };

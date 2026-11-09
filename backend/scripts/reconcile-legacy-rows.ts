@@ -70,8 +70,8 @@ export interface ParsedArgs {
   tableApps: string;
   /** When true, scan workflows for untitled never-run DRAFT workflows. */
   deleteUntitledDrafts: boolean;
-  /** Name regex pattern for untitled draft matching. Default /^Untitled Workflow/. */
-  namePattern: string;
+  /** Literal name prefix for untitled draft matching. Default 'Untitled Workflow'. */
+  namePrefix: string;
   /** Minimum age in hours before a row is eligible. Default 24. */
   minAgeHours: number;
 }
@@ -87,7 +87,7 @@ const KNOWN_FLAGS = new Set([
   "--delete-unpublished-intake-blueprints",
   "--delete-placeholder-copies",
   "--delete-untitled-drafts",
-  "--name-pattern",
+  "--name-prefix",
   "--min-age-hours",
   "--apply",
 ]);
@@ -102,7 +102,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let deleteUnpublishedIntakeBlueprints = false;
   let deletePlaceholderCopies = false;
   let deleteUntitledDrafts = false;
-  let namePattern = "^Untitled Workflow";
+  let namePrefix = "Untitled Workflow";
   let minAgeHours = 24;
 
   for (let i = 0; i < argv.length; i++) {
@@ -142,8 +142,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case "--delete-untitled-drafts":
         deleteUntitledDrafts = true;
         break;
-      case "--name-pattern":
-        namePattern = argv[++i];
+      case "--name-prefix":
+        namePrefix = argv[++i];
         break;
       case "--min-age-hours":
         minAgeHours = Number(argv[++i]);
@@ -157,7 +157,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   if (deleteUntitledDrafts) {
     if (!tableWorkflows || !tableExecutions) {
       console.error(
-        "Usage: --delete-untitled-drafts --table-workflows <table> --table-executions <table> [--table-apps <table>] [--name-pattern <regex>] [--min-age-hours <n>] [--apply]",
+        "Usage: --delete-untitled-drafts --table-workflows <table> --table-executions <table> [--table-apps <table>] [--name-prefix <prefix>] [--min-age-hours <n>] [--apply]",
       );
       process.exit(1);
     }
@@ -191,7 +191,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     deleteUnpublishedIntakeBlueprints,
     deletePlaceholderCopies,
     deleteUntitledDrafts,
-    namePattern,
+    namePrefix,
     minAgeHours,
   };
 }
@@ -919,7 +919,7 @@ export interface ReconcileUntitledDraftsOptions {
   tableApps: string;
   dryRun: boolean;
   docClient: DynamoDBDocumentClient;
-  namePattern: RegExp;
+  namePrefix: string;
   minAgeMs: number;
   now: number;
 }
@@ -934,14 +934,14 @@ export interface ReconcileUntitledDraftsOptions {
  */
 export function isUntitledDraft(
   item: Record<string, NativeAttributeValue>,
-  namePattern: RegExp,
+  namePrefix: string,
   minAgeMs: number,
   now: number,
 ): boolean {
   if (item.isBlueprint === "true") return false;
   if (item.status !== "DRAFT") return false;
   const name = typeof item.name === "string" ? item.name : "";
-  if (!namePattern.test(name)) return false;
+  if (!name.startsWith(namePrefix)) return false;
   const createdAt = typeof item.createdAt === "string" ? item.createdAt : "";
   if (!createdAt) return false;
   const createdMs = new Date(createdAt).getTime();
@@ -974,7 +974,7 @@ export async function runReconcileUntitledDrafts(
     tableApps,
     dryRun,
     docClient: dc,
-    namePattern,
+    namePrefix,
     minAgeMs,
     now,
   } = opts;
@@ -993,7 +993,7 @@ export async function runReconcileUntitledDrafts(
       `untitled-draft-cleanup table=${tableWorkflows} ` +
       `executions=${tableExecutions}` +
       (tableApps ? ` apps=${tableApps}` : "") +
-      ` pattern=${namePattern} minAgeMs=${minAgeMs}`,
+      ` prefix=${namePrefix} minAgeMs=${minAgeMs}`,
   );
 
   // ---------------------------------------------------------------------------
@@ -1017,7 +1017,7 @@ export async function runReconcileUntitledDrafts(
     );
     for (const item of page.Items ?? []) {
       summary.scanned++;
-      if (isUntitledDraft(item, namePattern, minAgeMs, now)) {
+      if (isUntitledDraft(item, namePrefix, minAgeMs, now)) {
         candidates.push({
           workflowId: String(item.workflowId ?? ""),
           name: String(item.name ?? ""),
@@ -1199,7 +1199,7 @@ export async function main(): Promise<void> {
       tableApps: args.tableApps,
       dryRun: args.dryRun,
       docClient,
-      namePattern: new RegExp(args.namePattern),
+      namePrefix: args.namePrefix,
       minAgeMs: args.minAgeHours * 60 * 60 * 1000,
       now: Date.now(),
     });
