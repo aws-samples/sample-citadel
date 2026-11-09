@@ -73,6 +73,8 @@ import serverService from '../services/server';
 import { replayService } from '../services/replayService';
 import { useOrganization } from '../contexts/OrganizationContext';
 import { cn } from '../components/ui/utils';
+import { hasPlaceholderNodes, shortId, sortByNameThenDate, parseDefinitionNodes } from '../utils/workflowListHelpers';
+import { relativeDate, absoluteDate } from '../utils/relativeDate';
 import {
   getHealthStatus,
   shouldEnablePublish,
@@ -116,6 +118,11 @@ interface WorkflowInfo {
   name: string;
   status: string;
   nodeCount: number;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+  shortId: string;
+  hasPlaceholders: boolean;
 }
 
 interface ApprovalRequest {
@@ -490,9 +497,10 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
   // Bind workflow dialog
   const { canApproveExecutions, loading: orgLoading } = useOrganization();
   const [bindWorkflowDialogOpen, setBindWorkflowDialogOpen] = useState(false);
-  const [unboundWorkflows, setUnboundWorkflows] = useState<Array<{ workflowId: string; name: string; status: string }>>([]);
+  const [unboundWorkflows, setUnboundWorkflows] = useState<Array<{ workflowId: string; name: string; status: string; version: number; createdAt: string; shortId: string; hasPlaceholders: boolean }>>([]);
   const [loadingUnboundWorkflows, setLoadingUnboundWorkflows] = useState(false);
   const [bindingWorkflow, setBindingWorkflow] = useState<string | null>(null);
+  const [showPlaceholderDrafts, setShowPlaceholderDrafts] = useState(false);
 
   // Add permission dialog
   const [addPermDialogOpen, setAddPermDialogOpen] = useState(false);
@@ -589,8 +597,14 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
           workflowId: r.value.workflowId,
           name: r.value.name || r.value.workflowId,
           status: r.value.status || 'UNKNOWN',
-          nodeCount: r.value.nodes?.length ?? 0,
-        }));
+          nodeCount: r.value.nodes?.length ?? parseDefinitionNodes(r.value.definition).length,
+          version: r.value.version ?? 1,
+          createdAt: r.value.createdAt ?? '',
+          updatedAt: r.value.updatedAt ?? '',
+          shortId: shortId(r.value.workflowId),
+          hasPlaceholders: hasPlaceholderNodes(r.value.definition),
+        }))
+        .sort(sortByNameThenDate);
       setWorkflows(loaded);
     } catch {
       setWorkflows([]);
@@ -916,7 +930,16 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
       setUnboundWorkflows(
         (result.items || [])
           .filter((w: any) => !boundIds.has(w.workflowId))
-          .map((w: any) => ({ workflowId: w.workflowId, name: w.name || w.workflowId, status: w.status || 'UNKNOWN' })),
+          .map((w: any) => ({
+            workflowId: w.workflowId,
+            name: w.name || w.workflowId,
+            status: w.status || 'UNKNOWN',
+            version: w.version ?? 1,
+            createdAt: w.createdAt ?? '',
+            shortId: shortId(w.workflowId),
+            hasPlaceholders: hasPlaceholderNodes(w.definition),
+          }))
+          .sort(sortByNameThenDate),
       );
     } catch {
       setUnboundWorkflows([]);
@@ -1359,15 +1382,39 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-sm font-medium text-foreground truncate mr-2">{wf.name}</span>
                     <div className="flex items-center gap-2 flex-shrink-0">
+                      <Badge className="text-xs border-0 bg-muted/20 text-muted-foreground">v{wf.version}</Badge>
                       {runIndicator && (
                         <Badge className={cn(runIndicator.bg, runIndicator.text, 'text-xs border-0')}>
                           {runIndicator.label}
                         </Badge>
                       )}
                       <Badge className="text-xs border-0 bg-muted/20 text-muted-foreground">{wf.status}</Badge>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="text-xs text-muted-foreground font-mono hover:text-foreground h-auto px-1 py-0"
+                        title={`Copy full ID: ${wf.workflowId}`}
+                        data-testid={`copy-id-${wf.workflowId}`}
+                        onClick={() => handleCopyToClipboard(wf.workflowId, `wf-id-${wf.workflowId}`)}
+                      >
+                        …{wf.shortId} {copiedField === `wf-id-${wf.workflowId}` ? <Check className="inline size-3 text-chart-2" /> : <Copy className="inline size-3" />}
+                      </Button>
                     </div>
                   </div>
-                  <p className="text-xs text-muted-foreground mb-3">{wf.nodeCount} node{wf.nodeCount !== 1 ? 's' : ''}</p>
+                  <p className="text-xs text-muted-foreground mb-1">
+                    <span title={absoluteDate(wf.createdAt)}>Created {relativeDate(wf.createdAt)}</span>
+                    {' · '}
+                    <span title={absoluteDate(wf.updatedAt)}>Updated {relativeDate(wf.updatedAt)}</span>
+                    {' · '}
+                    {wf.nodeCount} node{wf.nodeCount !== 1 ? 's' : ''}
+                  </p>
+                  {wf.hasPlaceholders && (
+                    <p className="text-xs text-amber-500 mb-1" data-testid={`placeholder-badge-${wf.workflowId}`}>
+                      <AlertTriangle className="inline size-3 mr-1" />
+                      Placeholder nodes
+                    </p>
+                  )}
                   <div className="flex items-center gap-2">
                     <Button
                       variant="outline"
@@ -2592,22 +2639,47 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
               Select a workflow to bind to this app.
             </DialogDescription>
           </DialogHeader>
+          <div className="flex items-center gap-2 my-1">
+            <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={showPlaceholderDrafts}
+                onChange={(e) => setShowPlaceholderDrafts(e.target.checked)}
+                data-testid="show-placeholder-toggle"
+              />
+              Show unmappable drafts
+            </label>
+          </div>
           <div className="flex flex-col max-h-80 overflow-y-auto gap-2 my-2">
             {loadingUnboundWorkflows ? (
               <div className="flex items-center gap-2 text-muted-foreground py-8 justify-center">
                 <Loader2 className="size-4 animate-spin" /> Loading workflows...
               </div>
-            ) : unboundWorkflows.length === 0 ? (
+            ) : unboundWorkflows.filter((wf) => showPlaceholderDrafts || !wf.hasPlaceholders).length === 0 ? (
               <p className="text-muted-foreground py-8 text-center text-sm">No available workflows to bind.</p>
             ) : (
-              unboundWorkflows.map((wf) => (
+              unboundWorkflows
+                .filter((wf) => showPlaceholderDrafts || !wf.hasPlaceholders)
+                .map((wf) => (
                 <Card
                   key={wf.workflowId}
                   className="flex-row items-center justify-between rounded-lg border-border/50 bg-background p-3 hover:border-border transition-colors"
                 >
                   <div className="flex-1 min-w-0 mr-3">
-                    <p className="text-sm font-medium text-foreground truncate">{wf.name}</p>
-                    <p className="text-xs text-muted-foreground">{wf.status}</p>
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm font-medium text-foreground truncate">{wf.name}</p>
+                      <span className="text-xs text-muted-foreground">v{wf.version}</span>
+                      <span className="text-xs font-mono text-muted-foreground" title={`Copy full ID: ${wf.workflowId}`}>…{wf.shortId}</span>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      {wf.status}
+                      {wf.createdAt && <> · <span title={absoluteDate(wf.createdAt)}>{relativeDate(wf.createdAt)}</span></>}
+                    </p>
+                    {wf.hasPlaceholders && (
+                      <p className="text-xs text-amber-500" data-testid={`picker-placeholder-badge-${wf.workflowId}`}>
+                        <AlertTriangle className="inline size-3 mr-1" />Placeholder nodes
+                      </p>
+                    )}
                   </div>
                   <Button
                     size="sm"

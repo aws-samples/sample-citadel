@@ -13,6 +13,7 @@ import { BlueprintPreviewDialog } from './BlueprintPreviewDialog';
 import { ImportBlueprintDialog } from './ImportBlueprintDialog';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
+import { sortByNameThenDate } from '../utils/workflowListHelpers';
 
 type LoadState = 'loading' | 'loaded' | 'error';
 
@@ -80,6 +81,9 @@ export function BlueprintCatalog() {
 
     return result;
   }, [blueprints, search, selectedCategory]);
+
+  // Sort: name ascending, then createdAt descending
+  const sorted = useMemo(() => [...filtered].sort(sortByNameThenDate), [filtered]);
 
   if (loadState === 'loading') {
     return (
@@ -150,7 +154,7 @@ export function BlueprintCatalog() {
 
       {/* Blueprint grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {filtered.map((bp) => (
+        {sorted.map((bp) => (
           <BlueprintCard
             key={bp.workflowId}
             blueprint={bp}
@@ -160,7 +164,7 @@ export function BlueprintCatalog() {
         ))}
       </div>
 
-      {filtered.length === 0 && (
+      {sorted.length === 0 && (
         <div className="flex items-center justify-center h-32">
           <p className="text-muted-foreground text-sm">No blueprints match your filters</p>
         </div>

@@ -234,7 +234,7 @@ describe('AppDetailView', () => {
       expect(screen.getByText('Test Workflow')).toBeInTheDocument();
     });
 
-    expect(screen.getByText('2 nodes')).toBeInTheDocument();
+    expect(screen.getByText(/2 nodes/)).toBeInTheDocument();
   });
 
   // Req 11.6: Permissions tab shows table
