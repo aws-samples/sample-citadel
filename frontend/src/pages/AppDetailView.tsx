@@ -496,12 +496,14 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
   const [editBindingSaving, setEditBindingSaving] = useState(false);
 
   // Bind workflow dialog
-  const { canApproveExecutions, loading: orgLoading } = useOrganization();
+  const { canApproveExecutions, loading: orgLoading, selectedOrganization } = useOrganization();
   const [bindWorkflowDialogOpen, setBindWorkflowDialogOpen] = useState(false);
-  const [unboundWorkflows, setUnboundWorkflows] = useState<Array<{ workflowId: string; name: string; status: string; version: number; createdAt: string; shortId: string; hasPlaceholders: boolean }>>([]);
+  const [unboundWorkflows, setUnboundWorkflows] = useState<Array<{ workflowId: string; name: string; status: string; version: number; createdAt: string; shortId: string; hasPlaceholders: boolean; appId?: string | null }>>([]);
   const [loadingUnboundWorkflows, setLoadingUnboundWorkflows] = useState(false);
   const [bindingWorkflow, setBindingWorkflow] = useState<string | null>(null);
   const [showPlaceholderDrafts, setShowPlaceholderDrafts] = useState(false);
+  const [showBoundElsewhere, setShowBoundElsewhere] = useState(false);
+  const [appsMap, setAppsMap] = useState<Map<string, string>>(new Map());
 
   // Add permission dialog
   const [addPermDialogOpen, setAddPermDialogOpen] = useState(false);
@@ -934,7 +936,15 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
     if (!app) return;
     try {
       setLoadingUnboundWorkflows(true);
-      const result = await workflowApiService.listWorkflows();
+      const [result, appsResult] = await Promise.all([
+        workflowApiService.listWorkflows(),
+        selectedOrganization ? appApiService.listApps(selectedOrganization).catch(() => ({ items: [] })) : Promise.resolve({ items: [] }),
+      ]);
+      const nameMap = new Map<string, string>();
+      for (const a of (appsResult.items || [])) {
+        nameMap.set(a.appId as string, (a.name as string) || shortId(a.appId as string));
+      }
+      setAppsMap(nameMap);
       const boundIds = new Set(app.workflowIds || []);
       setUnboundWorkflows(
         (result.items || [])
@@ -947,6 +957,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
             createdAt: (w.createdAt as string) ?? '',
             shortId: shortId(w.workflowId as string),
             hasPlaceholders: hasPlaceholderNodes(w.definition as string | undefined),
+            appId: (w.appId as string | null) ?? null,
           }))
           .sort(sortByNameThenDate),
       );
@@ -2660,7 +2671,7 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
               Select a workflow to bind to this app.
             </DialogDescription>
           </DialogHeader>
-          <div className="flex items-center gap-2 my-1">
+          <div className="flex items-center gap-4 my-1">
             <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
               <input
                 type="checkbox"
@@ -2670,55 +2681,104 @@ export function AppDetailView({ appId, onBack, onNavigate, onPublishSuccess, ini
               />
               Show unmappable drafts
             </label>
+            <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={showBoundElsewhere}
+                onChange={(e) => setShowBoundElsewhere(e.target.checked)}
+                data-testid="show-bound-elsewhere-toggle"
+              />
+              Show workflows bound to other apps
+            </label>
           </div>
           <div className="flex flex-col max-h-80 overflow-y-auto gap-2 my-2">
             {loadingUnboundWorkflows ? (
               <div className="flex items-center gap-2 text-muted-foreground py-8 justify-center">
                 <Loader2 className="size-4 animate-spin" /> Loading workflows...
               </div>
-            ) : unboundWorkflows.filter((wf) => showPlaceholderDrafts || !wf.hasPlaceholders).length === 0 ? (
-              <p className="text-muted-foreground py-8 text-center text-sm">No available workflows to bind.</p>
-            ) : (
-              unboundWorkflows
-                .filter((wf) => showPlaceholderDrafts || !wf.hasPlaceholders)
-                .map((wf) => (
-                <Card
-                  key={wf.workflowId}
-                  className="flex-row items-center justify-between rounded-lg border-border/50 bg-background p-3 hover:border-border transition-colors"
-                >
-                  <div className="flex-1 min-w-0 mr-3">
-                    <div className="flex items-center gap-2">
-                      <p className="text-sm font-medium text-foreground truncate">{wf.name}</p>
-                      <span className="text-xs text-muted-foreground">v{wf.version}</span>
-                      <span className="text-xs font-mono text-muted-foreground" title={`Copy full ID: ${wf.workflowId}`}>…{wf.shortId}</span>
+            ) : (() => {
+              const filtered = unboundWorkflows.filter((wf) => {
+                if (!showPlaceholderDrafts && wf.hasPlaceholders) return false;
+                const boundElsewhere = wf.appId && wf.appId !== appId;
+                if (!showBoundElsewhere && boundElsewhere) return false;
+                return true;
+              });
+              if (filtered.length === 0) {
+                return <p className="text-muted-foreground py-8 text-center text-sm">No available workflows to bind.</p>;
+              }
+              // Group adjacent same-name entries (list is already sorted by name)
+              const groups: Array<{ name: string; items: typeof filtered }> = [];
+              for (const wf of filtered) {
+                const last = groups[groups.length - 1];
+                if (last && last.name.localeCompare(wf.name, undefined, { sensitivity: 'base' }) === 0) {
+                  last.items.push(wf);
+                } else {
+                  groups.push({ name: wf.name, items: [wf] });
+                }
+              }
+              return groups.map((group) => (
+                <div key={group.name} className="flex flex-col gap-1">
+                  {group.items.length > 1 && (
+                    <div className="flex items-center gap-2 px-1 pt-1" data-testid={`group-header-${group.name}`}>
+                      <span className="text-xs font-medium text-muted-foreground">{group.name}</span>
+                      <Badge className="text-xs border-0 bg-muted/30 text-muted-foreground">{group.items.length} copies</Badge>
                     </div>
-                    <p className="text-xs text-muted-foreground">
-                      {wf.status}
-                      {wf.createdAt && <> · <span title={absoluteDate(wf.createdAt)}>{relativeDate(wf.createdAt)}</span></>}
-                    </p>
-                    {wf.hasPlaceholders && (
-                      <p className="text-xs text-amber-500" data-testid={`picker-placeholder-badge-${wf.workflowId}`}>
-                        <AlertTriangle className="inline size-3 mr-1" />Placeholder nodes
-                      </p>
-                    )}
-                  </div>
-                  <Button
-                    size="sm"
-                    className="text-xs bg-primary hover:bg-primary text-foreground h-7 px-3 flex-shrink-0"
-                    onClick={() => handleBindWorkflow(wf.workflowId)}
-                    disabled={bindingWorkflow === wf.workflowId}
-                  >
-                    {bindingWorkflow === wf.workflowId ? (
-                      <Loader2 className="size-3 animate-spin" />
-                    ) : (
-                      <>
-                        <Plus className="size-3 mr-1" /> Bind
-                      </>
-                    )}
-                  </Button>
-                </Card>
-              ))
-            )}
+                  )}
+                  {group.items.map((wf) => {
+                    const boundElsewhere = !!(wf.appId && wf.appId !== appId);
+                    const ownerLabel = boundElsewhere
+                      ? `Bound to ${appsMap.get(wf.appId!) || shortId(wf.appId!)}`
+                      : null;
+                    return (
+                      <Card
+                        key={wf.workflowId}
+                        className={cn(
+                          'flex-row items-center justify-between rounded-lg border-border/50 bg-background p-3 transition-colors',
+                          boundElsewhere ? 'opacity-50' : 'hover:border-border',
+                        )}
+                        data-testid={`picker-workflow-${wf.workflowId}`}
+                      >
+                        <div className="flex-1 min-w-0 mr-3">
+                          <div className="flex items-center gap-2">
+                            <p className="text-sm font-medium text-foreground truncate">{wf.name}</p>
+                            <span className="text-xs text-muted-foreground">v{wf.version}</span>
+                            <span className="text-xs font-mono text-muted-foreground" title={`Copy full ID: ${wf.workflowId}`}>…{wf.shortId}</span>
+                          </div>
+                          <p className="text-xs text-muted-foreground">
+                            {wf.status}
+                            {wf.createdAt && <> · <span title={absoluteDate(wf.createdAt)}>{relativeDate(wf.createdAt)}</span></>}
+                          </p>
+                          {wf.hasPlaceholders && (
+                            <p className="text-xs text-amber-500" data-testid={`picker-placeholder-badge-${wf.workflowId}`}>
+                              <AlertTriangle className="inline size-3 mr-1" />Placeholder nodes
+                            </p>
+                          )}
+                          {ownerLabel && (
+                            <p className="text-xs text-chart-4" data-testid={`bound-elsewhere-label-${wf.workflowId}`}>
+                              {ownerLabel}
+                            </p>
+                          )}
+                        </div>
+                        <Button
+                          size="sm"
+                          className="text-xs bg-primary hover:bg-primary text-foreground h-7 px-3 flex-shrink-0"
+                          onClick={() => handleBindWorkflow(wf.workflowId)}
+                          disabled={bindingWorkflow === wf.workflowId || boundElsewhere}
+                        >
+                          {bindingWorkflow === wf.workflowId ? (
+                            <Loader2 className="size-3 animate-spin" />
+                          ) : (
+                            <>
+                              <Plus className="size-3 mr-1" /> Bind
+                            </>
+                          )}
+                        </Button>
+                      </Card>
+                    );
+                  })}
+                </div>
+              ));
+            })()}
           </div>
           <DialogFooter>
             <Button variant="ghost" size="sm" className="text-xs" onClick={() => setBindWorkflowDialogOpen(false)}>
