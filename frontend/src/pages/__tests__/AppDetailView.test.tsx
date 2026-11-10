@@ -83,6 +83,7 @@ jest.mock('@/services/appApiService', () => ({
     setAppConfigValues: jest.fn(),
     addAppComponent: jest.fn(),
     updateAgentBinding: jest.fn(),
+    listApps: jest.fn(),
   },
 }));
 
@@ -160,6 +161,7 @@ describe('AppDetailView', () => {
     jest.clearAllMocks();
     tabsOnValueChange = null;
     (appApiService.getApp as jest.Mock).mockResolvedValue(mockApp);
+    (appApiService.listApps as jest.Mock).mockResolvedValue({ items: [] });
     (workflowApiService.getWorkflow as jest.Mock).mockResolvedValue(mockWorkflow);
   });
 
@@ -651,5 +653,51 @@ describe('AppDetailView', () => {
     await waitFor(() => {
       expect(appApiService.bindWorkflowToApp).toHaveBeenCalledWith('app-123', 'wf-new');
     });
+  });
+
+  it('hides workflows bound to another app by default and shows them disabled with the toggle', async () => {
+    (workflowApiService.listWorkflows as jest.Mock).mockResolvedValue({
+      items: [
+        { workflowId: 'wf-free', name: 'Free Workflow', status: 'DRAFT' },
+        { workflowId: 'wf-other', name: 'Other App Workflow', status: 'PUBLISHED', appId: 'app-other' },
+      ],
+    });
+    (appApiService.listApps as jest.Mock).mockResolvedValue({
+      items: [{ appId: 'app-other', name: 'Other App' }],
+    });
+
+    render(<AppDetailView {...defaultProps} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Test App')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText('Workflows'));
+
+    await waitFor(() => {
+      const bindButtons = screen.getAllByText('Bind Workflow');
+      fireEvent.click(bindButtons[0]);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Bind Workflow to App')).toBeInTheDocument();
+    });
+
+    // Free workflow visible, bound-elsewhere hidden by default
+    await waitFor(() => {
+      expect(screen.getByText('Free Workflow')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('Other App Workflow')).not.toBeInTheDocument();
+
+    // Toggle show bound-elsewhere
+    fireEvent.click(screen.getByTestId('show-bound-elsewhere-toggle'));
+
+    await waitFor(() => {
+      expect(screen.getByText('Other App Workflow')).toBeInTheDocument();
+    });
+
+    // The bound-elsewhere workflow's Bind button should be disabled
+    const bindBtn = screen.getByTestId('picker-workflow-wf-other').querySelector('button');
+    expect(bindBtn).toBeDisabled();
   });
 });

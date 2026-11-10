@@ -804,3 +804,163 @@ describe('ExecutionDetailSheet — execution actions (Pause/Approve/Deny)', () =
     expect(screen.queryByTestId('sheet-execution-actions')).not.toBeInTheDocument();
   });
 });
+
+// ─── Object output rendering (day-one bug fix) ───
+//
+// The worker stores node outputs as objects (AWSJSON parsed), not strings.
+// parseNodeResults must accept objects (pretty-print), strings (parse-if-JSON
+// then pretty, else raw), and treat only null/undefined as 'no output'.
+
+describe('ExecutionDetailSheet — object output rendering', () => {
+  it('renders object node output as pretty-printed JSON (not "No output recorded.")', () => {
+    const exec = {
+      ...baseExecution,
+      output: '{"answer":42}',
+      nodeResults: JSON.stringify({
+        router: {
+          nodeId: 'router',
+          status: 'completed',
+          startedAt: '2024-03-01T12:00:00Z',
+          completedAt: '2024-03-01T12:01:00Z',
+          output: { response: '{"route": "branch-b"}', usage: [] },
+          error: null,
+          retryCount: 0,
+        },
+      }),
+    };
+    render(<ExecutionDetailSheet execution={exec} open onClose={jest.fn()} />);
+
+    // Expand the router step
+    fireEvent.click(screen.getByRole('button', { name: /router/ }));
+
+    const stepsSection = screen.getByRole('region', { name: /^steps$/i });
+    // Must NOT show "No output recorded."
+    expect(within(stepsSection).queryByText('No output recorded.')).not.toBeInTheDocument();
+    // The object output is pretty-printed; the inner response string contains
+    // escaped quotes in the JSON representation — match the envelope keys
+    expect(within(stepsSection).getByText(/"response"/)).toBeInTheDocument();
+    expect(within(stepsSection).getByText(/branch-b/)).toBeInTheDocument();
+  });
+
+  it('still renders legacy string outputs correctly', () => {
+    const exec = {
+      ...baseExecution,
+      nodeResults: JSON.stringify({
+        'node-a': {
+          nodeId: 'node-a',
+          status: 'completed',
+          startedAt: '2024-03-01T12:00:00Z',
+          completedAt: '2024-03-01T12:02:00Z',
+          output: '{"step":"one"}',
+          error: null,
+          retryCount: 0,
+        },
+      }),
+    };
+    render(<ExecutionDetailSheet execution={exec} open onClose={jest.fn()} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /node-a/ }));
+
+    const pretty = JSON.stringify(JSON.parse('{"step":"one"}'), null, 2);
+    const stepsSection = screen.getByRole('region', { name: /^steps$/i });
+    expect(within(stepsSection).getByText((_: string, el: Element | null) =>
+      el?.tagName === 'PRE' && el.textContent === pretty
+    )).toBeInTheDocument();
+  });
+
+  it('shows "No output recorded." when node output is null', () => {
+    const exec = {
+      ...baseExecution,
+      nodeResults: JSON.stringify({
+        'node-x': {
+          nodeId: 'node-x',
+          status: 'completed',
+          startedAt: '2024-03-01T12:00:00Z',
+          completedAt: '2024-03-01T12:01:00Z',
+          output: null,
+          error: null,
+          retryCount: 0,
+        },
+      }),
+    };
+    render(<ExecutionDetailSheet execution={exec} open onClose={jest.fn()} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /node-x/ }));
+
+    const stepsSection = screen.getByRole('region', { name: /^steps$/i });
+    expect(within(stepsSection).getByText('No output recorded.')).toBeInTheDocument();
+  });
+
+  it('renders object node error as pretty-printed JSON', () => {
+    const exec = {
+      ...baseExecution,
+      nodeResults: JSON.stringify({
+        'node-err': {
+          nodeId: 'node-err',
+          status: 'failed',
+          startedAt: '2024-03-01T12:00:00Z',
+          completedAt: '2024-03-01T12:01:00Z',
+          output: null,
+          error: { code: 'TIMEOUT', message: 'exceeded 60s' },
+          retryCount: 0,
+        },
+      }),
+    };
+    render(<ExecutionDetailSheet execution={exec} open onClose={jest.fn()} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /node-err/ }));
+
+    const stepsSection = screen.getByRole('region', { name: /^steps$/i });
+    expect(within(stepsSection).getByText(/"TIMEOUT"/)).toBeInTheDocument();
+    expect(within(stepsSection).getByText(/"exceeded 60s"/)).toBeInTheDocument();
+  });
+
+  it('renders execution-level output when it is an object (defensive, unlikely from GraphQL)', () => {
+    const exec = {
+      ...baseExecution,
+      output: JSON.stringify({ result: 'success', data: [1, 2, 3] }),
+      nodeResults: null,
+    };
+    render(<ExecutionDetailSheet execution={exec} open onClose={jest.fn()} />);
+
+    expect(screen.queryByText('No output recorded.')).not.toBeInTheDocument();
+    expect(screen.getByText(/"result": "success"/)).toBeInTheDocument();
+  });
+
+  it('renders execution-level error string containing JSON as pretty-printed', () => {
+    const exec = {
+      ...baseExecution,
+      output: null,
+      error: '{"code":"FATAL","detail":"something broke"}',
+      nodeResults: null,
+    };
+    render(<ExecutionDetailSheet execution={exec} open onClose={jest.fn()} />);
+
+    expect(screen.getByText(/FATAL/)).toBeInTheDocument();
+  });
+
+  it('handles the full AWSJSON live shape: object nodeResults with object outputs', () => {
+    // This is the exact shape produced after AppSync parses AWSJSON:
+    // nodeResults is a JSON string containing objects whose output is an object
+    const liveNodeResults = JSON.stringify({
+      router: {
+        status: 'completed',
+        output: { response: '{"route": "branch-b"}', usage: [] },
+      },
+    });
+    const exec = {
+      ...baseExecution,
+      output: '{"final":"done"}',
+      nodeResults: liveNodeResults,
+    };
+    render(<ExecutionDetailSheet execution={exec} open onClose={jest.fn()} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /router/ }));
+
+    // The rendered output must contain the response key and route value
+    // (not "No output recorded."); the inner JSON string is escaped in
+    // the pretty-printed envelope
+    expect(screen.getByText(/"response"/)).toBeInTheDocument();
+    expect(screen.getByText(/branch-b/)).toBeInTheDocument();
+  });
+});

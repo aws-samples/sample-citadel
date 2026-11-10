@@ -110,6 +110,7 @@ jest.mock('@/services/appApiService', () => ({
     deleteApp: jest.fn(),
     deprecateApp: jest.fn(),
     restoreApp: jest.fn(),
+    listApps: jest.fn().mockResolvedValue({ items: [], nextToken: null }),
   },
 }));
 jest.mock('@/services/workflowApiService', () => ({
