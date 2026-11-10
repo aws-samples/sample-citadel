@@ -744,6 +744,20 @@ async function createDataStore(
       resourceArn = provisionResult.resourceArn;
       size = provisionResult.size;
       records = provisionResult.records;
+
+      // CIT-299: adapters may enrich config during provision (e.g.
+      // KnowledgeBaseAdapter adds collectionId). Persist the updated config
+      // so subsequent connect operations have the scoping identifiers.
+      await dynamodb.send(
+        new UpdateCommand({
+          TableName: DATASTORES_TABLE,
+          Key: { dataStoreId },
+          UpdateExpression: "SET config = :config",
+          ExpressionAttributeValues: {
+            ":config": JSON.stringify(config),
+          },
+        }),
+      );
     } else {
       await adapter.connect(config, scopedCredentials || credentials);
     }
@@ -978,6 +992,11 @@ async function connectDataStore(dataStoreId: string, event: unknown) {
       typeof existing.config === "string"
         ? JSON.parse(existing.config)
         : existing.config;
+
+    // CIT-298: inject dataStoreId and orgId into config so adapters (e.g.
+    // S3Adapter.connect) can verify resource ownership tags.
+    config.dataStoreId = dataStoreId;
+    config.orgId = existing.orgId;
 
     // Retrieve credentials from Secrets Manager if available
     let credentials: Record<string, unknown> | undefined;

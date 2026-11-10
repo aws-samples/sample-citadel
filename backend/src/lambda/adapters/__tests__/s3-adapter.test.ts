@@ -232,7 +232,9 @@ describe("S3Adapter", () => {
         fail("Expected ProvisioningError");
       } catch (err) {
         expect(err).toBeInstanceOf(ProvisioningError);
-        expect((err as Error).message).toMatch(/no tags/i);
+        expect((err as Error).message).toMatch(
+          /Bucket ownership verification failed/i,
+        );
       }
     });
 
@@ -250,7 +252,9 @@ describe("S3Adapter", () => {
         fail("Expected ProvisioningError");
       } catch (err) {
         expect(err).toBeInstanceOf(ProvisioningError);
-        expect((err as Error).message).toMatch(/not tagged as owned/i);
+        expect((err as Error).message).toMatch(
+          /Bucket ownership verification failed/i,
+        );
       }
     });
 
@@ -279,7 +283,9 @@ describe("S3Adapter", () => {
         fail("Expected ProvisioningError");
       } catch (err) {
         expect(err).toBeInstanceOf(ProvisioningError);
-        expect((err as Error).message).toMatch(/missing dataStoreId\/orgId/i);
+        expect((err as Error).message).toMatch(
+          /Bucket ownership verification failed/i,
+        );
       }
     });
 
@@ -294,7 +300,9 @@ describe("S3Adapter", () => {
         fail("Expected ProvisioningError");
       } catch (err) {
         expect(err).toBeInstanceOf(ProvisioningError);
-        expect((err as Error).message).toMatch(/tag verification failed/i);
+        expect((err as Error).message).toMatch(
+          /Bucket ownership verification failed/i,
+        );
       }
     });
   });
@@ -383,13 +391,26 @@ describe("S3Adapter", () => {
 
   describe("connect", () => {
     it("succeeds when HeadBucket succeeds", async () => {
-      mockSend.mockResolvedValueOnce({});
+      // CIT-298: ownership check fires first (GetBucketTagging)
+      mockSend.mockResolvedValueOnce({
+        TagSet: [
+          { Key: "citadel:dataStoreId", Value: "ds-001" },
+          { Key: "citadel:orgId", Value: "org-001" },
+        ],
+      });
+      mockSend.mockResolvedValueOnce({}); // HeadBucket
       await expect(
         adapter.connect(config, MOCK_SCOPED_CREDENTIALS),
       ).resolves.toBeUndefined();
     });
 
     it("throws ResourceNotFoundError when bucket does not exist", async () => {
+      mockSend.mockResolvedValueOnce({
+        TagSet: [
+          { Key: "citadel:dataStoreId", Value: "ds-001" },
+          { Key: "citadel:orgId", Value: "org-001" },
+        ],
+      });
       const sdkError = new Error("Not Found");
       sdkError.name = "NotFound";
       mockSend.mockRejectedValueOnce(sdkError);
@@ -399,6 +420,12 @@ describe("S3Adapter", () => {
     });
 
     it("throws PermissionError on AccessDenied", async () => {
+      mockSend.mockResolvedValueOnce({
+        TagSet: [
+          { Key: "citadel:dataStoreId", Value: "ds-001" },
+          { Key: "citadel:orgId", Value: "org-001" },
+        ],
+      });
       const sdkError = new Error("Forbidden");
       sdkError.name = "AccessDenied";
       mockSend.mockRejectedValueOnce(sdkError);
@@ -408,6 +435,12 @@ describe("S3Adapter", () => {
     });
 
     it("throws ConnectionError on other errors", async () => {
+      mockSend.mockResolvedValueOnce({
+        TagSet: [
+          { Key: "citadel:dataStoreId", Value: "ds-001" },
+          { Key: "citadel:orgId", Value: "org-001" },
+        ],
+      });
       const sdkError = new Error("Network issue");
       sdkError.name = "NetworkingError";
       mockSend.mockRejectedValueOnce(sdkError);
@@ -417,6 +450,12 @@ describe("S3Adapter", () => {
     });
 
     it("preserves SDK error as cause in ConnectionError", async () => {
+      mockSend.mockResolvedValueOnce({
+        TagSet: [
+          { Key: "citadel:dataStoreId", Value: "ds-001" },
+          { Key: "citadel:orgId", Value: "org-001" },
+        ],
+      });
       const sdkError = new Error("Network issue");
       sdkError.name = "NetworkingError";
       mockSend.mockRejectedValueOnce(sdkError);
@@ -515,6 +554,13 @@ describe("S3Adapter", () => {
 
   describe("scoped credentials", () => {
     it("constructs client with provided credentials", async () => {
+      // CIT-298: ownership check mock + HeadBucket
+      mockSend.mockResolvedValueOnce({
+        TagSet: [
+          { Key: "citadel:dataStoreId", Value: "ds-001" },
+          { Key: "citadel:orgId", Value: "org-001" },
+        ],
+      });
       mockSend.mockResolvedValueOnce({});
       const creds = {
         accessKeyId: "AKIA...",
