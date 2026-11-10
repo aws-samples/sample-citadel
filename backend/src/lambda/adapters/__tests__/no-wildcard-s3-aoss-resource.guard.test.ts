@@ -1,15 +1,11 @@
 /**
- * Guard test: no wildcard resource in S3 adapter policy statements.
+ * Guard test: no wildcard resource in S3 or bedrock/AOSS adapter policy statements.
  *
- * Scans S3 adapter files for provision and connect policy statements that
- * use `resources: ['*']` or `"*"`. All S3 actions must be scoped to the
- * specific bucket ARN.
+ * Scans adapter files for provision and connect policy statements that
+ * use `resources: ['*']` or `"*"` for S3, bedrock, or AOSS actions.
+ * All scoped actions must be resource-scoped.
  *
- * Allowlist: none. Every S3 statement must be resource-scoped.
- *
- * Note: OpenSearch adapter aoss:CreateCollection uses '*' because the
- * collection ARN is unknown at provision time — that is out of scope for
- * this PR and will be addressed in PR-3 (AOSS/KB scoping).
+ * Extended by CIT-299 to cover bedrock/aoss patterns.
  */
 
 import * as fs from "fs";
@@ -83,5 +79,43 @@ describe("no-wildcard-s3-resource guard", () => {
         expect(violations).toEqual([]);
       });
     }
+  });
+});
+
+describe("no-wildcard-bedrock-aoss-resource guard (CIT-299)", () => {
+  describe("runtime policy check — KNOWLEDGE_BASE with IDs", () => {
+    it("does not grant bedrock or aoss actions on bare wildcard resource", () => {
+      const adapter = getAdapter("KNOWLEDGE_BASE");
+      const policies = adapter.requiredPolicies(
+        { knowledgeBaseId: "KB12345", collectionId: "col-abc" },
+        "123456789012",
+        "us-east-1",
+      );
+      const allStatements = [...policies.provision, ...policies.connect];
+
+      for (const stmt of allStatements) {
+        const hasBrAoss = stmt.actions.some(
+          (a) => /^bedrock:/i.test(a) || /^aoss:/i.test(a),
+        );
+        if (hasBrAoss) {
+          for (const r of stmt.resources) {
+            expect(r).not.toBe("*");
+            expect(r).not.toMatch(/\/\*$/);
+          }
+        }
+      }
+    });
+  });
+
+  describe("runtime policy check — KNOWLEDGE_BASE without IDs returns empty", () => {
+    it("returns no connect policies when knowledgeBaseId/collectionId are absent", () => {
+      const adapter = getAdapter("KNOWLEDGE_BASE");
+      const policies = adapter.requiredPolicies(
+        {},
+        "123456789012",
+        "us-east-1",
+      );
+      expect(policies.connect).toEqual([]);
+    });
   });
 });
