@@ -20,6 +20,7 @@ try:
 
     _HAS_STRANDS = True
 except ImportError:
+    Model = object  # type: ignore[misc,assignment]
     _HAS_STRANDS = False
 
 pytestmark = pytest.mark.skipif(
@@ -33,7 +34,7 @@ if _WRAPPER_DIR not in sys.path:
     sys.path.insert(0, _WRAPPER_DIR)
 
 
-class _FakeModel(Model):
+class _FakeModel(Model):  # type: ignore[misc]
     """Minimal model that ends immediately — no Bedrock needed."""
 
     def update_config(self, **kw):
