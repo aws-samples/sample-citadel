@@ -30,6 +30,7 @@ try:
     from strands.models.model import Model
     _HAS_STRANDS = True
 except ImportError:
+    Model = object  # type: ignore[misc,assignment]
     _HAS_STRANDS = False
 
 pytestmark = pytest.mark.skipif(

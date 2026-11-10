@@ -1,0 +1,13 @@
+# CI aggregate: installs every Lambda's requirements so pytest can collect
+# all test modules.  If you add a new arbiter/*/requirements.txt, add it
+# here — the guard test (test_requirements_ci_completeness) will fail if
+# you forget.
+-r requirements.txt
+-r supervisor/requirements.txt
+-r fabricator/requirements.txt
+-r workerWrapper/requirements.txt
+-r stepRunner/requirements.txt
+-r activator/requirements.txt
+-r eval_judge/requirements.txt
+-r layers/common/requirements.txt
+-r requirements-dev.txt
