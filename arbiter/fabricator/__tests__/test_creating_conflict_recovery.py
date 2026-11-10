@@ -86,6 +86,7 @@ def _call_store_tool(tool_id="my_tool"):
         tool_id=tool_id,
         tool_schema={"type": "object", "properties": {}},
         tool_description="a test tool",
+        org_id="test-org",
     )
 
 
@@ -484,9 +485,12 @@ class TestRegistrationDeadlineCheckpoints:
 
     def test_create_custom_tool_refuses_to_start_inside_margin(self):
         set_fabrication_deadline(FabricationDeadline(lambda: 10_000))
+        bound_tool = index._make_create_custom_tool(
+            org_id="test-org", requested_by="fabricator", spec_id=None,
+        )
         with patch.object(index, "create_tool_fabricator") as mk:
             with pytest.raises(FabricationDeadlineExceeded):
-                index.create_custom_tool(tool_description="a nested tool")
+                bound_tool._tool_func(tool_description="a nested tool")
         mk.assert_not_called()
 
     def test_no_deadline_set_keeps_registration_working(self):

@@ -218,6 +218,7 @@ class TestApprovalPendingApproval:
                 tool_id="my-tool",
                 tool_schema=TOOL_SCHEMA,
                 tool_description="A tool",
+                org_id="test-org",
             )
         assert result is True
         # get_registry_record IS called once for the _approve status pre-read.
@@ -232,6 +233,7 @@ class TestApprovalPendingApproval:
                 tool_id="my-tool",
                 tool_schema=TOOL_SCHEMA,
                 tool_description="A tool",
+                org_id="test-org",
             )
         assert result is True
 
@@ -247,6 +249,7 @@ class TestApprovalPendingApproval:
                     tool_id="my-tool",
                     tool_schema=TOOL_SCHEMA,
                     tool_description="A tool",
+                    org_id="test-org",
                 )
 
     def test_pending_approval_tracked_in_run_state(self):
@@ -261,6 +264,7 @@ class TestApprovalPendingApproval:
                     tool_id="my-pending-tool",
                     tool_schema=TOOL_SCHEMA,
                     tool_description="A tool",
+                    org_id="test-org",
                 )
             run_state = index._registration_run_state
             assert "my-pending-tool" in run_state.pending_approval
@@ -279,6 +283,7 @@ class TestApprovalPendingApproval:
                 tool_id="my-tool",
                 tool_schema=TOOL_SCHEMA,
                 tool_description="A tool",
+                org_id="test-org",
             )
         assert result is True
 
@@ -323,6 +328,7 @@ class TestToolRegistryIdempotency:
                 tool_id="new-tool",
                 tool_schema=TOOL_SCHEMA,
                 tool_description="new",
+                org_id="test-org",
             )
         assert result is True
         client.create_registry_record.assert_called_once()

@@ -154,6 +154,7 @@ class TestCreateResourceCall:
                 tool_id=tool_id,
                 tool_schema=schema,
                 tool_description=description,
+                org_id="test-org",
             )
 
         assert client.create_registry_record.called
@@ -176,6 +177,7 @@ class TestCreateResourceCall:
                 tool_id=tool_id,
                 tool_schema=schema,
                 tool_description=description,
+                org_id="test-org",
             )
 
         kwargs = client.create_registry_record.call_args.kwargs
@@ -192,6 +194,7 @@ class TestCreateResourceCall:
                 tool_id=tool_id,
                 tool_schema=schema,
                 tool_description=description,
+                org_id="test-org",
             )
 
         kwargs = client.create_registry_record.call_args.kwargs
@@ -226,6 +229,7 @@ class TestCreateResourceCall:
                 tool_id=tool_id,
                 tool_schema=schema,
                 tool_description="desc",
+                org_id="test-org",
             )
 
         kwargs = client.create_registry_record.call_args.kwargs
@@ -244,6 +248,7 @@ class TestCreateResourceCall:
                 tool_schema=schema,
                 tool_description="desc",
                 requested_by=requester,
+                org_id="test-org",
             )
 
         kwargs = client.create_registry_record.call_args.kwargs
@@ -261,6 +266,7 @@ class TestCreateResourceCall:
                 tool_id=tool_id,
                 tool_schema=schema,
                 tool_description="desc",
+                org_id="test-org",
             )
 
         kwargs = client.create_registry_record.call_args.kwargs
@@ -287,8 +293,8 @@ class TestCreateResourceCall:
 
     @given(tool_id=tool_ids, schema=tool_schemas)
     @settings(max_examples=10)
-    def test_org_id_defaults_to_empty_string(self, tool_id, schema):
-        """Callers that don't pass org_id get '' — matches resolver's null fallback."""
+    def test_org_id_written_to_custom_metadata(self, tool_id, schema):
+        """Callers must supply org_id — it is stamped into custom metadata as orgId."""
         client = _make_registry_mock()
         with patch("index._get_registry_client", return_value=client):
             store_tool_config_registry(
@@ -296,11 +302,12 @@ class TestCreateResourceCall:
                 tool_id=tool_id,
                 tool_schema=schema,
                 tool_description="desc",
+                org_id="test-org",
             )
 
         kwargs = client.create_registry_record.call_args.kwargs
         meta = json.loads(kwargs["descriptors"]["custom"]["data"])
-        assert meta["orgId"] == ""
+        assert meta["orgId"] == "test-org"
 
     @given(
         tool_id=tool_ids,
@@ -318,6 +325,7 @@ class TestCreateResourceCall:
                 tool_schema=schema,
                 tool_description="desc",
                 integration_bindings=bindings,
+                org_id="test-org",
             )
 
         kwargs = client.create_registry_record.call_args.kwargs
@@ -340,6 +348,7 @@ class TestCreateResourceCall:
                 tool_schema=schema,
                 tool_description="desc",
                 datastore_bindings=bindings,
+                org_id="test-org",
             )
 
         kwargs = client.create_registry_record.call_args.kwargs
@@ -365,6 +374,7 @@ class TestCreateResourceCall:
                 tool_description="desc",
                 integration_bindings=ibindings,
                 datastore_bindings=dbindings,
+                org_id="test-org",
             )
 
         kwargs = client.create_registry_record.call_args.kwargs
@@ -383,6 +393,7 @@ class TestCreateResourceCall:
                 tool_id=tool_id,
                 tool_schema=schema,
                 tool_description="desc",
+                org_id="test-org",
             )
 
         kwargs = client.create_registry_record.call_args.kwargs
@@ -401,6 +412,7 @@ class TestCreateResourceCall:
                 tool_schema=schema,
                 tool_description="desc",
                 app_id=app_id,
+                org_id="test-org",
             )
 
         kwargs = client.create_registry_record.call_args.kwargs
@@ -417,6 +429,7 @@ class TestCreateResourceCall:
                 tool_id=tool_id,
                 tool_schema=schema,
                 tool_description="desc",
+                org_id="test-org",
             )
 
         kwargs = client.create_registry_record.call_args.kwargs
@@ -458,6 +471,7 @@ class TestInitialStatusApproved:
                 tool_id=tool_id,
                 tool_schema=schema,
                 tool_description="desc",
+                org_id="test-org",
             )
 
         # Live-oracle-verified contract: approval is a SINGLE
@@ -483,6 +497,7 @@ class TestInitialStatusApproved:
                 tool_id=tool_id,
                 tool_schema=schema,
                 tool_description="desc",
+                org_id="test-org",
             )
 
         response = client.submit_registry_record_for_approval.return_value
@@ -499,6 +514,7 @@ class TestInitialStatusApproved:
                 tool_id=tool_id,
                 tool_schema=schema,
                 tool_description="desc",
+                org_id="test-org",
             )
 
         kwargs = client.create_registry_record.call_args.kwargs
@@ -530,6 +546,7 @@ class TestFailureEmitsEvent:
                     tool_id=tool_id,
                     tool_schema={"type": "object", "properties": {}, "required": []},
                     tool_description="desc",
+                    org_id="test-org",
                 )
 
         assert mock_publish.called
@@ -552,6 +569,7 @@ class TestFailureEmitsEvent:
                     tool_schema={"type": "object", "properties": {}, "required": []},
                     tool_description="desc",
                     app_id=app_id,
+                    org_id="test-org",
                 )
 
         kwargs = mock_publish.call_args.kwargs
@@ -571,6 +589,7 @@ class TestFailureEmitsEvent:
                     tool_id="t",
                     tool_schema={"type": "object", "properties": {}},
                     tool_description="desc",
+                    org_id="test-org",
                 )
 
     def test_missing_registry_id_raises_value_error(self):
@@ -586,6 +605,7 @@ class TestFailureEmitsEvent:
                             tool_id="t",
                             tool_schema={"type": "object"},
                             tool_description="desc",
+                            org_id="test-org",
                         )
             finally:
                 if orig is not None:
@@ -609,6 +629,7 @@ class TestSchemaAsString:
                 tool_id=tool_id,
                 tool_schema=json.dumps(schema),
                 tool_description="desc",
+                org_id="test-org",
             )
 
         kwargs = client.create_registry_record.call_args.kwargs
