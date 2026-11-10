@@ -262,7 +262,8 @@ class TestFabricatorModelTransientFaultConfig:
     def test_agent_fabricator_model_disables_streaming(self):
         import index as index_module
         kwargs = self._bedrock_model_kwargs(
-            index_module.create_agent_fabricator, MagicMock(name="complete_task")
+            index_module.create_agent_fabricator, MagicMock(name="complete_task"),
+            org_id="test-org",
         )
         assert kwargs.get("streaming") is False
         assert kwargs.get("boto_client_config") is index_module.BEDROCK_RETRY_CONFIG

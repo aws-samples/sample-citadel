@@ -169,8 +169,8 @@ class TestMakeCreateCustomToolOrgBinding:
 # ---------------------------------------------------------------------------
 
 class TestStoreToolFailClosedWithoutOrg:
-    """store_tool_config_registry must refuse to write when org_id is empty
-    and a registration run is active (inside process_event)."""
+    """store_tool_config_registry must refuse to write when org_id is empty,
+    unconditionally (not gated on whether a registration run is active)."""
 
     def setup_method(self):
         _begin_registration_run()

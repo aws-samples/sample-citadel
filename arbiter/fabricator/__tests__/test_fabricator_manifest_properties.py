@@ -396,6 +396,7 @@ class TestToolHasNoManifest:
                 tool_id=tool_id,
                 tool_schema=schema,
                 tool_description=description,
+                org_id="test-org",
             )
 
         meta = _inline_meta_from_create_call(client)
@@ -420,6 +421,7 @@ class TestToolHasNoManifest:
                 tool_schema=schema,
                 tool_description=description,
                 requested_by=requester,
+                org_id="test-org",
             )
 
         meta = _inline_meta_from_create_call(client)

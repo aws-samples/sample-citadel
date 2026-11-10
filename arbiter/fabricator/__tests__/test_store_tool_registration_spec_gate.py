@@ -119,6 +119,7 @@ class TestSpecGateDeniesUngovernedTools:
                     tool_schema=CODE_GEN_SCHEMA,
                     tool_description="generates code",
                     spec_id=None,
+                    org_id="test-org",
                 )
         # Must NOT have created a registry record
         client.create_registry_record.assert_not_called()
@@ -138,6 +139,7 @@ class TestSpecGateDeniesUngovernedTools:
                     tool_schema=CODE_GEN_SCHEMA,
                     tool_description="generates code",
                     spec_id="spec-unapproved",
+                    org_id="test-org",
                 )
         client.create_registry_record.assert_not_called()
 
@@ -165,6 +167,7 @@ class TestSpecGateDeniesUngovernedTools:
                     tool_schema=schema_no_outputs,
                     tool_description="no outputs declared",
                     spec_id="spec-no-outputs",
+                    org_id="test-org",
                 )
         client.create_registry_record.assert_not_called()
 
@@ -190,6 +193,7 @@ class TestSpecGateAllowsGovernedTools:
                 tool_schema=CODE_GEN_SCHEMA,
                 tool_description="generates code",
                 spec_id="spec-123",
+                org_id="test-org",
             )
         assert result is True
         client.create_registry_record.assert_called_once()
@@ -205,6 +209,7 @@ class TestSpecGateAllowsGovernedTools:
                 tool_schema=NON_CODE_GEN_SCHEMA,
                 tool_description="returns text",
                 spec_id=None,
+                org_id="test-org",
             )
         assert result is True
         client.create_registry_record.assert_called_once()
@@ -224,6 +229,7 @@ class TestSpecGateAllowsGovernedTools:
                 tool_schema=schema,
                 tool_description="empty outputs",
                 spec_id=None,
+                org_id="test-org",
             )
         assert result is True
         client.create_registry_record.assert_called_once()
@@ -242,6 +248,7 @@ class TestSpecGateAllowsGovernedTools:
                 tool_schema=schema,
                 tool_description="legacy tool",
                 spec_id=None,
+                org_id="test-org",
             )
         assert result is True
         client.create_registry_record.assert_called_once()
@@ -257,6 +264,7 @@ class TestSpecGateAllowsGovernedTools:
                     tool_schema=CODE_GEN_SCHEMA,
                     tool_description="generates code",
                     spec_id=None,
+                    org_id="test-org",
                 )
         client.create_registry_record.assert_not_called()
 
@@ -277,6 +285,7 @@ class TestRecordCreatedAsDraftAndSubmitted:
                 tool_id="test_tool",
                 tool_schema=NON_CODE_GEN_SCHEMA,
                 tool_description="desc",
+                org_id="test-org",
             )
         client.submit_registry_record_for_approval.assert_called_once()
         client.update_registry_record_status.assert_not_called()
@@ -290,6 +299,7 @@ class TestRecordCreatedAsDraftAndSubmitted:
                 tool_id="test_tool",
                 tool_schema=NON_CODE_GEN_SCHEMA,
                 tool_description="desc",
+                org_id="test-org",
             )
         kwargs = client.submit_registry_record_for_approval.call_args.kwargs
         assert kwargs["registryId"] == os.environ["REGISTRY_ID"]
@@ -310,6 +320,7 @@ class TestRecordCreatedAsDraftAndSubmitted:
                 tool_id="test_tool",
                 tool_schema=NON_CODE_GEN_SCHEMA,
                 tool_description="desc",
+                org_id="test-org",
             )
         assert result is True
 
@@ -326,6 +337,7 @@ class TestRecordCreatedAsDraftAndSubmitted:
                 tool_id="test_tool",
                 tool_schema=NON_CODE_GEN_SCHEMA,
                 tool_description="desc",
+                org_id="test-org",
             )
         assert result is True
 
@@ -352,6 +364,7 @@ class TestToolRegistrationDeniedMetric:
                     tool_schema=CODE_GEN_SCHEMA,
                     tool_description="generates code",
                     spec_id=None,
+                    org_id="test-org",
                 )
         cw_mock.put_metric_data.assert_called_once()
         metric_data = cw_mock.put_metric_data.call_args.kwargs
@@ -381,6 +394,7 @@ class TestToolRegistrationDeniedMetric:
                     tool_schema=CODE_GEN_SCHEMA,
                     tool_description="generates code",
                     spec_id="spec-unapproved",
+                    org_id="test-org",
                 )
         cw_mock.put_metric_data.assert_called_once()
 
@@ -400,6 +414,7 @@ class TestToolRegistrationDeniedMetric:
                 tool_schema=CODE_GEN_SCHEMA,
                 tool_description="generates code",
                 spec_id="spec-123",
+                org_id="test-org",
             )
         cw_mock.put_metric_data.assert_not_called()
 
@@ -419,4 +434,5 @@ class TestToolRegistrationDeniedMetric:
                     tool_schema=CODE_GEN_SCHEMA,
                     tool_description="code gen",
                     spec_id=None,
+                    org_id="test-org",
                 )

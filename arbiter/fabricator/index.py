@@ -1997,9 +1997,10 @@ def store_tool_config_registry(
             metadata as ``createdBy``. Defaults to ``"fabricator"`` for legacy
             callers that don't thread the value through.
         org_id: The caller's organization id — stamped into custom metadata as
-            ``orgId`` (Phase 2b). Defaults to ``""`` to mirror the resolver's
-            defensive null fallback; callers should pass the value threaded
-            from the SQS event's ``org_id`` field.
+            ``orgId`` (Phase 2b).  **Server-derived**: callers MUST pass the
+            value threaded from the SQS event's ``org_id`` field.  An empty
+            value is unconditionally rejected (FabricationError + OrgMissing
+            metric) regardless of whether a registration run is active.
         spec_id: Optional ExecutionSpecification id. When provided and the
             tool schema declares code-generating outputs, the spec-approval
             gate is enforced (CIT-256 H2). ``None`` skips the gate — used
@@ -2044,16 +2045,17 @@ def store_tool_config_registry(
         )
 
         # CIT-302 fail-closed guard: refuse to register a tool without an
-        # organisation WHEN running inside a fabrication job (registration
-        # run state is active). An empty org_id means the nested fabrication
-        # path failed to bind the org. Writing an org-less record would
-        # create a tool invisible to any org's idempotency lookup and
-        # unreachable by org-scoped queries. Emit a metric for operator
-        # visibility and raise an opaque error.
-        # Outside a fabrication run (direct/legacy callers, tests),
-        # empty org_id is allowed for backward compatibility — process_event
-        # already refuses messages without org_id at the gate.
-        if not org_id and _registration_run_state is not None:
+        # organisation.  An empty org_id means the caller failed to bind
+        # the org.  Writing an org-less record would create a tool
+        # invisible to any org's idempotency lookup and unreachable by
+        # org-scoped queries.  Emit a metric for operator visibility and
+        # raise an opaque error.
+        #
+        # The guard is UNCONDITIONAL (not gated on _registration_run_state)
+        # so that every code path — production, nested fabrication, direct
+        # caller, or future integration — is fail-closed.  org_id is
+        # server-derived from the SQS event; it must never be omitted.
+        if not org_id:
             _emit_org_missing_metric("store_tool_config_registry", tool_id)
             raise FabricationError(
                 f"tool '{tool_id}' cannot be registered without an "
@@ -2628,7 +2630,7 @@ def _make_create_custom_tool(
 
     return create_custom_tool
 
-def create_agent_fabricator(complete_task, store_agent_tool=None, org_id: str = "", create_custom_tool_tool=None):
+def create_agent_fabricator(complete_task, store_agent_tool=None, *, org_id: str, create_custom_tool_tool=None):
     """Create and return the Agent Fabricator agent.
 
     Args:
@@ -2639,19 +2641,23 @@ def create_agent_fabricator(complete_task, store_agent_tool=None, org_id: str = 
             (see ``process_event``). Defaults to the module-level
             ``store_agent_config_registry`` which uses the legacy
             ``"fabricator"`` default.
-        org_id: The caller's organisation id, threaded to the prompt builder
-            so the tool catalogue is scoped.
+        org_id: **Required.**  The caller's organisation id, server-derived
+            from the SQS event.  Threaded to the prompt builder so the tool
+            catalogue is scoped, and to ``_make_create_custom_tool`` when no
+            explicit ``create_custom_tool_tool`` is provided.
         create_custom_tool_tool: Optional org-bound ``create_custom_tool``
             @tool produced by ``_make_create_custom_tool``. When ``None``
-            a legacy unbound tool is built that registers tools without an
-            org (backward-compat for direct callers outside ``process_event``).
+            the factory builds one using *org_id* / ``"fabricator"`` /
+            ``spec_id=None``.
+
+    Raises:
+        TypeError: If *org_id* is omitted (keyword-only, no default).
     """
     if store_agent_tool is None:
         store_agent_tool = store_agent_config_registry
     if create_custom_tool_tool is None:
-        # Legacy fallback — direct callers outside process_event.
         create_custom_tool_tool = _make_create_custom_tool(
-            org_id="", requested_by="fabricator", spec_id=None,
+            org_id=org_id, requested_by="fabricator", spec_id=None,
         )
 
     bedrock_model = models.BedrockModel(
