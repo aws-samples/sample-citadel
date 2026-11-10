@@ -125,4 +125,22 @@ export interface ConnectorAdapter {
     credentials: Record<string, unknown>,
     config: Record<string, unknown>,
   ): ValidationResult;
+
+  /**
+   * CIT-298: optional preflight ownership check run BEFORE any IAM role is
+   * vended. Called with the platform Lambda credentials (not scoped creds)
+   * so it can verify resource ownership tags before ensureRole creates a
+   * persistent IAM role.
+   *
+   * Implementations MUST throw on refusal (opaque error, no leaked details).
+   * For brand-new provisioning the resource may not exist yet — adapters
+   * should allow that case.
+   *
+   * @param config  The parsed datastore/integration config
+   * @param ctx     Platform context: { dataStoreId, orgId, provisionMode }
+   */
+  preflight?(
+    config: Record<string, unknown>,
+    ctx: { dataStoreId: string; orgId: string; provisionMode?: string },
+  ): Promise<void>;
 }

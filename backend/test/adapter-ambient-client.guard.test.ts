@@ -28,6 +28,8 @@ const PLATFORM_CLIENT_ALLOWLIST: Record<string, string> = {
     "IAM control-plane (create/delete Bedrock KB service role citadel-ds-kb-svc-*) — runs under datastore-resolver Lambda direct IAM grants",
   platformStsClient:
     "STS GetCallerIdentity — read-only account context query under Lambda execution role",
+  platformS3Client:
+    "CIT-298: S3 preflight bucket ownership check (GetBucketTagging + HeadBucket) — runs under datastore-resolver Lambda direct S3 grants on citadel-* buckets before any scoped role is vended",
 };
 
 /**
@@ -102,8 +104,13 @@ describe("adapter-ambient-client guard", () => {
       path.join(ADAPTER_DIR, "knowledge-base-adapter.ts"),
       "utf-8",
     );
+    const s3Content = fs.readFileSync(
+      path.join(ADAPTER_DIR, "s3-adapter.ts"),
+      "utf-8",
+    );
+    const allContent = kbContent + "\n" + s3Content;
     for (const method of Object.keys(PLATFORM_CLIENT_ALLOWLIST)) {
-      expect(kbContent).toContain(`private ${method}(`);
+      expect(allContent).toContain(`private ${method}(`);
     }
   });
 });

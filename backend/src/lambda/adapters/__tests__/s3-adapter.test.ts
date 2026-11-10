@@ -106,6 +106,7 @@ describe("S3Adapter", () => {
         "s3:ListObjectsV2",
         "s3:GetObject",
         "s3:PutObject",
+        "s3:GetBucketTagging",
       ]);
       expect(policies.connect[0].resources).toEqual([
         "arn:aws:s3:::citadel-my-test-bucket",

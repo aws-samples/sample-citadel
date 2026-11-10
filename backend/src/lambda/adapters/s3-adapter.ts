@@ -70,6 +70,17 @@ export class S3Adapter implements ConnectorAdapter {
     return new S3Client({ credentials });
   }
 
+  /**
+   * CIT-298: Platform-role S3 client for preflight ownership checks.
+   * Uses the Lambda execution role's ambient credentials intentionally —
+   * preflight runs BEFORE any scoped role is vended, to prove bucket
+   * ownership. Scoped to s3:GetBucketTagging + s3:HeadBucket on
+   * citadel-* buckets via the CDK grant in backend-stack.ts.
+   */
+  private platformS3Client(): S3Client {
+    return new S3Client({});
+  }
+
   requiredPolicies(
     config: Record<string, unknown>,
     _accountId: string,
@@ -111,6 +122,7 @@ export class S3Adapter implements ConnectorAdapter {
             "s3:ListObjectsV2",
             "s3:GetObject",
             "s3:PutObject",
+            "s3:GetBucketTagging",
           ],
           resources: [bucketArn, `${bucketArn}/*`],
         },
@@ -297,6 +309,69 @@ export class S3Adapter implements ConnectorAdapter {
       );
     } catch {
       // metrics must never break the caller
+    }
+  }
+
+  /**
+   * CIT-298: preflight ownership check using the PLATFORM Lambda credentials
+   * (not scoped creds). Called BEFORE ensureRole so no IAM role is created
+   * unless ownership is proven.
+   *
+   * For CONNECT_EXISTING: bucket must exist and carry
+   *   citadel:dataStoreId == ctx.dataStoreId AND citadel:orgId == ctx.orgId.
+   * For CREATE_NEW: bucket must NOT exist, OR must be tagged for this
+   *   datastore (idempotent re-provision).
+   */
+  async preflight(
+    config: Record<string, unknown>,
+    ctx: { dataStoreId: string; orgId: string; provisionMode?: string },
+  ): Promise<void> {
+    const bucketName = config.bucketName as string | undefined;
+    if (!bucketName) return; // validated later
+
+    // Platform client — NO scoped credentials, uses the Lambda execution role
+    const client = this.platformS3Client();
+
+    if (ctx.provisionMode === "CREATE_NEW") {
+      // For new provisions, the bucket should not exist yet.
+      // If it does (idempotent retry), verify tags.
+      try {
+        await client.send(new HeadBucketCommand({ Bucket: bucketName }));
+        // Bucket exists — must be tagged for THIS datastore + org
+        await this.verifyBucketOwnership(
+          client,
+          bucketName,
+          ctx.dataStoreId,
+          ctx.orgId,
+        );
+      } catch (error) {
+        if (error instanceof ProvisioningError) throw error;
+        const err = error as SdkError;
+        // 404/NotFound = bucket doesn't exist yet — that's expected for CREATE_NEW
+        if (err.name === "NotFound" || err.$metadata?.httpStatusCode === 404) {
+          return;
+        }
+        // 403 = bucket exists in another account — refuse
+        if (
+          err.name === "AccessDenied" ||
+          err.name === "AccessDeniedException" ||
+          err.$metadata?.httpStatusCode === 403
+        ) {
+          this.emitBucketOwnershipRefused();
+          throw new ProvisioningError("Bucket ownership verification failed");
+        }
+        // Any other error — fail closed
+        this.emitBucketOwnershipRefused();
+        throw new ProvisioningError("Bucket ownership verification failed");
+      }
+    } else {
+      // CONNECT_EXISTING: bucket must exist and be tagged for this datastore
+      await this.verifyBucketOwnership(
+        client,
+        bucketName,
+        ctx.dataStoreId,
+        ctx.orgId,
+      );
     }
   }
 

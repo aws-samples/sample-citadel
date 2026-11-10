@@ -3098,6 +3098,35 @@ export class BackendStack extends cdk.Stack {
       }),
     );
 
+    // CIT-298: Grant S3 GetBucketTagging for preflight bucket ownership
+    // verification. Scoped to citadel-* buckets only (least privilege).
+    dataStoreResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["s3:GetBucketTagging", "s3:HeadBucket"],
+        resources: [`arn:${cdk.Aws.PARTITION}:s3:::citadel-*`],
+      }),
+    );
+    NagSuppressions.addResourceSuppressions(
+      dataStoreResolverFunction.role!,
+      [
+        {
+          id: "AwsSolutions-IAM5",
+          reason:
+            "CIT-298: S3 preflight bucket ownership check. GetBucketTagging + HeadBucket " +
+            "must run under the platform role BEFORE any scoped IAM role is vended, " +
+            "to prove bucket ownership tags match the caller's org. Scoped to " +
+            "citadel-* prefix buckets only — the naming convention is enforced by " +
+            "S3Adapter.provision (CITADEL_BUCKET_PREFIX guard).",
+          appliesTo: [
+            `Resource::arn:${cdk.Aws.PARTITION}:s3:::citadel-*`,
+            `Resource::arn:<AWS::Partition>:s3:::citadel-*`,
+          ],
+        },
+      ],
+      true,
+    );
+
     // Grant OpenSearch Serverless permissions for Knowledge Base vector store provisioning
     dataStoreResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
