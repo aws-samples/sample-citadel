@@ -257,7 +257,7 @@ describe("intake-orchestration-resolver", () => {
       );
 
       expect(activateMock).toHaveBeenCalledTimes(1);
-      expect(activateMock).toHaveBeenCalledWith(SESSION_ID);
+      expect(activateMock).toHaveBeenCalledWith(SESSION_ID, ORG_ID);
       expect(result).toEqual({
         activated: ["agent-a"],
         failed: [],
@@ -280,8 +280,8 @@ describe("intake-orchestration-resolver", () => {
         makeEvent("intakeActivateProjectAgents", { sessionId: SESSION_ID }),
       );
 
-      expect(activateMock).toHaveBeenNthCalledWith(1, SESSION_ID);
-      expect(activateMock).toHaveBeenNthCalledWith(2, PROJECT_ID);
+      expect(activateMock).toHaveBeenNthCalledWith(1, SESSION_ID, ORG_ID);
+      expect(activateMock).toHaveBeenNthCalledWith(2, PROJECT_ID, ORG_ID);
       expect(result).toEqual({
         activated: ["agent-a"],
         failed: [],
@@ -364,8 +364,80 @@ describe("intake-orchestration-resolver", () => {
       expect(scanCalls[0].args[0].input.ExclusiveStartKey).toBeUndefined();
       expect(scanCalls[1].args[0].input.ExclusiveStartKey).toEqual(lastKey);
       // The row found on page 2 drives the projectId fallback activation.
-      expect(activateMock).toHaveBeenNthCalledWith(2, PROJECT_ID);
+      expect(activateMock).toHaveBeenNthCalledWith(2, PROJECT_ID, ORG_ID);
       expect(result).toMatchObject({ matchedBy: "projectId" });
+    });
+
+    // ── CIT-293 (H15): org-scoping on agent activation ────────────────
+
+    test("passes the session-derived orgId to activateProjectAgents (happy path)", async () => {
+      // CIT-293: the session org is now resolved server-side and threaded
+      // to activateProjectAgents so only the caller's own agents are
+      // activated.
+      mockSessionLinkage();
+      activateMock.mockResolvedValueOnce({
+        activated: ["agent-a"],
+        failed: [],
+        alreadyActive: [],
+      });
+
+      const result = await invoke(
+        makeEvent("intakeActivateProjectAgents", { sessionId: SESSION_ID }),
+      );
+
+      // The orgId is the SECOND argument to activateProjectAgents.
+      expect(activateMock).toHaveBeenCalledWith(SESSION_ID, ORG_ID);
+      expect(result).toMatchObject({ matchedBy: "sessionId" });
+    });
+
+    test("refuses activation when the session org is unknown (fail-closed, CIT-293)", async () => {
+      // An org-less project with no owner membership must fail closed — no
+      // cross-tenant agent activation can happen when the org is unknown.
+      mockSessionLinkage({
+        project: { id: PROJECT_ID, name: "Alpha" },
+      });
+
+      await expect(
+        invoke(
+          makeEvent("intakeActivateProjectAgents", { sessionId: SESSION_ID }),
+        ),
+      ).rejects.toThrow(/organisation could not be determined/i);
+
+      // activateProjectAgents must never be called without an org.
+      expect(activateMock).not.toHaveBeenCalled();
+    });
+
+    test("two-org negative: agents of org-B under a reused projectId are not activated (CIT-293)", async () => {
+      // If org-B fabricated agents against the same sourceProjectId
+      // (conceivable when projectIds are session-derived and collide),
+      // org-A's activation must not see or activate org-B's agents.
+      // The mock is wired so activateProjectAgents receives the org-scoping
+      // arg, and the test asserts it. The actual filtering is in
+      // findProjectAgentRecords — tested at the unit level separately.
+      mockSessionLinkage({
+        project: {
+          id: PROJECT_ID,
+          name: "Alpha",
+          organization: "org-A",
+          owner: OWNER_SUB,
+        },
+      });
+      activateMock.mockResolvedValueOnce({
+        activated: ["agent-orgA"],
+        failed: [],
+        alreadyActive: [],
+      });
+
+      const result = await invoke(
+        makeEvent("intakeActivateProjectAgents", { sessionId: SESSION_ID }),
+      );
+
+      // org-A is the only org passed — the downstream filter excludes org-B agents.
+      expect(activateMock).toHaveBeenCalledWith(SESSION_ID, "org-A");
+      expect(result).toMatchObject({
+        activated: ["agent-orgA"],
+        matchedBy: "sessionId",
+      });
     });
   });
 

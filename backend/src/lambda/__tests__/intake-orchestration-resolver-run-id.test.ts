@@ -162,9 +162,12 @@ describe("intake-orchestration-resolver — runId carry-through", () => {
     ddbMock
       .on(ScanCommand, { TableName: "citadel-conversations-test" })
       .resolves({ Items: [] });
-    ddbMock
-      .on(GetCommand, { TableName: "citadel-projects-test" })
-      .resolves({ Item: undefined });
+    // No conversation row → projectId falls back to SESSION_ID. The project
+    // row still carries an org so the CIT-293 org-resolution path succeeds;
+    // this test verifies runId handling, not org enforcement.
+    ddbMock.on(GetCommand, { TableName: "citadel-projects-test" }).resolves({
+      Item: { id: SESSION_ID, organization: "org-1" },
+    });
     activateMock.mockResolvedValue({
       activated: [],
       failed: [],
