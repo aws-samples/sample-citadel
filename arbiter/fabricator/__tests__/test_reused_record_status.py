@@ -213,38 +213,31 @@ class TestToolReusedPending:
 
     def test_reused_pending_tracked_in_run_state(self):
         """PENDING_APPROVAL reused record records in run_state.pending_approval."""
-        client, stubber = _stubbed_client()
-        stubber.add_response(
-            "list_registry_records",
-            _list_response([_existing_record_summary("pending-tool", RECORD_ID)]),
-            expected_params={
-                "registryId": REGISTRY_ID,
-                "filters": [
-                    {"name": "recordType", "values": ["CUSTOM"]},
-                    {"name": "name", "values": ["pending-tool"]},
-                ],
-                "maxResults": 100,
-            },
-        )
-        stubber.add_response(
-            "get_registry_record",
-            _get_record_response("PENDING_APPROVAL"),
-            expected_params={
-                "registryId": REGISTRY_ID,
+        # Use MagicMock (not botocore Stubber) so we can include descriptors
+        # with orgId in the list response — botocore shape validation
+        # rejects unknown keys in summaries.
+        mock_client = MagicMock()
+        mock_client.list_registry_records.return_value = {
+            "registryRecords": [{
+                "displayName": "pending-tool",
                 "recordId": RECORD_ID,
-            },
-        )
+                "descriptors": {
+                    "custom": {"data": json.dumps({"orgId": "test-org"})},
+                },
+            }],
+        }
+        mock_client.get_registry_record.return_value = {"status": "PENDING_APPROVAL"}
 
         index._begin_registration_run()
         try:
-            with stubber:
-                with patch("index._get_registry_client", return_value=client):
-                    index.store_tool_config_registry(
-                        file_name="/tmp/tool.py",
-                        tool_id="pending-tool",
-                        tool_schema=TOOL_SCHEMA,
-                        tool_description="A tool",
-                    )
+            with patch("index._get_registry_client", return_value=mock_client):
+                index.store_tool_config_registry(
+                    file_name="/tmp/tool.py",
+                    tool_id="pending-tool",
+                    tool_schema=TOOL_SCHEMA,
+                    tool_description="A tool",
+                    org_id="test-org",
+                )
             rs = index._registration_run_state
             assert "pending-tool" in rs.pending_approval
             assert "pending-tool" in rs.succeeded

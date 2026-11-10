@@ -261,6 +261,7 @@ class TestApprovalPendingApproval:
                     tool_id="my-pending-tool",
                     tool_schema=TOOL_SCHEMA,
                     tool_description="A tool",
+                    org_id="test-org",
                 )
             run_state = index._registration_run_state
             assert "my-pending-tool" in run_state.pending_approval

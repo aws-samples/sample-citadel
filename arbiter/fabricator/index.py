@@ -2043,6 +2043,23 @@ def store_tool_config_registry(
             f"file_name: {file_name}"
         )
 
+        # CIT-302 fail-closed guard: refuse to register a tool without an
+        # organisation WHEN running inside a fabrication job (registration
+        # run state is active). An empty org_id means the nested fabrication
+        # path failed to bind the org. Writing an org-less record would
+        # create a tool invisible to any org's idempotency lookup and
+        # unreachable by org-scoped queries. Emit a metric for operator
+        # visibility and raise an opaque error.
+        # Outside a fabrication run (direct/legacy callers, tests),
+        # empty org_id is allowed for backward compatibility — process_event
+        # already refuses messages without org_id at the gate.
+        if not org_id and _registration_run_state is not None:
+            _emit_org_missing_metric("store_tool_config_registry", tool_id)
+            raise FabricationError(
+                f"tool '{tool_id}' cannot be registered without an "
+                "organisation (org_id is required)"
+            )
+
         registry_id = os.environ.get("REGISTRY_ID")
         print(f"[store_tool_config_registry] REGISTRY_ID env var: {registry_id}")
 
@@ -2492,69 +2509,126 @@ def create_tool_fabricator(store_tool_tool=None):
     return tool_fabricator
 
 # Tool for Agent Fabricator to request custom tool creation
-@tool
-def create_custom_tool(
-    tool_description: str,
-    integration_bindings: list | None = None,
-    datastore_bindings: list | None = None,
-) -> str:
-    """Request the Tool Fabricator to create a custom tool.
-    
-    Args:
-        tool_description: Detailed description of what the tool should do
-        integration_bindings: Optional list of integration binding dicts
-        datastore_bindings: Optional list of data store binding dicts
-        
-    Returns:
-        The generated tool code as a string
-    """
-    # Watchdog checkpoint: a nested tool fabrication is a multi-minute
-    # operation (a whole inner Strands agent run). Refuse to START one
-    # inside the Lambda's safety margin so process_event can write the
-    # terminal 'timed out' status instead of the run being SIGKILLed midway.
-    registration_checkpoint(
-        f"before custom tool fabrication: {tool_description[:80]!r}"
-    )
-    print(f"Agent Fabricator requesting custom tool: {tool_description}")
-    
-    # Create the Tool Fabricator agent
-    tool_fabricator = create_tool_fabricator()
 
-    # Enrich the description with binding context if provided
-    enriched_description = tool_description
-    if integration_bindings or datastore_bindings:
-        binding_context_parts = []
-        if integration_bindings:
-            for binding in integration_bindings:
-                parts = [f"Integration type: {binding.get('integrationType', 'unknown')}"]
-                if binding.get('operations'):
-                    parts.append(f"Operations: {', '.join(binding['operations'])}")
-                if binding.get('authMethod'):
-                    parts.append(f"Auth method: {binding['authMethod']}")
-                binding_context_parts.append('; '.join(parts))
-        if datastore_bindings:
-            for binding in datastore_bindings:
-                parts = [f"Data store type: {binding.get('dataStoreType', 'unknown')}"]
-                if binding.get('operations'):
-                    parts.append(f"Operations: {', '.join(binding['operations'])}")
-                binding_context_parts.append('; '.join(parts))
-        binding_context = "\n".join(binding_context_parts)
-        enriched_description = (
-            f"{tool_description}\n\n"
-            f"BINDING CONTEXT (use scoped credentials from environment variables):\n"
-            f"{binding_context}\n\n"
-            f"When calling store_tool_config_registry, pass these bindings:\n"
-            f"integration_bindings={json.dumps(integration_bindings) if integration_bindings else 'None'}\n"
-            f"datastore_bindings={json.dumps(datastore_bindings) if datastore_bindings else 'None'}"
+
+def _make_create_custom_tool(
+    *,
+    org_id: str,
+    requested_by: str,
+    spec_id: str | None,
+):
+    """Build the ``create_custom_tool`` @tool with the caller's org bound.
+
+    CIT-302 fix: the nested Tool Fabricator MUST register tools under the
+    same organisation as the outer Agent Fabricator run.  Previously
+    ``create_custom_tool`` called ``create_tool_fabricator()`` with no
+    bound store-tool closure, so the inner agent used the module-level
+    ``store_tool_config_registry`` whose ``org_id`` parameter defaulted to
+    ``""`` — the LLM never supplied it, and the ContextVar is only
+    consulted by ``upload_to_s3``, not by the registry function's own
+    ``org_id`` parameter.  The tool was therefore registered without an
+    org.
+
+    Fix: capture ``org_id``, ``requested_by``, and ``spec_id`` from the
+    validated event at tool-creation time (closure, NOT LLM-supplied) and
+    thread them into a bound ``store_tool_config_registry`` wrapper, the
+    same pattern ``process_event`` already uses for the direct
+    tool-creation path.
+    """
+
+    @tool
+    def create_custom_tool(
+        tool_description: str,
+        integration_bindings: list | None = None,
+        datastore_bindings: list | None = None,
+    ) -> str:
+        """Request the Tool Fabricator to create a custom tool.
+
+        Args:
+            tool_description: Detailed description of what the tool should do
+            integration_bindings: Optional list of integration binding dicts
+            datastore_bindings: Optional list of data store binding dicts
+
+        Returns:
+            The generated tool code as a string
+        """
+        # Watchdog checkpoint: a nested tool fabrication is a multi-minute
+        # operation (a whole inner Strands agent run). Refuse to START one
+        # inside the Lambda's safety margin so process_event can write the
+        # terminal 'timed out' status instead of the run being SIGKILLed midway.
+        registration_checkpoint(
+            f"before custom tool fabrication: {tool_description[:80]!r}"
+        )
+        print(f"Agent Fabricator requesting custom tool: {tool_description}")
+
+        # CIT-302: bind the outer run's org/requester/spec into the nested
+        # fabricator so tool records are registered under the correct org.
+        @tool
+        def store_tool_config_registry_nested(
+            file_name: str,
+            tool_id: str,
+            tool_schema: Any,
+            tool_description: str,
+            integration_bindings: list | None = None,
+            datastore_bindings: list | None = None,
+            app_id: str = None,
+        ) -> bool:
+            """Store tool configuration in AgentCore Registry."""
+            return store_tool_config_registry(
+                file_name=file_name,
+                tool_id=tool_id,
+                tool_schema=tool_schema,
+                tool_description=tool_description,
+                integration_bindings=integration_bindings,
+                datastore_bindings=datastore_bindings,
+                app_id=app_id,
+                requested_by=requested_by,
+                org_id=org_id,
+                spec_id=spec_id,
+            )
+
+        # Create the Tool Fabricator agent with the org-bound store tool
+        tool_fabricator = create_tool_fabricator(
+            store_tool_tool=store_tool_config_registry_nested,
         )
 
-    # Call the Tool Fabricator agent
-    result = tool_fabricator(f"Create a custom tool with the following requirements: {enriched_description}")
-    
-    print(f"Tool Fabricator response: {result}")
-    return result
+        # Enrich the description with binding context if provided
+        enriched_description = tool_description
+        if integration_bindings or datastore_bindings:
+            binding_context_parts = []
+            if integration_bindings:
+                for binding in integration_bindings:
+                    parts = [f"Integration type: {binding.get('integrationType', 'unknown')}"]
+                    if binding.get('operations'):
+                        parts.append(f"Operations: {', '.join(binding['operations'])}")
+                    if binding.get('authMethod'):
+                        parts.append(f"Auth method: {binding['authMethod']}")
+                    binding_context_parts.append('; '.join(parts))
+            if datastore_bindings:
+                for binding in datastore_bindings:
+                    parts = [f"Data store type: {binding.get('dataStoreType', 'unknown')}"]
+                    if binding.get('operations'):
+                        parts.append(f"Operations: {', '.join(binding['operations'])}")
+                    binding_context_parts.append('; '.join(parts))
+            binding_context = "\n".join(binding_context_parts)
+            enriched_description = (
+                f"{tool_description}\n\n"
+                f"BINDING CONTEXT (use scoped credentials from environment variables):\n"
+                f"{binding_context}\n\n"
+                f"When calling store_tool_config_registry, pass these bindings:\n"
+                f"integration_bindings={json.dumps(integration_bindings) if integration_bindings else 'None'}\n"
+                f"datastore_bindings={json.dumps(datastore_bindings) if datastore_bindings else 'None'}"
+            )
 
-def create_agent_fabricator(complete_task, store_agent_tool=None, org_id: str = ""):
+        # Call the Tool Fabricator agent
+        result = tool_fabricator(f"Create a custom tool with the following requirements: {enriched_description}")
+
+        print(f"Tool Fabricator response: {result}")
+        return result
+
+    return create_custom_tool
+
+def create_agent_fabricator(complete_task, store_agent_tool=None, org_id: str = "", create_custom_tool_tool=None):
     """Create and return the Agent Fabricator agent.
 
     Args:
@@ -2567,9 +2641,18 @@ def create_agent_fabricator(complete_task, store_agent_tool=None, org_id: str = 
             ``"fabricator"`` default.
         org_id: The caller's organisation id, threaded to the prompt builder
             so the tool catalogue is scoped.
+        create_custom_tool_tool: Optional org-bound ``create_custom_tool``
+            @tool produced by ``_make_create_custom_tool``. When ``None``
+            a legacy unbound tool is built that registers tools without an
+            org (backward-compat for direct callers outside ``process_event``).
     """
     if store_agent_tool is None:
         store_agent_tool = store_agent_config_registry
+    if create_custom_tool_tool is None:
+        # Legacy fallback — direct callers outside process_event.
+        create_custom_tool_tool = _make_create_custom_tool(
+            org_id="", requested_by="fabricator", spec_id=None,
+        )
 
     bedrock_model = models.BedrockModel(
             model_id=FABRICATOR_MODEL_ID,
@@ -2584,7 +2667,7 @@ def create_agent_fabricator(complete_task, store_agent_tool=None, org_id: str = 
     
     agent_fabricator = Agent(
         bedrock_model,
-        tools=[write_job_file, get_worker_tool, create_custom_tool,
+        tools=[write_job_file, get_worker_tool, create_custom_tool_tool,
             upload_agent_to_s3, store_agent_tool, complete_task],
         system_prompt=get_agent_fabricator_prompt(org_id=org_id)
     )
@@ -2914,10 +2997,18 @@ def process_event(event, context, request_type=None):
                 )
 
             # Create the Agent Fabricator with access to create_custom_tool
+            # CIT-302: build an org-bound create_custom_tool so nested tool
+            # fabrication registers under the outer run's organisation.
+            bound_create_custom_tool = _make_create_custom_tool(
+                org_id=org_id,
+                requested_by=requested_by,
+                spec_id=spec_id,
+            )
             agent_fabricator = create_agent_fabricator(
                 complete_task,
                 store_agent_tool=store_agent_config_registry_bound,
                 org_id=org_id,
+                create_custom_tool_tool=bound_create_custom_tool,
             )
             # Bounded transient retry — same contract as the tool-creation
             # path above: transient Bedrock faults only, ≤3 total attempts,
@@ -3206,6 +3297,34 @@ def _emit_tool_registration_denied_metric(tool_id: str) -> None:
             "Failed to emit ToolRegistrationDenied metric for tool_id=%s "
             "(non-fatal): %s",
             tool_id, type(e).__name__,
+        )
+
+
+def _emit_org_missing_metric(site: str, record_id: str) -> None:
+    """Emit ``Citadel/Fabricator OrgMissing`` when a registration is refused
+    because ``org_id`` is empty (CIT-302 fail-closed guard).
+
+    Best-effort — a CloudWatch outage must never change the guard's
+    fail-closed behavior.
+    """
+    try:
+        _cloudwatch().put_metric_data(
+            Namespace="Citadel/Fabricator",
+            MetricData=[
+                {
+                    "MetricName": "OrgMissing",
+                    "Value": 1,
+                    "Unit": "Count",
+                    "Dimensions": [
+                        {"Name": "Site", "Value": site},
+                    ],
+                }
+            ],
+        )
+    except Exception as e:  # noqa: BLE001 — best-effort metric
+        logger.warning(
+            "Failed to emit OrgMissing metric for %s/%s (non-fatal): %s",
+            site, record_id, type(e).__name__,
         )
 
 
