@@ -1568,13 +1568,34 @@ function extractSourceProjectId(
  */
 export async function findProjectAgentRecords(
   projectId: string,
+  orgId?: string,
 ): Promise<RegistryRecord[]> {
   const registryService = getRegistryService();
   const records = await registryService.listResources("agent");
-  return records.filter(
-    (record) =>
-      extractSourceProjectId(record.customDescriptorContent) === projectId,
-  );
+  return records.filter((record) => {
+    if (extractSourceProjectId(record.customDescriptorContent) !== projectId) {
+      return false;
+    }
+    // When an orgId is provided, restrict to records whose customMetadata
+    // orgId matches the caller's org. Records with an empty/missing orgId
+    // are system-shared (same convention as listAgentConfigsRegistry) and
+    // are included for every caller; "All Organizations" records are also
+    // visible to any org.
+    if (orgId !== undefined) {
+      const meta = registryService.deserializeCustomMetadata<{
+        orgId?: string;
+      }>(record.customDescriptorContent ?? null, { orgId: undefined });
+      const recordOrg = meta.orgId ?? "";
+      if (
+        recordOrg !== "" &&
+        recordOrg !== "All Organizations" &&
+        recordOrg !== orgId
+      ) {
+        return false;
+      }
+    }
+    return true;
+  });
 }
 
 /**
@@ -1594,6 +1615,7 @@ export async function findProjectAgentRecords(
  */
 export async function activateProjectAgents(
   projectId: string,
+  orgId?: string,
 ): Promise<ActivateAgentsResult> {
   const registryService = getRegistryService();
   const result: ActivateAgentsResult = {
@@ -1602,7 +1624,7 @@ export async function activateProjectAgents(
     alreadyActive: [],
   };
 
-  const records = await findProjectAgentRecords(projectId);
+  const records = await findProjectAgentRecords(projectId, orgId);
   for (const record of records) {
     const name = record.name || record.recordId;
 

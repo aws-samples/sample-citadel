@@ -280,6 +280,34 @@ async function resolveOrgId(ctx: SessionContext): Promise<string> {
 }
 
 /**
+ * Best-effort OrgUnresolved metric emission (CIT-293). Mirrors the metric
+ * in `requireCallerOrg` (auth-event.ts) but under the `Citadel/Intake`
+ * namespace with a `fieldName` dimension so the intake-specific deny is
+ * distinguishable from general resolver denies. Never throws.
+ */
+function emitOrgUnresolvedMetric(fieldName: string): void {
+  import("@aws-sdk/client-cloudwatch")
+    .then(({ CloudWatchClient, PutMetricDataCommand }) =>
+      new CloudWatchClient({}).send(
+        new PutMetricDataCommand({
+          Namespace: "Citadel/Intake",
+          MetricData: [
+            {
+              MetricName: "OrgUnresolved",
+              Dimensions: [{ Name: "FieldName", Value: fieldName }],
+              Value: 1,
+              Unit: "Count",
+            },
+          ],
+        }),
+      ),
+    )
+    .catch(() => {
+      // Best effort — metric failure must never block the response path.
+    });
+}
+
+/**
  * Produces a shallow clone of the IAM event whose identity carries a
  * `custom:organization` claim equal to the server-derived org. Delegated
  * cores (`publishWorkflow`, `importBlueprint`) call `assertRowOrg → extractOrgFromEvent`
@@ -332,24 +360,43 @@ function isEmptyActivation(result: ActivateAgentsResult): boolean {
 }
 
 /**
- * Activation with R1-informed matching. Fabricated agents carry
- * `sourceProjectId = session_id` (the fabricator threads the SQS
- * `orchestration_id`, which intake sets to the session id, into the registry
- * record's custom metadata), so the sessionId is tried FIRST. When it matches
- * zero records, the conversations-linked projectId is tried as the fallback.
- * Zero matches on both keys is surfaced explicitly via `matchedBy: null`.
+ * Activation with R1-informed matching AND org-scoping (CIT-293 / H15).
+ *
+ * Fabricated agents carry `sourceProjectId = session_id` (the fabricator
+ * threads the SQS `orchestration_id`, which intake sets to the session id,
+ * into the registry record's custom metadata), so the sessionId is tried
+ * FIRST. When it matches zero records, the conversations-linked projectId
+ * is tried as the fallback. Zero matches on both keys is surfaced
+ * explicitly via `matchedBy: null`.
+ *
+ * The session's organisation is derived server-side (same resolveOrgId path
+ * as intakeCreateBlueprint) and threaded to activateProjectAgents so that
+ * only records belonging to the caller's org (or system-shared / "All
+ * Organizations") are considered. When the org cannot be resolved,
+ * OrgUnresolvedError is thrown (fail-closed) and an OrgUnresolved metric
+ * is emitted.
  */
 async function intakeActivateProjectAgents(
   sessionId: string,
 ): Promise<IntakeActivateAgentsResult> {
-  const bySession = await activateProjectAgents(sessionId);
+  const ctx = await deriveSessionContext(sessionId);
+  let orgId: string;
+  try {
+    orgId = await resolveOrgId(ctx);
+  } catch (err) {
+    // Emit the OrgUnresolved metric (best-effort, mirrors the pattern in
+    // auth-event.ts requireCallerOrg) so dashboards surface the failure.
+    emitOrgUnresolvedMetric("intakeActivateProjectAgents");
+    throw err;
+  }
+
+  const bySession = await activateProjectAgents(sessionId, orgId);
   if (!isEmptyActivation(bySession)) {
     return { ...bySession, matchedBy: "sessionId" };
   }
 
-  const ctx = await deriveSessionContext(sessionId);
   if (ctx.projectId !== sessionId) {
-    const byProject = await activateProjectAgents(ctx.projectId);
+    const byProject = await activateProjectAgents(ctx.projectId, orgId);
     if (!isEmptyActivation(byProject)) {
       return { ...byProject, matchedBy: "projectId" };
     }
