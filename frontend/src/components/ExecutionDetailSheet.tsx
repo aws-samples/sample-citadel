@@ -163,7 +163,9 @@ function statusStyle(status?: string | null) {
 
 // ---- Defensive parsing helpers ----
 
-/** Pretty-print a JSON string; return the raw string when unparseable; null when empty. */
+/** Pretty-print a value for display. Accepts JSON strings (parse then
+ * re-stringify indented), plain strings (return as-is), and objects
+ * (stringify). Returns null only for null/undefined/empty-string. */
 function prettyJson(raw?: string | null): string | null {
   if (raw === null || raw === undefined || raw === '') return null;
   try {
@@ -195,8 +197,12 @@ function parseNodeResults(raw?: string | Record<string, unknown> | null): Execut
       status: typeof v.status === 'string' ? v.status : null,
       startedAt: typeof v.startedAt === 'string' ? v.startedAt : null,
       completedAt: typeof v.completedAt === 'string' ? v.completedAt : null,
-      output: typeof v.output === 'string' ? v.output : null,
-      error: typeof v.error === 'string' ? v.error : null,
+      output: typeof v.output === 'string' ? v.output
+        : (v.output != null && typeof v.output === 'object') ? JSON.stringify(v.output)
+        : null,
+      error: typeof v.error === 'string' ? v.error
+        : (v.error != null && typeof v.error === 'object') ? JSON.stringify(v.error)
+        : null,
       retryCount: typeof v.retryCount === 'number' ? v.retryCount : 0,
       usageTotals: parseUsageTotals(v.usageTotals),
       failureClass: typeof v.failureClass === 'string' ? v.failureClass : null,
