@@ -126,10 +126,6 @@ updates:
         update-types:
           - minor
           - patch
-    ignore:
-      # pillow major blocked by upstream dependency cap
-      - dependency-name: pillow
-        update-types: ["version-update:semver-major"]
     labels:
       - dependencies
 
@@ -178,10 +174,6 @@ updates:
         update-types:
           - minor
           - patch
-    ignore:
-      # pillow major blocked by upstream dependency cap
-      - dependency-name: pillow
-        update-types: ["version-update:semver-major"]
     labels:
       - dependencies
 
