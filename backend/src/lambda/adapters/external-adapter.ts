@@ -11,10 +11,75 @@ import {
 } from "../../adapters/base";
 import { ProvisioningError, ConnectionError } from "./errors";
 import { SdkError } from "./sdk-types";
+import {
+  classifyIp,
+  parsePublicHttpsUrl,
+  resolveAndPin,
+  UrlRejectedError,
+  emitUrlRefused,
+  type DnsLookupFn,
+  type PinnedEndpoint,
+} from "../../utils/url-safety";
+
+/**
+ * CIT-300: resolve a hostname to public IPs and return the first pinned
+ * address. Refuses private, link-local, loopback, and metadata IPs.
+ *
+ * @throws {UrlRejectedError} if the host resolves to any non-public address.
+ */
+async function resolvePublicHost(
+  host: string,
+  lookup?: DnsLookupFn,
+): Promise<PinnedEndpoint> {
+  // If host is already a literal IP, classify directly.
+  if (net.isIPv4(host) || net.isIPv6(host)) {
+    const cls = classifyIp(host);
+    if (cls !== "public") {
+      throw new UrlRejectedError(`literal IP is ${cls}`);
+    }
+    return { ip: host, servername: host, host };
+  }
+
+  // Construct a synthetic HTTPS URL so we can reuse resolveAndPin.
+  const syntheticUrl = new URL(`https://${host}`);
+  return resolveAndPin(syntheticUrl, { lookup });
+}
+
+/**
+ * TCP reachability check connecting to a **pinned** IP address.
+ * The caller must resolve the host through {@link resolvePublicHost} first;
+ * this function never does its own DNS lookup.
+ */
+function tcpCheckPinned(
+  ip: string,
+  port: number,
+  timeoutMs: number,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = new net.Socket();
+    socket.setTimeout(timeoutMs);
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once("timeout", () => {
+      socket.destroy();
+      resolve(false);
+    });
+    socket.once("error", () => {
+      socket.destroy();
+      resolve(false);
+    });
+    socket.connect(port, ip);
+  });
+}
 
 export class ExternalDatabaseAdapter implements ConnectorAdapter {
   readonly category: ConnectorCategory = "datastore";
   readonly spec: ConnectorSpec;
+
+  /** Injectable DNS lookup for testing. */
+  _dnsLookup?: DnsLookupFn;
 
   constructor(private kind: string) {
     this.spec = {
@@ -96,6 +161,27 @@ export class ExternalDatabaseAdapter implements ConnectorAdapter {
     return { size: "0 MB", records: 0 };
   }
 
+  /**
+   * CIT-300: resolve and pin the host, then TCP-check the pinned IP.
+   * Refuses private/link-local/metadata addresses.
+   */
+  private async safeTcpCheck(
+    host: string,
+    port: number,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    try {
+      const pinned = await resolvePublicHost(host, this._dnsLookup);
+      return tcpCheckPinned(pinned.ip, port, timeoutMs);
+    } catch (error) {
+      if (error instanceof UrlRejectedError) {
+        emitUrlRefused("external-adapter");
+        return false;
+      }
+      throw error;
+    }
+  }
+
   private async testMongoConnection(
     config: Record<string, unknown>,
   ): Promise<ConnectionTestResult> {
@@ -103,7 +189,7 @@ export class ExternalDatabaseAdapter implements ConnectorAdapter {
       const url = new URL(config.connectionString as string);
       const host = url.hostname;
       const port = url.port ? parseInt(url.port, 10) : 27017;
-      const reachable = await this.tcpCheck(host, port, 5000);
+      const reachable = await this.safeTcpCheck(host, port, 5000);
       if (reachable) {
         return {
           success: true,
@@ -128,13 +214,17 @@ export class ExternalDatabaseAdapter implements ConnectorAdapter {
     config: Record<string, unknown>,
   ): Promise<ConnectionTestResult> {
     try {
-      new URL(config.baseUrl as string);
+      // CIT-300: validate the URL through the full url-safety pipeline.
+      parsePublicHttpsUrl(config.baseUrl as string);
       return {
         success: true,
         message: `API URL is well-formed: ${config.baseUrl}`,
         details: { baseUrl: config.baseUrl },
       };
-    } catch {
+    } catch (error) {
+      if (error instanceof UrlRejectedError) {
+        emitUrlRefused("external-adapter");
+      }
       return {
         success: false,
         message: `Invalid API URL: ${config.baseUrl}`,
@@ -153,7 +243,7 @@ export class ExternalDatabaseAdapter implements ConnectorAdapter {
         message: `Missing host or port for ${this.kind} connection`,
       };
     }
-    const reachable = await this.tcpCheck(host, port, 5000);
+    const reachable = await this.safeTcpCheck(host, port, 5000);
     if (reachable) {
       return {
         success: true,
@@ -165,29 +255,5 @@ export class ExternalDatabaseAdapter implements ConnectorAdapter {
       success: false,
       message: `Failed to reach ${this.kind} at ${host}:${port}`,
     };
-  }
-
-  private tcpCheck(
-    host: string,
-    port: number,
-    timeoutMs: number,
-  ): Promise<boolean> {
-    return new Promise((resolve) => {
-      const socket = new net.Socket();
-      socket.setTimeout(timeoutMs);
-      socket.once("connect", () => {
-        socket.destroy();
-        resolve(true);
-      });
-      socket.once("timeout", () => {
-        socket.destroy();
-        resolve(false);
-      });
-      socket.once("error", () => {
-        socket.destroy();
-        resolve(false);
-      });
-      socket.connect(port, host);
-    });
   }
 }
