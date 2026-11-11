@@ -80,97 +80,21 @@ updates:
     labels:
       - dependencies
 
-  # ── pip: arbiter directories ──
+  # ── pip: all arbiter directories (single update so shared pins move together) ──
   - package-ecosystem: pip
-    directory: /arbiter
+    directories:
+      - /arbiter
+      - /arbiter/activator
+      - /arbiter/eval_judge
+      - /arbiter/fabricator
+      - /arbiter/layers/common
+      - /arbiter/stepRunner
+      - /arbiter/supervisor
+      - /arbiter/workerWrapper
     schedule:
       interval: weekly
     groups:
       pip-arbiter-minor-patch:
-        update-types:
-          - minor
-          - patch
-    labels:
-      - dependencies
-
-  - package-ecosystem: pip
-    directory: /arbiter/activator
-    schedule:
-      interval: weekly
-    groups:
-      pip-arbiter-activator-minor-patch:
-        update-types:
-          - minor
-          - patch
-    labels:
-      - dependencies
-
-  - package-ecosystem: pip
-    directory: /arbiter/eval_judge
-    schedule:
-      interval: weekly
-    groups:
-      pip-arbiter-eval-judge-minor-patch:
-        update-types:
-          - minor
-          - patch
-    labels:
-      - dependencies
-
-  - package-ecosystem: pip
-    directory: /arbiter/fabricator
-    schedule:
-      interval: weekly
-    groups:
-      pip-arbiter-fabricator-minor-patch:
-        update-types:
-          - minor
-          - patch
-    labels:
-      - dependencies
-
-  - package-ecosystem: pip
-    directory: /arbiter/layers/common
-    schedule:
-      interval: weekly
-    groups:
-      pip-arbiter-layers-common-minor-patch:
-        update-types:
-          - minor
-          - patch
-    labels:
-      - dependencies
-
-  - package-ecosystem: pip
-    directory: /arbiter/stepRunner
-    schedule:
-      interval: weekly
-    groups:
-      pip-arbiter-steprunner-minor-patch:
-        update-types:
-          - minor
-          - patch
-    labels:
-      - dependencies
-
-  - package-ecosystem: pip
-    directory: /arbiter/supervisor
-    schedule:
-      interval: weekly
-    groups:
-      pip-arbiter-supervisor-minor-patch:
-        update-types:
-          - minor
-          - patch
-    labels:
-      - dependencies
-
-  - package-ecosystem: pip
-    directory: /arbiter/workerWrapper
-    schedule:
-      interval: weekly
-    groups:
-      pip-arbiter-workerwrapper-minor-patch:
         update-types:
           - minor
           - patch
