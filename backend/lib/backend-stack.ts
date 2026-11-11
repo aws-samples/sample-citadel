@@ -25,7 +25,7 @@ import * as crypto from "crypto";
 import { Construct } from "constructs";
 import { NagSuppressions } from "cdk-nag";
 import { REGISTRY_GENERATION } from "./registry-generation";
-import { PYTHON_RUNTIME } from "./python-runtime";
+import { PYTHON_RUNTIME, PYTHON_ARCHITECTURE } from "./python-runtime";
 import {
   SEED_VERSION as SEED_BLUEPRINTS_VERSION,
   computeSeedBlueprintFingerprint,
@@ -1837,6 +1837,7 @@ export class BackendStack extends cdk.Stack {
       "SeedOrganizationsFunction",
       {
         runtime: PYTHON_RUNTIME,
+        architecture: PYTHON_ARCHITECTURE,
         handler: "index.handler",
         code: lambda.Code.fromAsset(
           path.join(__dirname, "../../src/lambda/seed-organizations"),
@@ -1993,6 +1994,7 @@ export class BackendStack extends cdk.Stack {
       "SeedAdminUserFunction",
       {
         runtime: PYTHON_RUNTIME,
+        architecture: PYTHON_ARCHITECTURE,
         handler: "index.handler",
         code: lambda.Code.fromAsset("src/lambda/seed-admin-user"),
         timeout: cdk.Duration.seconds(30),

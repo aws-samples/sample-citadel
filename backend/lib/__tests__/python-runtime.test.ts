@@ -28,7 +28,7 @@ import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
 import { Bucket } from "aws-cdk-lib/aws-s3";
 import { ArbiterStack } from "../arbiter-stack";
-import { PYTHON_RUNTIME } from "../python-runtime";
+import { PYTHON_RUNTIME, PYTHON_ARCHITECTURE } from "../python-runtime";
 import {
   scaffoldBackendAssetDirs,
   scaffoldArbiterStubs,
@@ -144,6 +144,63 @@ describe("Python runtime consistency (synth)", () => {
 
     expect(violations).toEqual([]);
   });
+
+  it("every Python Lambda function has PYTHON_ARCHITECTURE", () => {
+    const resources = (
+      template as unknown as {
+        toJSON(): { Resources: Record<string, Record<string, unknown>> };
+      }
+    ).toJSON().Resources;
+
+    const violations: string[] = [];
+    // CloudFormation maps X86_64 → "x86_64"
+    const expectedArch = PYTHON_ARCHITECTURE.name;
+
+    for (const [logicalId, resource] of Object.entries(resources)) {
+      if (resource.Type !== "AWS::Lambda::Function") continue;
+      const props = resource.Properties as Record<string, unknown> | undefined;
+      if (!props) continue;
+      const runtime = props.Runtime as string | undefined;
+      if (!runtime || !runtime.startsWith("python")) continue;
+      const architectures = props.Architectures as string[] | undefined;
+      if (!architectures || !architectures.includes(expectedArch)) {
+        violations.push(
+          `${logicalId}: Architectures ${JSON.stringify(architectures)} missing ${expectedArch}`,
+        );
+      }
+    }
+
+    expect(violations).toEqual([]);
+  });
+
+  it("every Python LayerVersion has PYTHON_ARCHITECTURE in compatibleArchitectures", () => {
+    const resources = (
+      template as unknown as {
+        toJSON(): { Resources: Record<string, Record<string, unknown>> };
+      }
+    ).toJSON().Resources;
+
+    const violations: string[] = [];
+    const expectedArch = PYTHON_ARCHITECTURE.name;
+
+    for (const [logicalId, resource] of Object.entries(resources)) {
+      if (resource.Type !== "AWS::Lambda::LayerVersion") continue;
+      const props = resource.Properties as Record<string, unknown> | undefined;
+      if (!props) continue;
+      const runtimes = props.CompatibleRuntimes as string[] | undefined;
+      if (!runtimes) continue;
+      const hasPython = runtimes.some((r: string) => r.startsWith("python"));
+      if (!hasPython) continue;
+      const arches = props.CompatibleArchitectures as string[] | undefined;
+      if (!arches || !arches.includes(expectedArch)) {
+        violations.push(
+          `${logicalId}: CompatibleArchitectures ${JSON.stringify(arches)} missing ${expectedArch}`,
+        );
+      }
+    }
+
+    expect(violations).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -191,6 +248,22 @@ describe("Python runtime consistency (grep guard)", () => {
     const violations = scanForLiterals(/PYTHON_3_1\d/);
     expect(violations).toEqual([]);
   });
+
+  it('no literal "Architecture." outside python-runtime.ts', () => {
+    // Architecture.X86_64 / Architecture.ARM_64 must only live in the
+    // single-source-of-truth module; all consumers use PYTHON_ARCHITECTURE.
+    const violations = scanForLiterals(/Architecture\./);
+    expect(violations).toEqual([]);
+  });
+
+  it('no literal "--platform" outside python-runtime.ts', () => {
+    // --platform must be derived from the single constant, not hardcoded.
+    // The Dockerfile is allowed to reference the build arg (checked by
+    // the derivation guard below), but no .ts file outside the module
+    // should contain the literal.
+    const violations = scanForLiterals(/--platform/);
+    expect(violations).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -216,5 +289,22 @@ describe("Python runtime derivation", () => {
     expect(dockerfile).toContain(`ARG LAMBDA_BASE_TAG=${version}`);
     // Verify ENTRYPOINT is cleared (CDK bundling needs bash as the CMD)
     expect(dockerfile).toMatch(/ENTRYPOINT\s+\[\]/);
+  });
+
+  it("Dockerfile FROM uses --platform for architecture pinning", () => {
+    const dockerfilePath = path.resolve(
+      __dirname,
+      "..",
+      "python-build-image",
+      "Dockerfile",
+    );
+    const dockerfile = fs.readFileSync(dockerfilePath, "utf-8");
+    // The Dockerfile must use --platform=${TARGETPLATFORM} on the FROM line
+    // so the base image is always pulled for the target architecture.
+    expect(dockerfile).toMatch(
+      /FROM\s+--platform=\$\{TARGETPLATFORM\}\s+public\.ecr\.aws\/lambda\/python/,
+    );
+    // A default TARGETPLATFORM ARG must exist as a safety net
+    expect(dockerfile).toContain("ARG TARGETPLATFORM=linux/amd64");
   });
 });

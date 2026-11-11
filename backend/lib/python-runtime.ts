@@ -18,6 +18,28 @@ import * as lambda from "aws-cdk-lib/aws-lambda";
 export const PYTHON_RUNTIME = lambda.Runtime.PYTHON_3_15;
 
 /**
+ * Target Lambda architecture.  Every Python function and layer in Citadel
+ * must use this constant.  Changing this single value (plus the Dockerfile
+ * FROM platform) switches the entire fleet to a different architecture.
+ *
+ * Kept at x86_64: migrating to arm64 is a separate decision that requires
+ * validating all native dependencies, runtime images, and integration tests.
+ */
+export const PYTHON_ARCHITECTURE = lambda.Architecture.X86_64;
+
+/**
+ * Docker `--platform` string derived from {@link PYTHON_ARCHITECTURE}.
+ * Passed to `DockerImage.fromBuild` and the Dockerfile `FROM` so the
+ * bundling container always produces native extensions for the target
+ * architecture — regardless of the deploying host's CPU (e.g. Apple
+ * silicon emitting aarch64 wheels when the functions are x86_64).
+ */
+export const DOCKER_PLATFORM =
+  PYTHON_ARCHITECTURE === lambda.Architecture.ARM_64
+    ? "linux/arm64"
+    : "linux/amd64";
+
+/**
  * Docker image for bundling Python assets (layers and PythonFunction
  * code).  Derived from {@link PYTHON_RUNTIME} so the two cannot diverge.
  *
@@ -87,9 +109,16 @@ function lazyBuildImage(
   return new Proxy(placeholder, {
     get(target, prop, receiver) {
       // Intercept property access so the real image is built on demand.
-      if (prop === "image" || prop === "run" || prop === "toJSON" || prop === "cp") {
+      if (
+        prop === "image" ||
+        prop === "run" ||
+        prop === "toJSON" ||
+        prop === "cp"
+      ) {
         const real = resolve();
-        const val = (real as unknown as Record<string, unknown>)[prop as string];
+        const val = (real as unknown as Record<string, unknown>)[
+          prop as string
+        ];
         return typeof val === "function"
           ? (val as (...a: unknown[]) => unknown).bind(real)
           : val;
@@ -101,5 +130,5 @@ function lazyBuildImage(
 
 export const PYTHON_BUILD_IMAGE: cdk.DockerImage = lazyBuildImage(
   resolveBuildImageDir(__dirname),
-  { buildArgs: { LAMBDA_BASE_TAG } },
+  { buildArgs: { LAMBDA_BASE_TAG }, platform: DOCKER_PLATFORM },
 );

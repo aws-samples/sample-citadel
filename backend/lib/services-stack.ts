@@ -24,7 +24,7 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import { REGISTRY_GENERATION } from "./registry-generation";
-import { PYTHON_RUNTIME } from "./python-runtime";
+import { PYTHON_RUNTIME, PYTHON_ARCHITECTURE } from "./python-runtime";
 
 /**
  * Resolve the repo-root `service/` directory regardless of whether this
@@ -350,6 +350,7 @@ export class ServicesStack extends cdk.Stack {
       "CognitoSecretHandler",
       {
         runtime: PYTHON_RUNTIME,
+        architecture: PYTHON_ARCHITECTURE,
         handler: "index.handler",
         code: lambda.Code.fromAsset("src/lambda/cognito-secret-handler"),
         timeout: cdk.Duration.seconds(30),
@@ -612,6 +613,7 @@ export class ServicesStack extends cdk.Stack {
     // Custom Resource Lambda — creates the vector index via signed HTTP to AOSS
     const kbIndexCreatorFn = new lambda.Function(this, "KbIndexCreatorFn", {
       runtime: PYTHON_RUNTIME,
+      architecture: PYTHON_ARCHITECTURE,
       handler: "index.handler",
       role: kbIndexCreatorRole,
       timeout: cdk.Duration.minutes(10),

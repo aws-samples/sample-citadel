@@ -13,8 +13,14 @@
 #
 # The SAM build image (public.ecr.aws/sam/build-python3.15) does not exist
 # yet as of 2026-11-11; this Dockerfile bridges the gap.
+#
+# DOCKER_PLATFORM is passed by CDK's DockerBuildOptions.platform and
+# forwarded here via TARGETPLATFORM so the base image is always pulled for
+# the functions' target architecture (x86_64), even when building on an
+# Apple-silicon (aarch64) host.
 ARG LAMBDA_BASE_TAG=3.15
-FROM public.ecr.aws/lambda/python:${LAMBDA_BASE_TAG}
+ARG TARGETPLATFORM=linux/amd64
+FROM --platform=${TARGETPLATFORM} public.ecr.aws/lambda/python:${LAMBDA_BASE_TAG}
 # Clear the Lambda bootstrap entrypoint so CDK's `bash -c "…"` CMD runs
 # directly as the container process.
 ENTRYPOINT []

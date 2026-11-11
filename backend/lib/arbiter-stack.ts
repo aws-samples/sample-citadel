@@ -33,7 +33,11 @@ import * as path from "path";
 import * as fs from "fs";
 import * as crypto from "crypto";
 import { REGISTRY_GENERATION } from "./registry-generation";
-import { PYTHON_RUNTIME, PYTHON_BUILD_IMAGE } from "./python-runtime";
+import {
+  PYTHON_RUNTIME,
+  PYTHON_BUILD_IMAGE,
+  PYTHON_ARCHITECTURE,
+} from "./python-runtime";
 import { PYTHON_ASSET_EXCLUDES } from "./python-asset-excludes";
 
 // Resolve the repo-root `arbiter/` directory regardless of whether this
@@ -462,6 +466,7 @@ export class ArbiterStack extends cdk.Stack {
         },
       }),
       compatibleRuntimes: [PYTHON_RUNTIME],
+      compatibleArchitectures: [PYTHON_ARCHITECTURE],
       description:
         "Shared arbiter Python packages: catalog, common, governance modules " +
         "plus boto3, aws-xray-sdk, strands-agents, and mcp.",
@@ -490,6 +495,7 @@ export class ArbiterStack extends cdk.Stack {
 
     const supervisorLambda = new PythonFunction(this, "SupervisorAgent", {
       runtime: PYTHON_RUNTIME,
+      architecture: PYTHON_ARCHITECTURE,
       // Widened to the arbiter/ root (rather than arbiter/supervisor/) so
       // the governance package and the common package — both siblings of
       // supervisor/ that `_load_governance_package()` and the
@@ -971,6 +977,7 @@ export class ArbiterStack extends cdk.Stack {
       "WorkerAgentWrapper",
       {
         runtime: PYTHON_RUNTIME,
+        architecture: PYTHON_ARCHITECTURE,
         entry: path.join(ARBITER_ROOT, "workerWrapper"),
         handler: "lambda_handler",
         layers: [catalogLayer],
@@ -1392,6 +1399,7 @@ export class ArbiterStack extends cdk.Stack {
 
     const fabricatorLambda = new PythonFunction(this, "FabricatorAgent", {
       runtime: PYTHON_RUNTIME,
+      architecture: PYTHON_ARCHITECTURE,
       entry: path.join(ARBITER_ROOT, "fabricator"),
       handler: "lambda_handler",
       layers: [catalogLayer],
@@ -1627,6 +1635,7 @@ export class ArbiterStack extends cdk.Stack {
       "SeedAgentConfigFunction",
       {
         runtime: PYTHON_RUNTIME,
+        architecture: PYTHON_ARCHITECTURE,
         handler: "index.handler",
         code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, "seedConfig"), {
           exclude: [...PYTHON_ASSET_EXCLUDES],
@@ -1813,6 +1822,7 @@ export class ArbiterStack extends cdk.Stack {
     // UpdateItem overwrites with the same attribute value.
     const activatorLambda = new PythonFunction(this, "ActivatorAgent", {
       runtime: PYTHON_RUNTIME,
+      architecture: PYTHON_ARCHITECTURE,
       entry: path.join(ARBITER_ROOT, "activator"),
       handler: "handler",
       layers: [catalogLayer],
@@ -1855,6 +1865,7 @@ export class ArbiterStack extends cdk.Stack {
         "StepRunnerFunction",
         {
           runtime: PYTHON_RUNTIME,
+          architecture: PYTHON_ARCHITECTURE,
           handler: "index.handler",
           code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, "stepRunner"), {
             exclude: [...PYTHON_ASSET_EXCLUDES],
@@ -2086,6 +2097,7 @@ export class ArbiterStack extends cdk.Stack {
         "WorkflowTimeoutWatchdogFunction",
         {
           runtime: PYTHON_RUNTIME,
+          architecture: PYTHON_ARCHITECTURE,
           handler: "timeout_watchdog.handler",
           code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, "stepRunner"), {
             exclude: [...PYTHON_ASSET_EXCLUDES],
