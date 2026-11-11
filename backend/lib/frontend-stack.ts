@@ -12,6 +12,7 @@ import * as ssm from "aws-cdk-lib/aws-ssm";
 import * as fs from "fs";
 import * as path from "path";
 import { Construct } from "constructs";
+import { PYTHON_RUNTIME } from "./python-runtime";
 
 interface FrontendStackProps extends cdk.StackProps {
   appSyncApi: appsync.GraphqlApi;
@@ -253,7 +254,7 @@ export class FrontendStack extends cdk.Stack {
       this,
       "UpdateEmailTemplatesFunction",
       {
-        runtime: cdk.aws_lambda.Runtime.PYTHON_3_15,
+        runtime: PYTHON_RUNTIME,
         handler: "index.handler",
         code: cdk.aws_lambda.Code.fromAsset(
           path.join(__dirname, "../../src/lambda/update-email-templates"),
