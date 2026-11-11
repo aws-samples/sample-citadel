@@ -12,6 +12,7 @@ import * as fc from "fast-check";
 const mockCreateResource = jest.fn();
 const mockUpdateResource = jest.fn();
 const mockListResources = jest.fn();
+const mockListResourcesChecked = jest.fn();
 const mockGetResource = jest.fn();
 const mockUpdateResourceStatus = jest.fn();
 const mockSerializeCustomMetadata = jest.fn((meta: unknown) =>
@@ -38,19 +39,31 @@ const mockMapToAgentConfig = jest.fn(
   }),
 );
 
-jest.mock("../../services/registry-service", () => ({
-  RegistryService: jest.fn().mockImplementation(() => ({
-    getRegistryId: () => "test-registry",
-    createResource: mockCreateResource,
-    updateResource: mockUpdateResource,
-    listResources: mockListResources,
-    getResource: mockGetResource,
-    updateResourceStatus: mockUpdateResourceStatus,
-    serializeCustomMetadata: mockSerializeCustomMetadata,
-    deserializeCustomMetadata: mockDeserializeCustomMetadata,
-    mapToAgentConfig: mockMapToAgentConfig,
-  })),
-}));
+jest.mock("../../services/registry-service", () => {
+  class _RegistryThrottledError extends Error {
+    retryAfterMs: number;
+    constructor(message: string, retryAfterMs = 5000) {
+      super(message);
+      this.name = "RegistryThrottledError";
+      this.retryAfterMs = retryAfterMs;
+    }
+  }
+  return {
+    RegistryService: jest.fn().mockImplementation(() => ({
+      getRegistryId: () => "test-registry",
+      createResource: mockCreateResource,
+      updateResource: mockUpdateResource,
+      listResources: mockListResources,
+      listResourcesChecked: mockListResourcesChecked,
+      getResource: mockGetResource,
+      updateResourceStatus: mockUpdateResourceStatus,
+      serializeCustomMetadata: mockSerializeCustomMetadata,
+      deserializeCustomMetadata: mockDeserializeCustomMetadata,
+      mapToAgentConfig: mockMapToAgentConfig,
+    })),
+    RegistryThrottledError: _RegistryThrottledError,
+  };
+});
 
 // ── Mock auth-event ─────────────────────────────────────────────────────
 const mockExtractOrgFromEvent = jest.fn();
@@ -277,7 +290,7 @@ beforeEach(() => {
   // authorized caller set these explicitly.
   mockIsAdminFromEvent.mockReturnValue(false);
   mockHasRoleFromEvent.mockReturnValue(false);
-  mockListResources.mockResolvedValue([]);
+  mockListResourcesChecked.mockResolvedValue({ items: [], partial: false, droppedCount: 0, throttled: false });
   mockCreateResource.mockImplementation(async (_type: string, id: string) =>
     existingRecord({ recordId: "rec-new", name: id, sourceArn: SOURCE_ARN }),
   );
@@ -437,7 +450,7 @@ describe("importAgent — role gate (decision ff48d6f9, finding 234cda06)", () =
 
     expect(mockCreateResource).not.toHaveBeenCalled();
     expect(mockUpdateResource).not.toHaveBeenCalled();
-    expect(mockListResources).not.toHaveBeenCalled();
+    expect(mockListResourcesChecked).not.toHaveBeenCalled();
   });
 
   it("allows an architect caller through to the write path", async () => {
@@ -513,13 +526,13 @@ describe("importAgent — conflict resolution", () => {
   });
 
   it("returns a conflict result (no create) on sourceArn match with no onConflict", async () => {
-    mockListResources.mockResolvedValue([
+    mockListResourcesChecked.mockResolvedValue({ items: [
       existingRecord({
         recordId: "rec-existing",
         name: "OldPay",
         sourceArn: SOURCE_ARN,
       }),
-    ]);
+    ], partial: false, droppedCount: 0, throttled: false });
 
     const result = (await importAgent(
       validInput(),
@@ -539,13 +552,13 @@ describe("importAgent — conflict resolution", () => {
   });
 
   it('detects a name collision (reason="name") when sourceArn differs', async () => {
-    mockListResources.mockResolvedValue([
+    mockListResourcesChecked.mockResolvedValue({ items: [
       existingRecord({
         recordId: "rec-name",
         name: "PaymentsAgent",
         sourceArn: "arn:other",
       }),
-    ]);
+    ], partial: false, droppedCount: 0, throttled: false });
 
     const result = (await importAgent(
       validInput(),
@@ -559,14 +572,14 @@ describe("importAgent — conflict resolution", () => {
   });
 
   it("does NOT treat a same-sourceArn record in another org as a conflict (tenant isolation)", async () => {
-    mockListResources.mockResolvedValue([
+    mockListResourcesChecked.mockResolvedValue({ items: [
       existingRecord({
         recordId: "rec-other-org",
         name: "OldPay",
         sourceArn: SOURCE_ARN,
         orgId: "other-org",
       }),
-    ]);
+    ], partial: false, droppedCount: 0, throttled: false });
     mockCreateResource.mockResolvedValue(
       existingRecord({
         recordId: "rec-fresh",
@@ -587,7 +600,7 @@ describe("importAgent — conflict resolution", () => {
       name: "OldPay",
       sourceArn: SOURCE_ARN,
     });
-    mockListResources.mockResolvedValue([existing]);
+    mockListResourcesChecked.mockResolvedValue({ items: [existing], partial: false, droppedCount: 0, throttled: false });
 
     const result = await importAgent(
       validInput({ onConflict: "link" }),
@@ -608,7 +621,7 @@ describe("importAgent — conflict resolution", () => {
       name: "OldPay",
       sourceArn: SOURCE_ARN,
     });
-    mockListResources.mockResolvedValue([existing]);
+    mockListResourcesChecked.mockResolvedValue({ items: [existing], partial: false, droppedCount: 0, throttled: false });
     mockUpdateResource.mockResolvedValue(existing);
 
     await importAgent(validInput({ onConflict: "replace" }), eventWithOrg);
@@ -626,7 +639,7 @@ describe("importAgent — conflict resolution", () => {
       name: "PaymentsAgent",
       sourceArn: SOURCE_ARN,
     });
-    mockListResources.mockResolvedValue([existing]);
+    mockListResourcesChecked.mockResolvedValue({ items: [existing], partial: false, droppedCount: 0, throttled: false });
     mockCreateResource.mockResolvedValue(
       existingRecord({
         recordId: "rec-copy",
@@ -852,13 +865,13 @@ describe("importAgent — invocation auth-secret storage", () => {
   });
 
   it("stores the secret and sets the ref on the REPLACE path", async () => {
-    mockListResources.mockResolvedValue([
+    mockListResourcesChecked.mockResolvedValue({ items: [
       existingRecord({
         recordId: "rec-existing",
         name: "PaymentsAgent",
         sourceArn: SOURCE_ARN,
       }),
-    ]);
+    ], partial: false, droppedCount: 0, throttled: false });
     mockUpdateResource.mockResolvedValue(
       existingRecord({
         recordId: "rec-existing",
@@ -880,13 +893,13 @@ describe("importAgent — invocation auth-secret storage", () => {
   });
 
   it("stores the secret and sets the ref on the COPY path", async () => {
-    mockListResources.mockResolvedValue([
+    mockListResourcesChecked.mockResolvedValue({ items: [
       existingRecord({
         recordId: "rec-existing",
         name: "PaymentsAgent",
         sourceArn: SOURCE_ARN,
       }),
-    ]);
+    ], partial: false, droppedCount: 0, throttled: false });
     mockCreateResource.mockImplementation(async (_t: string, id: string) =>
       existingRecord({ recordId: "rec-copy", name: id, sourceArn: SOURCE_ARN }),
     );
@@ -904,13 +917,13 @@ describe("importAgent — invocation auth-secret storage", () => {
   });
 
   it("does NOT store a secret on a no-op link (no record is created)", async () => {
-    mockListResources.mockResolvedValue([
+    mockListResourcesChecked.mockResolvedValue({ items: [
       existingRecord({
         recordId: "rec-existing",
         name: "PaymentsAgent",
         sourceArn: SOURCE_ARN,
       }),
-    ]);
+    ], partial: false, droppedCount: 0, throttled: false });
 
     await importAgent(
       withAuth(
@@ -1224,7 +1237,7 @@ describe("importAgent — governance attestation", () => {
       name: "OldPay",
       sourceArn: SOURCE_ARN,
     });
-    mockListResources.mockResolvedValue([existing]);
+    mockListResourcesChecked.mockResolvedValue({ items: [existing], partial: false, droppedCount: 0, throttled: false });
     mockUpdateResource.mockResolvedValue(existing);
 
     await importAgent(validInput({ onConflict: "replace" }), eventWithOrg);
@@ -1247,7 +1260,7 @@ describe("importAgent — governance attestation", () => {
       name: "PaymentsAgent",
       sourceArn: SOURCE_ARN,
     });
-    mockListResources.mockResolvedValue([existing]);
+    mockListResourcesChecked.mockResolvedValue({ items: [existing], partial: false, droppedCount: 0, throttled: false });
     mockCreateResource.mockResolvedValue(
       existingRecord({
         recordId: "rec-copy",
@@ -1273,7 +1286,7 @@ describe("importAgent — governance attestation", () => {
       name: "OldPay",
       sourceArn: SOURCE_ARN,
     });
-    mockListResources.mockResolvedValue([existing]);
+    mockListResourcesChecked.mockResolvedValue({ items: [existing], partial: false, droppedCount: 0, throttled: false });
 
     await importAgent(validInput({ onConflict: "link" }), eventWithOrg);
 
@@ -1284,13 +1297,13 @@ describe("importAgent — governance attestation", () => {
   });
 
   it("does NOT grant authority or stamp attestation on an unresolved conflict", async () => {
-    mockListResources.mockResolvedValue([
+    mockListResourcesChecked.mockResolvedValue({ items: [
       existingRecord({
         recordId: "rec-existing",
         name: "OldPay",
         sourceArn: SOURCE_ARN,
       }),
-    ]);
+    ], partial: false, droppedCount: 0, throttled: false });
 
     const result = await importAgent(validInput(), eventWithOrg);
 
@@ -1423,7 +1436,7 @@ describe("importAgent — ADR-on-import", () => {
       name: "OldPay",
       sourceArn: SOURCE_ARN,
     });
-    mockListResources.mockResolvedValue([existing]);
+    mockListResourcesChecked.mockResolvedValue({ items: [existing], partial: false, droppedCount: 0, throttled: false });
     mockUpdateResource.mockResolvedValue(existing);
 
     await importAgent(validInput({ onConflict: "replace" }), eventWithOrg);
@@ -1439,7 +1452,7 @@ describe("importAgent — ADR-on-import", () => {
       name: "PaymentsAgent",
       sourceArn: SOURCE_ARN,
     });
-    mockListResources.mockResolvedValue([existing]);
+    mockListResourcesChecked.mockResolvedValue({ items: [existing], partial: false, droppedCount: 0, throttled: false });
     mockCreateResource.mockResolvedValue(
       existingRecord({
         recordId: "rec-copy",
@@ -1459,7 +1472,7 @@ describe("importAgent — ADR-on-import", () => {
       name: "OldPay",
       sourceArn: SOURCE_ARN,
     });
-    mockListResources.mockResolvedValue([existing]);
+    mockListResourcesChecked.mockResolvedValue({ items: [existing], partial: false, droppedCount: 0, throttled: false });
 
     await importAgent(validInput({ onConflict: "link" }), eventWithOrg);
 
@@ -1467,13 +1480,13 @@ describe("importAgent — ADR-on-import", () => {
   });
 
   it("records NO ADR on an unresolved conflict", async () => {
-    mockListResources.mockResolvedValue([
+    mockListResourcesChecked.mockResolvedValue({ items: [
       existingRecord({
         recordId: "rec-existing",
         name: "OldPay",
         sourceArn: SOURCE_ARN,
       }),
-    ]);
+    ], partial: false, droppedCount: 0, throttled: false });
 
     const result = await importAgent(validInput(), eventWithOrg);
 
@@ -1682,13 +1695,13 @@ describe("handler", () => {
   });
 
   it("returns the conflict ImportAgentResult shape (agent null) on a sourceArn match", async () => {
-    mockListResources.mockResolvedValue([
+    mockListResourcesChecked.mockResolvedValue({ items: [
       existingRecord({
         recordId: "rec-existing",
         name: "OldPay",
         sourceArn: SOURCE_ARN,
       }),
-    ]);
+    ], partial: false, droppedCount: 0, throttled: false });
     const res = (await handler({
       info: { fieldName: "importAgent" },
       arguments: { input: validFlatInput() },
@@ -1728,7 +1741,7 @@ describe("importAgent — idempotence property", () => {
           // Per-iteration isolation: reset only the call-sensitive mocks and
           // re-establish their implementations (impls survive between runs).
           mockCreateResource.mockReset();
-          mockListResources.mockReset();
+          mockListResourcesChecked.mockReset();
           mockExtractOrgFromEvent.mockResolvedValue(ORG);
           mockSerializeCustomMetadata.mockImplementation((m: unknown) =>
             JSON.stringify(m),
@@ -1750,9 +1763,9 @@ describe("importAgent — idempotence property", () => {
             sourceArn: arn,
           });
           // 1st import: registry empty. 2nd import: the just-created record.
-          mockListResources
-            .mockResolvedValueOnce([])
-            .mockResolvedValueOnce([created]);
+          mockListResourcesChecked
+            .mockResolvedValueOnce({ items: [], partial: false, droppedCount: 0, throttled: false })
+            .mockResolvedValueOnce({ items: [created], partial: false, droppedCount: 0, throttled: false });
           mockCreateResource.mockResolvedValue(created);
 
           const input = validInput({
@@ -2285,7 +2298,7 @@ describe("import lifecycle events", () => {
         name: "OldPay",
         sourceArn: SOURCE_ARN,
       });
-      mockListResources.mockResolvedValue([existing]);
+      mockListResourcesChecked.mockResolvedValue({ items: [existing], partial: false, droppedCount: 0, throttled: false });
       mockUpdateResource.mockResolvedValue(existing);
 
       await importAgent(validInput({ onConflict: "replace" }), eventWithOrg);
@@ -2299,7 +2312,7 @@ describe("import lifecycle events", () => {
         name: "PaymentsAgent",
         sourceArn: SOURCE_ARN,
       });
-      mockListResources.mockResolvedValue([existing]);
+      mockListResourcesChecked.mockResolvedValue({ items: [existing], partial: false, droppedCount: 0, throttled: false });
       mockCreateResource.mockResolvedValue(
         existingRecord({
           recordId: "rec-copy",
@@ -2319,7 +2332,7 @@ describe("import lifecycle events", () => {
         name: "OldPay",
         sourceArn: SOURCE_ARN,
       });
-      mockListResources.mockResolvedValue([existing]);
+      mockListResourcesChecked.mockResolvedValue({ items: [existing], partial: false, droppedCount: 0, throttled: false });
 
       await importAgent(validInput({ onConflict: "link" }), eventWithOrg);
 
@@ -2327,13 +2340,13 @@ describe("import lifecycle events", () => {
     });
 
     it("does NOT emit on an unresolved conflict (no onConflict supplied)", async () => {
-      mockListResources.mockResolvedValue([
+      mockListResourcesChecked.mockResolvedValue({ items: [
         existingRecord({
           recordId: "rec-existing",
           name: "OldPay",
           sourceArn: SOURCE_ARN,
         }),
-      ]);
+      ], partial: false, droppedCount: 0, throttled: false });
 
       const result = await importAgent(validInput(), eventWithOrg);
 
@@ -2820,5 +2833,44 @@ describe("handler — attestAgentImport", () => {
       }),
     ).rejects.toThrow(/agentId/i);
     expect(mockUpdateResource).not.toHaveBeenCalled();
+  });
+});
+
+// ── Throttled partial-listing guard (LIVE INCIDENT 2026-11-10) ──────────
+describe("importAgent — throttled partial listing", () => {
+  beforeEach(() => {
+    mockIsAdminFromEvent.mockReturnValue(true);
+  });
+
+  it("throws RegistryThrottledError when listResourcesChecked reports throttled + droppedCount > 0", async () => {
+    mockListResourcesChecked.mockResolvedValue({
+      items: [],
+      partial: true,
+      droppedCount: 3,
+      throttled: true,
+    });
+
+    await expect(
+      importAgent(validInput(), eventWithOrg),
+    ).rejects.toThrow(/Registry listing incomplete.*throttling.*Refusing/);
+
+    // No mutation calls should have been made.
+    expect(mockCreateResource).not.toHaveBeenCalled();
+    expect(mockUpdateResource).not.toHaveBeenCalled();
+  });
+
+  it("proceeds when listResourcesChecked reports a complete listing (throttled=false)", async () => {
+    mockListResourcesChecked.mockResolvedValue({
+      items: [],
+      partial: false,
+      droppedCount: 0,
+      throttled: false,
+    });
+    mockCreateResource.mockResolvedValue(
+      existingRecord({ recordId: "rec-new", name: "PaymentsAgent" }),
+    );
+
+    const result = await importAgent(validInput(), eventWithOrg);
+    expect(result).toEqual(expect.objectContaining({ agentId: "rec-new" }));
   });
 });
