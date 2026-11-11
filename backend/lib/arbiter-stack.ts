@@ -65,14 +65,17 @@ const ARBITER_ROOT = resolveArbiterRoot(__dirname);
 // ---------------------------------------------------------------------------
 // The catalogLayer (arbiter/layers/common/requirements.txt) already ships
 // boto3, botocore, s3transfer, jmespath, dateutil, six, urllib3,
-// aws_xray_sdk, and wrapt at /opt/python. PythonFunction's pip install
-// re-bundles them (botocore alone is ~31 MB), pushing Lambda towards the
-// 250 MB code + layers limit. This hook deletes those packages from the
-// asset output AFTER pip installs.
+// aws_xray_sdk, wrapt, strands-agents (+ opentelemetry, pydantic, watchdog,
+// docstring-parser, pyyaml, jsonschema), and mcp (+ httpx, starlette, uvicorn,
+// anyio) at /opt/python. PythonFunction's pip install re-bundles them
+// (botocore alone is ~31 MB), pushing Lambda towards the 250 MB code + layers
+// limit. This hook deletes those packages from the asset output AFTER pip
+// installs.
 //
 // This list MUST mirror arbiter/layers/common/requirements.txt plus its
 // transitive dependency set. Update both in lockstep.
 const LAYER_PROVIDED_PACKAGES = [
+  // boto3 + aws-xray-sdk tree
   "boto3",
   "botocore",
   "s3transfer",
@@ -84,6 +87,48 @@ const LAYER_PROVIDED_PACKAGES = [
   "urllib3",
   "aws_xray_sdk",
   "wrapt",
+  // strands-agents tree
+  "strands",
+  "strands_agents",
+  "opentelemetry",
+  "opentelemetry_api",
+  "opentelemetry_sdk",
+  "opentelemetry_instrumentation_threading",
+  "opentelemetry_semantic_conventions",
+  "docstring_parser",
+  "watchdog",
+  "jsonschema",
+  "jsonschema_specifications",
+  "referencing",
+  "rpds",
+  "rpds_py",
+  "attrs",
+  // mcp tree
+  "mcp",
+  "pydantic",
+  "pydantic_core",
+  "pydantic_settings",
+  "annotated_types",
+  "typing_extensions",
+  "typing_inspection",
+  "anyio",
+  "sniffio",
+  "httpx",
+  "httpx_sse",
+  "httpcore",
+  "certifi",
+  "h11",
+  "idna",
+  "starlette",
+  "sse_starlette",
+  "uvicorn",
+  "python_multipart",
+  "pyjwt",
+  "click",
+  "pyyaml",
+  "yaml",
+  "dotenv",
+  "python_dotenv",
 ] as const;
 
 /**
@@ -419,7 +464,7 @@ export class ArbiterStack extends cdk.Stack {
       compatibleRuntimes: [PYTHON_RUNTIME],
       description:
         "Shared arbiter Python packages: catalog, common, governance modules " +
-        "plus aws-xray-sdk for common.tracing.",
+        "plus boto3, aws-xray-sdk, strands-agents, and mcp.",
     });
 
     // --- Strip layer-provided packages from PythonFunction bundles ----------
