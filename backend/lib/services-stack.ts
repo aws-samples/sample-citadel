@@ -12,7 +12,6 @@ import * as cognito from "aws-cdk-lib/aws-cognito";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as agentcore from "@aws-cdk/aws-bedrock-agentcore-alpha";
-import { Platform } from "aws-cdk-lib/aws-ecr-assets";
 import * as ssm from "aws-cdk-lib/aws-ssm";
 import * as cr from "aws-cdk-lib/custom-resources";
 import * as events from "aws-cdk-lib/aws-events";
@@ -24,7 +23,12 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import { REGISTRY_GENERATION } from "./registry-generation";
-import { PYTHON_RUNTIME, PYTHON_ARCHITECTURE } from "./python-runtime";
+import {
+  PYTHON_RUNTIME,
+  LAMBDA_ARCHITECTURE,
+  ECR_PLATFORM,
+  NODE_RUNTIME,
+} from "./runtime-constants";
 
 /**
  * Resolve the repo-root `service/` directory regardless of whether this
@@ -350,7 +354,7 @@ export class ServicesStack extends cdk.Stack {
       "CognitoSecretHandler",
       {
         runtime: PYTHON_RUNTIME,
-        architecture: PYTHON_ARCHITECTURE,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "index.handler",
         code: lambda.Code.fromAsset("src/lambda/cognito-secret-handler"),
         timeout: cdk.Duration.seconds(30),
@@ -462,12 +466,13 @@ export class ServicesStack extends cdk.Stack {
         code: lambda.DockerImageCode.fromImageAsset(
           path.join(SERVICE_ROOT, "hld_pdf_generator"),
           {
-            platform: cdk.aws_ecr_assets.Platform.LINUX_AMD64,
+            platform: ECR_PLATFORM,
             exclude: ["__pycache__", "*.pyc", ".env", "tests", ".git", "*.md"],
           },
         ),
         timeout: cdk.Duration.minutes(5),
         memorySize: 2048,
+        architecture: LAMBDA_ARCHITECTURE,
         description: "Generates PDF from markdown documents on demand",
         tracing: lambda.Tracing.ACTIVE,
         environment: {
@@ -613,7 +618,7 @@ export class ServicesStack extends cdk.Stack {
     // Custom Resource Lambda — creates the vector index via signed HTTP to AOSS
     const kbIndexCreatorFn = new lambda.Function(this, "KbIndexCreatorFn", {
       runtime: PYTHON_RUNTIME,
-      architecture: PYTHON_ARCHITECTURE,
+      architecture: LAMBDA_ARCHITECTURE,
       handler: "index.handler",
       role: kbIndexCreatorRole,
       timeout: cdk.Duration.minutes(10),
@@ -723,7 +728,8 @@ def handler(event, context):
       this,
       "HldPdfCreatedNotifierV2",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "pdf-created-notifier.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -784,7 +790,8 @@ def handler(event, context):
       "DocumentIngestStartFunction",
       {
         functionName: `citadel-document-ingest-start-${props.environment}`,
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "document-ingestion-start.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -868,7 +875,8 @@ def handler(event, context):
       "DocumentIngestPollerFunction",
       {
         functionName: `citadel-document-ingest-poller-${props.environment}`,
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "document-ingestion-poller.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -945,7 +953,8 @@ def handler(event, context):
       "HealthMonitorFunction",
       {
         functionName: `citadel-health-monitor-${props.environment}`,
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "health-monitor.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -1057,7 +1066,8 @@ def handler(event, context):
       "ToolSandboxFunction",
       {
         functionName: `citadel-tool-sandbox-${props.environment}`,
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "tool-sandbox.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -1169,7 +1179,8 @@ def handler(event, context):
         this,
         "SeedSmokeEchoToolFunction",
         {
-          runtime: lambda.Runtime.NODEJS_24_X,
+          runtime: NODE_RUNTIME,
+          architecture: LAMBDA_ARCHITECTURE,
           handler: "seed-smoke-echo-tool/index.handler",
           code: lambda.Code.fromAsset("dist/lambda"),
           timeout: cdk.Duration.minutes(3),
@@ -1252,7 +1263,7 @@ def handler(event, context):
         agentRuntimeArtifact: agentcore.AgentRuntimeArtifact.fromAsset(
           path.join(SERVICE_ROOT, "agent_intake_single"),
           {
-            platform: Platform.LINUX_ARM64,
+            platform: ECR_PLATFORM,
             exclude: [
               ".venv",
               ".venv-*",
@@ -1552,7 +1563,8 @@ def handler(event, context):
         this,
         "IntakeOrchestrationResolverFunction",
         {
-          runtime: lambda.Runtime.NODEJS_24_X,
+          runtime: NODE_RUNTIME,
+          architecture: LAMBDA_ARCHITECTURE,
           handler: "intake-orchestration-resolver.handler",
           code: lambda.Code.fromAsset("dist/lambda"),
           environment: {

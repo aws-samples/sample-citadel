@@ -43,6 +43,7 @@ import { Provider } from "aws-cdk-lib/custom-resources";
 import { Construct } from "constructs";
 import { NagSuppressions } from "cdk-nag";
 import { REGISTRY_GENERATION } from "./registry-generation";
+import { LAMBDA_ARCHITECTURE, NODE_RUNTIME } from "./runtime-constants";
 
 export interface GovernanceStackProps extends cdk.StackProps {
   environment: string;
@@ -242,7 +243,8 @@ export class GovernanceStack extends cdk.Stack {
       this,
       "GovernanceEffectiveAtAutoWriterFn",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "index.handler",
         timeout: Duration.seconds(30),
         code: lambda.Code.fromInline(
@@ -540,7 +542,8 @@ exports.handler = async (event) => {
       this,
       "GovernanceNotifierFn",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "governance-notifier.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         timeout: Duration.seconds(10),
@@ -795,7 +798,8 @@ exports.handler = async (event) => {
       this,
       "ADRResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "adr-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -916,7 +920,8 @@ exports.handler = async (event) => {
       this,
       "ExecSpecResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "execspec-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -1073,7 +1078,8 @@ exports.handler = async (event) => {
       this,
       "EvalResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "eval-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -1202,7 +1208,8 @@ exports.handler = async (event) => {
       this,
       "EvalRunResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "eval-run-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -1318,7 +1325,8 @@ exports.handler = async (event) => {
       this,
       "AgentReleaseResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "release-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         role: props.agentReleaseWriterRole,
@@ -1434,7 +1442,8 @@ exports.handler = async (event) => {
       this,
       "ReleaseDiffResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "release-diff-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -1550,7 +1559,8 @@ exports.handler = async (event) => {
       this,
       "EnvironmentReleasePointerResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "environment-release-pointer-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         role: props.environmentReleasePointerWriterRole,
@@ -1746,7 +1756,8 @@ exports.handler = async (event) => {
       "AgentReleaseRollbackEvaluatorFunction",
       {
         functionName: `citadel-agent-release-rollback-evaluator-${props.environment}`,
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "agent-release-rollback-evaluator.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         role: rollbackEvaluatorRole,
@@ -1937,7 +1948,8 @@ exports.handler = async (event) => {
       this,
       "PromotionPolicyResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "promotion-policy-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         role: props.promotionPolicyConfigWriterRole,
@@ -2030,7 +2042,8 @@ exports.handler = async (event) => {
       this,
       "EvalComparisonResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "eval-comparison-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -2167,7 +2180,8 @@ exports.handler = async (event) => {
       this,
       "EvalConversationWorkerFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "eval-conversation-worker.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -2268,7 +2282,8 @@ exports.handler = async (event) => {
     //    detail-type, which eval-runner.ts's handler routes to
     //    sweepTimeouts (the deadlineAt safety net, design §3).
     const evalRunnerFunction = new lambda.Function(this, "EvalRunnerFunction", {
-      runtime: lambda.Runtime.NODEJS_24_X,
+      runtime: NODE_RUNTIME,
+      architecture: LAMBDA_ARCHITECTURE,
       handler: "eval-runner.handler",
       code: lambda.Code.fromAsset("dist/lambda"),
       environment: {
@@ -2338,7 +2353,8 @@ exports.handler = async (event) => {
       this,
       "InterrogationRoundResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "interrogation-round-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -2510,7 +2526,8 @@ exports.handler = async (event) => {
       this,
       "AgentDesignAssessmentResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "agent-design-assessment-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -2630,7 +2647,8 @@ exports.handler = async (event) => {
       this,
       "ProgramReviewResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "program-review-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {

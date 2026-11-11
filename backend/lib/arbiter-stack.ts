@@ -36,8 +36,9 @@ import { REGISTRY_GENERATION } from "./registry-generation";
 import {
   PYTHON_RUNTIME,
   PYTHON_BUILD_IMAGE,
-  PYTHON_ARCHITECTURE,
-} from "./python-runtime";
+  LAMBDA_ARCHITECTURE,
+  NODE_RUNTIME,
+} from "./runtime-constants";
 import { PYTHON_ASSET_EXCLUDES } from "./python-asset-excludes";
 
 // Resolve the repo-root `arbiter/` directory regardless of whether this
@@ -157,7 +158,7 @@ export { LAYER_PROVIDED_PACKAGES };
 export { PYTHON_ASSET_EXCLUDES } from "./python-asset-excludes";
 
 // ---------------------------------------------------------------------------
-// Python bundling image — imported from ./python-runtime.ts
+// Python bundling image — imported from ./runtime-constants.ts
 // ---------------------------------------------------------------------------
 // PYTHON_RUNTIME and PYTHON_BUILD_IMAGE are derived from a single constant
 // so the Lambda runtime and the bundling image can never diverge.  Uses the
@@ -466,7 +467,7 @@ export class ArbiterStack extends cdk.Stack {
         },
       }),
       compatibleRuntimes: [PYTHON_RUNTIME],
-      compatibleArchitectures: [PYTHON_ARCHITECTURE],
+      compatibleArchitectures: [LAMBDA_ARCHITECTURE],
       description:
         "Shared arbiter Python packages: catalog, common, governance modules " +
         "plus boto3, aws-xray-sdk, strands-agents, and mcp.",
@@ -495,7 +496,7 @@ export class ArbiterStack extends cdk.Stack {
 
     const supervisorLambda = new PythonFunction(this, "SupervisorAgent", {
       runtime: PYTHON_RUNTIME,
-      architecture: PYTHON_ARCHITECTURE,
+      architecture: LAMBDA_ARCHITECTURE,
       // Widened to the arbiter/ root (rather than arbiter/supervisor/) so
       // the governance package and the common package — both siblings of
       // supervisor/ that `_load_governance_package()` and the
@@ -729,7 +730,8 @@ export class ArbiterStack extends cdk.Stack {
       this,
       "AgentCredentialVender",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "agent-credential-vender.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         timeout: cdk.Duration.seconds(30),
@@ -977,7 +979,7 @@ export class ArbiterStack extends cdk.Stack {
       "WorkerAgentWrapper",
       {
         runtime: PYTHON_RUNTIME,
-        architecture: PYTHON_ARCHITECTURE,
+        architecture: LAMBDA_ARCHITECTURE,
         entry: path.join(ARBITER_ROOT, "workerWrapper"),
         handler: "lambda_handler",
         layers: [catalogLayer],
@@ -1399,7 +1401,7 @@ export class ArbiterStack extends cdk.Stack {
 
     const fabricatorLambda = new PythonFunction(this, "FabricatorAgent", {
       runtime: PYTHON_RUNTIME,
-      architecture: PYTHON_ARCHITECTURE,
+      architecture: LAMBDA_ARCHITECTURE,
       entry: path.join(ARBITER_ROOT, "fabricator"),
       handler: "lambda_handler",
       layers: [catalogLayer],
@@ -1635,7 +1637,7 @@ export class ArbiterStack extends cdk.Stack {
       "SeedAgentConfigFunction",
       {
         runtime: PYTHON_RUNTIME,
-        architecture: PYTHON_ARCHITECTURE,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "index.handler",
         code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, "seedConfig"), {
           exclude: [...PYTHON_ASSET_EXCLUDES],
@@ -1822,7 +1824,7 @@ export class ArbiterStack extends cdk.Stack {
     // UpdateItem overwrites with the same attribute value.
     const activatorLambda = new PythonFunction(this, "ActivatorAgent", {
       runtime: PYTHON_RUNTIME,
-      architecture: PYTHON_ARCHITECTURE,
+      architecture: LAMBDA_ARCHITECTURE,
       entry: path.join(ARBITER_ROOT, "activator"),
       handler: "handler",
       layers: [catalogLayer],
@@ -1865,7 +1867,7 @@ export class ArbiterStack extends cdk.Stack {
         "StepRunnerFunction",
         {
           runtime: PYTHON_RUNTIME,
-          architecture: PYTHON_ARCHITECTURE,
+          architecture: LAMBDA_ARCHITECTURE,
           handler: "index.handler",
           code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, "stepRunner"), {
             exclude: [...PYTHON_ASSET_EXCLUDES],
@@ -2097,7 +2099,7 @@ export class ArbiterStack extends cdk.Stack {
         "WorkflowTimeoutWatchdogFunction",
         {
           runtime: PYTHON_RUNTIME,
-          architecture: PYTHON_ARCHITECTURE,
+          architecture: LAMBDA_ARCHITECTURE,
           handler: "timeout_watchdog.handler",
           code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, "stepRunner"), {
             exclude: [...PYTHON_ASSET_EXCLUDES],
@@ -2878,7 +2880,8 @@ export class ArbiterStack extends cdk.Stack {
       this,
       "GovernanceUiResolverFn",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "governance-ui-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         timeout: cdk.Duration.seconds(30),
@@ -3284,7 +3287,8 @@ export class ArbiterStack extends cdk.Stack {
         this,
         "ToolApprovalResolverFn",
         {
-          runtime: lambda.Runtime.NODEJS_24_X,
+          runtime: NODE_RUNTIME,
+          architecture: LAMBDA_ARCHITECTURE,
           handler: "tool-approval-resolver.handler",
           code: lambda.Code.fromAsset("dist/lambda"),
           timeout: cdk.Duration.seconds(30),
@@ -3720,7 +3724,8 @@ export class ArbiterStack extends cdk.Stack {
       this,
       "GovernanceGraphSnapshotFn",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "governance-graph-snapshot.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         timeout: cdk.Duration.minutes(5),
@@ -3864,7 +3869,8 @@ export class ArbiterStack extends cdk.Stack {
       "GovernanceGraphSnapshotOnChangeFn",
       {
         functionName: `citadel-governance-graph-snapshot-on-change-${props.environment}`,
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "governance-graph-snapshot-on-change.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         timeout: cdk.Duration.minutes(1),
@@ -4124,7 +4130,8 @@ export class ArbiterStack extends cdk.Stack {
       this,
       "GovernanceModeRefresherFn",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "governance-mode-refresher.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         timeout: cdk.Duration.seconds(60),
@@ -4278,7 +4285,8 @@ export class ArbiterStack extends cdk.Stack {
         this,
         "GovernanceFindingFanoutFn",
         {
-          runtime: lambda.Runtime.NODEJS_24_X,
+          runtime: NODE_RUNTIME,
+          architecture: LAMBDA_ARCHITECTURE,
           handler: "governance-finding-fanout.handler",
           code: lambda.Code.fromAsset("dist/lambda"),
           timeout: cdk.Duration.seconds(30),

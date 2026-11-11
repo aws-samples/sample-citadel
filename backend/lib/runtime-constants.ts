@@ -1,43 +1,79 @@
 /**
- * Single source of truth for the Python Lambda runtime version and the
- * corresponding Docker image used to bundle Python assets.
+ * Single source of truth for Lambda runtime versions, target architecture,
+ * and the Docker platform / build image used to bundle assets.
  *
- * Every Python Lambda function and every Python LayerVersion in the CDK
- * stacks MUST use these constants.  Deriving the build image from the
- * runtime name makes it impossible for the two to diverge — the exact
- * class of bug that caused the pydantic_core ImportError regression
- * (#525: functions ran 3.15, but the layer was pip-installed under the
- * 3.14 SAM image, producing a 3.14-native C extension).
+ * Every Lambda function (Python and Node.js), every LayerVersion, and every
+ * DockerImageFunction / DockerImageAsset in the CDK stacks MUST use these
+ * constants.  Deriving the build image and platform from the architecture
+ * constant makes it impossible for host/target mismatches to occur — the
+ * exact class of bug that caused the pydantic_core ImportError regression
+ * (#525) and the reason decision 5f7754e4 standardised on arm64.
+ *
+ * Renamed from `python-runtime.ts` to reflect that it now governs Node.js
+ * functions and container images as well.
  */
 import * as fs from "fs";
 import * as path from "path";
 import * as cdk from "aws-cdk-lib";
 import * as lambda from "aws-cdk-lib/aws-lambda";
+import { Platform } from "aws-cdk-lib/aws-ecr-assets";
+
+// ---------------------------------------------------------------------------
+// Runtimes
+// ---------------------------------------------------------------------------
 
 /** The Python Lambda runtime used by every Python function in Citadel. */
 export const PYTHON_RUNTIME = lambda.Runtime.PYTHON_3_15;
 
-/**
- * Target Lambda architecture.  Every Python function and layer in Citadel
- * must use this constant.  Changing this single value (plus the Dockerfile
- * FROM platform) switches the entire fleet to a different architecture.
- *
- * Kept at x86_64: migrating to arm64 is a separate decision that requires
- * validating all native dependencies, runtime images, and integration tests.
- */
-export const PYTHON_ARCHITECTURE = lambda.Architecture.X86_64;
+/** The Node.js Lambda runtime used by every Node.js function in Citadel. */
+export const NODE_RUNTIME = lambda.Runtime.NODEJS_24_X;
+
+// ---------------------------------------------------------------------------
+// Architecture (decision 5f7754e4: everything arm64)
+// ---------------------------------------------------------------------------
 
 /**
- * Docker `--platform` string derived from {@link PYTHON_ARCHITECTURE}.
+ * Target Lambda architecture for the entire fleet — Python, Node.js,
+ * and container-image functions alike.
+ *
+ * ARM_64 (Graviton): better price-performance, and all Citadel
+ * dependencies (native Python wheels, Node.js runtime, pandoc, texlive)
+ * have validated arm64 support.
+ */
+export const LAMBDA_ARCHITECTURE = lambda.Architecture.ARM_64;
+
+/** @deprecated Use {@link LAMBDA_ARCHITECTURE} — kept for grep-ability. */
+export const PYTHON_ARCHITECTURE = LAMBDA_ARCHITECTURE;
+
+/**
+ * ECR-assets `Platform` constant corresponding to {@link LAMBDA_ARCHITECTURE}.
+ * Used for every `DockerImageAsset`, `DockerImageCode.fromImageAsset`, and
+ * AgentCore Runtime artifact.
+ */
+export const ECR_PLATFORM: Platform =
+  LAMBDA_ARCHITECTURE === lambda.Architecture.ARM_64
+    ? Platform.LINUX_ARM64
+    : Platform.LINUX_AMD64;
+
+// ---------------------------------------------------------------------------
+// Docker platform string (for DockerImage.fromBuild / bundling)
+// ---------------------------------------------------------------------------
+
+/**
+ * Docker `--platform` string derived from {@link LAMBDA_ARCHITECTURE}.
  * Passed to `DockerImage.fromBuild` and the Dockerfile `FROM` so the
  * bundling container always produces native extensions for the target
  * architecture — regardless of the deploying host's CPU (e.g. Apple
  * silicon emitting aarch64 wheels when the functions are x86_64).
  */
 export const DOCKER_PLATFORM =
-  PYTHON_ARCHITECTURE === lambda.Architecture.ARM_64
+  LAMBDA_ARCHITECTURE === lambda.Architecture.ARM_64
     ? "linux/arm64"
     : "linux/amd64";
+
+// ---------------------------------------------------------------------------
+// Python build image (lazy — no Docker pull until `cdk synth` bundles)
+// ---------------------------------------------------------------------------
 
 /**
  * Docker image for bundling Python assets (layers and PythonFunction

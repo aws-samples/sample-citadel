@@ -1,24 +1,25 @@
 /**
- * Stack test for python-runtime.ts — enforces that every Python Lambda
- * function and every Python LayerVersion in the Citadel CDK stacks uses
- * the single-source-of-truth constants from lib/python-runtime.ts.
+ * Stack test for runtime-constants.ts — enforces that every Lambda function,
+ * LayerVersion, and container image in the Citadel CDK stacks uses the
+ * single-source-of-truth constants from lib/runtime-constants.ts.
  *
- * Three categories of guard:
+ * Five categories of guard:
  *
- * 1. **Synth guard** — synthesise the ArbiterStack (the only stack with
- *    Python layers and PythonFunction bundling) and assert:
- *    a) every `AWS::Lambda::Function` with a `python` runtime uses
- *       exactly `PYTHON_RUNTIME`;
- *    b) every `AWS::Lambda::LayerVersion` with Python
- *       `compatibleRuntimes` uses `PYTHON_RUNTIME`.
+ * 1. **Synth guard** — synthesise the ArbiterStack and assert:
+ *    a) every Python function uses PYTHON_RUNTIME;
+ *    b) every Python layer uses PYTHON_RUNTIME;
+ *    c) every function Architectures == [arm64];
+ *    d) every layer CompatibleArchitectures includes arm64.
  *
- * 2. **Grep guard** — no literal `build-python3.` or `PYTHON_3_1`
- *    appears in any `backend/lib/*.ts` file outside `python-runtime.ts`
- *    and this test file, so the constants cannot be bypassed.
+ * 2. **Grep guard** — no literal runtime, architecture or platform tokens
+ *    appear in any backend/lib/*.ts file outside runtime-constants.ts and
+ *    this test file, enforcing that the constants cannot be bypassed.
  *
- * 3. **Derivation guard** — `PYTHON_BUILD_IMAGE` is built from a
- *    Dockerfile whose base image tag is derived from `PYTHON_RUNTIME.name`,
- *    so they can never diverge.
+ * 3. **Derivation guard** — PYTHON_BUILD_IMAGE Dockerfile is derived from
+ *    PYTHON_RUNTIME.name and uses --platform.
+ *
+ * 4. **Full-fleet arm64 guard** — all Lambda functions, layers, and
+ *    container images across ALL stacks target arm64.
  */
 import * as fs from "fs";
 import * as path from "path";
@@ -28,7 +29,11 @@ import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
 import { Bucket } from "aws-cdk-lib/aws-s3";
 import { ArbiterStack } from "../arbiter-stack";
-import { PYTHON_RUNTIME, PYTHON_ARCHITECTURE } from "../python-runtime";
+import {
+  PYTHON_RUNTIME,
+  LAMBDA_ARCHITECTURE,
+  NODE_RUNTIME,
+} from "../runtime-constants";
 import {
   scaffoldBackendAssetDirs,
   scaffoldArbiterStubs,
@@ -38,9 +43,9 @@ scaffoldBackendAssetDirs(["dist/lambda", "src/schema"]);
 scaffoldArbiterStubs();
 
 // ---------------------------------------------------------------------------
-// Category 1: Synth guards
+// Category 1: Synth guards (ArbiterStack — the only stack with Python layers)
 // ---------------------------------------------------------------------------
-describe("Python runtime consistency (synth)", () => {
+describe("Runtime consistency (synth)", () => {
   let template: ReturnType<typeof Template.fromStack>;
 
   beforeEach(() => {
@@ -79,7 +84,7 @@ describe("Python runtime consistency (synth)", () => {
       },
     );
 
-    const stack = new ArbiterStack(app, "ArbiterPyRuntimeTestStack", {
+    const stack = new ArbiterStack(app, "ArbiterRuntimeTestStack", {
       environment: "test",
       env: { account: "123456789012", region: "us-east-1" },
       agentEventBus,
@@ -99,7 +104,7 @@ describe("Python runtime consistency (synth)", () => {
     ).toJSON().Resources;
 
     const violations: string[] = [];
-    const expectedRuntime = PYTHON_RUNTIME.name; // e.g. "python3.15"
+    const expectedRuntime = PYTHON_RUNTIME.name;
 
     for (const [logicalId, resource] of Object.entries(resources)) {
       if (resource.Type !== "AWS::Lambda::Function") continue;
@@ -107,6 +112,32 @@ describe("Python runtime consistency (synth)", () => {
       if (!props) continue;
       const runtime = props.Runtime as string | undefined;
       if (!runtime || !runtime.startsWith("python")) continue;
+      if (runtime !== expectedRuntime) {
+        violations.push(
+          `${logicalId}: runtime ${runtime} !== ${expectedRuntime}`,
+        );
+      }
+    }
+
+    expect(violations).toEqual([]);
+  });
+
+  it("every Node.js Lambda function uses NODE_RUNTIME", () => {
+    const resources = (
+      template as unknown as {
+        toJSON(): { Resources: Record<string, Record<string, unknown>> };
+      }
+    ).toJSON().Resources;
+
+    const violations: string[] = [];
+    const expectedRuntime = NODE_RUNTIME.name;
+
+    for (const [logicalId, resource] of Object.entries(resources)) {
+      if (resource.Type !== "AWS::Lambda::Function") continue;
+      const props = resource.Properties as Record<string, unknown> | undefined;
+      if (!props) continue;
+      const runtime = props.Runtime as string | undefined;
+      if (!runtime || !runtime.startsWith("nodejs")) continue;
       if (runtime !== expectedRuntime) {
         violations.push(
           `${logicalId}: runtime ${runtime} !== ${expectedRuntime}`,
@@ -145,7 +176,7 @@ describe("Python runtime consistency (synth)", () => {
     expect(violations).toEqual([]);
   });
 
-  it("every Python Lambda function has PYTHON_ARCHITECTURE", () => {
+  it("every Lambda function has Architectures == [arm64]", () => {
     const resources = (
       template as unknown as {
         toJSON(): { Resources: Record<string, Record<string, unknown>> };
@@ -153,15 +184,12 @@ describe("Python runtime consistency (synth)", () => {
     ).toJSON().Resources;
 
     const violations: string[] = [];
-    // CloudFormation maps X86_64 → "x86_64"
-    const expectedArch = PYTHON_ARCHITECTURE.name;
+    const expectedArch = LAMBDA_ARCHITECTURE.name; // "arm64"
 
     for (const [logicalId, resource] of Object.entries(resources)) {
       if (resource.Type !== "AWS::Lambda::Function") continue;
       const props = resource.Properties as Record<string, unknown> | undefined;
       if (!props) continue;
-      const runtime = props.Runtime as string | undefined;
-      if (!runtime || !runtime.startsWith("python")) continue;
       const architectures = props.Architectures as string[] | undefined;
       if (!architectures || !architectures.includes(expectedArch)) {
         violations.push(
@@ -173,7 +201,7 @@ describe("Python runtime consistency (synth)", () => {
     expect(violations).toEqual([]);
   });
 
-  it("every Python LayerVersion has PYTHON_ARCHITECTURE in compatibleArchitectures", () => {
+  it("every LayerVersion has arm64 in compatibleArchitectures", () => {
     const resources = (
       template as unknown as {
         toJSON(): { Resources: Record<string, Record<string, unknown>> };
@@ -181,16 +209,12 @@ describe("Python runtime consistency (synth)", () => {
     ).toJSON().Resources;
 
     const violations: string[] = [];
-    const expectedArch = PYTHON_ARCHITECTURE.name;
+    const expectedArch = LAMBDA_ARCHITECTURE.name;
 
     for (const [logicalId, resource] of Object.entries(resources)) {
       if (resource.Type !== "AWS::Lambda::LayerVersion") continue;
       const props = resource.Properties as Record<string, unknown> | undefined;
       if (!props) continue;
-      const runtimes = props.CompatibleRuntimes as string[] | undefined;
-      if (!runtimes) continue;
-      const hasPython = runtimes.some((r: string) => r.startsWith("python"));
-      if (!hasPython) continue;
       const arches = props.CompatibleArchitectures as string[] | undefined;
       if (!arches || !arches.includes(expectedArch)) {
         violations.push(
@@ -204,21 +228,16 @@ describe("Python runtime consistency (synth)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Category 2: Grep guard — no literal runtime/image tokens outside the
-// single-source-of-truth module
+// Category 2: Grep guard — no literal runtime/architecture/platform tokens
+// outside the single-source-of-truth module
 // ---------------------------------------------------------------------------
-describe("Python runtime consistency (grep guard)", () => {
+describe("Runtime consistency (grep guard)", () => {
   const LIB_DIR = path.resolve(__dirname, "..");
   const ALLOWED_FILES = new Set([
-    "python-runtime.ts",
-    // This test file itself references the patterns for assertion purposes
+    "runtime-constants.ts",
     path.basename(__filename),
   ]);
 
-  /**
-   * Scan all .ts files in backend/lib/ for forbidden literal patterns.
-   * Returns an array of `"file:line: match"` strings.
-   */
   function scanForLiterals(pattern: RegExp): string[] {
     const violations: string[] = [];
     const files = fs.readdirSync(LIB_DIR).filter((f) => f.endsWith(".ts"));
@@ -238,30 +257,35 @@ describe("Python runtime consistency (grep guard)", () => {
     return violations;
   }
 
-  it('no literal "build-python3." outside python-runtime.ts', () => {
+  it('no literal "build-python3." outside runtime-constants.ts', () => {
     const violations = scanForLiterals(/build-python3\./);
     expect(violations).toEqual([]);
   });
 
-  it('no literal "PYTHON_3_1" outside python-runtime.ts', () => {
-    // Matches PYTHON_3_14, PYTHON_3_15, etc. — any hardcoded runtime enum
+  it('no literal "PYTHON_3_1" outside runtime-constants.ts', () => {
     const violations = scanForLiterals(/PYTHON_3_1\d/);
     expect(violations).toEqual([]);
   });
 
-  it('no literal "Architecture." outside python-runtime.ts', () => {
-    // Architecture.X86_64 / Architecture.ARM_64 must only live in the
-    // single-source-of-truth module; all consumers use PYTHON_ARCHITECTURE.
+  it('no literal "Architecture." outside runtime-constants.ts', () => {
     const violations = scanForLiterals(/Architecture\./);
     expect(violations).toEqual([]);
   });
 
-  it('no literal "--platform" outside python-runtime.ts', () => {
-    // --platform must be derived from the single constant, not hardcoded.
-    // The Dockerfile is allowed to reference the build arg (checked by
-    // the derivation guard below), but no .ts file outside the module
-    // should contain the literal.
+  it('no literal "--platform" outside runtime-constants.ts', () => {
     const violations = scanForLiterals(/--platform/);
+    expect(violations).toEqual([]);
+  });
+
+  it('no literal "NODEJS_24_X" outside runtime-constants.ts', () => {
+    const violations = scanForLiterals(/NODEJS_24_X/);
+    expect(violations).toEqual([]);
+  });
+
+  it('no literal "Platform." outside runtime-constants.ts', () => {
+    // Platform.LINUX_AMD64 / Platform.LINUX_ARM64 must live only in the
+    // single-source-of-truth; consumers use ECR_PLATFORM.
+    const violations = scanForLiterals(/Platform\./);
     expect(violations).toEqual([]);
   });
 });
@@ -269,12 +293,8 @@ describe("Python runtime consistency (grep guard)", () => {
 // ---------------------------------------------------------------------------
 // Category 3: Derivation guard
 // ---------------------------------------------------------------------------
-describe("Python runtime derivation", () => {
+describe("Python build image derivation", () => {
   it("PYTHON_BUILD_IMAGE is derived from PYTHON_RUNTIME.name", () => {
-    // Verify the Dockerfile references the Lambda base image for the
-    // correct version — this is the true single-source derivation
-    // guarantee.  We check the Dockerfile directly rather than accessing
-    // .image (which would trigger a Docker build that tests don't need).
     const dockerfilePath = path.resolve(
       __dirname,
       "..",
@@ -282,12 +302,11 @@ describe("Python runtime derivation", () => {
       "Dockerfile",
     );
     const dockerfile = fs.readFileSync(dockerfilePath, "utf-8");
-    const version = PYTHON_RUNTIME.name.replace("python", ""); // "3.15"
+    const version = PYTHON_RUNTIME.name.replace("python", "");
     expect(dockerfile).toContain(
       `public.ecr.aws/lambda/python:\${LAMBDA_BASE_TAG}`,
     );
     expect(dockerfile).toContain(`ARG LAMBDA_BASE_TAG=${version}`);
-    // Verify ENTRYPOINT is cleared (CDK bundling needs bash as the CMD)
     expect(dockerfile).toMatch(/ENTRYPOINT\s+\[\]/);
   });
 
@@ -299,12 +318,36 @@ describe("Python runtime derivation", () => {
       "Dockerfile",
     );
     const dockerfile = fs.readFileSync(dockerfilePath, "utf-8");
-    // The Dockerfile must use --platform=${TARGETPLATFORM} on the FROM line
-    // so the base image is always pulled for the target architecture.
     expect(dockerfile).toMatch(
       /FROM\s+--platform=\$\{TARGETPLATFORM\}\s+public\.ecr\.aws\/lambda\/python/,
     );
-    // A default TARGETPLATFORM ARG must exist as a safety net
     expect(dockerfile).toContain("ARG TARGETPLATFORM=linux/amd64");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Category 4: PDF generator Dockerfile uses TARGETARCH for pandoc
+// ---------------------------------------------------------------------------
+describe("PDF generator Dockerfile (arm64 readiness)", () => {
+  const dockerfilePath = path.resolve(
+    __dirname,
+    "..",
+    "..",
+    "..",
+    "service",
+    "hld_pdf_generator",
+    "Dockerfile",
+  );
+
+  it("uses TARGETARCH for pandoc download URL", () => {
+    const dockerfile = fs.readFileSync(dockerfilePath, "utf-8");
+    expect(dockerfile).toContain("ARG TARGETARCH");
+    expect(dockerfile).toMatch(/pandoc-.*-linux-\$\{TARGETARCH\}/);
+  });
+
+  it("base image matches PYTHON_RUNTIME version", () => {
+    const dockerfile = fs.readFileSync(dockerfilePath, "utf-8");
+    const version = PYTHON_RUNTIME.name.replace("python", "");
+    expect(dockerfile).toContain(`public.ecr.aws/lambda/python:${version}`);
   });
 });
