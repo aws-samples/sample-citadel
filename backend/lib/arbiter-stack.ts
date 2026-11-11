@@ -33,6 +33,7 @@ import * as path from "path";
 import * as fs from "fs";
 import * as crypto from "crypto";
 import { REGISTRY_GENERATION } from "./registry-generation";
+import { PYTHON_RUNTIME, PYTHON_BUILD_IMAGE } from "./python-runtime";
 import { PYTHON_ASSET_EXCLUDES } from "./python-asset-excludes";
 
 // Resolve the repo-root `arbiter/` directory regardless of whether this
@@ -64,14 +65,17 @@ const ARBITER_ROOT = resolveArbiterRoot(__dirname);
 // ---------------------------------------------------------------------------
 // The catalogLayer (arbiter/layers/common/requirements.txt) already ships
 // boto3, botocore, s3transfer, jmespath, dateutil, six, urllib3,
-// aws_xray_sdk, and wrapt at /opt/python. PythonFunction's pip install
-// re-bundles them (botocore alone is ~31 MB), pushing Lambda towards the
-// 250 MB code + layers limit. This hook deletes those packages from the
-// asset output AFTER pip installs.
+// aws_xray_sdk, wrapt, strands-agents (+ opentelemetry, pydantic, watchdog,
+// docstring-parser, pyyaml, jsonschema), and mcp (+ httpx, starlette, uvicorn,
+// anyio) at /opt/python. PythonFunction's pip install re-bundles them
+// (botocore alone is ~31 MB), pushing Lambda towards the 250 MB code + layers
+// limit. This hook deletes those packages from the asset output AFTER pip
+// installs.
 //
 // This list MUST mirror arbiter/layers/common/requirements.txt plus its
 // transitive dependency set. Update both in lockstep.
 const LAYER_PROVIDED_PACKAGES = [
+  // boto3 + aws-xray-sdk tree
   "boto3",
   "botocore",
   "s3transfer",
@@ -83,6 +87,48 @@ const LAYER_PROVIDED_PACKAGES = [
   "urllib3",
   "aws_xray_sdk",
   "wrapt",
+  // strands-agents tree
+  "strands",
+  "strands_agents",
+  "opentelemetry",
+  "opentelemetry_api",
+  "opentelemetry_sdk",
+  "opentelemetry_instrumentation_threading",
+  "opentelemetry_semantic_conventions",
+  "docstring_parser",
+  "watchdog",
+  "jsonschema",
+  "jsonschema_specifications",
+  "referencing",
+  "rpds",
+  "rpds_py",
+  "attrs",
+  // mcp tree
+  "mcp",
+  "pydantic",
+  "pydantic_core",
+  "pydantic_settings",
+  "annotated_types",
+  "typing_extensions",
+  "typing_inspection",
+  "anyio",
+  "sniffio",
+  "httpx",
+  "httpx_sse",
+  "httpcore",
+  "certifi",
+  "h11",
+  "idna",
+  "starlette",
+  "sse_starlette",
+  "uvicorn",
+  "python_multipart",
+  "pyjwt",
+  "click",
+  "pyyaml",
+  "yaml",
+  "dotenv",
+  "python_dotenv",
 ] as const;
 
 /**
@@ -107,17 +153,14 @@ export { LAYER_PROVIDED_PACKAGES };
 export { PYTHON_ASSET_EXCLUDES } from "./python-asset-excludes";
 
 // ---------------------------------------------------------------------------
-// Python bundling image override
+// Python bundling image — imported from ./python-runtime.ts
 // ---------------------------------------------------------------------------
-// The SAM build image (`public.ecr.aws/sam/build-python3.15`) referenced by
-// `lambda.Runtime.PYTHON_3_15.bundlingImage` is not yet published. Fall back
-// to the 3.14 SAM build image for pip-installing pure-Python dependencies;
-// the actual Lambda runtime is still PYTHON_3_15 — the build image only needs
-// pip and a CPython interpreter, and 3.14 satisfies both for our dependency
-// set (all packages are pure-Python / universal wheels).
-const PYTHON_315_BUNDLING_IMAGE = cdk.DockerImage.fromRegistry(
-  "public.ecr.aws/sam/build-python3.14:latest",
-);
+// PYTHON_RUNTIME and PYTHON_BUILD_IMAGE are derived from a single constant
+// so the Lambda runtime and the bundling image can never diverge.  Uses the
+// official Lambda base image (public.ecr.aws/lambda/python:3.15) because
+// the SAM build image does not exist for 3.15 yet.  The previous fallback
+// to the 3.14 SAM image caused a pydantic_core C-extension ABI mismatch
+// (#525 regression).
 
 // ---------------------------------------------------------------------------
 // Seed-module content digest (finding 588c7fb8)
@@ -410,7 +453,7 @@ export class ArbiterStack extends cdk.Stack {
       code: lambda.Code.fromAsset(ARBITER_ROOT, {
         exclude: [...PYTHON_ASSET_EXCLUDES],
         bundling: {
-          image: PYTHON_315_BUNDLING_IMAGE,
+          image: PYTHON_BUILD_IMAGE,
           command: [
             "bash",
             "-c",
@@ -418,10 +461,10 @@ export class ArbiterStack extends cdk.Stack {
           ],
         },
       }),
-      compatibleRuntimes: [lambda.Runtime.PYTHON_3_15],
+      compatibleRuntimes: [PYTHON_RUNTIME],
       description:
         "Shared arbiter Python packages: catalog, common, governance modules " +
-        "plus aws-xray-sdk for common.tracing.",
+        "plus boto3, aws-xray-sdk, strands-agents, and mcp.",
     });
 
     // --- Strip layer-provided packages from PythonFunction bundles ----------
@@ -446,7 +489,7 @@ export class ArbiterStack extends cdk.Stack {
     });
 
     const supervisorLambda = new PythonFunction(this, "SupervisorAgent", {
-      runtime: lambda.Runtime.PYTHON_3_15,
+      runtime: PYTHON_RUNTIME,
       // Widened to the arbiter/ root (rather than arbiter/supervisor/) so
       // the governance package and the common package — both siblings of
       // supervisor/ that `_load_governance_package()` and the
@@ -465,7 +508,7 @@ export class ArbiterStack extends cdk.Stack {
       handler: "handler",
       layers: [catalogLayer],
       bundling: {
-        image: PYTHON_315_BUNDLING_IMAGE,
+        image: PYTHON_BUILD_IMAGE,
         assetHashType: cdk.AssetHashType.SOURCE,
         commandHooks: stripLayerPackagesHook,
         assetExcludes: [
@@ -927,12 +970,12 @@ export class ArbiterStack extends cdk.Stack {
       this,
       "WorkerAgentWrapper",
       {
-        runtime: lambda.Runtime.PYTHON_3_15,
+        runtime: PYTHON_RUNTIME,
         entry: path.join(ARBITER_ROOT, "workerWrapper"),
         handler: "lambda_handler",
         layers: [catalogLayer],
         bundling: {
-          image: PYTHON_315_BUNDLING_IMAGE,
+          image: PYTHON_BUILD_IMAGE,
           assetHashType: cdk.AssetHashType.SOURCE,
           commandHooks: stripLayerPackagesHook,
           assetExcludes: [...PYTHON_ASSET_EXCLUDES],
@@ -1348,12 +1391,12 @@ export class ArbiterStack extends cdk.Stack {
     });
 
     const fabricatorLambda = new PythonFunction(this, "FabricatorAgent", {
-      runtime: lambda.Runtime.PYTHON_3_15,
+      runtime: PYTHON_RUNTIME,
       entry: path.join(ARBITER_ROOT, "fabricator"),
       handler: "lambda_handler",
       layers: [catalogLayer],
       bundling: {
-        image: PYTHON_315_BUNDLING_IMAGE,
+        image: PYTHON_BUILD_IMAGE,
         assetHashType: cdk.AssetHashType.SOURCE,
         commandHooks: stripLayerPackagesHook,
         assetExcludes: [...PYTHON_ASSET_EXCLUDES],
@@ -1583,7 +1626,7 @@ export class ArbiterStack extends cdk.Stack {
       this,
       "SeedAgentConfigFunction",
       {
-        runtime: lambda.Runtime.PYTHON_3_15,
+        runtime: PYTHON_RUNTIME,
         handler: "index.handler",
         code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, "seedConfig"), {
           exclude: [...PYTHON_ASSET_EXCLUDES],
@@ -1769,12 +1812,12 @@ export class ArbiterStack extends cdk.Stack {
     // handler. Duplicate events are idempotent by construction since
     // UpdateItem overwrites with the same attribute value.
     const activatorLambda = new PythonFunction(this, "ActivatorAgent", {
-      runtime: lambda.Runtime.PYTHON_3_15,
+      runtime: PYTHON_RUNTIME,
       entry: path.join(ARBITER_ROOT, "activator"),
       handler: "handler",
       layers: [catalogLayer],
       bundling: {
-        image: PYTHON_315_BUNDLING_IMAGE,
+        image: PYTHON_BUILD_IMAGE,
         assetHashType: cdk.AssetHashType.SOURCE,
         commandHooks: stripLayerPackagesHook,
         assetExcludes: [...PYTHON_ASSET_EXCLUDES],
@@ -1811,7 +1854,7 @@ export class ArbiterStack extends cdk.Stack {
         this,
         "StepRunnerFunction",
         {
-          runtime: lambda.Runtime.PYTHON_3_15,
+          runtime: PYTHON_RUNTIME,
           handler: "index.handler",
           code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, "stepRunner"), {
             exclude: [...PYTHON_ASSET_EXCLUDES],
@@ -2042,7 +2085,7 @@ export class ArbiterStack extends cdk.Stack {
         this,
         "WorkflowTimeoutWatchdogFunction",
         {
-          runtime: lambda.Runtime.PYTHON_3_15,
+          runtime: PYTHON_RUNTIME,
           handler: "timeout_watchdog.handler",
           code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, "stepRunner"), {
             exclude: [...PYTHON_ASSET_EXCLUDES],

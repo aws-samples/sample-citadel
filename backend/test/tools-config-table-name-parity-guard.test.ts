@@ -129,7 +129,9 @@ describe("citadel-tools table name parity (finding 9b702e07 regression guard)", 
 
     // ArbiterStack owns the real ToolsConfigTable — construct it and read
     // the name BACK from the synthesized template, not from source literals.
-    const arbiterApp = new cdk.App();
+    const arbiterApp = new cdk.App({
+      context: { "aws:cdk:bundling-stacks": [] },
+    });
     const arbiterBackendStack = new cdk.Stack(
       arbiterApp,
       "MockArbiterBackendStack",
