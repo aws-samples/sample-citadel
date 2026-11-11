@@ -133,13 +133,29 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
     _accountId: string,
     _region: string,
   ): RequiredPolicies {
-    const knowledgeBaseArn = `arn:aws:bedrock:${_region}:${_accountId}:knowledge-base/*`;
-    // If config carries a collectionArn, scope AOSS APIAccessAll to it;
-    // otherwise use a wildcard (collection ARN not known until after provision).
-    const collectionArn =
-      typeof _config.collectionArn === "string"
-        ? _config.collectionArn
-        : `arn:aws:aoss:${_region}:${_accountId}:collection/*`;
+    // CIT-299: scope connect policies to the datastore's own knowledge base
+    // and collection. Both knowledgeBaseId and collectionId are REQUIRED at
+    // connect time — the caller must have set them during provision or manual
+    // configuration. A wildcard fallback is never used.
+    const knowledgeBaseId =
+      typeof _config.knowledgeBaseId === "string"
+        ? _config.knowledgeBaseId
+        : undefined;
+    const collectionId =
+      typeof _config.collectionId === "string"
+        ? _config.collectionId
+        : undefined;
+
+    if (!knowledgeBaseId || !collectionId) {
+      // Return empty connect policies — connect() will reject with an opaque
+      // error before any role grant. We cannot throw here because
+      // requiredPolicies is a pure synchronous method and the resolver calls
+      // it speculatively.
+      return { provision: [], connect: [] };
+    }
+
+    const knowledgeBaseArn = `arn:aws:bedrock:${_region}:${_accountId}:knowledge-base/${knowledgeBaseId}`;
+    const collectionArn = `arn:aws:aoss:${_region}:${_accountId}:collection/${collectionId}`;
 
     return {
       provision: [],
@@ -663,6 +679,10 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
       );
       collectionArn = vectorStore.collectionArn;
 
+      // CIT-299: record collectionId into config so subsequent connect
+      // operations can scope policies to this specific collection.
+      config.collectionId = vectorStore.collectionId;
+
       storageConfiguration = {
         type: "OPENSEARCH_SERVERLESS",
         opensearchServerlessConfiguration: {
@@ -690,6 +710,11 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
             storageConfiguration,
           }),
         );
+
+        // CIT-299: record knowledgeBaseId so connect can scope policies.
+        if (result.knowledgeBase?.knowledgeBaseId) {
+          config.knowledgeBaseId = result.knowledgeBase.knowledgeBaseId;
+        }
 
         return {
           resourceArn:
@@ -771,8 +796,20 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
     config: Record<string, unknown>,
     credentials?: Record<string, unknown>,
   ): Promise<void> {
-    const client = this.makeClient(credentials, "connect");
     const knowledgeBaseId = config.knowledgeBaseId as string | undefined;
+    const collectionId = config.collectionId as string | undefined;
+
+    // CIT-299: both IDs are required at connect time. Absent → opaque error,
+    // no wildcard fallback, no role grant (requiredPolicies already returned
+    // empty when these are missing).
+    if (!knowledgeBaseId || !collectionId) {
+      throw new ConnectionError(
+        "Knowledge base connection requires both knowledgeBaseId and collectionId in config",
+        false,
+      );
+    }
+
+    const client = this.makeClient(credentials, "connect");
 
     try {
       const response = await client.send(

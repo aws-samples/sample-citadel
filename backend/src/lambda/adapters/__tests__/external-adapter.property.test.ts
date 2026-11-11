@@ -30,6 +30,9 @@ jest.mock("net", () => ({
     };
     return instance;
   }),
+  // CIT-300: url-safety uses net.isIPv4/isIPv6 for IP classification
+  isIPv4: (ip: string) => /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip),
+  isIPv6: (ip: string) => ip.includes(":"),
 }));
 
 const externalKinds = [
@@ -170,6 +173,9 @@ describe("Property 8: External adapter connection validation", () => {
     await fc.assert(
       fc.asyncProperty(hostArb, portArb, async (host, port) => {
         const adapter = new ExternalDatabaseAdapter("mongodb");
+        // CIT-300: inject a DNS lookup that returns a public IP so the SSRF
+        // guard doesn't reject arbitrary generated domains.
+        adapter._dnsLookup = async () => ["203.0.113.1"];
         const uri = port
           ? `mongodb://${host}:${port}/testdb`
           : `mongodb://${host}/testdb`;
@@ -209,12 +215,14 @@ describe("Property 8: External adapter connection validation", () => {
     );
   });
 
-  it("api: accepts well-formed URLs", async () => {
-    const urlArb = fc.webUrl();
+  it("api: accepts well-formed HTTPS URLs (CIT-300 rejects non-HTTPS)", async () => {
+    // CIT-300: only HTTPS URLs are accepted now
+    const domainArb = fc.domain();
 
     await fc.assert(
-      fc.asyncProperty(urlArb, async (url) => {
+      fc.asyncProperty(domainArb, async (domain) => {
         const adapter = new ExternalDatabaseAdapter("api");
+        const url = `https://${domain}/api`;
         const result = await adapter.testConnection(
           { baseUrl: url },
           MOCK_SCOPED_CREDENTIALS,
@@ -236,6 +244,23 @@ describe("Property 8: External adapter connection validation", () => {
     await fc.assert(
       fc.asyncProperty(badUrlArb, async (url) => {
         const adapter = new ExternalDatabaseAdapter("api");
+        const result = await adapter.testConnection(
+          { baseUrl: url },
+          MOCK_SCOPED_CREDENTIALS,
+        );
+        expect(result.success).toBe(false);
+      }),
+      { numRuns: 100 },
+    );
+  });
+
+  it("api: rejects http:// URLs (CIT-300 HTTPS only)", async () => {
+    const domainArb = fc.domain();
+
+    await fc.assert(
+      fc.asyncProperty(domainArb, async (domain) => {
+        const adapter = new ExternalDatabaseAdapter("api");
+        const url = `http://${domain}/api`;
         const result = await adapter.testConnection(
           { baseUrl: url },
           MOCK_SCOPED_CREDENTIALS,
@@ -292,9 +317,14 @@ describe("Property 9: External adapter connect delegates and throws on failure",
     await fc.assert(
       fc.asyncProperty(tcpKindArb, portArb, async (kind, port) => {
         const adapter = new ExternalDatabaseAdapter(kind);
+        // CIT-300: inject public DNS lookup to bypass SSRF guard
+        adapter._dnsLookup = async () => ["203.0.113.1"];
         // TCP mock triggers connect event by default, so this should succeed
         await expect(
-          adapter.connect({ host: "localhost", port }, MOCK_SCOPED_CREDENTIALS),
+          adapter.connect(
+            { host: "public.example.com", port },
+            MOCK_SCOPED_CREDENTIALS,
+          ),
         ).resolves.toBeUndefined();
       }),
       { numRuns: 100 },

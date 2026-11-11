@@ -72,9 +72,7 @@ jest.mock("@aws-sdk/client-opensearchserverless", () => ({
 }));
 
 import { KnowledgeBaseAdapter } from "../knowledge-base-adapter";
-import {
-  CreateAccessPolicyCommand,
-} from "@aws-sdk/client-opensearchserverless";
+import { CreateAccessPolicyCommand } from "@aws-sdk/client-opensearchserverless";
 
 describe("KnowledgeBaseAdapter AOSS policy scoping (C7)", () => {
   let adapter: KnowledgeBaseAdapter;
@@ -204,10 +202,7 @@ describe("KnowledgeBaseAdapter AOSS policy scoping (C7)", () => {
     });
 
     test("only service role principal when dataStoreId is absent", async () => {
-      await adapter.provision(
-        { name: "test-kb" },
-        MOCK_SCOPED_CREDENTIALS,
-      );
+      await adapter.provision({ name: "test-kb" }, MOCK_SCOPED_CREDENTIALS);
 
       const accessPolicyCalls = jest.mocked(CreateAccessPolicyCommand).mock
         .calls;
@@ -254,25 +249,9 @@ describe("KnowledgeBaseAdapter AOSS policy scoping (C7)", () => {
   });
 
   describe("requiredPolicies.connect", () => {
-    test("includes aoss:APIAccessAll on collection ARN", () => {
-      const collectionArn =
-        "arn:aws:aoss:us-west-2:123456789012:collection/col-abc123";
+    test("includes aoss:APIAccessAll on specific collection ID", () => {
       const policies = adapter.requiredPolicies(
-        { collectionArn },
-        "123456789012",
-        "us-west-2",
-      );
-
-      const aossStatement = policies.connect.find((s) =>
-        s.actions.includes("aoss:APIAccessAll"),
-      );
-      expect(aossStatement).toBeDefined();
-      expect(aossStatement!.resources).toEqual([collectionArn]);
-    });
-
-    test("uses wildcard collection ARN when collectionArn not in config", () => {
-      const policies = adapter.requiredPolicies(
-        {},
+        { knowledgeBaseId: "KB123", collectionId: "col-abc123" },
         "123456789012",
         "us-west-2",
       );
@@ -282,13 +261,24 @@ describe("KnowledgeBaseAdapter AOSS policy scoping (C7)", () => {
       );
       expect(aossStatement).toBeDefined();
       expect(aossStatement!.resources).toEqual([
-        "arn:aws:aoss:us-west-2:123456789012:collection/*",
+        "arn:aws:aoss:us-west-2:123456789012:collection/col-abc123",
       ]);
     });
 
-    test("includes bedrock:Retrieve and bedrock:GetKnowledgeBase on KB ARN", () => {
+    test("returns empty connect policies when knowledgeBaseId/collectionId absent (CIT-299)", () => {
       const policies = adapter.requiredPolicies(
         {},
+        "123456789012",
+        "us-west-2",
+      );
+
+      // No wildcard fallback — empty connect policies
+      expect(policies.connect).toEqual([]);
+    });
+
+    test("includes bedrock:Retrieve and bedrock:GetKnowledgeBase scoped to specific KB", () => {
+      const policies = adapter.requiredPolicies(
+        { knowledgeBaseId: "KB123", collectionId: "col-abc123" },
         "123456789012",
         "us-west-2",
       );
@@ -299,13 +289,13 @@ describe("KnowledgeBaseAdapter AOSS policy scoping (C7)", () => {
       expect(bedrockStatement).toBeDefined();
       expect(bedrockStatement!.actions).toContain("bedrock:GetKnowledgeBase");
       expect(bedrockStatement!.resources).toEqual([
-        "arn:aws:bedrock:us-west-2:123456789012:knowledge-base/*",
+        "arn:aws:bedrock:us-west-2:123456789012:knowledge-base/KB123",
       ]);
     });
 
-    test("connect has exactly 2 policy statements", () => {
+    test("connect with IDs has exactly 2 policy statements", () => {
       const policies = adapter.requiredPolicies(
-        {},
+        { knowledgeBaseId: "KB123", collectionId: "col-abc123" },
         "123456789012",
         "us-west-2",
       );

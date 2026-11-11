@@ -195,7 +195,7 @@ describe("adapter data-plane credential enforcement", () => {
 
   describe("KnowledgeBaseAdapter", () => {
     const adapter = new KnowledgeBaseAdapter();
-    const config = { knowledgeBaseId: "test-kb" };
+    const config = { knowledgeBaseId: "test-kb", collectionId: "test-col" };
 
     it("connect without credentials throws CredentialMissingError", async () => {
       await expect(adapter.connect(config)).rejects.toThrow(

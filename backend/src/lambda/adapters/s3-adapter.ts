@@ -70,6 +70,17 @@ export class S3Adapter implements ConnectorAdapter {
     return new S3Client({ credentials });
   }
 
+  /**
+   * CIT-298: Platform-role S3 client for preflight ownership checks.
+   * Uses the Lambda execution role's ambient credentials intentionally —
+   * preflight runs BEFORE any scoped role is vended, to prove bucket
+   * ownership. Scoped to s3:GetBucketTagging + s3:HeadBucket on
+   * citadel-* buckets via the CDK grant in backend-stack.ts.
+   */
+  private platformS3Client(): S3Client {
+    return new S3Client({});
+  }
+
   requiredPolicies(
     config: Record<string, unknown>,
     _accountId: string,
@@ -111,6 +122,7 @@ export class S3Adapter implements ConnectorAdapter {
             "s3:ListObjectsV2",
             "s3:GetObject",
             "s3:PutObject",
+            "s3:GetBucketTagging",
           ],
           resources: [bucketArn, `${bucketArn}/*`],
         },
@@ -231,7 +243,8 @@ export class S3Adapter implements ConnectorAdapter {
    * Verifies that an existing bucket was created by Citadel for the given
    * datastore and org. Reads bucket tags via the scoped credential; if the
    * tags don't match, the bucket is not adopted and an opaque
-   * ProvisioningError is thrown.
+   * ProvisioningError is thrown. Emits a `Citadel/Adapters BucketOwnershipRefused`
+   * metric on failure (CIT-298).
    */
   private async verifyBucketOwnership(
     client: S3Client,
@@ -240,10 +253,8 @@ export class S3Adapter implements ConnectorAdapter {
     orgId: string | undefined,
   ): Promise<void> {
     if (!dataStoreId || !orgId) {
-      throw new ProvisioningError(
-        `Bucket "${bucketName}" already exists but cannot verify ownership ` +
-          `(missing dataStoreId/orgId in config). Refusing to adopt.`,
-      );
+      this.emitBucketOwnershipRefused();
+      throw new ProvisioningError("Bucket ownership verification failed");
     }
     try {
       const tagging = await client.send(
@@ -257,23 +268,109 @@ export class S3Adapter implements ConnectorAdapter {
         (t) => t.Key === "citadel:orgId" && t.Value === orgId,
       );
       if (!hasCitadelDs || !hasCitadelOrg) {
-        throw new ProvisioningError(
-          `Bucket "${bucketName}" already exists but is not tagged as owned by ` +
-            `this datastore (${dataStoreId}) and org (${orgId}). Refusing to adopt.`,
-        );
+        console.warn("Bucket ownership tag mismatch", {
+          bucketName,
+          expectedDataStoreId: dataStoreId,
+          expectedOrgId: orgId,
+        });
+        this.emitBucketOwnershipRefused();
+        throw new ProvisioningError("Bucket ownership verification failed");
       }
     } catch (error) {
       if (error instanceof ProvisioningError) throw error;
       const err = error as SdkError;
       if (err.name === "NoSuchTagSet") {
-        throw new ProvisioningError(
-          `Bucket "${bucketName}" already exists but has no tags. ` +
-            `Cannot verify Citadel ownership. Refusing to adopt.`,
-        );
+        this.emitBucketOwnershipRefused();
+        throw new ProvisioningError("Bucket ownership verification failed");
       }
-      throw new ProvisioningError(
-        `Bucket "${bucketName}" already exists but tag verification failed: ${err.message}. Refusing to adopt.`,
-        err,
+      this.emitBucketOwnershipRefused();
+      throw new ProvisioningError("Bucket ownership verification failed", err);
+    }
+  }
+
+  /** Emit a CloudWatch EMF metric for a refused bucket ownership check. */
+  private emitBucketOwnershipRefused(): void {
+    try {
+      console.log(
+        JSON.stringify({
+          _aws: {
+            Timestamp: Date.now(),
+            CloudWatchMetrics: [
+              {
+                Namespace: "Citadel/Adapters",
+                Dimensions: [["Adapter"]],
+                Metrics: [{ Name: "BucketOwnershipRefused", Unit: "Count" }],
+              },
+            ],
+          },
+          Adapter: "S3",
+          BucketOwnershipRefused: 1,
+        }),
+      );
+    } catch {
+      // metrics must never break the caller
+    }
+  }
+
+  /**
+   * CIT-298: preflight ownership check using the PLATFORM Lambda credentials
+   * (not scoped creds). Called BEFORE ensureRole so no IAM role is created
+   * unless ownership is proven.
+   *
+   * For CONNECT_EXISTING: bucket must exist and carry
+   *   citadel:dataStoreId == ctx.dataStoreId AND citadel:orgId == ctx.orgId.
+   * For CREATE_NEW: bucket must NOT exist, OR must be tagged for this
+   *   datastore (idempotent re-provision).
+   */
+  async preflight(
+    config: Record<string, unknown>,
+    ctx: { dataStoreId: string; orgId: string; provisionMode?: string },
+  ): Promise<void> {
+    const bucketName = config.bucketName as string | undefined;
+    if (!bucketName) return; // validated later
+
+    // Platform client — NO scoped credentials, uses the Lambda execution role
+    const client = this.platformS3Client();
+
+    if (ctx.provisionMode === "CREATE_NEW") {
+      // For new provisions, the bucket should not exist yet.
+      // If it does (idempotent retry), verify tags.
+      try {
+        await client.send(new HeadBucketCommand({ Bucket: bucketName }));
+        // Bucket exists — must be tagged for THIS datastore + org
+        await this.verifyBucketOwnership(
+          client,
+          bucketName,
+          ctx.dataStoreId,
+          ctx.orgId,
+        );
+      } catch (error) {
+        if (error instanceof ProvisioningError) throw error;
+        const err = error as SdkError;
+        // 404/NotFound = bucket doesn't exist yet — that's expected for CREATE_NEW
+        if (err.name === "NotFound" || err.$metadata?.httpStatusCode === 404) {
+          return;
+        }
+        // 403 = bucket exists in another account — refuse
+        if (
+          err.name === "AccessDenied" ||
+          err.name === "AccessDeniedException" ||
+          err.$metadata?.httpStatusCode === 403
+        ) {
+          this.emitBucketOwnershipRefused();
+          throw new ProvisioningError("Bucket ownership verification failed");
+        }
+        // Any other error — fail closed
+        this.emitBucketOwnershipRefused();
+        throw new ProvisioningError("Bucket ownership verification failed");
+      }
+    } else {
+      // CONNECT_EXISTING: bucket must exist and be tagged for this datastore
+      await this.verifyBucketOwnership(
+        client,
+        bucketName,
+        ctx.dataStoreId,
+        ctx.orgId,
       );
     }
   }
@@ -284,6 +381,19 @@ export class S3Adapter implements ConnectorAdapter {
   ): Promise<void> {
     const client = this.makeClient(credentials, "connect");
     const bucketName = config.bucketName as string | undefined;
+
+    // CIT-298: prove bucket ownership BEFORE any role grant / policy computation.
+    // The bucket must be tagged with the caller's dataStoreId + orgId.
+    const dataStoreId = config.dataStoreId as string | undefined;
+    const orgId = config.orgId as string | undefined;
+    if (dataStoreId && orgId) {
+      await this.verifyBucketOwnership(
+        client,
+        bucketName as string,
+        dataStoreId,
+        orgId,
+      );
+    }
 
     try {
       await client.send(new HeadBucketCommand({ Bucket: bucketName }));

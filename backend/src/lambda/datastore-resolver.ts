@@ -267,6 +267,33 @@ async function persistErrorState(
   }
 }
 
+/**
+ * CIT-298: emit a CloudWatch EMF metric when a vended IAM role is rolled
+ * back after a failed connect or provision.
+ */
+function emitRoleRolledBack(): void {
+  try {
+    console.log(
+      JSON.stringify({
+        _aws: {
+          Timestamp: Date.now(),
+          CloudWatchMetrics: [
+            {
+              Namespace: "Citadel/Adapters",
+              Dimensions: [["Scope"]],
+              Metrics: [{ Name: "RoleRolledBack", Unit: "Count" }],
+            },
+          ],
+        },
+        Scope: "datastore",
+        RoleRolledBack: 1,
+      }),
+    );
+  } catch {
+    // metrics must never break the caller
+  }
+}
+
 async function retryOptimisticLock<T>(
   fn: () => Promise<T>,
   maxRetries = 3,
@@ -643,6 +670,7 @@ async function createDataStore(
     throw error;
   }
 
+  let roleCreated = false;
   try {
     // Store credentials in Secrets Manager
     let secretArn: string | undefined;
@@ -664,8 +692,23 @@ async function createDataStore(
         ? adapter.requiredPolicies(config, accountId, region).provision
         : adapter.requiredPolicies(config, accountId, region).connect;
 
+    // CIT-298: inject dataStoreId + orgId so preflight and adapters can
+    // verify resource ownership.
+    config.dataStoreId = dataStoreId;
+    config.orgId = callerOrgId;
+
     let scopedCredentials: ScopedCredentials | undefined;
     if (policies.length > 0) {
+      // CIT-298: preflight ownership check BEFORE creating any IAM role.
+      // Uses platform Lambda credentials, not scoped creds.
+      if (adapter.preflight) {
+        await adapter.preflight(config, {
+          dataStoreId,
+          orgId: callerOrgId,
+          provisionMode: input.provisionMode,
+        });
+      }
+
       // CIT-254 C12: validate crossAccountRoleArn at write time + trust-path probe
       const crossAccountExternalId = await validateCrossAccountConfig(
         config,
@@ -685,6 +728,7 @@ async function createDataStore(
         crossAccountExternalId,
         roleTagInput,
       );
+      roleCreated = true;
       // Trust-path probe (soft gate — log findings, do not block)
       if (config.crossAccountRoleArn) {
         try {
@@ -744,6 +788,20 @@ async function createDataStore(
       resourceArn = provisionResult.resourceArn;
       size = provisionResult.size;
       records = provisionResult.records;
+
+      // CIT-299: adapters may enrich config during provision (e.g.
+      // KnowledgeBaseAdapter adds collectionId). Persist the updated config
+      // so subsequent connect operations have the scoping identifiers.
+      await dynamodb.send(
+        new UpdateCommand({
+          TableName: DATASTORES_TABLE,
+          Key: { dataStoreId },
+          UpdateExpression: "SET config = :config",
+          ExpressionAttributeValues: {
+            ":config": JSON.stringify(config),
+          },
+        }),
+      );
     } else {
       await adapter.connect(config, scopedCredentials || credentials);
     }
@@ -786,6 +844,18 @@ async function createDataStore(
 
     return finalUpdate.Attributes;
   } catch (error) {
+    // CIT-298: roll back the IAM role on failed provision/connect so it doesn't persist
+    if (roleCreated) {
+      try {
+        await policyManager.deleteRole(dataStoreId, "datastore");
+        emitRoleRolledBack();
+      } catch (rollbackErr) {
+        console.error(
+          "createDataStore: failed to roll back IAM role (best-effort)",
+          { dataStoreId, rollbackErr },
+        );
+      }
+    }
     await persistErrorState(dataStoreId, error);
     throw error;
   }
@@ -979,6 +1049,11 @@ async function connectDataStore(dataStoreId: string, event: unknown) {
         ? JSON.parse(existing.config)
         : existing.config;
 
+    // CIT-298: inject dataStoreId and orgId into config so adapters (e.g.
+    // S3Adapter.connect) can verify resource ownership tags.
+    config.dataStoreId = dataStoreId;
+    config.orgId = existing.orgId;
+
     // Retrieve credentials from Secrets Manager if available
     let credentials: Record<string, unknown> | undefined;
     if (existing.secretArn) {
@@ -1002,6 +1077,16 @@ async function connectDataStore(dataStoreId: string, event: unknown) {
     let scopedCredentials: ScopedCredentials | undefined;
 
     if (policies.length > 0) {
+      // CIT-298: preflight ownership check BEFORE creating any IAM role.
+      // Uses platform Lambda credentials, not scoped creds.
+      if (adapter.preflight) {
+        await adapter.preflight(config, {
+          dataStoreId,
+          orgId: existing.orgId as string,
+          provisionMode: "CONNECT_EXISTING",
+        });
+      }
+
       // CIT-254 C12: validate crossAccountRoleArn at connect time + trust-path probe
       const crossAccountExternalId = await validateCrossAccountConfig(
         config,
@@ -1055,6 +1140,18 @@ async function connectDataStore(dataStoreId: string, event: unknown) {
     try {
       await adapter.connect(config, scopedCredentials || credentials);
     } catch (error) {
+      // CIT-298: roll back the IAM role on failed connect so it doesn't persist
+      if (policies.length > 0) {
+        try {
+          await policyManager.deleteRole(dataStoreId, "datastore");
+          emitRoleRolledBack();
+        } catch (rollbackErr) {
+          console.error(
+            "connectDataStore: failed to roll back IAM role (best-effort)",
+            { dataStoreId, rollbackErr },
+          );
+        }
+      }
       await persistErrorState(dataStoreId, error);
       throw error;
     }
