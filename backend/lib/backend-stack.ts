@@ -1828,7 +1828,7 @@ export class BackendStack extends cdk.Stack {
       this,
       "SeedOrganizationsFunction",
       {
-        runtime: lambda.Runtime.PYTHON_3_14,
+        runtime: lambda.Runtime.PYTHON_3_15,
         handler: "index.handler",
         code: lambda.Code.fromAsset(
           path.join(__dirname, "../../src/lambda/seed-organizations"),
@@ -1984,7 +1984,7 @@ export class BackendStack extends cdk.Stack {
       this,
       "SeedAdminUserFunction",
       {
-        runtime: lambda.Runtime.PYTHON_3_14,
+        runtime: lambda.Runtime.PYTHON_3_15,
         handler: "index.handler",
         code: lambda.Code.fromAsset("src/lambda/seed-admin-user"),
         timeout: cdk.Duration.seconds(30),

@@ -101,12 +101,12 @@ function findLambdaLogicalId(resources: Resources, prefix: string): string {
   const entry = Object.entries(resources).find(
     ([key, r]) =>
       r.Type === "AWS::Lambda::Function" &&
-      r.Properties?.Runtime === "python3.14" &&
+      r.Properties?.Runtime === "python3.15" &&
       key.startsWith(prefix),
   );
   if (!entry)
     throw new Error(
-      `Python 3.14 Lambda with logical-ID prefix "${prefix}" not found`,
+      `Python 3.15 Lambda with logical-ID prefix "${prefix}" not found`,
     );
   return entry[0];
 }
@@ -167,7 +167,7 @@ function countPythonFunctionsByPrefix(
   return Object.keys(resources).filter(
     (key) =>
       resources[key].Type === "AWS::Lambda::Function" &&
-      resources[key].Properties?.Runtime === "python3.14" &&
+      resources[key].Properties?.Runtime === "python3.15" &&
       key.startsWith(prefix),
   ).length;
 }
@@ -198,7 +198,7 @@ describe("ArbiterStack — Registry wiring across arbiter PythonFunctions (SSM-r
 
   describe("A. Bundling surface — 4 PythonFunction logical IDs present", () => {
     test.each(allFour)(
-      "%s Lambda (prefix %s) synthesises as python3.14",
+      "%s Lambda (prefix %s) synthesises as python3.15",
       (_label, prefix) => {
         expect(
           countPythonFunctionsByPrefix(resources, prefix),

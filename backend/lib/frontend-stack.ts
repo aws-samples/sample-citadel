@@ -253,7 +253,7 @@ export class FrontendStack extends cdk.Stack {
       this,
       "UpdateEmailTemplatesFunction",
       {
-        runtime: cdk.aws_lambda.Runtime.PYTHON_3_14,
+        runtime: cdk.aws_lambda.Runtime.PYTHON_3_15,
         handler: "index.handler",
         code: cdk.aws_lambda.Code.fromAsset(
           path.join(__dirname, "../../src/lambda/update-email-templates"),
