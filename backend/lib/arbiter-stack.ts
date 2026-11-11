@@ -38,6 +38,8 @@ import {
   PYTHON_BUILD_IMAGE,
   LAMBDA_ARCHITECTURE,
   NODE_RUNTIME,
+  DOCKER_PLATFORM,
+  archVerificationSnippet,
 } from "./runtime-constants";
 import { PYTHON_ASSET_EXCLUDES } from "./python-asset-excludes";
 
@@ -459,10 +461,18 @@ export class ArbiterStack extends cdk.Stack {
         exclude: [...PYTHON_ASSET_EXCLUDES],
         bundling: {
           image: PYTHON_BUILD_IMAGE,
+          platform: DOCKER_PLATFORM,
           command: [
             "bash",
             "-c",
-            "mkdir -p /asset-output/python && cp -r /asset-input/catalog /asset-output/python/catalog && cp -r /asset-input/common /asset-output/python/common && cp -r /asset-input/governance /asset-output/python/governance && pip install -r /asset-input/layers/common/requirements.txt -t /asset-output/python",
+            [
+              "mkdir -p /asset-output/python",
+              "cp -r /asset-input/catalog /asset-output/python/catalog",
+              "cp -r /asset-input/common /asset-output/python/common",
+              "cp -r /asset-input/governance /asset-output/python/governance",
+              "pip install -r /asset-input/layers/common/requirements.txt -t /asset-output/python",
+              archVerificationSnippet("/asset-output/python"),
+            ].join(" && "),
           ],
         },
       }),

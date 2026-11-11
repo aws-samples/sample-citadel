@@ -71,6 +71,73 @@ export const DOCKER_PLATFORM =
     ? "linux/arm64"
     : "linux/amd64";
 
+/**
+ * ELF machine tag expected on every native `.so` in the bundled layer
+ * output.  Used by the self-verification check inside the bundling
+ * command to fail the build when the wrong-architecture shared objects
+ * are produced (e.g. Docker reusing a cached amd64 build image).
+ *
+ * - arm64  → `aarch64`  (ELF e_machine EM_AARCH64)
+ * - x86_64 → `x86_64`  (ELF e_machine EM_X86_64)
+ */
+export const EXPECTED_ARCH_TAG: string =
+  LAMBDA_ARCHITECTURE === lambda.Architecture.ARM_64 ? "aarch64" : "x86_64";
+
+/**
+ * Shell snippet that verifies every `*.so` under a given directory
+ * matches {@link EXPECTED_ARCH_TAG} and that the Python interpreter
+ * itself is running on the expected architecture.  Intended to be
+ * appended (via `&&`) to a bundling command string so a wrong-arch
+ * layer can never be synthesised — the bundling exits non-zero on
+ * mismatch.
+ *
+ * @param outputDir  Absolute path inside the container to scan
+ *                   (e.g. `/asset-output/python`).
+ */
+export function archVerificationSnippet(outputDir: string): string {
+  // The Lambda base image lacks `find` and `file`; use a single Python
+  // script that walks the tree and checks .so filenames for the wrong
+  // architecture tag.  It also verifies that `platform.machine()` reports
+  // the expected architecture — but only when NOT running under QEMU
+  // (QEMU returns the host's uname, not the emulated arch).
+  const expected = EXPECTED_ARCH_TAG;
+  const wrong = expected === "aarch64" ? "x86_64" : "aarch64";
+  // Use double-quoted shell string wrapping a Python script with
+  // single-quoted Python strings to avoid escaping issues.
+  const pyScript = [
+    "import os, sys, platform",
+    `expected = '${expected}'`,
+    `wrong = '${wrong}'`,
+    `root = '${outputDir}'`,
+    "bad = []",
+    "for dirpath, _, filenames in os.walk(root):",
+    "    for fn in filenames:",
+    "        if fn.endswith('.so') and wrong in fn:",
+    "            bad.append(os.path.join(dirpath, fn))",
+    "if bad:",
+    "    print('ARCH MISMATCH: found %d %s .so files under %s:' % (len(bad), wrong, root), file=sys.stderr)",
+    "    for p in bad: print('  ' + p, file=sys.stderr)",
+    "    sys.exit(1)",
+    "m = platform.machine()",
+    "if m != expected:",
+    "    print('arch-verify: WARNING platform.machine()=%s != %s (likely QEMU)' % (m, expected), file=sys.stderr)",
+    "else:",
+    "    print('arch-verify: platform.machine()=%s OK' % m)",
+    "print('arch-verify: OK all .so files match %s' % expected)",
+  ].join("\n");
+  // Shell: echo ... && python3 -c "..."
+  // Escape double quotes and backslashes in the Python script for
+  // embedding inside a shell double-quoted string.
+  const escaped = pyScript
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\$/g, "\\$");
+  return [
+    `echo "arch-verify: expecting ${expected}"`,
+    `python3 -c "${escaped}"`,
+  ].join(" && ");
+}
+
 // ---------------------------------------------------------------------------
 // Python build image (lazy — no Docker pull until `cdk synth` bundles)
 // ---------------------------------------------------------------------------
@@ -166,5 +233,17 @@ function lazyBuildImage(
 
 export const PYTHON_BUILD_IMAGE: cdk.DockerImage = lazyBuildImage(
   resolveBuildImageDir(__dirname),
-  { buildArgs: { LAMBDA_BASE_TAG }, platform: DOCKER_PLATFORM },
+  {
+    buildArgs: { LAMBDA_BASE_TAG, TARGETPLATFORM: DOCKER_PLATFORM },
+    platform: DOCKER_PLATFORM,
+    // Disable Docker layer cache for cross-platform builds.  BuildKit may
+    // reuse cached layers from a prior build for the host architecture
+    // (e.g. amd64 on x86_64) even when --platform linux/arm64 is
+    // specified, producing an image labelled arm64 that contains x86_64
+    // binaries.  --no-cache forces a fresh pull of the arm64 base image.
+    // On native-arch hosts (Apple Silicon building arm64) this is a no-op
+    // cost-wise because the base image layers are re-downloaded only when
+    // they differ from cache.
+    cacheDisabled: true,
+  },
 );

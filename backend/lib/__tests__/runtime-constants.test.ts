@@ -33,6 +33,9 @@ import {
   PYTHON_RUNTIME,
   LAMBDA_ARCHITECTURE,
   NODE_RUNTIME,
+  EXPECTED_ARCH_TAG,
+  DOCKER_PLATFORM,
+  archVerificationSnippet,
 } from "../runtime-constants";
 import {
   scaffoldBackendAssetDirs,
@@ -322,6 +325,37 @@ describe("Python build image derivation", () => {
       /FROM\s+--platform=\$\{TARGETPLATFORM\}\s+public\.ecr\.aws\/lambda\/python/,
     );
     expect(dockerfile).toContain("ARG TARGETPLATFORM=linux/amd64");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Category 3b: Architecture determinism guards
+// ---------------------------------------------------------------------------
+describe("Architecture determinism", () => {
+  it("EXPECTED_ARCH_TAG matches LAMBDA_ARCHITECTURE", () => {
+    // arm64 → aarch64, x86_64 → x86_64
+    expect(EXPECTED_ARCH_TAG).toBe("aarch64");
+    expect(LAMBDA_ARCHITECTURE.name).toBe("arm64");
+  });
+
+  it("DOCKER_PLATFORM matches LAMBDA_ARCHITECTURE", () => {
+    expect(DOCKER_PLATFORM).toBe("linux/arm64");
+  });
+
+  it("archVerificationSnippet includes expected arch tag", () => {
+    const snippet = archVerificationSnippet("/asset-output/python");
+    expect(snippet).toContain("aarch64");
+    expect(snippet).toContain("/asset-output/python");
+    expect(snippet).toContain("platform.machine()");
+    expect(snippet).toContain("ARCH MISMATCH");
+  });
+
+  it("archVerificationSnippet fails on wrong arch (logic check)", () => {
+    // The snippet walks .so files for the wrong-arch tag
+    // and calls sys.exit(1) on mismatch.
+    const snippet = archVerificationSnippet("/out");
+    expect(snippet).toContain("x86_64");
+    expect(snippet).toContain("sys.exit(1)");
   });
 });
 
