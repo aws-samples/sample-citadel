@@ -1834,6 +1834,8 @@ async function updateApp(
   // Validated-transition gate. Every OTHER status change on this path MUST
   // pass through registryLifecycle before any write — illegal transitions
   // throw a structured error rather than being silently coerced.
+  // PUBLISHED is an app-specific status (not in REGISTRY_TRANSITIONS) and
+  // is validated by its own guard below instead of registryLifecycle.
   if (isStatusChange && !isSubmit && input.status !== "PUBLISHED") {
     if (!registryLifecycle.isValidTransition(currentStatus, input.status!)) {
       const valid = REGISTRY_TRANSITIONS.transitions[currentStatus] || [];
@@ -1860,6 +1862,23 @@ async function updateApp(
           "ValidationError: statusReason is required to reject an app",
         );
       }
+    }
+  }
+
+  // CIT-294/H16: PUBLISHED lifecycle guard. PUBLISHED is an app-specific
+  // status stored only in the manifest (never propagated to the Registry),
+  // so it is not modelled in REGISTRY_TRANSITIONS. However it MUST still
+  // be lifecycle-gated: only APPROVED → PUBLISHED is valid (the agent must
+  // have passed approval before it can be published). Any other source
+  // status is rejected with the same structured error used for Registry
+  // transitions.
+  if (isStatusChange && input.status === "PUBLISHED") {
+    if (currentStatus !== "APPROVED") {
+      throw new RegistryLifecycleError(
+        `Invalid status transition: ${currentStatus} → PUBLISHED. ` +
+          `PUBLISHED is only valid from APPROVED`,
+        "INVALID_TRANSITION",
+      );
     }
   }
 
