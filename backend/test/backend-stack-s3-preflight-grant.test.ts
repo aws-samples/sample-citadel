@@ -1,25 +1,51 @@
 /**
  * CIT-298: Verify the datastore-resolver Lambda has s3:GetBucketTagging
  * granted on citadel-* buckets for preflight ownership verification.
+ *
+ * Synthesises BackendStack in-process (same pattern as
+ * handler-env-contract.guard.test.ts) so CI never needs a prior `cdk synth`.
  */
+import * as cdk from "aws-cdk-lib";
+import { Template } from "aws-cdk-lib/assertions";
 import * as fs from "fs";
 import * as path from "path";
+import { scaffoldBackendAssetDirs } from "./helpers/scaffold-stub-assets";
+
+scaffoldBackendAssetDirs(["dist/lambda", "src/schema"]);
+
+// BackendStack references asset paths outside backend/ — stub them so synth
+// succeeds in CI without a full build.
+const EXTRA_ASSET_DIRS = [
+  path.resolve(__dirname, "../../src/lambda/seed-organizations"),
+  path.resolve(__dirname, "../src/lambda/seed-admin-user"),
+  path.resolve(__dirname, "../src/lambda/seed-organizations"),
+];
+for (const dir of EXTRA_ASSET_DIRS) {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
+import { BackendStack } from "../lib/backend-stack";
+
+jest.setTimeout(60000);
+
+function synthBackendStack(): Template {
+  const app = new cdk.App();
+  const stack = new BackendStack(app, "S3PreflightGrantStack", {
+    environment: "test",
+    env: { account: "123456789012", region: "us-east-1" },
+  });
+  return Template.fromStack(stack);
+}
 
 describe("CIT-298 — backend-stack S3 preflight grant", () => {
-  let template: Record<string, unknown>;
+  let template: Template;
 
   beforeAll(() => {
-    const templatePath = path.join(
-      __dirname,
-      "..",
-      "cdk.out",
-      "citadel-backend-dev.template.json",
-    );
-    template = JSON.parse(fs.readFileSync(templatePath, "utf-8"));
+    template = synthBackendStack();
   });
 
   it("datastore-resolver role has s3:GetBucketTagging on citadel-* buckets", () => {
-    const resources = template.Resources as Record<
+    const resources = template.toJSON().Resources as Record<
       string,
       { Type: string; Properties?: Record<string, unknown> }
     >;
@@ -73,10 +99,10 @@ describe("CIT-298 — backend-stack S3 preflight grant", () => {
     expect(s3TaggingStmt!.Effect).toBe("Allow");
 
     // Verify resource is scoped to citadel-* buckets
-    const resources_list = Array.isArray(s3TaggingStmt!.Resource)
+    const resourcesList = Array.isArray(s3TaggingStmt!.Resource)
       ? s3TaggingStmt!.Resource
       : [s3TaggingStmt!.Resource];
-    const hasCitadelScope = resources_list.some((r) => {
+    const hasCitadelScope = resourcesList.some((r) => {
       if (typeof r === "string") return r.includes("citadel-*");
       // Handle Fn::Join or other intrinsic functions
       const joined = JSON.stringify(r);
