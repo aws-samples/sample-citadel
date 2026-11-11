@@ -1133,6 +1133,9 @@ export class BackendStack extends cdk.Stack {
           // and the governance enforcement mode.
           ORGANIZATIONS_TABLE: organisationTable.tableName,
           ENVIRONMENT: props.environment,
+          // CIT-295/H17: ownership validation of integration/datastore bindings.
+          INTEGRATIONS_TABLE: integrationsTable.tableName,
+          DATASTORES_TABLE: `citadel-datastores-${props.environment}`,
         },
         memorySize: 512,
         timeout: cdk.Duration.seconds(30),
@@ -1362,6 +1365,10 @@ export class BackendStack extends cdk.Stack {
 
     // Tag-policy enforcement: read-only access to the organisations table.
     organisationTable.grantReadData(toolConfigResolverFunction);
+
+    // CIT-295/H17: read-only access for binding ownership validation.
+    integrationsTable.grantReadData(toolConfigResolverFunction);
+    // dataStoresTable grant is deferred — see after DataStoresTable declaration.
 
     // CIT-244: ListSource metric emission (best-effort, no resource scoping).
     toolConfigResolverFunction.addToRolePolicy(
@@ -2990,6 +2997,10 @@ export class BackendStack extends cdk.Stack {
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     });
     this.dataStoresTable = dataStoresTable;
+
+    // CIT-295/H17: deferred grant — toolConfigResolverFunction is declared
+    // before this table; read-only access for binding ownership validation.
+    dataStoresTable.grantReadData(toolConfigResolverFunction);
 
     dataStoresTable.addGlobalSecondaryIndex({
       indexName: "OrgIndex",
