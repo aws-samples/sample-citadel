@@ -1027,6 +1027,10 @@ type ActivateAgentsResult @aws_iam @aws_cognito_user_pools {
   # explicit zero-activated signal for the intake flow. Null on the legacy
   # activateProjectAgents path.
   matchedBy: String
+  # True when the operation was aborted because the registry was
+  # rate-limited and the agent list was incomplete. The UI should show
+  # "the registry is busy, try again in a minute" instead of "failed".
+  throttled: Boolean
 }
 
 type AgentCode {

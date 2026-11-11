@@ -42,6 +42,7 @@ const mockDeleteResource = jest.fn();
 const mockUpdateResource = jest.fn();
 const mockUpdateResourceStatus = jest.fn();
 const mockListResources = jest.fn();
+const mockListResourcesChecked = jest.fn();
 const mockSearchResources = jest.fn();
 const mockSerializeCustomMetadata = jest.fn((meta: unknown) =>
   JSON.stringify(meta),
@@ -94,31 +95,49 @@ const mockMapToAgentConfig = jest.fn((record: RegistryRecordFixture) => {
   };
 });
 
-jest.mock("../../services/registry-service", () => ({
-  RegistryService: jest.fn().mockImplementation(() => ({
+jest.mock("../../services/registry-service", () => {
+  const MockRS = jest.fn().mockImplementation(() => ({
     getResource: mockGetResource,
     deleteResource: mockDeleteResource,
     updateResource: mockUpdateResource,
     updateResourceStatus: mockUpdateResourceStatus,
     listResources: mockListResources,
+    listResourcesChecked: mockListResourcesChecked,
     searchResources: mockSearchResources,
     serializeCustomMetadata: mockSerializeCustomMetadata,
     deserializeCustomMetadata: mockDeserializeCustomMetadata,
     toRegistryStatus: mockToRegistryStatus,
     mapToAgentConfig: mockMapToAgentConfig,
-  })),
-  RegistryRecordStatusValues: {
-    DRAFT: "DRAFT",
-    PENDING_APPROVAL: "PENDING_APPROVAL",
-    APPROVED: "APPROVED",
-    REJECTED: "REJECTED",
-    DEPRECATED: "DEPRECATED",
-    CREATING: "CREATING",
-    UPDATING: "UPDATING",
-    CREATE_FAILED: "CREATE_FAILED",
-    UPDATE_FAILED: "UPDATE_FAILED",
-  },
-}));
+  }));
+  MockRS.isThrottlingError = (err: unknown): boolean => {
+    const name = (err as { name?: string })?.name ?? "";
+    const statusCode = (err as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode;
+    return name === "ThrottlingException" || name === "TooManyRequestsException" || statusCode === 429;
+  };
+  return {
+    RegistryService: MockRS,
+    RegistryRecordStatusValues: {
+      DRAFT: "DRAFT",
+      PENDING_APPROVAL: "PENDING_APPROVAL",
+      APPROVED: "APPROVED",
+      REJECTED: "REJECTED",
+      DEPRECATED: "DEPRECATED",
+      CREATING: "CREATING",
+      UPDATING: "UPDATING",
+      CREATE_FAILED: "CREATE_FAILED",
+      UPDATE_FAILED: "UPDATE_FAILED",
+    },
+    RegistryThrottledError: class RegistryThrottledError extends Error {
+      retryable = true;
+      retryAfterMs: number;
+      constructor(message: string, retryAfterMs = 5000) {
+        super(message);
+        this.name = "RegistryThrottledError";
+        this.retryAfterMs = retryAfterMs;
+      }
+    },
+  };
+});
 
 // ── Mock the project-org-access gate for activateProjectAgents dispatch ──
 const mockAssertProjectOrgAccess = jest.fn();
@@ -447,7 +466,9 @@ describe("agent-config-resolver — tenancy + role gate (finding 1fcfd11e)", () 
 
     test("dispatch calls assertProjectOrgAccess(projectId, event) BEFORE activation runs", async () => {
       mockAssertProjectOrgAccess.mockResolvedValue(undefined);
-      mockListResources.mockResolvedValue([]);
+      mockListResourcesChecked.mockResolvedValue({
+        items: [], partial: false, droppedCount: 0, throttled: false,
+      });
 
       await handler(
         makeEvent(
@@ -479,15 +500,19 @@ describe("agent-config-resolver — tenancy + role gate (finding 1fcfd11e)", () 
           ),
         ),
       ).rejects.toThrow();
-      expect(mockListResources).not.toHaveBeenCalled();
+      expect(mockListResourcesChecked).not.toHaveBeenCalled();
     });
 
     test("PINNING: activateProjectAgents(projectId) itself remains callable with NO event (intake-orchestration-resolver.ts's internal call site)", async () => {
-      mockListResources.mockResolvedValue([]);
+      mockListResourcesChecked.mockResolvedValue({
+        items: [], partial: false, droppedCount: 0, throttled: false,
+      });
 
       const result = await activateProjectAgents("proj-1");
 
-      expect(result).toEqual({ activated: [], failed: [], alreadyActive: [] });
+      expect(result).toEqual(expect.objectContaining({
+        activated: [], failed: [], alreadyActive: [],
+      }));
       // The internal core must never require assertProjectOrgAccess itself —
       // only the dispatch wrapper does. No event was passed here, and no org
       // gate was invoked, exactly like the pre-fix behaviour intake relies on.

@@ -49,6 +49,27 @@ export class TypeMismatchError extends Error {
 }
 
 /**
+ * Thrown when a registry operation is rate-limited (ThrottlingException /
+ * TooManyRequestsException). Carries a `retryAfterMs` hint so callers can
+ * surface a meaningful "retry in N seconds" message to the user instead of
+ * a generic "failed".
+ *
+ * LIVE INCIDENT 2026-11-10: activateProjectAgents silently acted on a
+ * partial agent list because listResources dropped throttled records into
+ * `droppedCount` without distinguishing throttling from other failures.
+ * This error is the signal that lets mutation callers REFUSE to proceed.
+ */
+export class RegistryThrottledError extends Error {
+  readonly retryAfterMs: number;
+  readonly retryable = true;
+  constructor(message: string, retryAfterMs: number = 5000) {
+    super(message);
+    this.name = "RegistryThrottledError";
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+/**
  * Structured error for the agent-record approval lifecycle gate: illegal
  * status transitions and pending-immutability violations. Carries a `code`
  * so callers/UIs can branch on failure kind rather than string-matching the
@@ -632,6 +653,25 @@ export interface ListResourcesOptions {
   viewer?: Viewer;
 }
 
+/**
+ * Structured result from {@link RegistryService.listResourcesChecked}.
+ *
+ * LIVE INCIDENT 2026-11-10: listResources returned a bare array, making it
+ * impossible for mutation callers (activateProjectAgents, bulk flows) to
+ * distinguish a COMPLETE list from one truncated by throttling. Callers that
+ * MUTATE based on the list MUST check `partial` and REFUSE to proceed when
+ * true — acting on a subset silently drops agents.
+ */
+export interface ListResourcesResult {
+  items: RegistryRecord[];
+  /** True when ANY detail fetch was dropped due to throttling or time budget. */
+  partial: boolean;
+  /** Number of records excluded from items due to fetch failures. */
+  droppedCount: number;
+  /** True specifically when throttling caused records to be dropped. */
+  throttled: boolean;
+}
+
 export class RegistryService {
   private readonly client: AgentRegistryControlClient;
   /**
@@ -730,13 +770,18 @@ export class RegistryService {
   // -- Retry helper ---------------------------------------------------------
 
   /**
-   * Retries an async operation with exponential backoff for transient errors.
-   * Retries on 5xx status codes and timeout/network errors. Non-retryable
-   * errors are thrown immediately.
+   * Retries an async operation with exponential backoff + jitter for
+   * transient errors. Retries on 5xx, throttling, and timeout/network
+   * errors. Non-retryable errors are thrown immediately.
+   *
+   * @param operation  The async operation to execute.
+   * @param maxAttempts  Maximum number of attempts (default 3 for reads).
+   * @param baseDelayMs  Base delay in ms before the first retry (default 100).
    */
   private async withRetry<T>(
     operation: () => Promise<T>,
     maxAttempts: number = 3,
+    baseDelayMs: number = 100,
   ): Promise<T> {
     let lastError: unknown;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -748,7 +793,9 @@ export class RegistryService {
         if (!isTransient || attempt === maxAttempts) {
           throw err;
         }
-        const delayMs = Math.pow(2, attempt - 1) * 100; // 100ms, 200ms, 400ms…
+        // Exponential backoff with full jitter: uniform random in [0, base * 2^(attempt-1)]
+        const ceiling = baseDelayMs * Math.pow(2, attempt - 1);
+        const delayMs = Math.floor(Math.random() * ceiling) + 1;
         console.warn(
           `Transient error on attempt ${attempt}/${maxAttempts}, retrying in ${delayMs}ms: ${
             err instanceof Error ? err.message : err
@@ -759,6 +806,18 @@ export class RegistryService {
     }
     // Unreachable, but satisfies TypeScript
     throw lastError;
+  }
+
+  /**
+   * Retry wrapper for registry MUTATION operations (submitForApproval,
+   * decide, activate). Uses longer backoff to honour throttle headers:
+   * base 500 ms, max 5 attempts, cap ~15 s total.
+   *
+   * LIVE INCIDENT 2026-11-10: the previous 3×100ms retry exhausted all
+   * attempts within <1s, well inside the throttle window.
+   */
+  async withMutationRetry<T>(operation: () => Promise<T>): Promise<T> {
+    return this.withRetry(operation, 5, 500);
   }
 
   /** Returns true if the error is transient (5xx, timeout, network). */
@@ -780,6 +839,17 @@ export class RegistryService {
     }
 
     return false;
+  }
+
+  /** Returns true if the error is specifically a throttling/rate-limit error. */
+  static isThrottlingError(err: unknown): boolean {
+    const name = (err as AwsErrorLike)?.name ?? "";
+    const statusCode = (err as AwsErrorLike)?.$metadata?.httpStatusCode;
+    return (
+      name === "ThrottlingException" ||
+      name === "TooManyRequestsException" ||
+      statusCode === 429
+    );
   }
 
   /** Promise-based sleep. Extracted for testability. */
@@ -1236,7 +1306,7 @@ export class RegistryService {
     // UpdateRegistryRecordStatusCommand directly. SubmitRegistryRecordForApproval
     // must NEVER be used here: it auto-approves the record on the AgentCore
     // side, bypassing the human decision this gate exists to enforce.
-    const result = await this.withRetry(() =>
+    const result = await this.withMutationRetry(() =>
       this.client.send(
         new UpdateRegistryRecordStatusCommand({
           registryId: this.registryId,
@@ -1274,7 +1344,7 @@ export class RegistryService {
    * post-submit state.
    */
   async submitForApproval(recordId: string): Promise<RegistryRecord> {
-    await this.withRetry(() =>
+    await this.withMutationRetry(() =>
       this.client.send(
         new SubmitRegistryRecordForApprovalCommand({
           registryId: this.registryId,
@@ -1599,6 +1669,23 @@ export class RegistryService {
     type: ResourceType,
     options?: ListResourcesOptions,
   ): Promise<RegistryRecord[]> {
+    const checked = await this.listResourcesChecked(type, options);
+    return checked.items;
+  }
+
+  /**
+   * Like {@link listResources} but returns a structured
+   * {@link ListResourcesResult} that exposes whether the list is partial
+   * and whether throttling caused records to be dropped.
+   *
+   * LIVE INCIDENT 2026-11-10: mutation callers (activateProjectAgents)
+   * MUST use this method and REFUSE to proceed when `partial && throttled`
+   * — acting on a subset silently drops agents.
+   */
+  async listResourcesChecked(
+    type: ResourceType,
+    options?: ListResourcesOptions,
+  ): Promise<ListResourcesResult> {
     const minRemainingTimeMs = options?.minRemainingTimeMs ?? 5000;
     const budgetLow = (): boolean =>
       options?.getRemainingTimeMs !== undefined &&
@@ -1608,6 +1695,7 @@ export class RegistryService {
     let nextToken: string | undefined;
     let truncated = false;
     let droppedCount = 0;
+    let throttledDrop = false;
 
     do {
       if (budgetLow()) {
@@ -1699,6 +1787,9 @@ export class RegistryService {
           } catch (err) {
             const reason =
               err instanceof Error ? err.name || err.message : "unknown";
+            if (RegistryService.isThrottlingError(err)) {
+              throttledDrop = true;
+            }
             outcomes[i] = { kind: "dropped", reason };
           }
         }
@@ -1766,7 +1857,7 @@ export class RegistryService {
     // their persona is not authorised for.
     if (options?.viewer) {
       const viewer = options.viewer;
-      return records.filter((record) => {
+      const filtered = records.filter((record) => {
         const meta = record.customDescriptorContent
           ? JSON.parse(record.customDescriptorContent)
           : {};
@@ -1776,9 +1867,20 @@ export class RegistryService {
           createdBy: meta.createdBy,
         });
       });
+      return {
+        items: filtered,
+        partial: truncated || droppedCount > 0,
+        droppedCount,
+        throttled: throttledDrop,
+      };
     }
 
-    return records;
+    return {
+      items: records,
+      partial: truncated || droppedCount > 0,
+      droppedCount,
+      throttled: throttledDrop,
+    };
   }
 
   /**

@@ -346,7 +346,7 @@ def _record_stage_progress(session_id: str, stage: str, summary: str) -> None:
 
 _ACTIVATE_MUTATION = """mutation IntakeActivate($sessionId: ID!) {
   intakeActivateProjectAgents(sessionId: $sessionId) {
-    activated failed alreadyActive matchedBy
+    activated failed alreadyActive matchedBy throttled
   }
 }"""
 
@@ -978,6 +978,22 @@ def activate_agents() -> str:
         "activated": activated, "failed": failed,
         "alreadyActive": already, "matchedBy": matched_by,
     }
+
+    # LIVE INCIDENT 2026-11-10: when the registry is rate-limited, the
+    # backend refuses to act on a partial agent list and returns
+    # throttled=true. Surface a "registry is busy, try again" message
+    # instead of "failed".
+    if outcome.get("throttled"):
+        return _result(
+            False, "throttled",
+            "The agent registry is busy right now — I couldn't get the full "
+            "list of agents, so I held off on activating to avoid missing any. "
+            "Nothing has been changed.",
+            "Try again in a minute — the registry just needs a moment to catch up.",
+            [_action("Try again", "Yes, activate the agents"),
+             _action("Not now", "Not now")],
+            activation=activation, retryable=True,
+        )
 
     if matched_by is None and not activated and not already:
         # Approved zero-activated explanation (failure mode 6) — do NOT advance.
