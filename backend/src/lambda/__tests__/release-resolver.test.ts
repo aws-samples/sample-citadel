@@ -564,6 +564,87 @@ describe("cutAgentRelease — eval run validation", () => {
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
   });
+
+  test("CIT-301: rejects when the eval run targets a different agent than the release's agentTargetId", async () => {
+    mockHappyPath();
+    ddbMock.on(GetCommand).callsFake((input) => {
+      if (input.TableName === process.env.EXECUTION_SPECS_TABLE)
+        return { Item: approvedExecSpec() };
+      if (input.TableName === process.env.EVAL_RUNS_TABLE) {
+        // agentTargetId "agent-OTHER" != baseCutInput().agentTargetId "agent-1"
+        return { Item: completedEvalRun({ agentTargetId: "agent-OTHER" }) };
+      }
+      if (input.TableName === process.env.EVAL_SUITES_TABLE)
+        return { Item: frozenSuite() };
+      if (input.TableName === process.env.PROJECTS_TABLE)
+        return { Item: { id: "project-1", owner: OWNER_IN_ORG_1 } };
+      if (input.TableName === process.env.USER_ORG_MEMBERSHIP_TABLE)
+        return membershipGet(input);
+      return {};
+    });
+    await expect(
+      cutAgentRelease(baseCutInput(), authContextFor("architect"), "org-1"),
+    ).rejects.toThrow(/ValidationError.*different agent/i);
+    // No writes
+    expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
+    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
+  });
+
+  test("CIT-301: rejects (two-org) when eval run belongs to same org but targets a foreign agent", async () => {
+    mockHappyPath();
+    ddbMock.on(GetCommand).callsFake((input) => {
+      if (input.TableName === process.env.EXECUTION_SPECS_TABLE)
+        return { Item: approvedExecSpec() };
+      if (input.TableName === process.env.EVAL_RUNS_TABLE) {
+        // Same org, but agentTargetId points to a different agent record
+        return {
+          Item: completedEvalRun({
+            agentTargetId: "agent-foreign-same-org",
+          }),
+        };
+      }
+      if (input.TableName === process.env.EVAL_SUITES_TABLE)
+        return { Item: frozenSuite() };
+      if (input.TableName === process.env.PROJECTS_TABLE)
+        return { Item: { id: "project-1", owner: OWNER_IN_ORG_1 } };
+      if (input.TableName === process.env.USER_ORG_MEMBERSHIP_TABLE)
+        return membershipGet(input);
+      return {};
+    });
+    await expect(
+      cutAgentRelease(baseCutInput(), authContextFor("architect"), "org-1"),
+    ).rejects.toThrow(/different agent/i);
+  });
+
+  test("CIT-301: error message is opaque — does not leak agent ids", async () => {
+    mockHappyPath();
+    ddbMock.on(GetCommand).callsFake((input) => {
+      if (input.TableName === process.env.EXECUTION_SPECS_TABLE)
+        return { Item: approvedExecSpec() };
+      if (input.TableName === process.env.EVAL_RUNS_TABLE) {
+        return { Item: completedEvalRun({ agentTargetId: "agent-secret" }) };
+      }
+      if (input.TableName === process.env.EVAL_SUITES_TABLE)
+        return { Item: frozenSuite() };
+      if (input.TableName === process.env.PROJECTS_TABLE)
+        return { Item: { id: "project-1", owner: OWNER_IN_ORG_1 } };
+      if (input.TableName === process.env.USER_ORG_MEMBERSHIP_TABLE)
+        return membershipGet(input);
+      return {};
+    });
+    try {
+      await cutAgentRelease(
+        baseCutInput(),
+        authContextFor("architect"),
+        "org-1",
+      );
+      throw new Error("should have thrown");
+    } catch (err: unknown) {
+      const msg = (err as Error).message;
+      expect(msg).not.toContain("agent-secret");
+      expect(msg).not.toContain("agent-1");
+    }
+  });
 });
 
 describe("cutAgentRelease — release orgId is derived from callerOrgId, not trusted from input", () => {

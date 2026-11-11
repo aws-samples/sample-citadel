@@ -5,6 +5,8 @@ import {
   PutCommand,
   ScanCommand,
   DeleteCommand,
+  BatchGetCommand,
+  QueryCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { getOperations } from "../utils/operations-registry";
 import {
@@ -36,7 +38,105 @@ const docClient = DynamoDBDocumentClient.from(client);
 
 const TOOLS_CONFIG_TABLE = process.env.TOOLS_CONFIG_TABLE!;
 
+// CIT-295/H17: binding ownership validation tables.
+const INTEGRATIONS_TABLE = process.env.INTEGRATIONS_TABLE;
+const DATASTORES_TABLE = process.env.DATASTORES_TABLE;
+
 // DECISION_STATUSES imported from ../services/registry-service
+
+// ---------------------------------------------------------------------------
+// CIT-295/H17: Binding ownership verification
+// ---------------------------------------------------------------------------
+
+const ALL_ORGS_ORG_ID = "All Organizations";
+
+/**
+ * Verify that every referenced integrationId exists and belongs to the
+ * caller's org (or "All Organizations"). Batches lookups via the
+ * IntegrationIdIndex GSI. Throws an opaque error on any missing or
+ * foreign-org binding — the error intentionally does NOT reveal which id
+ * failed, to avoid disclosing the existence of foreign integrations.
+ */
+export async function assertIntegrationBindingOwnership(
+  integrationIds: string[],
+  callerOrgId: string,
+): Promise<void> {
+  if (integrationIds.length === 0 || !INTEGRATIONS_TABLE) return;
+  const unique = [...new Set(integrationIds)];
+  // Batch via parallel GSI queries (DDB BatchGetItem requires PK/SK,
+  // but integrations use a composite PK=ORG#{orgId}; the GSI on
+  // integrationId is the only single-field lookup path).
+  const results = await Promise.all(
+    unique.map((integrationId) =>
+      docClient.send(
+        new QueryCommand({
+          TableName: INTEGRATIONS_TABLE,
+          IndexName: "IntegrationIdIndex",
+          KeyConditionExpression: "integrationId = :id",
+          ExpressionAttributeValues: { ":id": integrationId },
+          Limit: 1,
+        }),
+      ),
+    ),
+  );
+  for (let i = 0; i < unique.length; i++) {
+    const items = results[i].Items;
+    if (!items || items.length === 0) {
+      throw new Error(
+        "Validation error: integration binding references an invalid or inaccessible integration",
+      );
+    }
+    const row = items[0];
+    const rowOrg = row.orgId as string | undefined;
+    if (rowOrg !== callerOrgId && rowOrg !== ALL_ORGS_ORG_ID) {
+      throw new Error(
+        "Validation error: integration binding references an invalid or inaccessible integration",
+      );
+    }
+  }
+}
+
+/**
+ * Verify that every referenced dataStoreId exists and belongs to the
+ * caller's org (or "All Organizations"). Batches lookups via
+ * BatchGetCommand (datastores PK = dataStoreId). Throws an opaque error
+ * on any missing or foreign-org binding.
+ */
+export async function assertDataStoreBindingOwnership(
+  dataStoreIds: string[],
+  callerOrgId: string,
+): Promise<void> {
+  if (dataStoreIds.length === 0 || !DATASTORES_TABLE) return;
+  const unique = [...new Set(dataStoreIds)];
+  // DDB BatchGetItem supports up to 100 keys per call — safe for binding lists.
+  const batchResult = await docClient.send(
+    new BatchGetCommand({
+      RequestItems: {
+        [DATASTORES_TABLE]: {
+          Keys: unique.map((dataStoreId) => ({ dataStoreId })),
+          ProjectionExpression: "dataStoreId, orgId",
+        },
+      },
+    }),
+  );
+  const rows = batchResult.Responses?.[DATASTORES_TABLE] ?? [];
+  const found = new Map(
+    rows.map((r) => [r.dataStoreId as string, r.orgId as string | undefined]),
+  );
+  for (const id of unique) {
+    const rowOrg = found.get(id);
+    if (rowOrg === undefined) {
+      throw new Error(
+        "Validation error: data store binding references an invalid or inaccessible data store",
+      );
+    }
+    if (rowOrg !== callerOrgId && rowOrg !== ALL_ORGS_ORG_ID) {
+      throw new Error(
+        "Validation error: data store binding references an invalid or inaccessible data store",
+      );
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Decision-metadata helpers (approval-cache pattern)
@@ -899,6 +999,24 @@ export async function createToolConfigRegistry(
     throw new Error("Cannot determine caller organization");
   }
 
+  // CIT-295/H17: verify binding ownership BEFORE any Registry write.
+  if (input.integrationBindings && Array.isArray(input.integrationBindings)) {
+    await assertIntegrationBindingOwnership(
+      input.integrationBindings
+        .map((b) => b.integrationId)
+        .filter((id): id is string => !!id),
+      orgId,
+    );
+  }
+  if (input.dataStoreBindings && Array.isArray(input.dataStoreBindings)) {
+    await assertDataStoreBindingOwnership(
+      input.dataStoreBindings
+        .map((b) => b.dataStoreId)
+        .filter((id): id is string => !!id),
+      orgId,
+    );
+  }
+
   // CIT-042 tag-policy enforcement: validate tags BEFORE the registry write.
   const normalisedTags =
     input.tags !== undefined ? normaliseTags(input.tags) : undefined;
@@ -1071,6 +1189,26 @@ export async function updateToolConfigRegistry(
       action: "updateTool",
       subjectId: input.toolId,
     });
+  }
+
+  // CIT-295/H17: verify binding ownership BEFORE any Registry write.
+  if (preservedOrgId) {
+    if (input.integrationBindings && Array.isArray(input.integrationBindings)) {
+      await assertIntegrationBindingOwnership(
+        input.integrationBindings
+          .map((b) => b.integrationId)
+          .filter((id): id is string => !!id),
+        preservedOrgId,
+      );
+    }
+    if (input.dataStoreBindings && Array.isArray(input.dataStoreBindings)) {
+      await assertDataStoreBindingOwnership(
+        input.dataStoreBindings
+          .map((b) => b.dataStoreId)
+          .filter((id): id is string => !!id),
+        preservedOrgId,
+      );
+    }
   }
 
   // ─── Decision path: input.status = APPROVED | REJECTED ──────
@@ -1652,6 +1790,26 @@ async function createToolConfig(
   // remain updatable/deletable by their owning org.
   const orgId = event !== undefined ? await extractOrgFromEvent(event) : null;
 
+  // CIT-295/H17: verify binding ownership.
+  if (orgId) {
+    if (input.integrationBindings && Array.isArray(input.integrationBindings)) {
+      await assertIntegrationBindingOwnership(
+        input.integrationBindings
+          .map((b) => b.integrationId)
+          .filter((id): id is string => !!id),
+        orgId,
+      );
+    }
+    if (input.dataStoreBindings && Array.isArray(input.dataStoreBindings)) {
+      await assertDataStoreBindingOwnership(
+        input.dataStoreBindings
+          .map((b) => b.dataStoreId)
+          .filter((id): id is string => !!id),
+        orgId,
+      );
+    }
+  }
+
   const toolConfig: ToolConfig = {
     toolId: input.toolId,
     orgId: orgId ?? "",
@@ -1719,6 +1877,28 @@ async function updateToolConfig(
   }
   if (input.dataStoreBindings && Array.isArray(input.dataStoreBindings)) {
     validateDataStoreBindings(input.dataStoreBindings);
+  }
+
+  // CIT-295/H17: verify binding ownership.
+  const callerOrgForUpdate =
+    event !== undefined ? await extractOrgFromEvent(event) : null;
+  if (callerOrgForUpdate) {
+    if (input.integrationBindings && Array.isArray(input.integrationBindings)) {
+      await assertIntegrationBindingOwnership(
+        input.integrationBindings
+          .map((b) => b.integrationId)
+          .filter((id): id is string => !!id),
+        callerOrgForUpdate,
+      );
+    }
+    if (input.dataStoreBindings && Array.isArray(input.dataStoreBindings)) {
+      await assertDataStoreBindingOwnership(
+        input.dataStoreBindings
+          .map((b) => b.dataStoreId)
+          .filter((id): id is string => !!id),
+        callerOrgForUpdate,
+      );
+    }
   }
 
   const now = new Date().toISOString();

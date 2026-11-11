@@ -333,6 +333,38 @@ describe("agent-code-resolver key binding (C10)", () => {
   });
 
   // -------------------------------------------------------------------------
+  // CIT-297/C10 confirmation: raw config.filename is ALWAYS routed through
+  // resolveRecordScopedAgentCodeKey — the filename is read from DDB then
+  // passed directly into the safe resolver; there is no code path where the
+  // raw filename is used as an S3 key.
+  // -------------------------------------------------------------------------
+
+  describe("CIT-297/C10: raw config.filename residual is safe", () => {
+    test("a subdirectory config.filename is stripped to basename before use as S3 key", async () => {
+      mockAuthorizedAgent("a1");
+      dynamoMock.on(GetCommand).resolves({
+        Item: {
+          agentId: "a1",
+          config: { filename: "subdir/nested/agent.py" },
+        },
+      });
+      s3Mock.on(GetObjectCommand).resolves({
+        Body: sdkStreamMixin(Readable.from(["code"])),
+      });
+
+      const result = (await handler(
+        makeEvent("getAgentCode", { agentId: "a1" }, READER_IDENTITY),
+      )) as { code: string };
+      expect(result.code).toBe("code");
+
+      // The S3 call must use the BASENAME, scoped under the record id —
+      // never the raw subdirectory path.
+      const s3Calls = s3Mock.commandCalls(GetObjectCommand);
+      expect(s3Calls[0].args[0].input.Key).toBe("agents/a1/agent.py");
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // Metric emission
   // -------------------------------------------------------------------------
 
