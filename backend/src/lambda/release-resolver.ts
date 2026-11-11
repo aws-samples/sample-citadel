@@ -377,6 +377,15 @@ export async function cutAgentRelease(
       `SecurityError: eval run ${input.evalRunId} belongs to a different org — a release must never pin another org's evidence`,
     );
   }
+  // CIT-301: eval run must target the SAME agent being released — a caller
+  // must not be able to pin an eval run from Agent-A as evidence for
+  // Agent-B's release. The error is opaque (no ids leaked) to avoid
+  // disclosing which agents exist.
+  if (evalRun.agentTargetId !== input.agentTargetId) {
+    throw new Error(
+      "ValidationError: eval run targets a different agent than the release",
+    );
+  }
   const evalSuite = await getEvalSuite(evalRun.suiteId);
   if (!evalSuite) {
     throw new Error(
