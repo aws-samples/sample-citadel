@@ -10,6 +10,7 @@ import {
 import {
   RegistryService,
   RegistryRecordStatusValues,
+  RegistryThrottledError,
 } from "../services/registry-service";
 import type {
   AgentInvocationProtocol,
@@ -1527,11 +1528,32 @@ export async function searchAgentConfigsRegistry(
   });
 }
 
+/** Per-agent error class for the activation result. */
+export type ActivationErrorClass = "throttled" | "refused" | "not_found" | "rejected" | "unknown";
+
+/** Per-agent failure detail in a bulk activation. */
+export interface ActivationFailure {
+  name: string;
+  errorClass: ActivationErrorClass;
+  message: string;
+}
+
 /** Result of a bulk activation, grouped by per-agent outcome. */
 export interface ActivateAgentsResult {
   activated: string[];
   failed: string[];
   alreadyActive: string[];
+  /**
+   * Per-agent error details (parallel to `failed`). Present only when the
+   * caller processes agents sequentially with error classification.
+   */
+  failureDetails?: ActivationFailure[];
+  /**
+   * True when the operation was aborted because the agent list was
+   * incomplete due to registry throttling. The UI should show a "retry"
+   * message rather than "failed".
+   */
+  throttled?: boolean;
 }
 
 /**
@@ -1565,14 +1587,28 @@ function extractSourceProjectId(
  * `sourceProjectId === projectId`. This is THE canonical fabricated-agent
  * match — activation (below) and the intake resolver's app-binding path
  * (intakeCreateApp) both rely on it, so the two can never diverge.
+ *
+ * LIVE INCIDENT 2026-11-10: when any detail-fetch fails with throttling,
+ * the result is partial (some agents are invisible). Mutation callers MUST
+ * NOT act on a partial list — this function throws RegistryThrottledError
+ * so activation and bulk flows are forced to refuse/retry.
  */
 export async function findProjectAgentRecords(
   projectId: string,
   orgId?: string,
 ): Promise<RegistryRecord[]> {
   const registryService = getRegistryService();
-  const records = await registryService.listResources("agent");
-  return records.filter((record) => {
+  const checked = await registryService.listResourcesChecked("agent");
+
+  if (checked.throttled && checked.droppedCount > 0) {
+    throw new RegistryThrottledError(
+      `Registry listing incomplete: ${checked.droppedCount} record(s) excluded by throttling. ` +
+        `Refusing to act on a partial agent list — retry in a few seconds.`,
+      5000,
+    );
+  }
+
+  return checked.items.filter((record) => {
     if (extractSourceProjectId(record.customDescriptorContent) !== projectId) {
       return false;
     }
@@ -1607,11 +1643,15 @@ export async function findProjectAgentRecords(
  * approval (APPROVED == active via toInternalState). Already-active agents
  * (status APPROVED) are reported separately and skipped.
  *
- * Per-agent failures are swallowed and collected so one bad agent never
- * aborts activation of the rest; the whole operation never throws on a
- * single-agent error. Logs are kept free of record metadata (which can
- * carry org-scoped fields) — only the agent name and error message are
- * logged.
+ * LIVE INCIDENT 2026-11-10: agents are now processed SEQUENTIALLY with a
+ * 250 ms inter-call delay (matching the pace used by scripts) to avoid
+ * triggering registry rate limits. Per-agent failures are classified by
+ * error class (throttled / refused / not_found / rejected / unknown) so
+ * the UI can show "retry" for throttled agents instead of "failed".
+ *
+ * When findProjectAgentRecords throws RegistryThrottledError (the list
+ * itself was partial), the entire activation is refused with
+ * `throttled: true`.
  */
 export async function activateProjectAgents(
   projectId: string,
@@ -1622,15 +1662,39 @@ export async function activateProjectAgents(
     activated: [],
     failed: [],
     alreadyActive: [],
+    failureDetails: [],
   };
 
-  const records = await findProjectAgentRecords(projectId, orgId);
-  for (const record of records) {
+  let records: RegistryRecord[];
+  try {
+    records = await findProjectAgentRecords(projectId, orgId);
+  } catch (err) {
+    if (err instanceof RegistryThrottledError) {
+      return {
+        ...result,
+        throttled: true,
+      };
+    }
+    throw err;
+  }
+
+  /** Inter-agent delay to stay below registry rate limits (250 ms). */
+  const INTER_CALL_DELAY_MS = 250;
+
+  for (let i = 0; i < records.length; i++) {
+    const record = records[i];
     const name = record.name || record.recordId;
 
     if (record.status === RegistryRecordStatusValues.APPROVED) {
       result.alreadyActive.push(name);
       continue;
+    }
+
+    // Inter-call delay between mutation calls (skip before the first).
+    if (i > 0) {
+      await new Promise<void>((resolve) =>
+        setTimeout(resolve, INTER_CALL_DELAY_MS),
+      );
     }
 
     try {
@@ -1663,14 +1727,54 @@ export async function activateProjectAgents(
       await registryService.submitForApproval(record.recordId);
       result.activated.push(name);
     } catch (err) {
+      const errorClass = classifyActivationError(err);
+      const message =
+        err instanceof Error ? err.message : String(err);
       console.error(
-        `Failed to activate agent "${name}": ${err instanceof Error ? err.message : String(err)}`,
+        `Failed to activate agent "${name}" [${errorClass}]: ${message}`,
       );
       result.failed.push(name);
+      result.failureDetails!.push({ name, errorClass, message });
     }
   }
 
   return result;
+}
+
+/**
+ * Classifies an activation error into a UI-friendly error class.
+ * 'throttled' signals the UI to show "retry" rather than "failed".
+ */
+function classifyActivationError(err: unknown): ActivationErrorClass {
+  if (RegistryService.isThrottlingError(err)) {
+    return "throttled";
+  }
+  const name =
+    (err as { name?: string })?.name ?? "";
+  const message =
+    err instanceof Error ? err.message : String(err);
+  const statusCode =
+    (err as { $metadata?: { httpStatusCode?: number } })?.$metadata
+      ?.httpStatusCode;
+
+  if (
+    name === "ResourceNotFoundException" ||
+    statusCode === 404
+  ) {
+    return "not_found";
+  }
+  if (message.includes("Rejected records")) {
+    return "rejected";
+  }
+  if (
+    name === "AccessDeniedException" ||
+    name === "UnauthorizedClientException" ||
+    message.includes("governance") ||
+    message.includes("attestation")
+  ) {
+    return "refused";
+  }
+  return "unknown";
 }
 
 /**

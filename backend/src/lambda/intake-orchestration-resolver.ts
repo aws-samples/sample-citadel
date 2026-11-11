@@ -391,12 +391,24 @@ async function intakeActivateProjectAgents(
   }
 
   const bySession = await activateProjectAgents(sessionId, orgId);
+
+  // When the registry is throttled, the list was incomplete — refuse to
+  // proceed and surface the throttled flag so the UI shows "retry" not
+  // "failed". Do NOT fall through to the projectId fallback (which would
+  // issue another throttled list call).
+  if (bySession.throttled) {
+    return { ...bySession, matchedBy: null };
+  }
+
   if (!isEmptyActivation(bySession)) {
     return { ...bySession, matchedBy: "sessionId" };
   }
 
   if (ctx.projectId !== sessionId) {
     const byProject = await activateProjectAgents(ctx.projectId, orgId);
+    if (byProject.throttled) {
+      return { ...byProject, matchedBy: null };
+    }
     if (!isEmptyActivation(byProject)) {
       return { ...byProject, matchedBy: "projectId" };
     }

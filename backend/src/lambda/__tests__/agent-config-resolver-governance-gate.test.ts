@@ -22,6 +22,7 @@ const mockUpdateResource = jest.fn();
 const mockUpdateResourceStatus = jest.fn();
 const mockSubmitForApproval = jest.fn();
 const mockListResources = jest.fn();
+const mockListResourcesChecked = jest.fn();
 const mockSerializeCustomMetadata = jest.fn((meta: unknown) =>
   JSON.stringify(meta),
 );
@@ -55,31 +56,49 @@ const mockMapToAgentConfig = jest.fn(
   }),
 );
 
-jest.mock("../../services/registry-service", () => ({
-  __esModule: true,
-  RegistryService: jest.fn().mockImplementation(() => ({
+jest.mock("../../services/registry-service", () => {
+  const MockRS = jest.fn().mockImplementation(() => ({
     getResource: mockGetResource,
     updateResource: mockUpdateResource,
     updateResourceStatus: mockUpdateResourceStatus,
     submitForApproval: mockSubmitForApproval,
     listResources: mockListResources,
+    listResourcesChecked: mockListResourcesChecked,
     serializeCustomMetadata: mockSerializeCustomMetadata,
     deserializeCustomMetadata: mockDeserializeCustomMetadata,
     toRegistryStatus: mockToRegistryStatus,
     mapToAgentConfig: mockMapToAgentConfig,
-  })),
-  RegistryRecordStatusValues: {
-    DRAFT: "DRAFT",
-    PENDING_APPROVAL: "PENDING_APPROVAL",
-    APPROVED: "APPROVED",
-    REJECTED: "REJECTED",
-    DEPRECATED: "DEPRECATED",
-    CREATING: "CREATING",
-    UPDATING: "UPDATING",
-    CREATE_FAILED: "CREATE_FAILED",
-    UPDATE_FAILED: "UPDATE_FAILED",
-  },
-}));
+  }));
+  MockRS.isThrottlingError = (err: unknown): boolean => {
+    const name = (err as { name?: string })?.name ?? "";
+    const statusCode = (err as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode;
+    return name === "ThrottlingException" || name === "TooManyRequestsException" || statusCode === 429;
+  };
+  return {
+    __esModule: true,
+    RegistryService: MockRS,
+    RegistryRecordStatusValues: {
+      DRAFT: "DRAFT",
+      PENDING_APPROVAL: "PENDING_APPROVAL",
+      APPROVED: "APPROVED",
+      REJECTED: "REJECTED",
+      DEPRECATED: "DEPRECATED",
+      CREATING: "CREATING",
+      UPDATING: "UPDATING",
+      CREATE_FAILED: "CREATE_FAILED",
+      UPDATE_FAILED: "UPDATE_FAILED",
+    },
+    RegistryThrottledError: class RegistryThrottledError extends Error {
+      retryable = true;
+      retryAfterMs: number;
+      constructor(message: string, retryAfterMs = 5000) {
+        super(message);
+        this.name = "RegistryThrottledError";
+        this.retryAfterMs = retryAfterMs;
+      }
+    },
+  };
+});
 
 // ── Mock the governance rollout flag reader (reads SSM; never AWS) ──────────
 const mockGetGovernanceEnforce = jest.fn();
@@ -328,10 +347,10 @@ describe("agent-config-resolver governance activation gate (US-IMP)", () => {
     };
 
     test("strict → imported-unattested agent lands in failed without aborting the batch", async () => {
-      mockListResources.mockResolvedValue([
-        importedBatchRecord,
-        plainBatchRecord,
-      ]);
+      mockListResourcesChecked.mockResolvedValue({
+        items: [importedBatchRecord, plainBatchRecord],
+        partial: false, droppedCount: 0, throttled: false,
+      });
       mockGetGovernanceEnforce.mockResolvedValue("strict");
 
       const res = await activateProjectAgents("proj-1");
@@ -346,7 +365,10 @@ describe("agent-config-resolver governance activation gate (US-IMP)", () => {
     });
 
     test("shadow → imported-unattested agent activates and emits a gate event with orgId", async () => {
-      mockListResources.mockResolvedValue([importedBatchRecord]);
+      mockListResourcesChecked.mockResolvedValue({
+        items: [importedBatchRecord],
+        partial: false, droppedCount: 0, throttled: false,
+      });
       mockGetGovernanceEnforce.mockResolvedValue("shadow");
 
       const res = await activateProjectAgents("proj-1");

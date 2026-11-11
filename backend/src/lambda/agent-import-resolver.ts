@@ -39,6 +39,7 @@ import {
   getRegistryService,
   validateImportDescriptor,
 } from "./agent-config-resolver";
+import { RegistryThrottledError } from "../services/registry-service";
 import { createADR } from "./adr-resolver";
 import {
   extractOrgFromEvent,
@@ -1212,7 +1213,20 @@ export async function importAgent(
   // 3. Conflict resolution. Scope dedupe to the caller's org so one tenant can
   //    never link to / replace another tenant's record (cross-tenant
   //    isolation). Primary key: origin.sourceArn; secondary: display name.
-  const allRecords = await registryService.listResources("agent");
+  //
+  // LIVE INCIDENT 2026-11-10: import conflict resolution CREATES, REPLACES, or
+  // LINKS records based on the listing. Acting on a partial list (some records
+  // invisible due to throttling) could create duplicates or silently replace the
+  // wrong record. Use listResourcesChecked and refuse when partial.
+  const checked = await registryService.listResourcesChecked("agent");
+  if (checked.throttled && checked.droppedCount > 0) {
+    throw new RegistryThrottledError(
+      `Registry listing incomplete: ${checked.droppedCount} record(s) excluded by throttling. ` +
+        `Refusing to resolve import conflicts on a partial agent list — retry in a few seconds.`,
+      5000,
+    );
+  }
+  const allRecords = checked.items;
   const orgRecords = allRecords.filter(
     (rec) => readMeta(registryService, rec).orgId === orgId,
   );

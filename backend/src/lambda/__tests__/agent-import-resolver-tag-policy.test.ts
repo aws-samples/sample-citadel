@@ -41,6 +41,7 @@ jest.mock("../tag-policy-check", () => ({
 const mockCreateResource = jest.fn();
 const mockUpdateResource = jest.fn();
 const mockListResources = jest.fn();
+const mockListResourcesChecked = jest.fn();
 const mockGetResource = jest.fn();
 const mockUpdateResourceStatus = jest.fn();
 const mockSerializeCustomMetadata = jest.fn((m: unknown) => JSON.stringify(m));
@@ -65,19 +66,31 @@ const mockMapToAgentConfig = jest.fn(
   }),
 );
 
-jest.mock("../../services/registry-service", () => ({
-  RegistryService: jest.fn().mockImplementation(() => ({
-    getRegistryId: () => "test-registry",
-    createResource: mockCreateResource,
-    updateResource: mockUpdateResource,
-    listResources: mockListResources,
-    getResource: mockGetResource,
-    updateResourceStatus: mockUpdateResourceStatus,
-    serializeCustomMetadata: mockSerializeCustomMetadata,
-    deserializeCustomMetadata: mockDeserializeCustomMetadata,
-    mapToAgentConfig: mockMapToAgentConfig,
-  })),
-}));
+jest.mock("../../services/registry-service", () => {
+  class _RegistryThrottledError extends Error {
+    retryAfterMs: number;
+    constructor(message: string, retryAfterMs = 5000) {
+      super(message);
+      this.name = "RegistryThrottledError";
+      this.retryAfterMs = retryAfterMs;
+    }
+  }
+  return {
+    RegistryService: jest.fn().mockImplementation(() => ({
+      getRegistryId: () => "test-registry",
+      createResource: mockCreateResource,
+      updateResource: mockUpdateResource,
+      listResources: mockListResources,
+      listResourcesChecked: mockListResourcesChecked,
+      getResource: mockGetResource,
+      updateResourceStatus: mockUpdateResourceStatus,
+      serializeCustomMetadata: mockSerializeCustomMetadata,
+      deserializeCustomMetadata: mockDeserializeCustomMetadata,
+      mapToAgentConfig: mockMapToAgentConfig,
+    })),
+    RegistryThrottledError: _RegistryThrottledError,
+  };
+});
 
 // ── mocks: auth-event ──────────────────────────────────────────────────
 jest.mock("../../utils/auth-event", () => ({
@@ -217,7 +230,7 @@ describe("agent-import-resolver tag-policy enforcement", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     _resetRegistryService();
-    mockListResources.mockResolvedValue([]);
+    mockListResourcesChecked.mockResolvedValue({ items: [], partial: false, droppedCount: 0, throttled: false });
     mockCreateResource.mockResolvedValue(makeCreatedRecord());
   });
 

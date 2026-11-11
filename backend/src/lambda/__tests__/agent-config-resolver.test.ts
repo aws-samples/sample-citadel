@@ -16,6 +16,7 @@ const dynamoMock = mockClient(DynamoDBDocumentClient);
 // can be driven without hitting the AgentCore Registry SDK. DynamoDB-only
 // tests never construct a RegistryService, so this mock does not affect them.
 const mockListResources = jest.fn();
+const mockListResourcesChecked = jest.fn();
 const mockUpdateResourceStatus = jest.fn();
 const mockSubmitForApproval = jest.fn();
 const mockGetResource = jest.fn();
@@ -59,9 +60,10 @@ const mockDeserializeCustomMetadata = jest.fn(
   },
 );
 
-jest.mock("../../services/registry-service", () => ({
-  RegistryService: jest.fn().mockImplementation(() => ({
+jest.mock("../../services/registry-service", () => {
+  const MockRegistryService = jest.fn().mockImplementation(() => ({
     listResources: mockListResources,
+    listResourcesChecked: mockListResourcesChecked,
     updateResourceStatus: mockUpdateResourceStatus,
     submitForApproval: mockSubmitForApproval,
     deserializeCustomMetadata: mockDeserializeCustomMetadata,
@@ -70,19 +72,37 @@ jest.mock("../../services/registry-service", () => ({
     serializeCustomMetadata: mockSerializeCustomMetadata,
     toRegistryStatus: mockToRegistryStatus,
     mapToAgentConfig: mockMapToAgentConfig,
-  })),
-  RegistryRecordStatusValues: {
-    DRAFT: "DRAFT",
-    PENDING_APPROVAL: "PENDING_APPROVAL",
-    APPROVED: "APPROVED",
-    REJECTED: "REJECTED",
-    DEPRECATED: "DEPRECATED",
-    CREATING: "CREATING",
-    UPDATING: "UPDATING",
-    CREATE_FAILED: "CREATE_FAILED",
-    UPDATE_FAILED: "UPDATE_FAILED",
-  },
-}));
+  }));
+  // Static method used by classifyActivationError
+  MockRegistryService.isThrottlingError = (err: unknown): boolean => {
+    const name = (err as { name?: string })?.name ?? "";
+    const statusCode = (err as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode;
+    return name === "ThrottlingException" || name === "TooManyRequestsException" || statusCode === 429;
+  };
+  return {
+    RegistryService: MockRegistryService,
+    RegistryRecordStatusValues: {
+      DRAFT: "DRAFT",
+      PENDING_APPROVAL: "PENDING_APPROVAL",
+      APPROVED: "APPROVED",
+      REJECTED: "REJECTED",
+      DEPRECATED: "DEPRECATED",
+      CREATING: "CREATING",
+      UPDATING: "UPDATING",
+      CREATE_FAILED: "CREATE_FAILED",
+      UPDATE_FAILED: "UPDATE_FAILED",
+    },
+    RegistryThrottledError: class RegistryThrottledError extends Error {
+      retryable = true;
+      retryAfterMs: number;
+      constructor(message: string, retryAfterMs = 5000) {
+        super(message);
+        this.name = "RegistryThrottledError";
+        this.retryAfterMs = retryAfterMs;
+      }
+    },
+  };
+});
 
 // Lazy IAM trust-path core — only computeTrustPath is mocked so activation
 // tests drive clean / findings / throw deterministically without touching IAM.
@@ -352,7 +372,7 @@ describe("agent-config-resolver", () => {
     beforeEach(() => {
       process.env.REGISTRY_ID = "reg-123";
       _resetRegistryService();
-      mockListResources.mockReset();
+      mockListResourcesChecked.mockReset();
       mockUpdateResourceStatus.mockReset();
       mockSubmitForApproval.mockReset();
     });
@@ -376,19 +396,27 @@ describe("agent-config-resolver", () => {
       }),
     });
 
+    /** Wraps a list of records as a complete (non-partial) listResourcesChecked result. */
+    const checkedOk = (records: ReturnType<typeof agentRecord>[]) => ({
+      items: records,
+      partial: false,
+      droppedCount: 0,
+      throttled: false,
+    });
+
     test("filters by sourceProjectId, activates non-active, skips already-active", async () => {
-      mockListResources.mockResolvedValue([
+      mockListResourcesChecked.mockResolvedValue(checkedOk([
         agentRecord("r1", "Agent One", "proj-1", "DRAFT"),
         agentRecord("r2", "Agent Two", "proj-1", "APPROVED"),
         agentRecord("r3", "Other Project", "proj-2", "DRAFT"),
-      ]);
+      ]));
       mockSubmitForApproval.mockResolvedValue({});
 
       const result = await handler(
         makeEvent("activateProjectAgents", { projectId: "proj-1" }),
       );
 
-      expect(mockListResources).toHaveBeenCalledWith("agent");
+      expect(mockListResourcesChecked).toHaveBeenCalledWith("agent");
       // Activation must go through SubmitRegistryRecordForApproval, never a
       // direct UpdateRegistryRecordStatus(APPROVED) — finding adde5b79.
       expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
@@ -400,10 +428,10 @@ describe("agent-config-resolver", () => {
     });
 
     test("continues and records failed when one agent errors", async () => {
-      mockListResources.mockResolvedValue([
+      mockListResourcesChecked.mockResolvedValue(checkedOk([
         agentRecord("r1", "Agent One", "proj-1", "DRAFT"),
         agentRecord("r2", "Agent Two", "proj-1", "DRAFT"),
-      ]);
+      ]));
       mockSubmitForApproval
         .mockRejectedValueOnce(new Error("boom"))
         .mockResolvedValueOnce({});
@@ -418,17 +446,60 @@ describe("agent-config-resolver", () => {
     });
 
     test("returns empty arrays when no agents match the project", async () => {
-      mockListResources.mockResolvedValue([
+      mockListResourcesChecked.mockResolvedValue(checkedOk([
         agentRecord("r3", "Other Project", "proj-2", "DRAFT"),
         agentRecord("r4", "No Project", undefined, "DRAFT"),
-      ]);
+      ]));
 
       const result = await handler(
         makeEvent("activateProjectAgents", { projectId: "proj-1" }),
       );
 
       expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
-      expect(result).toEqual({ activated: [], failed: [], alreadyActive: [] });
+      expect(result).toEqual(expect.objectContaining({
+        activated: [], failed: [], alreadyActive: [],
+      }));
+    });
+
+    test("returns throttled:true when listResourcesChecked reports throttled partial", async () => {
+      mockListResourcesChecked.mockResolvedValue({
+        items: [agentRecord("r1", "Agent One", "proj-1", "DRAFT")],
+        partial: true,
+        droppedCount: 3,
+        throttled: true,
+      });
+
+      const result = await handler(
+        makeEvent("activateProjectAgents", { projectId: "proj-1" }),
+      );
+
+      expect(result.throttled).toBe(true);
+      expect(result.activated).toEqual([]);
+      expect(result.failed).toEqual([]);
+      expect(mockSubmitForApproval).not.toHaveBeenCalled();
+    });
+
+    test("classifies throttled per-agent errors as 'throttled'", async () => {
+      mockListResourcesChecked.mockResolvedValue(checkedOk([
+        agentRecord("r1", "Agent One", "proj-1", "DRAFT"),
+      ]));
+      const throttleErr = Object.assign(new Error("Request rate exceeded"), {
+        name: "ThrottlingException",
+        $metadata: { httpStatusCode: 429 },
+      });
+      mockSubmitForApproval.mockRejectedValueOnce(throttleErr);
+
+      const result = await handler(
+        makeEvent("activateProjectAgents", { projectId: "proj-1" }),
+      );
+
+      expect(result.failed).toEqual(["Agent One"]);
+      expect(result.failureDetails).toEqual([
+        expect.objectContaining({
+          name: "Agent One",
+          errorClass: "throttled",
+        }),
+      ]);
     });
   });
 
