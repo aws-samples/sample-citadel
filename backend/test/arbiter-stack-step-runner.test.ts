@@ -115,9 +115,9 @@ describe("ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)",
 
   // --- StepRunnerFunction ---
   describe("StepRunnerFunction", () => {
-    test("exists with Python 3.14 runtime, 300s timeout, 1024MB memory", () => {
+    test("exists with Python 3.15 runtime, 300s timeout, 1024MB memory", () => {
       template.hasResourceProperties("AWS::Lambda::Function", {
-        Runtime: "python3.14",
+        Runtime: "python3.15",
         Timeout: 300,
         MemorySize: 1024,
         Handler: "index.handler",
@@ -128,17 +128,17 @@ describe("ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)",
       const functions = template.findResources("AWS::Lambda::Function", {
         Properties: {
           Handler: "index.handler",
-          Runtime: "python3.14",
+          Runtime: "python3.15",
           Timeout: 300,
         },
       });
       const logicalIds = Object.keys(functions);
       expect(logicalIds.length).toBeGreaterThanOrEqual(1);
-      // Find the step runner specifically (300s timeout, python3.14)
+      // Find the step runner specifically (300s timeout, python3.15)
       const stepRunnerEntry = Object.entries(functions).find(
         ([, fn]: [string, any]) =>
           fn.Properties.Timeout === 300 &&
-          fn.Properties.Runtime === "python3.14",
+          fn.Properties.Runtime === "python3.15",
       );
       expect(stepRunnerEntry).toBeDefined();
       expect(stepRunnerEntry![1].Properties.TracingConfig).toEqual({
@@ -148,7 +148,7 @@ describe("ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)",
 
     test("has correct environment variables", () => {
       template.hasResourceProperties("AWS::Lambda::Function", {
-        Runtime: "python3.14",
+        Runtime: "python3.15",
         Timeout: 300,
         Environment: {
           Variables: Match.objectLike({
@@ -172,19 +172,19 @@ describe("ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)",
       const catalogLayerId = Object.keys(layers)[0];
       expect(catalogLayerId).toBeDefined();
 
-      // Find the step runner function (python3.14, 300s timeout) and assert it
+      // Find the step runner function (python3.15, 300s timeout) and assert it
       // references the catalog layer.
       const functions = template.findResources("AWS::Lambda::Function", {
         Properties: {
           Handler: "index.handler",
-          Runtime: "python3.14",
+          Runtime: "python3.15",
           Timeout: 300,
         },
       });
       const stepRunnerEntry = Object.entries(functions).find(
         ([, fn]: [string, any]) =>
           fn.Properties.Timeout === 300 &&
-          fn.Properties.Runtime === "python3.14",
+          fn.Properties.Runtime === "python3.15",
       );
       expect(stepRunnerEntry).toBeDefined();
       const stepRunnerLayers =
@@ -598,10 +598,10 @@ describe("ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)",
   });
 
   describe("Workflow timeout watchdog", () => {
-    test("watchdog Lambda exists with timeout_watchdog.handler on Python 3.14", () => {
+    test("watchdog Lambda exists with timeout_watchdog.handler on Python 3.15", () => {
       template.hasResourceProperties("AWS::Lambda::Function", {
         Handler: "timeout_watchdog.handler",
-        Runtime: "python3.14",
+        Runtime: "python3.15",
       });
     });
 

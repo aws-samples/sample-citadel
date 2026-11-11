@@ -107,6 +107,19 @@ export { LAYER_PROVIDED_PACKAGES };
 export { PYTHON_ASSET_EXCLUDES } from "./python-asset-excludes";
 
 // ---------------------------------------------------------------------------
+// Python bundling image override
+// ---------------------------------------------------------------------------
+// The SAM build image (`public.ecr.aws/sam/build-python3.15`) referenced by
+// `lambda.Runtime.PYTHON_3_15.bundlingImage` is not yet published. Fall back
+// to the 3.14 SAM build image for pip-installing pure-Python dependencies;
+// the actual Lambda runtime is still PYTHON_3_15 — the build image only needs
+// pip and a CPython interpreter, and 3.14 satisfies both for our dependency
+// set (all packages are pure-Python / universal wheels).
+const PYTHON_315_BUNDLING_IMAGE = cdk.DockerImage.fromRegistry(
+  "public.ecr.aws/sam/build-python3.14:latest",
+);
+
+// ---------------------------------------------------------------------------
 // Seed-module content digest (finding 588c7fb8)
 // ---------------------------------------------------------------------------
 // The seed custom resource (SeedAgentConfigResource, below) uploads agent
@@ -397,7 +410,7 @@ export class ArbiterStack extends cdk.Stack {
       code: lambda.Code.fromAsset(ARBITER_ROOT, {
         exclude: [...PYTHON_ASSET_EXCLUDES],
         bundling: {
-          image: lambda.Runtime.PYTHON_3_14.bundlingImage,
+          image: PYTHON_315_BUNDLING_IMAGE,
           command: [
             "bash",
             "-c",
@@ -405,7 +418,7 @@ export class ArbiterStack extends cdk.Stack {
           ],
         },
       }),
-      compatibleRuntimes: [lambda.Runtime.PYTHON_3_14],
+      compatibleRuntimes: [lambda.Runtime.PYTHON_3_15],
       description:
         "Shared arbiter Python packages: catalog, common, governance modules " +
         "plus aws-xray-sdk for common.tracing.",
@@ -433,7 +446,7 @@ export class ArbiterStack extends cdk.Stack {
     });
 
     const supervisorLambda = new PythonFunction(this, "SupervisorAgent", {
-      runtime: lambda.Runtime.PYTHON_3_14,
+      runtime: lambda.Runtime.PYTHON_3_15,
       // Widened to the arbiter/ root (rather than arbiter/supervisor/) so
       // the governance package and the common package — both siblings of
       // supervisor/ that `_load_governance_package()` and the
@@ -452,6 +465,7 @@ export class ArbiterStack extends cdk.Stack {
       handler: "handler",
       layers: [catalogLayer],
       bundling: {
+        image: PYTHON_315_BUNDLING_IMAGE,
         assetHashType: cdk.AssetHashType.SOURCE,
         commandHooks: stripLayerPackagesHook,
         assetExcludes: [
@@ -913,11 +927,12 @@ export class ArbiterStack extends cdk.Stack {
       this,
       "WorkerAgentWrapper",
       {
-        runtime: lambda.Runtime.PYTHON_3_14,
+        runtime: lambda.Runtime.PYTHON_3_15,
         entry: path.join(ARBITER_ROOT, "workerWrapper"),
         handler: "lambda_handler",
         layers: [catalogLayer],
         bundling: {
+          image: PYTHON_315_BUNDLING_IMAGE,
           assetHashType: cdk.AssetHashType.SOURCE,
           commandHooks: stripLayerPackagesHook,
           assetExcludes: [...PYTHON_ASSET_EXCLUDES],
@@ -1333,11 +1348,12 @@ export class ArbiterStack extends cdk.Stack {
     });
 
     const fabricatorLambda = new PythonFunction(this, "FabricatorAgent", {
-      runtime: lambda.Runtime.PYTHON_3_14,
+      runtime: lambda.Runtime.PYTHON_3_15,
       entry: path.join(ARBITER_ROOT, "fabricator"),
       handler: "lambda_handler",
       layers: [catalogLayer],
       bundling: {
+        image: PYTHON_315_BUNDLING_IMAGE,
         assetHashType: cdk.AssetHashType.SOURCE,
         commandHooks: stripLayerPackagesHook,
         assetExcludes: [...PYTHON_ASSET_EXCLUDES],
@@ -1567,7 +1583,7 @@ export class ArbiterStack extends cdk.Stack {
       this,
       "SeedAgentConfigFunction",
       {
-        runtime: lambda.Runtime.PYTHON_3_14,
+        runtime: lambda.Runtime.PYTHON_3_15,
         handler: "index.handler",
         code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, "seedConfig"), {
           exclude: [...PYTHON_ASSET_EXCLUDES],
@@ -1753,11 +1769,12 @@ export class ArbiterStack extends cdk.Stack {
     // handler. Duplicate events are idempotent by construction since
     // UpdateItem overwrites with the same attribute value.
     const activatorLambda = new PythonFunction(this, "ActivatorAgent", {
-      runtime: lambda.Runtime.PYTHON_3_14,
+      runtime: lambda.Runtime.PYTHON_3_15,
       entry: path.join(ARBITER_ROOT, "activator"),
       handler: "handler",
       layers: [catalogLayer],
       bundling: {
+        image: PYTHON_315_BUNDLING_IMAGE,
         assetHashType: cdk.AssetHashType.SOURCE,
         commandHooks: stripLayerPackagesHook,
         assetExcludes: [...PYTHON_ASSET_EXCLUDES],
@@ -1794,7 +1811,7 @@ export class ArbiterStack extends cdk.Stack {
         this,
         "StepRunnerFunction",
         {
-          runtime: lambda.Runtime.PYTHON_3_14,
+          runtime: lambda.Runtime.PYTHON_3_15,
           handler: "index.handler",
           code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, "stepRunner"), {
             exclude: [...PYTHON_ASSET_EXCLUDES],
@@ -2025,7 +2042,7 @@ export class ArbiterStack extends cdk.Stack {
         this,
         "WorkflowTimeoutWatchdogFunction",
         {
-          runtime: lambda.Runtime.PYTHON_3_14,
+          runtime: lambda.Runtime.PYTHON_3_15,
           handler: "timeout_watchdog.handler",
           code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, "stepRunner"), {
             exclude: [...PYTHON_ASSET_EXCLUDES],

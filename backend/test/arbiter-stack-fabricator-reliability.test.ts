@@ -76,12 +76,12 @@ function buildResources(): Resources {
 }
 
 function findFabricatorFunctionTimeout(resources: Resources): number {
-  // The FabricatorAgent PythonFunction is the python3.14 Lambda whose
+  // The FabricatorAgent PythonFunction is the python3.15 Lambda whose
   // logical id starts with "FabricatorAgent".
   const entry = Object.entries(resources).find(
     ([key, r]) =>
       (r as any).Type === "AWS::Lambda::Function" &&
-      (r as any).Properties?.Runtime === "python3.14" &&
+      (r as any).Properties?.Runtime === "python3.15" &&
       key.startsWith("FabricatorAgent"),
   );
   if (!entry) throw new Error("FabricatorAgent Lambda not found");
