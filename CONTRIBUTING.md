@@ -56,7 +56,9 @@ This project uses a layered approach to dependency security:
 
 **Scheduled advisory scan** — The `advisory-scan.yml` workflow runs daily at 03:00 UTC and on manual dispatch. It audits npm dependencies (root and `frontend/`) via `audit-ci` and Python dependencies (all `arbiter/**/requirements*.txt`) via `pip-audit`. It also checks that all `revisitBy` dates in `audit-ci-allowlist-justifications.md` are still in the future; an expired date fails the workflow. If any audit fails, the workflow attempts `npm audit fix` and, when the tree changes and audits pass, opens a PR on the `chore/advisory-autofix` branch. If auto-fix is insufficient, it creates or updates a GitHub issue titled "Dependency advisories need attention".
 
-**Dependabot** — `.github/dependabot.yml` monitors npm (`/`, `/frontend`), pip (all arbiter requirement directories), and GitHub Actions (`/`) on a weekly schedule. Minor and patch updates are grouped per ecosystem. Major bumps for `react`, `react-dom`, `vite`, and `typescript` are ignored (handled manually).
+**Dependabot** — `.github/dependabot.yml` monitors npm (`/`, `/frontend`), pip (all arbiter requirement directories in a single grouped update), and GitHub Actions (`/`) on a weekly schedule. Minor and patch updates are grouped per ecosystem. Major bumps for `react`, `react-dom`, `vite`, and `typescript` are ignored (handled manually).
+
+**Arbiter pin consistency** — All `arbiter/*/requirements.txt` files (and `arbiter/layers/common/`) that pin a shared package (e.g. `boto3==…`) must use the same version everywhere. Dependabot bumps them together in one PR, but manual edits must do the same. The `test_arbiter_pin_consistency` guard test enforces this.
 
 **Allowlist governance** — Advisories that cannot be immediately remediated are added to `.audit-ci.json` with a corresponding justification and `revisitBy` date in `audit-ci-allowlist-justifications.md`. The scheduled scan enforces expiry of these dates.
 
