@@ -76,6 +76,11 @@ function findSoFiles(dir: string): string[] {
 }
 
 describe("ArbiterCatalogLayer — runtime import smoke test", () => {
+  // Opt out of the jest-env-setup.ts default: this test intentionally
+  // needs Docker and must not carry the skip-bundling flag into the
+  // CDK synth if it ever synthesises.
+  delete process.env.CITADEL_SKIP_BUNDLING;
+
   const hasDocker = dockerAvailable();
 
   if (!hasDocker) {

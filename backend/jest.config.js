@@ -50,6 +50,7 @@ module.exports = {
   ],
   coverageDirectory: "coverage",
   coverageReporters: ["text", "lcov", "html"],
+  setupFiles: ["<rootDir>/test/jest-env-setup.ts"],
   setupFilesAfterEnv: ["<rootDir>/test/setup.ts"],
   testTimeout: 30000,
   maxWorkers: "50%",

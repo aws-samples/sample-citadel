@@ -80,6 +80,10 @@ jobs:
       - name: Unit tests
         run: npm test -- --ci --coverage
         env:
+          # Skip Docker-based Python layer bundling in unit tests (belt-and-
+          # suspenders for the jest-env-setup.ts default).
+          CITADEL_SKIP_BUNDLING: "1"
+          ENVIRONMENT: test
           # Backend Build + Synth synthesizes with ENVIRONMENT=test, so the
           # downloaded cdk.out/*.template.json files are named
           # citadel-<stack>-test.template.json. The cdk.out-conditional
@@ -299,6 +303,7 @@ jobs:
           # dedicated layer-import smoke test remains the only
           # Docker-touching test (it already self-skips without Docker).
           CITADEL_SKIP_BUNDLING: "1"
+          ENVIRONMENT: test
 
       - name: Build Lambda bundles
         run: npm run build:lambda
