@@ -1,66 +1,40 @@
 import { execSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
+import { DOCKER_PLATFORM, EXPECTED_ARCH_TAG } from "../lib/runtime-constants";
+import {
+  wrongArchFiles,
+  layerAssetDirFromTemplate,
+} from "./helpers/layer-asset-helpers";
 
 /**
  * Verify that the bundled common layer asset contains every runtime package
  * the arbiter Lambda functions import, AND that native extensions are compiled
- * for the target architecture (x86_64).
+ * for the target architecture (derived from runtime-constants.ts).
  *
- * When Docker is available AND a cdk.out with a layer asset exists (or can
- * be synthesised), this test mounts the layer's python/ directory into the
- * official Lambda Python runtime image and runs the critical import check
- * under `--platform linux/amd64` to match the function architecture.
+ * Platform and expected .so tag are imported — never hardcoded — so a
+ * change in runtime-constants.ts automatically updates the test.
  *
- * An additional test asserts that bundled .so filenames carry the expected
- * x86_64 architecture tag, catching the exact class of bug where an
- * Apple-silicon host produces aarch64 wheels for x86_64 functions.
+ * The layer asset directory is located DETERMINISTICALLY from the synthesised
+ * template (cdk.out/citadel-arbiter-test.template.json → LayerVersion
+ * Content.S3Key → cdk.out/asset.<hash>/python).  The test synthesises
+ * only if the template is absent; it never deletes env flags.
  *
- * When Docker is absent or the asset directory cannot be found, the test
- * skips with a loud console.warn so CI operators know coverage was reduced.
+ * This test MUST run under the bundling jest config (jest.bundling.config.js)
+ * and FAIL — not skip — when Docker is unavailable.  Skipping silently hid
+ * the original x86_64 regression.
  */
 
 const BACKEND = path.resolve(__dirname, "..");
 const CDK_OUT = path.join(BACKEND, "cdk.out");
-
-/** Expected arch tag in .so filenames — must match the function architecture. */
-const EXPECTED_ARCH_TAG = "x86_64-linux-gnu";
+const TEMPLATE = path.join(CDK_OUT, "citadel-arbiter-test.template.json");
 
 /** The imports every arbiter function must be able to resolve from the layer. */
 const IMPORT_CHECK =
   'import pydantic_core, strands, mcp, boto3; from strands import Agent; print(\\"layer-ok\\")';
 
-function dockerAvailable(): boolean {
-  try {
-    execSync("docker info", { stdio: "ignore", timeout: 10_000 });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /**
- * Find the layer asset directory.  The catalogLayer asset is the one that
- * contains a `python/` subdirectory with `catalog/` and `common/` inside.
- */
-function findLayerAsset(): string | undefined {
-  if (!fs.existsSync(CDK_OUT)) return undefined;
-  for (const entry of fs.readdirSync(CDK_OUT)) {
-    if (!entry.startsWith("asset.")) continue;
-    const candidate = path.join(CDK_OUT, entry, "python");
-    if (
-      fs.existsSync(candidate) &&
-      fs.existsSync(path.join(candidate, "catalog")) &&
-      fs.existsSync(path.join(candidate, "common"))
-    ) {
-      return path.join(CDK_OUT, entry);
-    }
-  }
-  return undefined;
-}
-
-/**
- * Recursively find all .so files under a directory.
+ * Recursively find all .so filenames under a directory.
  */
 function findSoFiles(dir: string): string[] {
   const results: string[] = [];
@@ -75,40 +49,66 @@ function findSoFiles(dir: string): string[] {
   return results;
 }
 
-describe("ArbiterCatalogLayer — runtime import smoke test", () => {
-  // Opt out of the jest-env-setup.ts default: this test intentionally
-  // needs Docker and must not carry the skip-bundling flag into the
-  // CDK synth if it ever synthesises.
+/**
+ * Fail hard when Docker is not available — do NOT skip.
+ * Skipping hid the x86_64 regression for the entire branch.
+ */
+function requireDocker(): void {
+  try {
+    execSync("docker info", { stdio: "ignore", timeout: 10_000 });
+  } catch {
+    throw new Error(
+      "Docker is not available.  The layer import smoke test REQUIRES Docker " +
+        "and must run only in the bundling CI job (npm run test:bundling).  " +
+        "Do not run this test without Docker — it must fail, not skip.",
+    );
+  }
+}
+
+/**
+ * Ensure cdk.out has been synthesised.  Synthesise only if the template
+ * is absent.  Never delete env flags.
+ */
+function ensureSynthesised(): void {
+  if (fs.existsSync(TEMPLATE)) return;
+  // eslint-disable-next-line no-console
+  console.log(
+    "cdk.out/citadel-arbiter-test.template.json not found — running cdk synth…",
+  );
+  execSync("npx cdk synth citadel-arbiter-test --quiet", {
+    cwd: BACKEND,
+    stdio: "inherit",
+    timeout: 2_700_000,
+    env: { ...process.env, ENVIRONMENT: "test" },
+  });
+  if (!fs.existsSync(TEMPLATE)) {
+    throw new Error(
+      "cdk synth completed but template still not found at " + TEMPLATE,
+    );
+  }
+}
+
+describe(`ArbiterCatalogLayer — runtime import smoke (${DOCKER_PLATFORM})`, () => {
+  // Opt out of jest-env-setup.ts: this test needs Docker and real bundling.
   delete process.env.CITADEL_SKIP_BUNDLING;
 
-  const hasDocker = dockerAvailable();
+  requireDocker();
+  ensureSynthesised();
 
-  if (!hasDocker) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      "⚠️  SKIPPING layer import test: Docker is not available.  " +
-        "Run with Docker to verify the layer contains all runtime dependencies.",
-    );
-    test.skip("Docker not available — layer import check skipped", () => {});
-    return;
-  }
-
-  const layerAsset = findLayerAsset();
-
+  const layerAsset = layerAssetDirFromTemplate(TEMPLATE);
   if (!layerAsset) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      "⚠️  SKIPPING layer import test: no cdk.out layer asset found.  " +
-        "Run `npx cdk synth` first, or the test will auto-skip.",
+    throw new Error(
+      "Could not locate the catalog layer asset directory from " +
+        TEMPLATE +
+        ".  The template exists but no LayerVersion with a matching " +
+        "asset.*/python/catalog+common directory was found.",
     );
-    test.skip("cdk.out layer asset not found — layer import check skipped", () => {});
-    return;
   }
 
-  test("layer asset satisfies all runtime imports (pydantic_core, strands, mcp, boto3)", () => {
+  test(`layer asset satisfies all runtime imports on ${DOCKER_PLATFORM} (pydantic_core, strands, mcp, boto3)`, () => {
     const cmd = [
       "docker run --rm",
-      "--platform linux/amd64",
+      `--platform ${DOCKER_PLATFORM}`,
       "--entrypoint python",
       `-v ${layerAsset}/python:/opt/python`,
       "-e PYTHONPATH=/opt/python",
@@ -125,17 +125,11 @@ describe("ArbiterCatalogLayer — runtime import smoke test", () => {
     expect(output).toContain("layer-ok");
   }, /* 5 min timeout for Docker pull + import */ 360_000);
 
-  test("bundled .so files carry the x86_64 architecture tag", () => {
+  test(`bundled .so files carry the ${EXPECTED_ARCH_TAG} architecture tag`, () => {
     const soFiles = findSoFiles(path.join(layerAsset, "python"));
-    // There must be at least one .so (pydantic_core ships native extensions)
     expect(soFiles.length).toBeGreaterThan(0);
 
-    // Every arch-tagged .so must carry the expected tag.
-    // Format: _pydantic_core.cpython-315-x86_64-linux-gnu.so
-    const archTagged = soFiles.filter((f) => /cpython-\d+-.+\.so$/.test(f));
-    expect(archTagged.length).toBeGreaterThan(0);
-
-    const wrongArch = archTagged.filter((f) => !f.includes(EXPECTED_ARCH_TAG));
-    expect(wrongArch).toEqual([]);
+    const wrong = wrongArchFiles(soFiles, EXPECTED_ARCH_TAG);
+    expect(wrong).toEqual([]);
   });
 });

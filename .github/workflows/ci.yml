@@ -148,6 +148,11 @@ jobs:
           CDK_DEFAULT_ACCOUNT: "000000000000"
           CDK_DEFAULT_REGION: us-east-1
 
+      - name: Layer import smoke test (Docker, reuses cdk.out from synth)
+        run: npm run test:bundling
+        env:
+          ENVIRONMENT: test
+
       - name: Verify SupervisorAgent bundle (governance + common packages present)
         run: bash backend/scripts/verify-supervisor-bundle.sh
         working-directory: ${{ github.workspace }}

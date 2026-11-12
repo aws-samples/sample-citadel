@@ -11,6 +11,7 @@
     "watch": "tsc -w",
     "test": "jest",
     "test:integration": "jest --config jest.integration.config.js",
+    "test:bundling": "jest --config jest.bundling.config.js",
     "lint": "eslint \"src/**/*.ts\" --max-warnings 0",
     "lint:fix": "eslint \"src/**/*.ts\" --fix",
     "format": "prettier --write \"src/**/*.ts\"",
