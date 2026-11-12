@@ -228,7 +228,23 @@ function lazyBuildImage(
         // no Docker daemon is contacted.  Unit tests that set
         // `aws:cdk:bundling-stacks: []` never call .run(), and asset-hash
         // computation only reads .image — the placeholder string is fine.
+        //
+        // SAFETY GUARD: the bundling-skip placeholder must NEVER reach a
+        // real deployment.  Only allow it when the environment is 'test'
+        // or unset (unit-test suite) — an explicitly non-test ENVIRONMENT
+        // indicates a real synth and must use the real Docker build image.
+        // The companion guard in bin/app.ts catches the CDK entry point
+        // (where ENVIRONMENT defaults to 'dev' when unset).
         if (process.env.CITADEL_SKIP_BUNDLING) {
+          const env = process.env.ENVIRONMENT;
+          if (env && env !== "test") {
+            throw new Error(
+              "CITADEL_SKIP_BUNDLING is set but ENVIRONMENT is not 'test'. " +
+                "Refusing to synthesise with a bundling-skip placeholder for " +
+                `environment '${env}'. ` +
+                "Unset CITADEL_SKIP_BUNDLING or set ENVIRONMENT=test.",
+            );
+          }
           return Reflect.get(target, prop, receiver);
         }
         const real = resolve();

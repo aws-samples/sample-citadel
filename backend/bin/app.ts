@@ -46,6 +46,21 @@ if (!environment) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Bundling-skip safety guard — fail BEFORE any stack is constructed.
+// CITADEL_SKIP_BUNDLING is a unit-test convenience that replaces the real
+// Docker build image with an inert placeholder.  It must never reach a
+// real deployment: the placeholder produces non-functional Lambda assets.
+// ---------------------------------------------------------------------------
+if (process.env.CITADEL_SKIP_BUNDLING && environment !== "test") {
+  throw new Error(
+    "CITADEL_SKIP_BUNDLING is set but ENVIRONMENT is not 'test'. " +
+      "Refusing to synthesise with a bundling-skip placeholder for " +
+      `environment '${environment}'. ` +
+      "Unset CITADEL_SKIP_BUNDLING or set ENVIRONMENT=test.",
+  );
+}
+
 const env = {
   account: process.env.CDK_DEFAULT_ACCOUNT,
   region: process.env.CDK_DEFAULT_REGION || "ap-southeast-2",
