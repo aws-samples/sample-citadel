@@ -95,6 +95,7 @@ import * as ssm from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
 import { buildImportDiscoveryPolicy } from "../src/utils/agent-import-policy";
 import { REGISTRY_GENERATION } from "./registry-generation";
+import { LAMBDA_ARCHITECTURE, NODE_RUNTIME } from "./runtime-constants";
 
 export interface RegistryStackProps extends cdk.StackProps {
   environment: string;
@@ -233,7 +234,8 @@ export class RegistryStack extends cdk.Stack {
     });
 
     const registrySyncLambda = new lambda.Function(this, "RegistrySyncLambda", {
-      runtime: lambda.Runtime.NODEJS_24_X,
+      runtime: NODE_RUNTIME,
+      architecture: LAMBDA_ARCHITECTURE,
       handler: "registry-sync.handler",
       code: lambda.Code.fromAsset("dist/lambda"),
       environment: {
@@ -305,7 +307,8 @@ export class RegistryStack extends cdk.Stack {
       this,
       "AgentImportResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "agent-import-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -539,7 +542,8 @@ export class RegistryStack extends cdk.Stack {
       this,
       "AgentImportManifestResultHandler",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "agent-import-manifest-result-handler.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -677,7 +681,8 @@ export class RegistryStack extends cdk.Stack {
       this,
       "AgentCodeResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "agent-code-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -763,7 +768,8 @@ export class RegistryStack extends cdk.Stack {
       this,
       "FabricatorRequestResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "fabricator-request-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -832,7 +838,8 @@ export class RegistryStack extends cdk.Stack {
       this,
       "FabricatorQueueResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "fabricator-queue-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -910,7 +917,8 @@ export class RegistryStack extends cdk.Stack {
       this,
       "FabricationEventHandlerFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "fabrication-event-handler.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -961,7 +969,8 @@ export class RegistryStack extends cdk.Stack {
       this,
       "FabricationEventSubscriptionAuthorizerFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "chatter-subscription-authorizer.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -1030,7 +1039,8 @@ export class RegistryStack extends cdk.Stack {
       this,
       "RegistryAgentRecordResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "registry-agent-record-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         functionName: `citadel-registry-agent-record-resolver-${props.environment}`,

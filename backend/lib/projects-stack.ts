@@ -53,6 +53,7 @@ import * as logs from "aws-cdk-lib/aws-logs";
 import { Bucket } from "aws-cdk-lib/aws-s3";
 import * as ssm from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
+import { LAMBDA_ARCHITECTURE, NODE_RUNTIME } from "./runtime-constants";
 
 export interface ProjectsStackProps extends cdk.StackProps {
   environment: string;
@@ -141,7 +142,8 @@ export class ProjectsStack extends cdk.Stack {
       this,
       "ProjectResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "project-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -224,7 +226,8 @@ export class ProjectsStack extends cdk.Stack {
       this,
       "ConversationResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "conversation-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -298,7 +301,8 @@ export class ProjectsStack extends cdk.Stack {
       this,
       "AgentResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "agent-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -350,7 +354,8 @@ export class ProjectsStack extends cdk.Stack {
       this,
       "DocumentUploadResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "document-upload-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -468,7 +473,8 @@ export class ProjectsStack extends cdk.Stack {
       this,
       "DocumentResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "document-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -567,7 +573,8 @@ export class ProjectsStack extends cdk.Stack {
       this,
       "ChatterPublisherFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "chatter-publisher.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -597,7 +604,8 @@ export class ProjectsStack extends cdk.Stack {
       this,
       "ChatterResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "chatter-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         timeout: cdk.Duration.seconds(30),
@@ -634,7 +642,8 @@ export class ProjectsStack extends cdk.Stack {
       this,
       "ChatterSubscriptionAuthorizerFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "chatter-subscription-authorizer.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -698,7 +707,8 @@ export class ProjectsStack extends cdk.Stack {
       this,
       "ProjectProgressUpdater",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "project-progress-updater.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -748,7 +758,8 @@ export class ProjectsStack extends cdk.Stack {
       this,
       "AssessmentCompletionNotifier",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "assessment-completion-notifier.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -794,7 +805,8 @@ export class ProjectsStack extends cdk.Stack {
       this,
       "AssessmentCompletionResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "assessment-completion-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         timeout: cdk.Duration.seconds(30),
@@ -832,7 +844,8 @@ export class ProjectsStack extends cdk.Stack {
       this,
       "AssessmentProgressResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "assessment-progress-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -878,7 +891,8 @@ export class ProjectsStack extends cdk.Stack {
       this,
       "IntakeConsentResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "intake-consent-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -939,7 +953,8 @@ export class ProjectsStack extends cdk.Stack {
       this,
       "DesignProgressNotifier",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "design-progress-notifier.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -981,7 +996,8 @@ export class ProjectsStack extends cdk.Stack {
       this,
       "DesignProgressResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "design-progress-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         timeout: cdk.Duration.seconds(30),
@@ -1018,7 +1034,8 @@ export class ProjectsStack extends cdk.Stack {
       this,
       "DesignProgressSubscriptionAuthorizerFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "design-progress-subscription-authorizer.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -1072,7 +1089,8 @@ export class ProjectsStack extends cdk.Stack {
       this,
       "ProjectSubscriptionAuthorizerFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "project-subscription-authorizer.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -1129,7 +1147,8 @@ export class ProjectsStack extends cdk.Stack {
       this,
       "GenerateReportUrlFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "generate-report-url.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {

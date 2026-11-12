@@ -15,6 +15,8 @@ module.exports = {
     "<rootDir>/src/lambda/__tests__/fixtures/",
     "<rootDir>/src/utils/__tests__/.*-helper\\.ts$",
     "<rootDir>/src/lambda/adapters/__tests__/helpers/",
+    // Docker-dependent: runs under jest.bundling.config.js (npm run test:bundling)
+    "<rootDir>/test/arbiter-layer-import-smoke\\.test\\.ts$",
   ],
   modulePathIgnorePatterns: [
     "<rootDir>/cdk.out/",
@@ -50,6 +52,7 @@ module.exports = {
   ],
   coverageDirectory: "coverage",
   coverageReporters: ["text", "lcov", "html"],
+  setupFiles: ["<rootDir>/test/jest-env-setup.ts"],
   setupFilesAfterEnv: ["<rootDir>/test/setup.ts"],
   testTimeout: 30000,
   maxWorkers: "50%",

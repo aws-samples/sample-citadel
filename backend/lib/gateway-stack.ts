@@ -7,6 +7,7 @@ import * as logs from "aws-cdk-lib/aws-logs";
 import * as ssm from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
 import { REGISTRY_GENERATION } from "./registry-generation";
+import { LAMBDA_ARCHITECTURE, NODE_RUNTIME } from "./runtime-constants";
 
 export interface GatewayStackProps extends cdk.StackProps {
   environment: string;
@@ -41,7 +42,8 @@ export class GatewayStack extends cdk.Stack {
 
     // Shared Lambda authorizer (one per environment, used by all per-app APIs)
     this.authorizerFunction = new lambda.Function(this, "AppApiAuthorizer", {
-      runtime: lambda.Runtime.NODEJS_24_X,
+      runtime: NODE_RUNTIME,
+      architecture: LAMBDA_ARCHITECTURE,
       handler: "app-api-authorizer.handler",
       code: lambda.Code.fromAsset("dist/lambda"),
       environment: {
@@ -88,7 +90,8 @@ export class GatewayStack extends cdk.Stack {
     // Publish handler — orchestrates API Gateway provisioning
     this.publishHandler = new lambda.Function(this, "AppPublishHandler", {
       functionName: `citadel-app-publish-handler-${props.environment}`,
-      runtime: lambda.Runtime.NODEJS_24_X,
+      runtime: NODE_RUNTIME,
+      architecture: LAMBDA_ARCHITECTURE,
       handler: "app-publish-handler.handler",
       code: lambda.Code.fromAsset("dist/lambda"),
       environment: {
@@ -120,7 +123,8 @@ export class GatewayStack extends cdk.Stack {
 
     // Metrics handler — aggregates API Gateway access logs
     this.metricsHandler = new lambda.Function(this, "AppMetricsHandler", {
-      runtime: lambda.Runtime.NODEJS_24_X,
+      runtime: NODE_RUNTIME,
+      architecture: LAMBDA_ARCHITECTURE,
       handler: "app-metrics-handler.handler",
       code: lambda.Code.fromAsset("dist/lambda"),
       environment: {

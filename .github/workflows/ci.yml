@@ -80,6 +80,10 @@ jobs:
       - name: Unit tests
         run: npm test -- --ci --coverage
         env:
+          # Skip Docker-based Python layer bundling in unit tests (belt-and-
+          # suspenders for the jest-env-setup.ts default).
+          CITADEL_SKIP_BUNDLING: "1"
+          ENVIRONMENT: test
           # Backend Build + Synth synthesizes with ENVIRONMENT=test, so the
           # downloaded cdk.out/*.template.json files are named
           # citadel-<stack>-test.template.json. The cdk.out-conditional
@@ -102,6 +106,10 @@ jobs:
         working-directory: backend
     steps:
       - uses: actions/checkout@v7
+
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+        with:
+          platforms: arm64
 
       - uses: actions/setup-node@v7
         with:
@@ -140,6 +148,11 @@ jobs:
           CDK_DEFAULT_ACCOUNT: "000000000000"
           CDK_DEFAULT_REGION: us-east-1
 
+      - name: Layer import smoke test (Docker, reuses cdk.out from synth)
+        run: npm run test:bundling
+        env:
+          ENVIRONMENT: test
+
       - name: Verify SupervisorAgent bundle (governance + common packages present)
         run: bash backend/scripts/verify-supervisor-bundle.sh
         working-directory: ${{ github.workspace }}
@@ -174,6 +187,10 @@ jobs:
         working-directory: backend
     steps:
       - uses: actions/checkout@v7
+
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+        with:
+          platforms: arm64
 
       - uses: actions/setup-node@v7
         with:
@@ -265,6 +282,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+        with:
+          platforms: arm64
+
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -277,6 +298,17 @@ jobs:
 
       - name: Governance resolver tests
         run: npm test -- --ci --testPathPatterns governance
+        env:
+          # Skip Docker-based Python layer bundling in unit tests.
+          # arbiter-stack-governance-tables.test.ts imports ArbiterStack
+          # whose PythonFunction/LayerVersion constructs trigger a
+          # `docker build --platform linux/arm64` via the lazy proxy in
+          # runtime-constants.ts.  With this flag the proxy returns a
+          # placeholder image, so no Docker daemon is needed.  The
+          # dedicated layer-import smoke test remains the only
+          # Docker-touching test (it already self-skips without Docker).
+          CITADEL_SKIP_BUNDLING: "1"
+          ENVIRONMENT: test
 
       - name: Build Lambda bundles
         run: npm run build:lambda

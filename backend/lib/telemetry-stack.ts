@@ -31,6 +31,7 @@ import {
   METRIC_DRIFT_DELTA,
   DIMENSION_ENVIRONMENT_EVAL,
 } from "../src/utils/eval-metrics-constants";
+import { LAMBDA_ARCHITECTURE, NODE_RUNTIME } from "./runtime-constants";
 
 // --- Cost-reconciler metric contract (pinned literals; see
 // cost-ledger-reconciler.ts `emitMetrics`). Not exported from
@@ -321,7 +322,8 @@ export class TelemetryStack extends cdk.Stack {
       "CostLedgerWriter",
       {
         functionName: `citadel-cost-ledger-writer-${props.environment}`,
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "cost-ledger-writer.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         timeout: cdk.Duration.seconds(30),
@@ -428,7 +430,8 @@ export class TelemetryStack extends cdk.Stack {
       "CostLedgerReconciler",
       {
         functionName: `citadel-cost-ledger-reconciler-${props.environment}`,
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "cost-ledger-reconciler.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         timeout: cdk.Duration.minutes(5),
@@ -582,7 +585,8 @@ export class TelemetryStack extends cdk.Stack {
       "CostQueryHandler",
       {
         functionName: `citadel-cost-query-handler-${props.environment}`,
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "cost-query-handler.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         timeout: cdk.Duration.seconds(30),
@@ -633,7 +637,8 @@ export class TelemetryStack extends cdk.Stack {
       "CostBudgetHandler",
       {
         functionName: `citadel-cost-budget-handler-${props.environment}`,
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "cost-budget-handler.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         timeout: cdk.Duration.seconds(30),
@@ -670,7 +675,8 @@ export class TelemetryStack extends cdk.Stack {
       "TraceQueryHandler",
       {
         functionName: `citadel-trace-query-handler-${props.environment}`,
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "trace-query-handler.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         timeout: cdk.Duration.seconds(30),
@@ -982,7 +988,8 @@ export class TelemetryStack extends cdk.Stack {
       "ReplayPackageHandler",
       {
         functionName: `citadel-replay-package-handler-${props.environment}`,
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "replay-package-handler.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         timeout: cdk.Duration.seconds(30),
@@ -1066,7 +1073,8 @@ export class TelemetryStack extends cdk.Stack {
       "CostBudgetEvaluator",
       {
         functionName: `citadel-cost-budget-evaluator-${props.environment}`,
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "cost-budget-evaluator.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         timeout: cdk.Duration.minutes(5),
@@ -1137,7 +1145,8 @@ export class TelemetryStack extends cdk.Stack {
       "EvalCaseScorerFunction",
       {
         functionName: `citadel-eval-case-scorer-${props.environment}`,
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "eval-case-scorer.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -1216,7 +1225,8 @@ export class TelemetryStack extends cdk.Stack {
       "EvalRunAggregatorFunction",
       {
         functionName: `citadel-eval-run-aggregator-${props.environment}`,
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "eval-run-aggregator.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -1280,7 +1290,8 @@ export class TelemetryStack extends cdk.Stack {
       "EvalSamplingSelectorFunction",
       {
         functionName: `citadel-eval-sampling-selector-${props.environment}`,
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "eval-sampling-selector.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -1370,7 +1381,8 @@ export class TelemetryStack extends cdk.Stack {
       "EvalSampleScorerFunction",
       {
         functionName: `citadel-eval-sample-scorer-${props.environment}`,
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "eval-sample-scorer.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -1466,7 +1478,8 @@ export class TelemetryStack extends cdk.Stack {
       "EvalSamplingConfigResolverFunction",
       {
         functionName: `citadel-eval-sampling-config-resolver-${props.environment}`,
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "eval-sampling-config-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -1509,7 +1522,8 @@ export class TelemetryStack extends cdk.Stack {
       "EvalDriftDetectorFunction",
       {
         functionName: `citadel-eval-drift-detector-${props.environment}`,
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "eval-drift-detector.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -1557,7 +1571,8 @@ export class TelemetryStack extends cdk.Stack {
       "EvalDriftFindingWriterFunction",
       {
         functionName: `citadel-eval-drift-finding-writer-${props.environment}`,
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "eval-drift-finding-writer.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {

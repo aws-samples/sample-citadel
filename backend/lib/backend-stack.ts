@@ -25,7 +25,11 @@ import * as crypto from "crypto";
 import { Construct } from "constructs";
 import { NagSuppressions } from "cdk-nag";
 import { REGISTRY_GENERATION } from "./registry-generation";
-import { PYTHON_RUNTIME } from "./python-runtime";
+import {
+  PYTHON_RUNTIME,
+  LAMBDA_ARCHITECTURE,
+  NODE_RUNTIME,
+} from "./runtime-constants";
 import {
   SEED_VERSION as SEED_BLUEPRINTS_VERSION,
   computeSeedBlueprintFingerprint,
@@ -525,7 +529,8 @@ export class BackendStack extends cdk.Stack {
       this,
       "RegistryProvisionerFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "registry-provisioner.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         timeout: cdk.Duration.minutes(5),
@@ -654,7 +659,8 @@ export class BackendStack extends cdk.Stack {
       this,
       "ReconcileAppsMetaScheduledFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "reconcile-apps-meta-scheduled-handler.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -723,7 +729,8 @@ export class BackendStack extends cdk.Stack {
       this,
       "ModelCatalogSyncFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "model-catalog-sync.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -831,7 +838,8 @@ export class BackendStack extends cdk.Stack {
       this,
       "PreTokenGenerationFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "pre-token-generation.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         functionName: `citadel-pre-token-gen-${props.environment}`,
@@ -1045,7 +1053,8 @@ export class BackendStack extends cdk.Stack {
       this,
       "AgentConfigResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "agent-config-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -1086,7 +1095,8 @@ export class BackendStack extends cdk.Stack {
       this,
       "ModelConfigResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "model-config-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -1121,7 +1131,8 @@ export class BackendStack extends cdk.Stack {
       this,
       "ToolConfigResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "tool-config-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -1412,7 +1423,8 @@ export class BackendStack extends cdk.Stack {
       this,
       "TaskRunnerResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "task-runner-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -1431,7 +1443,8 @@ export class BackendStack extends cdk.Stack {
       this,
       "UserManagementResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "user-management-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -1490,7 +1503,8 @@ export class BackendStack extends cdk.Stack {
       this,
       "IntegrationResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "integration-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -1519,7 +1533,8 @@ export class BackendStack extends cdk.Stack {
       this,
       "GatewayRegistrationHandler",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "gateway-registration-handler.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -1797,7 +1812,8 @@ export class BackendStack extends cdk.Stack {
       this,
       "OrganizationResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "organization-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -1837,6 +1853,7 @@ export class BackendStack extends cdk.Stack {
       "SeedOrganizationsFunction",
       {
         runtime: PYTHON_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "index.handler",
         code: lambda.Code.fromAsset(
           path.join(__dirname, "../../src/lambda/seed-organizations"),
@@ -1882,7 +1899,8 @@ export class BackendStack extends cdk.Stack {
       this,
       "SeedBlueprintsFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "seed-blueprints/index.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         timeout: cdk.Duration.seconds(30),
@@ -1935,7 +1953,8 @@ export class BackendStack extends cdk.Stack {
       this,
       "SeedModelCatalogFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "seed-model-catalog/index.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         timeout: cdk.Duration.seconds(30),
@@ -1993,6 +2012,7 @@ export class BackendStack extends cdk.Stack {
       "SeedAdminUserFunction",
       {
         runtime: PYTHON_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "index.handler",
         code: lambda.Code.fromAsset("src/lambda/seed-admin-user"),
         timeout: cdk.Duration.seconds(30),
@@ -2064,7 +2084,8 @@ export class BackendStack extends cdk.Stack {
       this,
       "WorkflowResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "workflow-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -2105,7 +2126,8 @@ export class BackendStack extends cdk.Stack {
       this,
       "AppComponentRegistrationHandler",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "app-component-registration-handler.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -2150,7 +2172,8 @@ export class BackendStack extends cdk.Stack {
       this,
       "ExecutionResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "execution-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -2257,7 +2280,8 @@ export class BackendStack extends cdk.Stack {
       this,
       "WorkflowProgressFanoutFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "workflow-progress-fanout.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -2345,7 +2369,8 @@ export class BackendStack extends cdk.Stack {
       this,
       "AgentMessageHandlerFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "agent-message-handler.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -2491,7 +2516,8 @@ export class BackendStack extends cdk.Stack {
       this,
       "AppInvokeHandler",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "app-invoke-handler.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         functionName: `citadel-app-invoke-handler-${props.environment}`,
@@ -3015,7 +3041,8 @@ export class BackendStack extends cdk.Stack {
       this,
       "DataStoreResolverFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "datastore-resolver.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -3254,7 +3281,8 @@ export class BackendStack extends cdk.Stack {
       this,
       "BackendSubscriptionAuthorizerFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "backend-subscription-authorizer.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
@@ -3790,7 +3818,8 @@ export class BackendStack extends cdk.Stack {
       this,
       "SeedEvalSuitesFunction",
       {
-        runtime: lambda.Runtime.NODEJS_24_X,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
         handler: "seed-eval-suites/index.handler",
         code: lambda.Code.fromAsset("dist/lambda"),
         timeout: cdk.Duration.seconds(30),
