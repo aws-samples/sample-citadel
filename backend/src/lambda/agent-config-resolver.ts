@@ -1529,7 +1529,8 @@ export async function searchAgentConfigsRegistry(
 }
 
 /** Per-agent error class for the activation result. */
-export type ActivationErrorClass = "throttled" | "refused" | "not_found" | "rejected" | "unknown";
+export type ActivationErrorClass =
+  "throttled" | "refused" | "not_found" | "rejected" | "unknown";
 
 /** Per-agent failure detail in a bulk activation. */
 export interface ActivationFailure {
@@ -1543,6 +1544,12 @@ export interface ActivateAgentsResult {
   activated: string[];
   failed: string[];
   alreadyActive: string[];
+  /**
+   * Agents whose submit succeeded but the record landed in PENDING_APPROVAL
+   * (manual review mode). The UI should tell the user to approve them on
+   * the Approvals page, then come back and activate again.
+   */
+  submitted?: string[];
   /**
    * Per-agent error details (parallel to `failed`). Present only when the
    * caller processes agents sequentially with error classification.
@@ -1662,6 +1669,7 @@ export async function activateProjectAgents(
     activated: [],
     failed: [],
     alreadyActive: [],
+    submitted: [],
     failureDetails: [],
   };
 
@@ -1724,12 +1732,19 @@ export async function activateProjectAgents(
           "ValidationError: Rejected records cannot be resubmitted; create a new record",
         );
       }
-      await registryService.submitForApproval(record.recordId);
-      result.activated.push(name);
+      const refreshed = await registryService.submitForApproval(
+        record.recordId,
+      );
+      // Route based on the post-submit status: auto-approved -> activated,
+      // manual review -> submitted (new list for the intake to distinguish).
+      if (refreshed?.status === RegistryRecordStatusValues.PENDING_APPROVAL) {
+        result.submitted!.push(name);
+      } else {
+        result.activated.push(name);
+      }
     } catch (err) {
       const errorClass = classifyActivationError(err);
-      const message =
-        err instanceof Error ? err.message : String(err);
+      const message = err instanceof Error ? err.message : String(err);
       console.error(
         `Failed to activate agent "${name}" [${errorClass}]: ${message}`,
       );
@@ -1749,18 +1764,12 @@ function classifyActivationError(err: unknown): ActivationErrorClass {
   if (RegistryService.isThrottlingError(err)) {
     return "throttled";
   }
-  const name =
-    (err as { name?: string })?.name ?? "";
-  const message =
-    err instanceof Error ? err.message : String(err);
-  const statusCode =
-    (err as { $metadata?: { httpStatusCode?: number } })?.$metadata
-      ?.httpStatusCode;
+  const name = (err as { name?: string })?.name ?? "";
+  const message = err instanceof Error ? err.message : String(err);
+  const statusCode = (err as { $metadata?: { httpStatusCode?: number } })
+    ?.$metadata?.httpStatusCode;
 
-  if (
-    name === "ResourceNotFoundException" ||
-    statusCode === 404
-  ) {
+  if (name === "ResourceNotFoundException" || statusCode === 404) {
     return "not_found";
   }
   if (message.includes("Rejected records")) {

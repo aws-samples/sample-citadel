@@ -346,7 +346,7 @@ def _record_stage_progress(session_id: str, stage: str, summary: str) -> None:
 
 _ACTIVATE_MUTATION = """mutation IntakeActivate($sessionId: ID!) {
   intakeActivateProjectAgents(sessionId: $sessionId) {
-    activated failed alreadyActive matchedBy throttled
+    activated failed alreadyActive submitted matchedBy throttled
   }
 }"""
 
@@ -768,23 +768,24 @@ def check_fabrication_status() -> str:
 
     if status == "complete":
         if draft_agents:
-            # DRAFT = never submitted for approval. The intake tools do not
-            # have a submit-for-approval action today — the user must submit
-            # from the registry UI or an operator must approve directly.
+            # DRAFT records will be submitted for approval automatically
+            # when the user runs Activate agents — the activation mutation
+            # calls submitForApproval on every DRAFT record.
             draft_summary = (
                 f"All {total} agents built successfully. "
                 f"{_join_names(draft_agents)} "
                 + ("has" if len(draft_agents) == 1 else "have")
-                + " not been submitted for approval yet — you can submit "
-                + ("it" if len(draft_agents) == 1 else "them")
-                + " from the agent registry."
+                + " not been submitted for approval yet — "
+                + ("it" if len(draft_agents) == 1 else "they")
+                + " will be submitted when you activate."
             )
+            activate_count = total
             return _result(
                 True, "complete",
                 draft_summary,
-                "Submit the agents for approval in the registry, then come "
-                "back and check status again.",
-                [_action("Check again", "Check the build status again"),
+                "Want me to activate them? That will submit the agents for approval.",
+                [_action(f"Activate {activate_count} agents",
+                         "Yes, activate the agents"),
                  _action("Not now", "Not now")],
                 **extra,
             )
@@ -828,7 +829,10 @@ def check_fabrication_status() -> str:
             bits.append(
                 f"{_join_names(draft_agents)} "
                 + ("has" if len(draft_agents) == 1 else "have")
-                + " not been submitted for approval yet."
+                + " not been submitted for approval yet"
+                + " — activation will submit "
+                + ("it" if len(draft_agents) == 1 else "them")
+                + "."
             )
         if pending_approval:
             bits.append(
@@ -836,8 +840,9 @@ def check_fabrication_status() -> str:
                 + ("is" if len(pending_approval) == 1 else "are")
                 + " awaiting approval on the Approvals page."
             )
-        # Activatable = completed agents that are NOT pending approval and NOT draft.
-        not_activatable = set(pending_approval) | set(draft_agents)
+        # Activatable = completed agents that are NOT pending approval.
+        # DRAFT agents ARE activatable — activation submits them for approval.
+        not_activatable = set(pending_approval)
         activatable = [n for n in succeeded if n not in not_activatable]
         if not_activatable and not activatable:
             # All completed agents are pending/draft — can't activate yet.
@@ -973,10 +978,12 @@ def activate_agents() -> str:
     activated = outcome.get("activated") or []
     failed = outcome.get("failed") or []
     already = outcome.get("alreadyActive") or []
+    submitted = outcome.get("submitted") or []
     matched_by = outcome.get("matchedBy")
     activation = {
         "activated": activated, "failed": failed,
-        "alreadyActive": already, "matchedBy": matched_by,
+        "alreadyActive": already, "submitted": submitted,
+        "matchedBy": matched_by,
     }
 
     # LIVE INCIDENT 2026-11-10: when the registry is rate-limited, the
@@ -995,7 +1002,7 @@ def activate_agents() -> str:
             activation=activation, retryable=True,
         )
 
-    if matched_by is None and not activated and not already:
+    if matched_by is None and not activated and not already and not submitted:
         # Approved zero-activated explanation (failure mode 6) — do NOT advance.
         return _result(
             True, "zero_matched",
@@ -1011,7 +1018,7 @@ def activate_agents() -> str:
     set_postfab_marker(session_id, stage="activated", activation=activation)
     _record_stage_progress(session_id, "activated", "Agents activated")
     marker = get_postfab_marker(session_id)
-    total = len(activated) + len(failed) + len(already)
+    total = len(activated) + len(failed) + len(already) + len(submitted)
 
     if failed:
         summary = (
@@ -1019,6 +1026,14 @@ def activate_agents() -> str:
             f"{_join_names(failed)} couldn't be activated — it might need a "
             "governance sign-off before it can run. I'd suggest trying that one again first."
         )
+        if submitted:
+            summary += (
+                f" {_join_names(submitted)} "
+                + ("was" if len(submitted) == 1 else "were")
+                + " submitted for approval — approve "
+                + ("it" if len(submitted) == 1 else "them")
+                + " on the Approvals page."
+            )
         return _result(
             True, "partial", summary,
             "How would you like to proceed?",
@@ -1027,6 +1042,38 @@ def activate_agents() -> str:
              _action("Stop here", "Stop here")],
             activation=activation,
         )
+
+    # Submitted-only path: all agents submitted for manual review, none
+    # auto-approved. The user must approve on the Approvals page, then
+    # come back and activate again.
+    if submitted and not activated and not already:
+        noun = "agent" if len(submitted) == 1 else "agents"
+        summary = (
+            f"Done — {len(submitted)} {noun} submitted for approval. "
+            "Approve them on the Approvals page, then run Activate agents again."
+        )
+        return _result(
+            True, "submitted_for_approval", summary,
+            "Check the Approvals page, then come back and activate.",
+            [_action("Check build status", "Check the build status again"),
+             _action("Not now", "Not now")],
+            activation=activation,
+        )
+
+    # Mixed path: some auto-approved, some submitted for manual review.
+    if submitted:
+        active_count = len(activated) + len(already)
+        summary = (
+            f"Done — {active_count} agents are now active"
+        )
+        if already:
+            summary += f" ({len(already)} were already active)"
+        summary += (
+            f" and {len(submitted)} submitted for approval. "
+            "Approve them on the Approvals page, then run Activate agents again."
+        )
+        question, actions = _app_gate(session_id, marker)
+        return _result(True, "activated", summary, question, actions, activation=activation)
 
     if already and activated:
         summary = (

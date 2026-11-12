@@ -281,7 +281,12 @@ class TestLiveStatusPendingApproval:
 # ===========================================================================
 
 class TestLiveStatusDraft:
-    """Agent record was never submitted for approval — still in DRAFT."""
+    """Agent record was never submitted for approval — still in DRAFT.
+
+    Fix: DRAFT agents ARE now activatable — activation submits them for
+    approval. The old behavior told users to "submit from the registry UI"
+    which doesn't exist.
+    """
 
     def test_draft_shows_not_submitted(
         self, jobs_table, marker_store, registry_stubber,
@@ -294,11 +299,11 @@ class TestLiveStatusDraft:
         states = {a["name"]: a["state"] for a in result["agents"]}
         assert "not yet submitted" in states["AgentA"]
         assert result["draft_agents"] == ["AgentA"]
-        # Should NOT offer activation — draft agents can't be activated
+        # DRAFT agents ARE activatable — activation submits them
         labels = [a["label"] for a in result["actions"]]
-        assert not any("Activate" in label for label in labels)
+        assert any("Activate" in label for label in labels)
 
-    def test_draft_complete_section_mentions_registry(
+    def test_draft_complete_section_recommends_activation(
         self, jobs_table, marker_store, registry_stubber,
     ):
         items = [_job("AgentA", "COMPLETED")]
@@ -307,7 +312,10 @@ class TestLiveStatusDraft:
         result = _run_status(jobs_table, items, marker_store)
 
         assert "not been submitted" in result["summary"]
-        assert "registry" in result["summary"].lower()
+        # Must recommend activation, never "registry UI"
+        assert "activate" in result["summary"].lower() or \
+            "activate" in result["consent_question"].lower()
+        assert "registry UI" not in result["summary"]
 
 
 # ===========================================================================
