@@ -189,6 +189,12 @@ function resolveBuildImageDir(startDir: string): string {
  * `aws:cdk:bundling-stacks: []` never trigger the build because CDK
  * skips the `.run()` call entirely.
  *
+ * When `CITADEL_SKIP_BUNDLING=1` is set (unit-test CI), the proxy never
+ * resolves the real Docker image — all property reads return the inert
+ * placeholder, so `docker build` is never spawned.  The dedicated
+ * layer-import smoke test is the only Docker-touching test; it already
+ * skips itself when Docker is unavailable.
+ *
  * We use a Proxy rather than class inheritance because DockerImage
  * declares `image` as a readonly property, and TypeScript strict mode
  * prohibits overriding that with a getter.
@@ -218,6 +224,13 @@ function lazyBuildImage(
         prop === "toJSON" ||
         prop === "cp"
       ) {
+        // CITADEL_SKIP_BUNDLING: return the placeholder's own values so
+        // no Docker daemon is contacted.  Unit tests that set
+        // `aws:cdk:bundling-stacks: []` never call .run(), and asset-hash
+        // computation only reads .image — the placeholder string is fine.
+        if (process.env.CITADEL_SKIP_BUNDLING) {
+          return Reflect.get(target, prop, receiver);
+        }
         const real = resolve();
         const val = (real as unknown as Record<string, unknown>)[
           prop as string
