@@ -78,6 +78,14 @@ interface BackendStackProps extends cdk.StackProps {
  */
 export const AGENTS_TABLE_GSI_NAME = "sourceProjectId-index";
 
+/**
+ * Single-sourced GSI names for the WorkflowsTable. Consumers that import the
+ * table by deterministic name MUST include any queried index in their IAM
+ * grants (same pattern as AGENTS_TABLE_GSI_NAME above).
+ */
+export const WORKFLOWS_TABLE_ORG_STATUS_INDEX = "OrgStatusIndex";
+export const WORKFLOWS_TABLE_BLUEPRINT_INDEX = "BlueprintIndex";
+
 export class BackendStack extends cdk.Stack {
   public readonly appSyncApi: appsync.GraphqlApi;
   public readonly userPool: cognito.UserPool;
@@ -473,14 +481,14 @@ export class BackendStack extends cdk.Stack {
     });
 
     this.workflowsTable.addGlobalSecondaryIndex({
-      indexName: "OrgStatusIndex",
+      indexName: WORKFLOWS_TABLE_ORG_STATUS_INDEX,
       partitionKey: { name: "orgId", type: dynamodb.AttributeType.STRING },
       sortKey: { name: "status", type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
     this.workflowsTable.addGlobalSecondaryIndex({
-      indexName: "BlueprintIndex",
+      indexName: WORKFLOWS_TABLE_BLUEPRINT_INDEX,
       partitionKey: {
         name: "isBlueprint",
         type: dynamodb.AttributeType.STRING,

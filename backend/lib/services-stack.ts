@@ -29,7 +29,10 @@ import {
   ECR_PLATFORM,
   NODE_RUNTIME,
 } from "./runtime-constants";
-import { AGENTS_TABLE_GSI_NAME } from "./backend-stack";
+import {
+  AGENTS_TABLE_GSI_NAME,
+  WORKFLOWS_TABLE_ORG_STATUS_INDEX,
+} from "./backend-stack";
 
 /**
  * Resolve the repo-root `service/` directory regardless of whether this
@@ -1612,9 +1615,6 @@ def handler(event, context):
       // IAM — union of the delegated cores' least-privilege sets, expressed
       // as explicit deterministic-name ARNs (the tables live on
       // BackendStack; construct grants would need cross-stack imports).
-      // Actions are the exact commands the delegated cores issue — no
-      // Query/Scan or GSI access exists on these paths, so no /index/*
-      // wildcard is granted.
       const tableArn = (name: string): string =>
         `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/${name}`;
       // workflows + apps: createWorkflow/importBlueprint Put, publishWorkflow
@@ -1641,6 +1641,21 @@ def handler(event, context):
         new iam.PolicyStatement({
           actions: ["dynamodb:Scan"],
           resources: [tableArn(`citadel-apps-${props.environment}`)],
+        }),
+      );
+      // findExistingDraftBlueprint queries OrgStatusIndex on the workflows
+      // table (idempotency guard for intakeCreateBlueprint). The index ARN
+      // is distinct from the table ARN, so it needs its own grant.
+      // queryAppsViaOrgIndex (bundled from registry-agent-record-resolver)
+      // queries AppsTable.OrgIndex — grant defensively since the module is
+      // part of the Lambda deployment package.
+      intakeOrchestrationResolverFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["dynamodb:Query"],
+          resources: [
+            `${tableArn(`citadel-workflows-${props.environment}`)}/index/${WORKFLOWS_TABLE_ORG_STATUS_INDEX}`,
+            `${tableArn(`citadel-apps-${props.environment}`)}/index/OrgIndex`,
+          ],
         }),
       );
       // agent-config: verifyAgentsExist reads (Get/BatchGet) + the
