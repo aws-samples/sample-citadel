@@ -1459,8 +1459,29 @@ describe("handler — GA agent-registry events", () => {
       "#createdAt = if_not_exists(#createdAt, :recordCreatedAt)",
     );
   });
-});
 
+  test("GA merge does NOT set sourceProjectId — GA records carry no reliable source for it", async () => {
+    mockGetResource.mockResolvedValueOnce({
+      ...zdRecord,
+      customDescriptorContent: JSON.stringify({
+        categories: ["fabricated"],
+        icon: "icon.png",
+        state: "active",
+        orgId: "org-1",
+        sourceProjectId: "proj-sneaky",
+      }),
+    });
+    ddbMock.on(UpdateCommand).resolves({});
+
+    await handler(makeGaDraftEvent() as RegistryEvent);
+
+    const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
+    expect(input.UpdateExpression).not.toContain("sourceProjectId");
+    expect(
+      input.ExpressionAttributeValues![":sourceProjectId"],
+    ).toBeUndefined();
+  });
+});
 // ---------------------------------------------------------------------------
 // sendToDlq
 // ---------------------------------------------------------------------------

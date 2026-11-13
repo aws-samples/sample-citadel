@@ -533,6 +533,10 @@
           {
             "AttributeName": "agentId",
             "AttributeType": "S"
+          },
+          {
+            "AttributeName": "sourceProjectId",
+            "AttributeType": "S"
           }
         ],
         "BillingMode": "PAY_PER_REQUEST",
@@ -566,6 +570,26 @@
           {
             "Key": "Team",
             "Value": "platform"
+          }
+        ],
+        "GlobalSecondaryIndexes": [
+          {
+            "IndexName": "sourceProjectId-index",
+            "KeySchema": [
+              {
+                "AttributeName": "sourceProjectId",
+                "KeyType": "HASH"
+              }
+            ],
+            "Projection": {
+              "NonKeyAttributes": [
+                "registryRecordId",
+                "registryStatus",
+                "orgId",
+                "name"
+              ],
+              "ProjectionType": "INCLUDE"
+            }
           }
         ]
       }
