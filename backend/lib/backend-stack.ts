@@ -70,6 +70,14 @@ interface BackendStackProps extends cdk.StackProps {
   alarmDelivery?: AlarmDeliveryConfig;
 }
 
+/**
+ * Single-sourced GSI name for the AgentConfigTable's project-scoped lookup
+ * index. Consumers that import the table by deterministic name (not by
+ * construct reference) MUST include this index in their IAM grants so that
+ * findProjectAgentRecords' Query succeeds.
+ */
+export const AGENTS_TABLE_GSI_NAME = "sourceProjectId-index";
+
 export class BackendStack extends cdk.Stack {
   public readonly appSyncApi: appsync.GraphqlApi;
   public readonly userPool: cognito.UserPool;
@@ -396,7 +404,7 @@ export class BackendStack extends cdk.Stack {
     // backfilled via: npx ts-node scripts/reconcile-legacy-rows.ts
     //   --backfill-source-project-id --table-agents <TABLE> [--apply]
     this.agentConfigTable.addGlobalSecondaryIndex({
-      indexName: "sourceProjectId-index",
+      indexName: AGENTS_TABLE_GSI_NAME,
       partitionKey: {
         name: "sourceProjectId",
         type: dynamodb.AttributeType.STRING,

@@ -29,6 +29,7 @@ import {
   ECR_PLATFORM,
   NODE_RUNTIME,
 } from "./runtime-constants";
+import { AGENTS_TABLE_GSI_NAME } from "./backend-stack";
 
 /**
  * Resolve the repo-root `service/` directory regardless of whether this
@@ -1654,6 +1655,17 @@ def handler(event, context):
             "dynamodb:PutItem",
           ],
           resources: [tableArn(`citadel-agents-${props.environment}`)],
+        }),
+      );
+      // activateProjectAgents → findProjectAgentRecords issues a Query
+      // against the sourceProjectId-index GSI. The index ARN is distinct
+      // from the table ARN, so it needs its own grant.
+      intakeOrchestrationResolverFn.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: ["dynamodb:Query"],
+          resources: [
+            `${tableArn(`citadel-agents-${props.environment}`)}/index/${AGENTS_TABLE_GSI_NAME}`,
+          ],
         }),
       );
       // NEW relative to the reused cores: server-side orgId/projectId
