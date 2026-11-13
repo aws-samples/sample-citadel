@@ -343,6 +343,7 @@ describe("agent-config-resolver governance activation gate (US-IMP)", () => {
       name: "Imported",
       status: "DRAFT",
       customDescriptorContent: JSON.stringify({
+        citadelKind: "agent",
         sourceProjectId: "proj-1",
         ...importedMeta("pending"),
       }),
@@ -352,6 +353,7 @@ describe("agent-config-resolver governance activation gate (US-IMP)", () => {
       name: "Plain",
       status: "DRAFT",
       customDescriptorContent: JSON.stringify({
+        citadelKind: "agent",
         sourceProjectId: "proj-1",
         categories: [],
         icon: "",

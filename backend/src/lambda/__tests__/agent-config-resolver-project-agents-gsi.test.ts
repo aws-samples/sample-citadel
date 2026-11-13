@@ -165,7 +165,11 @@ function registryRecord(
     name: `Agent ${recordId}`,
     description: "desc",
     status: "DRAFT",
-    customDescriptorContent: JSON.stringify({ sourceProjectId, orgId }),
+    customDescriptorContent: JSON.stringify({
+      citadelKind: "agent",
+      sourceProjectId,
+      orgId,
+    }),
   };
 }
 
