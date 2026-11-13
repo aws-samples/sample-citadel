@@ -36,6 +36,11 @@ import {
   _resetRegistryService,
 } from "../agent-config-resolver";
 
+// ── DDB mock for the GSI query path used by findProjectAgentRecords ───────
+import { DynamoDBDocumentClient, QueryCommand } from "@aws-sdk/lib-dynamodb";
+import { mockClient } from "aws-sdk-client-mock";
+const dynamoMock = mockClient(DynamoDBDocumentClient);
+
 // ── Mock RegistryService ────────────────────────────────────────────────
 const mockGetResource = jest.fn();
 const mockDeleteResource = jest.fn();
@@ -111,8 +116,13 @@ jest.mock("../../services/registry-service", () => {
   }));
   MockRS.isThrottlingError = (err: unknown): boolean => {
     const name = (err as { name?: string })?.name ?? "";
-    const statusCode = (err as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode;
-    return name === "ThrottlingException" || name === "TooManyRequestsException" || statusCode === 429;
+    const statusCode = (err as { $metadata?: { httpStatusCode?: number } })
+      ?.$metadata?.httpStatusCode;
+    return (
+      name === "ThrottlingException" ||
+      name === "TooManyRequestsException" ||
+      statusCode === 429
+    );
   };
   return {
     RegistryService: MockRS,
@@ -203,6 +213,9 @@ describe("agent-config-resolver — tenancy + role gate (finding 1fcfd11e)", () 
     };
     _resetRegistryService();
     jest.clearAllMocks();
+    dynamoMock.reset();
+    // Default: GSI query returns empty (tests that need records override this)
+    dynamoMock.on(QueryCommand).resolves({ Items: [] });
   });
 
   afterAll(() => {
@@ -466,9 +479,8 @@ describe("agent-config-resolver — tenancy + role gate (finding 1fcfd11e)", () 
 
     test("dispatch calls assertProjectOrgAccess(projectId, event) BEFORE activation runs", async () => {
       mockAssertProjectOrgAccess.mockResolvedValue(undefined);
-      mockListResourcesChecked.mockResolvedValue({
-        items: [], partial: false, droppedCount: 0, throttled: false,
-      });
+      // GSI returns empty — no agents to activate
+      dynamoMock.on(QueryCommand).resolves({ Items: [] });
 
       await handler(
         makeEvent(
@@ -504,15 +516,18 @@ describe("agent-config-resolver — tenancy + role gate (finding 1fcfd11e)", () 
     });
 
     test("PINNING: activateProjectAgents(projectId) itself remains callable with NO event (intake-orchestration-resolver.ts's internal call site)", async () => {
-      mockListResourcesChecked.mockResolvedValue({
-        items: [], partial: false, droppedCount: 0, throttled: false,
-      });
+      // GSI returns empty — no agents to activate
+      dynamoMock.on(QueryCommand).resolves({ Items: [] });
 
       const result = await activateProjectAgents("proj-1");
 
-      expect(result).toEqual(expect.objectContaining({
-        activated: [], failed: [], alreadyActive: [],
-      }));
+      expect(result).toEqual(
+        expect.objectContaining({
+          activated: [],
+          failed: [],
+          alreadyActive: [],
+        }),
+      );
       // The internal core must never require assertProjectOrgAccess itself —
       // only the dispatch wrapper does. No event was passed here, and no org
       // gate was invoked, exactly like the pre-fix behaviour intake relies on.

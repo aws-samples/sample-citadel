@@ -388,6 +388,23 @@ export class BackendStack extends cdk.Stack {
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     });
 
+    // GSI for project-scoped agent lookups — replaces full-registry
+    // enumeration in findProjectAgentRecords with a targeted DDB query.
+    // The cache writer (registry-sync.ts:528) already populates
+    // sourceProjectId on every EventBridge event, so the GSI is populated
+    // automatically for new/updated records. Pre-existing rows are
+    // backfilled via: npx ts-node scripts/reconcile-legacy-rows.ts
+    //   --backfill-source-project-id --table-agents <TABLE> [--apply]
+    this.agentConfigTable.addGlobalSecondaryIndex({
+      indexName: "sourceProjectId-index",
+      partitionKey: {
+        name: "sourceProjectId",
+        type: dynamodb.AttributeType.STRING,
+      },
+      projectionType: dynamodb.ProjectionType.INCLUDE,
+      nonKeyAttributes: ["registryRecordId", "registryStatus", "orgId", "name"],
+    });
+
     // Model Catalog Table — inventory of invokable foundation models. Additive and
     // not yet wired into any runtime/Lambda env; operators curate rows over time.
     const modelCatalogTable = (this.modelCatalogTable = new dynamodb.Table(

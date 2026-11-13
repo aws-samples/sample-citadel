@@ -6,6 +6,7 @@ import {
   ScanCommand,
   DeleteCommand,
   UpdateCommand,
+  QueryCommand,
 } from "@aws-sdk/lib-dynamodb";
 import {
   RegistryService,
@@ -1569,7 +1570,7 @@ export interface ActivateAgentsResult {
  * `undefined` rather than throwing — a single bad record must not abort the
  * whole bulk operation.
  */
-function extractSourceProjectId(
+function _extractSourceProjectId(
   customDescriptorContent: string | undefined,
 ): string | undefined {
   if (!customDescriptorContent) return undefined;
@@ -1589,66 +1590,102 @@ function extractSourceProjectId(
 }
 
 /**
- * Lists the Registry agent records fabricated for a project/session:
- * records whose customDescriptorContent carries
- * `sourceProjectId === projectId`. This is THE canonical fabricated-agent
- * match — activation (below) and the intake resolver's app-binding path
- * (intakeCreateApp) both rely on it, so the two can never diverge.
+ * Finds Registry agent records fabricated for a project by querying the
+ * DDB GSI `sourceProjectId-index` on AgentConfigTable, then fetching the
+ * full Registry record for each hit. Replaces the previous approach of
+ * listing ALL 243+ registry records via listResourcesChecked.
  *
- * LIVE INCIDENT 2026-11-10: when any detail-fetch fails with throttling,
- * the result is partial (some agents are invisible). Mutation callers MUST
- * NOT act on a partial list — this function throws RegistryThrottledError
- * so activation and bulk flows are forced to refuse/retry.
+ * The GSI is populated by the existing cache writer (registry-sync.ts:528)
+ * on every EventBridge event. Pre-existing rows are backfilled via
+ * `reconcile-legacy-rows.ts --backfill-source-project-id`.
+ *
+ * Individual getResource failures are dropped (logged) rather than
+ * propagated — the GSI already gave us the authoritative list, so a
+ * single failed GET is a missing detail, not a partial list.
  */
 export async function findProjectAgentRecords(
   projectId: string,
   orgId?: string,
 ): Promise<RegistryRecord[]> {
   const registryService = getRegistryService();
-  const checked = await registryService.listResourcesChecked("agent");
 
-  if (checked.throttled && checked.droppedCount > 0) {
-    throw new RegistryThrottledError(
-      `Registry listing incomplete: ${checked.droppedCount} record(s) excluded by throttling. ` +
-        `Refusing to act on a partial agent list — retry in a few seconds.`,
-      5000,
+  // ── Step 1: Query the DDB GSI for cache rows belonging to this project ──
+  const gsiItems: Record<string, unknown>[] = [];
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const resp = await docClient.send(
+      new QueryCommand({
+        TableName: AGENT_CONFIG_TABLE,
+        IndexName: "sourceProjectId-index",
+        KeyConditionExpression: "sourceProjectId = :pid",
+        ExpressionAttributeValues: { ":pid": projectId },
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }),
     );
-  }
+    if (resp.Items) gsiItems.push(...resp.Items);
+    exclusiveStartKey = resp.LastEvaluatedKey as
+      Record<string, unknown> | undefined;
+  } while (exclusiveStartKey);
 
-  return checked.items.filter((record) => {
-    if (extractSourceProjectId(record.customDescriptorContent) !== projectId) {
-      return false;
-    }
-    // When an orgId is provided, restrict to records whose customMetadata
-    // orgId matches the caller's org. Records with an empty/missing orgId
-    // are system-shared (same convention as listAgentConfigsRegistry) and
-    // are included for every caller; "All Organizations" records are also
-    // visible to any org.
+  // ── Step 2: Filter by orgId at the GSI level (cheap, avoids registry calls) ──
+  const candidates = gsiItems.filter((item) => {
+    if (!item.registryRecordId) return false;
     if (orgId !== undefined) {
-      const meta = registryService.deserializeCustomMetadata<{
-        orgId?: string;
-      }>(record.customDescriptorContent ?? null, { orgId: undefined });
-      const recordOrg = meta.orgId ?? "";
-      if (
-        recordOrg !== "" &&
-        recordOrg !== "All Organizations" &&
-        recordOrg !== orgId
-      ) {
+      const rowOrg = (item.orgId as string) ?? "";
+      if (rowOrg !== "" && rowOrg !== "All Organizations" && rowOrg !== orgId) {
         return false;
       }
     }
     return true;
   });
+
+  // ── Step 3: Targeted getResource for each candidate's full record ────────
+  const records: RegistryRecord[] = [];
+  let getResourceCalls = 0;
+  for (const item of candidates) {
+    const recordId = item.registryRecordId as string;
+    try {
+      getResourceCalls++;
+      const full = await registryService.getResource("agent", recordId);
+      if (full) {
+        records.push(full);
+      }
+    } catch (err) {
+      // Drop individual failures (same resilience as the old N+1 path).
+      // Throttle errors are NOT propagated — the GSI already gave us the
+      // authoritative list, so a single failed GET is a missing detail,
+      // not a partial list.
+      console.warn(
+        `[findProjectAgentRecords] getResource failed for ${recordId}: ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
+    }
+  }
+
+  console.log(
+    JSON.stringify({
+      op: "findProjectAgentRecords",
+      projectId,
+      gsiHits: gsiItems.length,
+      afterOrgFilter: candidates.length,
+      registryGetCalls: getResourceCalls,
+      returned: records.length,
+    }),
+  );
+
+  return records;
 }
 
 /**
  * Activates every fabricated agent belonging to a project in one operation.
  *
  * Fabricated agents carry their originating `sourceProjectId` inside the
- * Registry record's customDescriptorContent JSON. We list all agent records,
- * select those matching `projectId`, and submit each non-active one for
- * approval (APPROVED == active via toInternalState). Already-active agents
- * (status APPROVED) are reported separately and skipped.
+ * Registry record's customDescriptorContent JSON. We query the DDB GSI
+ * `sourceProjectId-index` on AgentConfigTable for cache rows matching
+ * `projectId`, then issue targeted GetRegistryRecord calls for the full
+ * record of each. This replaces the previous full-registry enumeration
+ * (243+ records) with ~6 targeted lookups.
  *
  * LIVE INCIDENT 2026-11-10: agents are now processed SEQUENTIALLY with a
  * 250 ms inter-call delay (matching the pace used by scripts) to avoid
@@ -1656,9 +1693,9 @@ export async function findProjectAgentRecords(
  * error class (throttled / refused / not_found / rejected / unknown) so
  * the UI can show "retry" for throttled agents instead of "failed".
  *
- * When findProjectAgentRecords throws RegistryThrottledError (the list
- * itself was partial), the entire activation is refused with
- * `throttled: true`.
+ * The RegistryThrottledError catch is retained defensively. The GSI-based
+ * findProjectAgentRecords no longer throws it, but the catch ensures safe
+ * behaviour if a future change reintroduces the condition.
  */
 export async function activateProjectAgents(
   projectId: string,

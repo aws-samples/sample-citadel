@@ -688,7 +688,7 @@ export class RegistryService {
    * Upper bound on concurrent GetRegistryRecord calls issued while
    * hydrating list summaries (the N+1 fix — see listResources).
    */
-  private static readonly LIST_DETAIL_CONCURRENCY = 10;
+  private static readonly LIST_DETAIL_CONCURRENCY = 3;
 
   // ---------------------------------------------------------------------
   // resolveRecordId LRU cache
@@ -1814,7 +1814,8 @@ export class RegistryService {
             console.warn(
               JSON.stringify({
                 level: "WARN",
-                message: "listResources: detail fetch failed — record excluded from results",
+                message:
+                  "listResources: detail fetch failed — record excluded from results",
                 recordId: recId,
                 reason: outcome.reason,
                 metric: "Citadel/Registry",
