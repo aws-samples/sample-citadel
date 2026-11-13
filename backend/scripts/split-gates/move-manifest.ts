@@ -2257,6 +2257,28 @@ export const ALLOWED_SATELLITE_ADDED_STATEMENTS: Record<
       ],
       conditionKeys: [],
     },
+    // GSI sourceProjectId-index added to AgentConfigTable; CDK's
+    // grantReadData includes the index ARN for existing grantees.
+    // Index data is a projection of the same table — same actions, no new
+    // principal. Confirmed via `cdk synth + npm run split:gates`.
+    {
+      effect: "Allow",
+      actions: [
+        "dynamodb:BatchGetItem",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:DescribeTable",
+        "dynamodb:GetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:Query",
+        "dynamodb:Scan",
+      ],
+      resources: [
+        "GETATT:AgentConfigTableE9BDF3BA:Arn",
+        "JOIN::GETATT:AgentConfigTableE9BDF3BA:Arn/index/*",
+      ],
+      conditionKeys: [],
+    },
   ],
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -2326,6 +2348,32 @@ export const ALLOWED_SATELLITE_ADDED_STATEMENTS: Record<
       ],
       conditionKeys: [],
     },
+    // GSI sourceProjectId-index added to AgentConfigTable; CDK's
+    // grantReadWriteData includes the index ARN for existing grantees.
+    // Index data is a projection of the same table — same actions, no new
+    // principal. Confirmed via `cdk synth + npm run split:gates`.
+    {
+      effect: "Allow",
+      actions: [
+        "dynamodb:BatchGetItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable",
+        "dynamodb:GetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:PutItem",
+        "dynamodb:Query",
+        "dynamodb:Scan",
+        "dynamodb:UpdateItem",
+      ],
+      resources: [
+        "GETATT:AgentConfigTableE9BDF3BA:Arn",
+        "JOIN::GETATT:AgentConfigTableE9BDF3BA:Arn/index/*",
+      ],
+      conditionKeys: [],
+    },
   ],
   // AgentImportManifestResultHandlerAC7A0B8E is merged into its existing
   // key above (sqs:SendMessage DLQ grant + the renamed agent-registry
@@ -2377,6 +2425,10 @@ export const ALLOWED_SATELLITE_ADDED_STATEMENTS: Record<
     // their ARNs; the baseline had agentConfig as read-only, so the merged
     // R/W statement is not covered. Confirmed via `cdk synth + npm run
     // split:gates`, not hand-typed.
+    // GSI sourceProjectId-index added to AgentConfigTable; CDK's
+    // grantReadWriteData now includes the index ARN alongside the table ARN
+    // for all three tables. Index data is a projection of the same table —
+    // same actions, no new principal.
     {
       effect: "Allow",
       actions: [
@@ -2397,6 +2449,7 @@ export const ALLOWED_SATELLITE_ADDED_STATEMENTS: Record<
         "GETATT:AgentConfigTableE9BDF3BA:Arn",
         "GETATT:AppsTable172E1E77:Arn",
         "GETATT:WorkflowsTable4E215008:Arn",
+        "JOIN::GETATT:AgentConfigTableE9BDF3BA:Arn/index/*",
         "JOIN::GETATT:AppsTable172E1E77:Arn/index/*",
         "JOIN::GETATT:WorkflowsTable4E215008:Arn/index/*",
       ],
@@ -2448,6 +2501,32 @@ export const ALLOWED_SATELLITE_ADDED_STATEMENTS: Record<
       ],
       resources: [
         "arn:aws:dynamodb:us-west-2:000000000000:table/citadel-tools-dev",
+      ],
+      conditionKeys: [],
+    },
+    // GSI sourceProjectId-index added to AgentConfigTable; CDK's
+    // grantReadWriteData includes the index ARN for existing grantees.
+    // Index data is a projection of the same table — same actions, no new
+    // principal. Confirmed via `cdk synth + npm run split:gates`.
+    {
+      effect: "Allow",
+      actions: [
+        "dynamodb:BatchGetItem",
+        "dynamodb:BatchWriteItem",
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:DeleteItem",
+        "dynamodb:DescribeTable",
+        "dynamodb:GetItem",
+        "dynamodb:GetRecords",
+        "dynamodb:GetShardIterator",
+        "dynamodb:PutItem",
+        "dynamodb:Query",
+        "dynamodb:Scan",
+        "dynamodb:UpdateItem",
+      ],
+      resources: [
+        "GETATT:AgentConfigTableE9BDF3BA:Arn",
+        "JOIN::GETATT:AgentConfigTableE9BDF3BA:Arn/index/*",
       ],
       conditionKeys: [],
     },
