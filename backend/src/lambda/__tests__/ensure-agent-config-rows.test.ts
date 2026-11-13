@@ -332,4 +332,29 @@ describe("ensureAgentConfigRows", () => {
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
     warnSpy.mockRestore();
   });
+
+  it("writes sourceProjectId extracted from the record's customDescriptorContent into the put item", async () => {
+    mockBatchGetExisting([]);
+    mockRegistry({
+      "rec-proj": registryRecord({
+        recordId: "rec-proj",
+        status: "APPROVED",
+        customDescriptorContent: JSON.stringify({
+          citadelKind: "agent",
+          categories: ["fabricated"],
+          icon: "",
+          state: "active",
+          manifest: { name: "proj-agent", version: "1.0.0" },
+          sourceProjectId: "proj-99",
+        }),
+      }),
+    });
+    ddbMock.on(PutCommand).resolves({});
+
+    await ensureAgentConfigRows(["rec-proj"]);
+
+    const input = ddbMock.commandCalls(PutCommand)[0].args[0].input;
+    expect(input.Item?.sourceProjectId).toBe("proj-99");
+    expect(input.Item?.registryRecordId).toBe("rec-proj");
+  });
 });

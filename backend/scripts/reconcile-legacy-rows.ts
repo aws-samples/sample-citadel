@@ -24,6 +24,7 @@ import {
   ScanCommand,
   DeleteCommand,
   QueryCommand,
+  UpdateCommand,
   type NativeAttributeValue,
 } from "@aws-sdk/lib-dynamodb";
 import { resolveRegionOrExit } from "./lib/resolve-region";
@@ -72,6 +73,8 @@ export interface ParsedArgs {
   deleteUntitledDrafts: boolean;
   /** CIT-286: when true, reconcile app↔workflow binding consistency. */
   reconcileBindings: boolean;
+  /** When true, backfill sourceProjectId on agent cache rows from Registry. */
+  backfillSourceProjectId: boolean;
   /** Literal name prefix for untitled draft matching. Default 'Untitled Workflow'. */
   namePrefix: string;
   /** Minimum age in hours before a row is eligible. Default 24. */
@@ -90,6 +93,7 @@ const KNOWN_FLAGS = new Set([
   "--delete-placeholder-copies",
   "--delete-untitled-drafts",
   "--reconcile-bindings",
+  "--backfill-source-project-id",
   "--name-prefix",
   "--min-age-hours",
   "--apply",
@@ -106,6 +110,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let deletePlaceholderCopies = false;
   let deleteUntitledDrafts = false;
   let reconcileBindings = false;
+  let backfillSourceProjectId = false;
   let namePrefix = "Untitled Workflow";
   let minAgeHours = 24;
 
@@ -149,6 +154,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case "--reconcile-bindings":
         reconcileBindings = true;
         break;
+      case "--backfill-source-project-id":
+        backfillSourceProjectId = true;
+        break;
       case "--name-prefix":
         namePrefix = argv[++i];
         break;
@@ -189,6 +197,13 @@ export function parseArgs(argv: string[]): ParsedArgs {
       );
       process.exit(1);
     }
+  } else if (backfillSourceProjectId) {
+    if (!tableAgents) {
+      console.error(
+        "Usage: --backfill-source-project-id --table-agents <table> [--apply]",
+      );
+      process.exit(1);
+    }
   } else if (!tableAgents || !tableTools) {
     console.error(
       "Usage: --table-agents <table> --table-tools <table> [--dry-run | --delete-orphans]",
@@ -206,6 +221,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     deletePlaceholderCopies,
     deleteUntitledDrafts,
     reconcileBindings,
+    backfillSourceProjectId,
     namePrefix,
     minAgeHours,
   };
@@ -1202,6 +1218,189 @@ export async function runReconcileUntitledDrafts(
 }
 
 // ---------------------------------------------------------------------------
+// Backfill sourceProjectId on agent cache rows (GSI population)
+// ---------------------------------------------------------------------------
+
+export interface ReconcileSourceProjectIdSummary {
+  scanned: number;
+  candidatesFound: number;
+  updated: number;
+  skippedAlreadySet: number;
+  skippedNoProjectId: number;
+  errors: number;
+}
+
+export interface ReconcileSourceProjectIdOptions {
+  tableAgents: string;
+  dryRun: boolean;
+  docClient: DynamoDBDocumentClient;
+  registryService?: {
+    getResource: (type: "agent" | "tool", id: string) => Promise<unknown>;
+  };
+}
+
+/**
+ * Scans AgentConfigTable for rows that have a registryRecordId but no
+ * sourceProjectId, fetches the Registry record to extract sourceProjectId,
+ * and patches the cache row. Idempotent: rows already carrying
+ * sourceProjectId are skipped. A second dry-run after --apply is empty.
+ */
+export async function runReconcileSourceProjectId(
+  opts: ReconcileSourceProjectIdOptions,
+): Promise<ReconcileSourceProjectIdSummary> {
+  const { tableAgents, dryRun, docClient } = opts;
+  const summary: ReconcileSourceProjectIdSummary = {
+    scanned: 0,
+    candidatesFound: 0,
+    updated: 0,
+    skippedAlreadySet: 0,
+    skippedNoProjectId: 0,
+    errors: 0,
+  };
+
+  // Resolve registry service — from opts (tests) or env (production).
+  let registryService = opts.registryService;
+  if (!registryService) {
+    const registryId = process.env.REGISTRY_ID;
+    if (!registryId) {
+      console.error(
+        "[reconcile-legacy-rows] REGISTRY_ID env is required for --backfill-source-project-id",
+      );
+      return summary;
+    }
+    const { RegistryService } =
+      await import("../src/services/registry-service");
+    const region = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION;
+    if (!region) {
+      console.error(
+        "[reconcile-legacy-rows] AWS_REGION or AWS_DEFAULT_REGION required for --backfill-source-project-id",
+      );
+      return summary;
+    }
+    registryService = new RegistryService({
+      registryId,
+      region,
+    });
+  }
+
+  // Step 1: Scan for candidate rows.
+  const allItems: Record<string, unknown>[] = [];
+  let exclusiveStartKey: Record<string, NativeAttributeValue> | undefined;
+  do {
+    const resp = await docClient.send(
+      new ScanCommand({
+        TableName: tableAgents,
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }),
+    );
+    if (resp.Items) allItems.push(...resp.Items);
+    exclusiveStartKey = resp.LastEvaluatedKey;
+  } while (exclusiveStartKey);
+
+  summary.scanned = allItems.length;
+
+  // Partition: already-set vs candidates (missing sourceProjectId + has registryRecordId).
+  const candidates: Record<string, unknown>[] = [];
+  for (const item of allItems) {
+    if (item.sourceProjectId) {
+      summary.skippedAlreadySet++;
+      continue;
+    }
+    if (!item.registryRecordId) {
+      continue; // No registry backing — nothing to resolve.
+    }
+    candidates.push(item);
+  }
+  summary.candidatesFound = candidates.length;
+
+  if (candidates.length === 0) {
+    console.log(
+      "[reconcile-legacy-rows] sourceProjectId backfill: 0 candidates (all rows already populated)",
+    );
+    return summary;
+  }
+
+  console.log(
+    `[reconcile-legacy-rows] sourceProjectId backfill: ${candidates.length} candidate(s), dryRun=${dryRun}`,
+  );
+
+  // Step 2: For each candidate, fetch from registry and extract sourceProjectId.
+  for (const item of candidates) {
+    const agentId = item.agentId as string;
+    const registryRecordId = item.registryRecordId as string;
+
+    try {
+      const record = (await registryService!.getResource(
+        "agent",
+        registryRecordId,
+      )) as {
+        customDescriptorContent?: string;
+      } | null;
+
+      if (!record?.customDescriptorContent) {
+        summary.skippedNoProjectId++;
+        console.log(
+          `  [skip] ${agentId}: registry record has no customDescriptorContent`,
+        );
+        continue;
+      }
+
+      let sourceProjectId: string | undefined;
+      try {
+        const parsed = JSON.parse(record.customDescriptorContent);
+        sourceProjectId =
+          typeof parsed?.sourceProjectId === "string"
+            ? parsed.sourceProjectId
+            : undefined;
+      } catch {
+        summary.skippedNoProjectId++;
+        console.log(`  [skip] ${agentId}: malformed customDescriptorContent`);
+        continue;
+      }
+
+      if (!sourceProjectId) {
+        summary.skippedNoProjectId++;
+        console.log(
+          `  [skip] ${agentId}: registry record has no sourceProjectId`,
+        );
+        continue;
+      }
+
+      if (dryRun) {
+        console.log(
+          `  [dry-run] ${agentId} → sourceProjectId=${sourceProjectId}`,
+        );
+      } else {
+        await docClient.send(
+          new UpdateCommand({
+            TableName: tableAgents,
+            Key: { agentId },
+            UpdateExpression: "SET sourceProjectId = :pid",
+            ExpressionAttributeValues: { ":pid": sourceProjectId },
+          }),
+        );
+        summary.updated++;
+        console.log(
+          `  [updated] ${agentId} → sourceProjectId=${sourceProjectId}`,
+        );
+      }
+    } catch (err) {
+      summary.errors++;
+      console.error(
+        `  [error] ${agentId}: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+  }
+
+  console.log(
+    "[reconcile-legacy-rows] --- sourceProjectId Backfill Summary ---",
+  );
+  console.log(JSON.stringify(summary));
+
+  return summary;
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -1275,6 +1474,13 @@ export async function main(): Promise<void> {
       seededIds,
     });
     if (summary.errors > 0) process.exit(1);
+  } else if (args.backfillSourceProjectId) {
+    const result = await runReconcileSourceProjectId({
+      tableAgents: args.tableAgents,
+      dryRun: args.dryRun,
+      docClient,
+    });
+    if (result.errors > 0) process.exit(1);
   } else {
     const { summary } = await runReconcileLegacy({
       ...args,

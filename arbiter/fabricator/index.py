@@ -1417,7 +1417,7 @@ def get_worker_tool(tool_name: str) -> str:
     )
 
 @tool
-def store_agent_config_dynamo(file_name: str, agent_id: str, llm_tool_schema: Any, agent_description: str, app_id: str = None):
+def store_agent_config_dynamo(file_name: str, agent_id: str, llm_tool_schema: Any, agent_description: str, app_id: str = None, source_project_id: str = None, registry_record_id: str = None):
     """Store agent configuration in DynamoDB.
     
     Requirements:
@@ -1440,6 +1440,11 @@ def store_agent_config_dynamo(file_name: str, agent_id: str, llm_tool_schema: An
                                  "type": "object"
                                }
         agent_description (str): Human-readable description of what the agent does
+        source_project_id (str | None): Optional project id that owns this agent —
+            written as ``sourceProjectId`` so the GSI is populated at fabrication
+            time (not only after registry-sync).
+        registry_record_id (str | None): Optional AgentCore Registry record id —
+            written as ``registryRecordId`` for the same reason.
         
     Returns:
         bool: True if configuration was successfully stored
@@ -1498,6 +1503,12 @@ def store_agent_config_dynamo(file_name: str, agent_id: str, llm_tool_schema: An
 
         if app_id:
             item['appId'] = app_id
+        
+        if source_project_id:
+            item['sourceProjectId'] = source_project_id
+        
+        if registry_record_id:
+            item['registryRecordId'] = registry_record_id
         
         print(f"[store_agent_config_dynamo] Attempting to put_item: {json.dumps(item, indent=2, default=str)}")
         

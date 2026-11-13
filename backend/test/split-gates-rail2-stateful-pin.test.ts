@@ -1,6 +1,9 @@
 /**
  * Rail 2 — stateful logical-ID pin.
  *
+ * IMPORTANT: intended stateful changes must be applied to BOTH baselines
+ * (citadel-backend-dev.json AND citadel-backend-test.json) in split-baseline/.
+ *
  * Jest test asserting every stateful logical ID recorded in the committed
  * baseline still exists in a fresh synth, with its DeletionPolicy /
  * UpdateReplacePolicy (DeletionProtection carried inside Properties for

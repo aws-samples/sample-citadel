@@ -16,6 +16,11 @@ import {
   _resetRegistryService,
 } from "../agent-config-resolver";
 
+// ── DDB mock for the GSI query path used by findProjectAgentRecords ───────
+import { DynamoDBDocumentClient, QueryCommand } from "@aws-sdk/lib-dynamodb";
+import { mockClient } from "aws-sdk-client-mock";
+const dynamoMock = mockClient(DynamoDBDocumentClient);
+
 // ── Mock RegistryService ──────────────────────────────────────────────────
 const mockGetResource = jest.fn();
 const mockUpdateResource = jest.fn();
@@ -71,8 +76,13 @@ jest.mock("../../services/registry-service", () => {
   }));
   MockRS.isThrottlingError = (err: unknown): boolean => {
     const name = (err as { name?: string })?.name ?? "";
-    const statusCode = (err as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode;
-    return name === "ThrottlingException" || name === "TooManyRequestsException" || statusCode === 429;
+    const statusCode = (err as { $metadata?: { httpStatusCode?: number } })
+      ?.$metadata?.httpStatusCode;
+    return (
+      name === "ThrottlingException" ||
+      name === "TooManyRequestsException" ||
+      statusCode === 429
+    );
   };
   return {
     __esModule: true,
@@ -176,6 +186,9 @@ describe("agent-config-resolver governance activation gate (US-IMP)", () => {
     };
     _resetRegistryService();
     jest.clearAllMocks();
+    dynamoMock.reset();
+    // Default: GSI query returns empty (tests that need records override this)
+    dynamoMock.on(QueryCommand).resolves({ Items: [] });
   });
 
   afterAll(() => {
@@ -347,10 +360,29 @@ describe("agent-config-resolver governance activation gate (US-IMP)", () => {
     };
 
     test("strict → imported-unattested agent lands in failed without aborting the batch", async () => {
-      mockListResourcesChecked.mockResolvedValue({
-        items: [importedBatchRecord, plainBatchRecord],
-        partial: false, droppedCount: 0, throttled: false,
+      // GSI returns cache rows for the two agents
+      dynamoMock.on(QueryCommand).resolves({
+        Items: [
+          {
+            agentId: "imp-cache",
+            registryRecordId: "imp-1",
+            sourceProjectId: "proj-1",
+            orgId: "org-a",
+            name: "Imported",
+          },
+          {
+            agentId: "plain-cache",
+            registryRecordId: "plain-1",
+            sourceProjectId: "proj-1",
+            orgId: "org-a",
+            name: "Plain",
+          },
+        ],
       });
+      // getResource returns full records
+      mockGetResource
+        .mockResolvedValueOnce(importedBatchRecord)
+        .mockResolvedValueOnce(plainBatchRecord);
       mockGetGovernanceEnforce.mockResolvedValue("strict");
 
       const res = await activateProjectAgents("proj-1");
@@ -365,10 +397,19 @@ describe("agent-config-resolver governance activation gate (US-IMP)", () => {
     });
 
     test("shadow → imported-unattested agent activates and emits a gate event with orgId", async () => {
-      mockListResourcesChecked.mockResolvedValue({
-        items: [importedBatchRecord],
-        partial: false, droppedCount: 0, throttled: false,
+      // GSI returns cache row for the imported agent
+      dynamoMock.on(QueryCommand).resolves({
+        Items: [
+          {
+            agentId: "imp-cache",
+            registryRecordId: "imp-1",
+            sourceProjectId: "proj-1",
+            orgId: "org-a",
+            name: "Imported",
+          },
+        ],
       });
+      mockGetResource.mockResolvedValueOnce(importedBatchRecord);
       mockGetGovernanceEnforce.mockResolvedValue("shadow");
 
       const res = await activateProjectAgents("proj-1");

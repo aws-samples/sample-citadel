@@ -7,6 +7,7 @@ import {
   PutCommand,
   ScanCommand,
   DeleteCommand,
+  QueryCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { mockClient } from "aws-sdk-client-mock";
 
@@ -380,6 +381,9 @@ describe("agent-config-resolver", () => {
       mockListResourcesChecked.mockReset();
       mockUpdateResourceStatus.mockReset();
       mockSubmitForApproval.mockReset();
+      mockGetResource.mockReset();
+      // Default: GSI query returns empty
+      dynamoMock.on(QueryCommand).resolves({ Items: [] });
     });
 
     afterEach(() => {
@@ -401,29 +405,42 @@ describe("agent-config-resolver", () => {
       }),
     });
 
-    /** Wraps a list of records as a complete (non-partial) listResourcesChecked result. */
-    const checkedOk = (records: ReturnType<typeof agentRecord>[]) => ({
-      items: records,
-      partial: false,
-      droppedCount: 0,
-      throttled: false,
+    /** Build a GSI cache row for a given registry record. */
+    const gsiRow = (
+      recordId: string,
+      name: string,
+      sourceProjectId: string | undefined,
+    ) => ({
+      agentId: `cache-${recordId}`,
+      registryRecordId: recordId,
+      sourceProjectId,
+      orgId: "org-a",
+      name,
     });
 
     test("filters by sourceProjectId, activates non-active, skips already-active", async () => {
-      mockListResourcesChecked.mockResolvedValue(
-        checkedOk([
+      // GSI returns only proj-1 rows (proj-2 is NOT in the GSI result for proj-1 query)
+      dynamoMock.on(QueryCommand).resolves({
+        Items: [
+          gsiRow("r1", "Agent One", "proj-1"),
+          gsiRow("r2", "Agent Two", "proj-1"),
+        ],
+      });
+      mockGetResource
+        .mockResolvedValueOnce(
           agentRecord("r1", "Agent One", "proj-1", "DRAFT"),
+        )
+        .mockResolvedValueOnce(
           agentRecord("r2", "Agent Two", "proj-1", "APPROVED"),
-          agentRecord("r3", "Other Project", "proj-2", "DRAFT"),
-        ]),
-      );
+        );
       mockSubmitForApproval.mockResolvedValue({});
 
       const result = await handler(
         makeEvent("activateProjectAgents", { projectId: "proj-1" }),
       );
 
-      expect(mockListResourcesChecked).toHaveBeenCalledWith("agent");
+      // MUST NOT call listResourcesChecked
+      expect(mockListResourcesChecked).not.toHaveBeenCalled();
       // Activation must go through SubmitRegistryRecordForApproval, never a
       // direct UpdateRegistryRecordStatus(APPROVED) — finding adde5b79.
       expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
@@ -435,12 +452,19 @@ describe("agent-config-resolver", () => {
     });
 
     test("continues and records failed when one agent errors", async () => {
-      mockListResourcesChecked.mockResolvedValue(
-        checkedOk([
+      dynamoMock.on(QueryCommand).resolves({
+        Items: [
+          gsiRow("r1", "Agent One", "proj-1"),
+          gsiRow("r2", "Agent Two", "proj-1"),
+        ],
+      });
+      mockGetResource
+        .mockResolvedValueOnce(
           agentRecord("r1", "Agent One", "proj-1", "DRAFT"),
+        )
+        .mockResolvedValueOnce(
           agentRecord("r2", "Agent Two", "proj-1", "DRAFT"),
-        ]),
-      );
+        );
       mockSubmitForApproval
         .mockRejectedValueOnce(new Error("boom"))
         .mockResolvedValueOnce({});
@@ -455,12 +479,8 @@ describe("agent-config-resolver", () => {
     });
 
     test("returns empty arrays when no agents match the project", async () => {
-      mockListResourcesChecked.mockResolvedValue(
-        checkedOk([
-          agentRecord("r3", "Other Project", "proj-2", "DRAFT"),
-          agentRecord("r4", "No Project", undefined, "DRAFT"),
-        ]),
-      );
+      // GSI returns empty for proj-1
+      dynamoMock.on(QueryCommand).resolves({ Items: [] });
 
       const result = await handler(
         makeEvent("activateProjectAgents", { projectId: "proj-1" }),
@@ -476,27 +496,26 @@ describe("agent-config-resolver", () => {
       );
     });
 
-    test("returns throttled:true when listResourcesChecked reports throttled partial", async () => {
-      mockListResourcesChecked.mockResolvedValue({
-        items: [agentRecord("r1", "Agent One", "proj-1", "DRAFT")],
-        partial: true,
-        droppedCount: 3,
-        throttled: true,
-      });
+    test("returns empty when GSI has no rows (replaces old throttled-partial test)", async () => {
+      // The GSI path doesn't throw RegistryThrottledError; it simply
+      // returns whatever the GSI has. This test verifies graceful behaviour.
+      dynamoMock.on(QueryCommand).resolves({ Items: [] });
 
       const result = await handler(
         makeEvent("activateProjectAgents", { projectId: "proj-1" }),
       );
 
-      expect(result.throttled).toBe(true);
       expect(result.activated).toEqual([]);
       expect(result.failed).toEqual([]);
       expect(mockSubmitForApproval).not.toHaveBeenCalled();
     });
 
     test("classifies throttled per-agent errors as 'throttled'", async () => {
-      mockListResourcesChecked.mockResolvedValue(
-        checkedOk([agentRecord("r1", "Agent One", "proj-1", "DRAFT")]),
+      dynamoMock.on(QueryCommand).resolves({
+        Items: [gsiRow("r1", "Agent One", "proj-1")],
+      });
+      mockGetResource.mockResolvedValueOnce(
+        agentRecord("r1", "Agent One", "proj-1", "DRAFT"),
       );
       const throttleErr = Object.assign(new Error("Request rate exceeded"), {
         name: "ThrottlingException",
@@ -518,8 +537,11 @@ describe("agent-config-resolver", () => {
     });
 
     test("DRAFT record landing in PENDING_APPROVAL goes to submitted, not activated", async () => {
-      mockListResourcesChecked.mockResolvedValue(
-        checkedOk([agentRecord("r1", "Agent One", "proj-1", "DRAFT")]),
+      dynamoMock.on(QueryCommand).resolves({
+        Items: [gsiRow("r1", "Agent One", "proj-1")],
+      });
+      mockGetResource.mockResolvedValueOnce(
+        agentRecord("r1", "Agent One", "proj-1", "DRAFT"),
       );
       mockSubmitForApproval.mockResolvedValue({
         recordId: "r1",
@@ -537,8 +559,11 @@ describe("agent-config-resolver", () => {
     });
 
     test("DRAFT record auto-approved goes to activated, not submitted", async () => {
-      mockListResourcesChecked.mockResolvedValue(
-        checkedOk([agentRecord("r1", "Agent One", "proj-1", "DRAFT")]),
+      dynamoMock.on(QueryCommand).resolves({
+        Items: [gsiRow("r1", "Agent One", "proj-1")],
+      });
+      mockGetResource.mockResolvedValueOnce(
+        agentRecord("r1", "Agent One", "proj-1", "DRAFT"),
       );
       mockSubmitForApproval.mockResolvedValue({
         recordId: "r1",
@@ -555,12 +580,19 @@ describe("agent-config-resolver", () => {
     });
 
     test("mixed batch: auto-approved and manual-review", async () => {
-      mockListResourcesChecked.mockResolvedValue(
-        checkedOk([
+      dynamoMock.on(QueryCommand).resolves({
+        Items: [
+          gsiRow("r1", "Auto Agent", "proj-1"),
+          gsiRow("r2", "Manual Agent", "proj-1"),
+        ],
+      });
+      mockGetResource
+        .mockResolvedValueOnce(
           agentRecord("r1", "Auto Agent", "proj-1", "DRAFT"),
+        )
+        .mockResolvedValueOnce(
           agentRecord("r2", "Manual Agent", "proj-1", "DRAFT"),
-        ]),
-      );
+        );
       mockSubmitForApproval
         .mockResolvedValueOnce({
           recordId: "r1",
