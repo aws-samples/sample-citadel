@@ -76,8 +76,13 @@ jest.mock("../../services/registry-service", () => {
   // Static method used by classifyActivationError
   MockRegistryService.isThrottlingError = (err: unknown): boolean => {
     const name = (err as { name?: string })?.name ?? "";
-    const statusCode = (err as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode;
-    return name === "ThrottlingException" || name === "TooManyRequestsException" || statusCode === 429;
+    const statusCode = (err as { $metadata?: { httpStatusCode?: number } })
+      ?.$metadata?.httpStatusCode;
+    return (
+      name === "ThrottlingException" ||
+      name === "TooManyRequestsException" ||
+      statusCode === 429
+    );
   };
   return {
     RegistryService: MockRegistryService,
@@ -405,11 +410,13 @@ describe("agent-config-resolver", () => {
     });
 
     test("filters by sourceProjectId, activates non-active, skips already-active", async () => {
-      mockListResourcesChecked.mockResolvedValue(checkedOk([
-        agentRecord("r1", "Agent One", "proj-1", "DRAFT"),
-        agentRecord("r2", "Agent Two", "proj-1", "APPROVED"),
-        agentRecord("r3", "Other Project", "proj-2", "DRAFT"),
-      ]));
+      mockListResourcesChecked.mockResolvedValue(
+        checkedOk([
+          agentRecord("r1", "Agent One", "proj-1", "DRAFT"),
+          agentRecord("r2", "Agent Two", "proj-1", "APPROVED"),
+          agentRecord("r3", "Other Project", "proj-2", "DRAFT"),
+        ]),
+      );
       mockSubmitForApproval.mockResolvedValue({});
 
       const result = await handler(
@@ -428,10 +435,12 @@ describe("agent-config-resolver", () => {
     });
 
     test("continues and records failed when one agent errors", async () => {
-      mockListResourcesChecked.mockResolvedValue(checkedOk([
-        agentRecord("r1", "Agent One", "proj-1", "DRAFT"),
-        agentRecord("r2", "Agent Two", "proj-1", "DRAFT"),
-      ]));
+      mockListResourcesChecked.mockResolvedValue(
+        checkedOk([
+          agentRecord("r1", "Agent One", "proj-1", "DRAFT"),
+          agentRecord("r2", "Agent Two", "proj-1", "DRAFT"),
+        ]),
+      );
       mockSubmitForApproval
         .mockRejectedValueOnce(new Error("boom"))
         .mockResolvedValueOnce({});
@@ -446,19 +455,25 @@ describe("agent-config-resolver", () => {
     });
 
     test("returns empty arrays when no agents match the project", async () => {
-      mockListResourcesChecked.mockResolvedValue(checkedOk([
-        agentRecord("r3", "Other Project", "proj-2", "DRAFT"),
-        agentRecord("r4", "No Project", undefined, "DRAFT"),
-      ]));
+      mockListResourcesChecked.mockResolvedValue(
+        checkedOk([
+          agentRecord("r3", "Other Project", "proj-2", "DRAFT"),
+          agentRecord("r4", "No Project", undefined, "DRAFT"),
+        ]),
+      );
 
       const result = await handler(
         makeEvent("activateProjectAgents", { projectId: "proj-1" }),
       );
 
       expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
-      expect(result).toEqual(expect.objectContaining({
-        activated: [], failed: [], alreadyActive: [],
-      }));
+      expect(result).toEqual(
+        expect.objectContaining({
+          activated: [],
+          failed: [],
+          alreadyActive: [],
+        }),
+      );
     });
 
     test("returns throttled:true when listResourcesChecked reports throttled partial", async () => {
@@ -480,9 +495,9 @@ describe("agent-config-resolver", () => {
     });
 
     test("classifies throttled per-agent errors as 'throttled'", async () => {
-      mockListResourcesChecked.mockResolvedValue(checkedOk([
-        agentRecord("r1", "Agent One", "proj-1", "DRAFT"),
-      ]));
+      mockListResourcesChecked.mockResolvedValue(
+        checkedOk([agentRecord("r1", "Agent One", "proj-1", "DRAFT")]),
+      );
       const throttleErr = Object.assign(new Error("Request rate exceeded"), {
         name: "ThrottlingException",
         $metadata: { httpStatusCode: 429 },
@@ -500,6 +515,71 @@ describe("agent-config-resolver", () => {
           errorClass: "throttled",
         }),
       ]);
+    });
+
+    test("DRAFT record landing in PENDING_APPROVAL goes to submitted, not activated", async () => {
+      mockListResourcesChecked.mockResolvedValue(
+        checkedOk([agentRecord("r1", "Agent One", "proj-1", "DRAFT")]),
+      );
+      mockSubmitForApproval.mockResolvedValue({
+        recordId: "r1",
+        name: "Agent One",
+        status: "PENDING_APPROVAL",
+      });
+
+      const result = await handler(
+        makeEvent("activateProjectAgents", { projectId: "proj-1" }),
+      );
+
+      expect(result.submitted).toBeDefined();
+      expect(result.submitted).toContain("Agent One");
+      expect(result.activated).not.toContain("Agent One");
+    });
+
+    test("DRAFT record auto-approved goes to activated, not submitted", async () => {
+      mockListResourcesChecked.mockResolvedValue(
+        checkedOk([agentRecord("r1", "Agent One", "proj-1", "DRAFT")]),
+      );
+      mockSubmitForApproval.mockResolvedValue({
+        recordId: "r1",
+        name: "Agent One",
+        status: "APPROVED",
+      });
+
+      const result = await handler(
+        makeEvent("activateProjectAgents", { projectId: "proj-1" }),
+      );
+
+      expect(result.activated).toContain("Agent One");
+      expect(result.submitted ?? []).not.toContain("Agent One");
+    });
+
+    test("mixed batch: auto-approved and manual-review", async () => {
+      mockListResourcesChecked.mockResolvedValue(
+        checkedOk([
+          agentRecord("r1", "Auto Agent", "proj-1", "DRAFT"),
+          agentRecord("r2", "Manual Agent", "proj-1", "DRAFT"),
+        ]),
+      );
+      mockSubmitForApproval
+        .mockResolvedValueOnce({
+          recordId: "r1",
+          name: "Auto Agent",
+          status: "APPROVED",
+        })
+        .mockResolvedValueOnce({
+          recordId: "r2",
+          name: "Manual Agent",
+          status: "PENDING_APPROVAL",
+        });
+
+      const result = await handler(
+        makeEvent("activateProjectAgents", { projectId: "proj-1" }),
+      );
+
+      expect(result.activated).toContain("Auto Agent");
+      expect(result.submitted).toContain("Manual Agent");
+      expect(result.activated).not.toContain("Manual Agent");
     });
   });
 

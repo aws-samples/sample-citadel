@@ -1021,6 +1021,10 @@ type ActivateAgentsResult @aws_iam @aws_cognito_user_pools {
   activated: [String!]!
   failed: [String!]!
   alreadyActive: [String!]!
+  # Agents whose submit succeeded but the record landed in PENDING_APPROVAL
+  # (manual review mode). The intake flow shows "N submitted; approve them
+  # on the Approvals page, then run Activate agents again".
+  submitted: [String!]
   # Which key matched the fabricated agents' sourceProjectId: "sessionId"
   # (the fabrication orchestration id), "projectId" (the conversations-linked
   # project fallback), or null when zero records matched either key — the
