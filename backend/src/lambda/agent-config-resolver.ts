@@ -1640,7 +1640,14 @@ export async function findProjectAgentRecords(
   });
 
   // ── Step 3: Targeted getResource for each candidate's full record ────────
+  // Kind gate: the GSI has no record-kind filter, and getResource('agent', id)
+  // returns BOTH agent and app kinds. We must keep only records whose resolved
+  // kind is exactly 'agent' — reusing resolveKind (same inference used by
+  // getAgentConfigRegistry and listAgentConfigsRegistry). Non-agent records
+  // (apps, tools) are dropped with structured logging so the caller never
+  // accidentally submits an app for approval (regression from #534).
   const records: RegistryRecord[] = [];
+  const droppedByKind: Record<string, number> = {};
   let getResourceCalls = 0;
   for (const item of candidates) {
     const recordId = item.registryRecordId as string;
@@ -1648,15 +1655,22 @@ export async function findProjectAgentRecords(
       getResourceCalls++;
       const full = await registryService.getResource("agent", recordId);
       if (full) {
-        records.push(full);
+        const kind = resolveKind(full);
+        if (kind === "agent") {
+          records.push(full);
+        } else {
+          droppedByKind[kind] = (droppedByKind[kind] ?? 0) + 1;
+        }
       }
     } catch (err) {
       // Drop individual failures (same resilience as the old N+1 path).
       // Throttle errors are NOT propagated — the GSI already gave us the
       // authoritative list, so a single failed GET is a missing detail,
       // not a partial list.
+      const errorClass =
+        err instanceof Error ? err.constructor.name : "unknown";
       console.warn(
-        `[findProjectAgentRecords] getResource failed for ${recordId}: ${
+        `[findProjectAgentRecords] getResource failed for ${recordId} [${errorClass}]: ${
           err instanceof Error ? err.message : err
         }`,
       );
@@ -1671,6 +1685,7 @@ export async function findProjectAgentRecords(
       afterOrgFilter: candidates.length,
       registryGetCalls: getResourceCalls,
       returned: records.length,
+      droppedByKind,
     }),
   );
 
