@@ -177,6 +177,8 @@ async function mirrorToRegistry(
   if (!deps.registryService) return false;
   const maxRetries = 3;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    /** Tracks which registry operation failed for structured logging. */
+    let lastOperation: "getResource" | "updateResource" = "getResource";
     try {
       const record = await deps.registryService!.getResource("agent", appId);
       if (!record) return false;
@@ -186,6 +188,7 @@ async function mirrorToRegistry(
         m.version = ((m.version as number) ?? 1) + 1;
       });
 
+      lastOperation = "updateResource";
       await deps.registryService!.updateResource("agent", appId, {
         customMetadata: updatedContent,
       });
@@ -199,6 +202,8 @@ async function mirrorToRegistry(
       console.error("mirrorToRegistry: all retries exhausted", {
         appId,
         attempt,
+        operation: lastOperation,
+        errorClass: err instanceof Error ? err.name : "Unknown",
         error: err instanceof Error ? err.message : String(err),
       });
       return false;
