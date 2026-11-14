@@ -110,6 +110,8 @@ export interface RegistryEvent {
   source: string;
   "detail-type": string;
   detail: RegistryEventDetail | GaRegistryEventDetail;
+  /** EventBridge event time (ISO 8601). Used by the stale-event guard. */
+  time?: string;
 }
 
 /**
@@ -159,21 +161,31 @@ const VALID_RECORD_DETAIL_TYPES: ReadonlySet<unknown> = new Set([
   "Agent Registry Record Rejected",
 ]);
 
+// Canonical list of registry state display names as they appear in the GA
+// "Registry Record State changed to <State>" detail-type strings. Every
+// entry MUST have a corresponding mapping in toInternalStateFromGaStatus.
+export const REGISTRY_STATE_NAMES: readonly string[] = [
+  "Draft",
+  "Pending Approval",
+  "Approved",
+  "Rejected",
+  "Deprecated",
+] as const;
+
 // GA additions (observed live, diag 2026-09-26): GA emits record-lifecycle
 // events under "Registry Record State changed to <State>" rather than the
-// legacy allowlist above. Exact strings observed: "Registry Record State
-// changed to Draft" and "... to Approved". Kept as its own allowlist
+// legacy allowlist above. Derived from REGISTRY_STATE_NAMES so adding a new
+// state automatically extends the allowlist. Kept as its own allowlist
 // (rather than merged into VALID_RECORD_DETAIL_TYPES) because these events
 // carry a materially different detail shape (GaRegistryEventDetail) that
 // requires a record fetch, not an inline payload.
-const VALID_GA_RECORD_DETAIL_TYPES: ReadonlySet<unknown> = new Set([
-  "Registry Record State changed to Draft",
-  "Registry Record State changed to Approved",
-]);
+export const VALID_GA_RECORD_DETAIL_TYPES: ReadonlySet<string> = new Set(
+  REGISTRY_STATE_NAMES.map((s) => `Registry Record State changed to ${s}`),
+);
 
 /** True if `detailType` is one of the GA "State changed to <X>" strings. */
 export function isGaRecordDetailType(detailType: unknown): boolean {
-  return VALID_GA_RECORD_DETAIL_TYPES.has(detailType);
+  return typeof detailType === "string" && VALID_GA_RECORD_DETAIL_TYPES.has(detailType);
 }
 
 /**
@@ -194,7 +206,12 @@ export function validateEvent(
   const detailType = event["detail-type"];
   const isGa = isGaRecordDetailType(detailType);
   if (!isGa && !VALID_RECORD_DETAIL_TYPES.has(detailType)) {
-    return `Unexpected detail-type: ${detailType}`;
+    // Include the record id (if present) so operators can correlate DLQ'd
+    // events back to specific registry records.
+    const detail = event.detail as UnvalidatedEventDetail | null | undefined;
+    const recordId =
+      detail?.registryRecordId ?? detail?.resourceId ?? "unknown";
+    return `Unexpected detail-type: ${detailType} (recordId: ${recordId})`;
   }
 
   const detail = event.detail;
@@ -1247,6 +1264,7 @@ export async function syncSeederOwnedRow(
   tableName: string,
   resourceId: string,
   record: RegistryRecord,
+  eventTime?: string,
 ): Promise<void> {
   const now = new Date().toISOString();
   const names: Record<string, string> = {
@@ -1256,6 +1274,12 @@ export async function syncSeederOwnedRow(
     ":updatedAt": now,
   };
   const setClauses: string[] = ["#updatedAt = :updatedAt"];
+
+  if (eventTime) {
+    names["#lastRegistryEventAt"] = "lastRegistryEventAt";
+    values[":lastRegistryEventAt"] = eventTime;
+    setClauses.push("#lastRegistryEventAt = :lastRegistryEventAt");
+  }
 
   if (record.status) {
     names["#registryStatus"] = "registryStatus";
@@ -1324,6 +1348,7 @@ export async function handleGaUpsert(
   resourceType: ResourceType,
   resourceId: string,
   record: RegistryRecord,
+  eventTime?: string,
 ): Promise<void> {
   // -----------------------------------------------------------------------
   // Seeder guard: if the existing recordId-keyed row was written by
@@ -1385,7 +1410,7 @@ export async function handleGaUpsert(
       }
 
       if (isSeederOwned) {
-        await syncSeederOwnedRow(tableName, resourceId, record);
+        await syncSeederOwnedRow(tableName, resourceId, record, eventTime);
         return;
       }
     } catch (err) {
@@ -1424,6 +1449,14 @@ export async function handleGaUpsert(
       : new Date().toISOString();
   values[":recordCreatedAt"] = recordCreatedAt;
   setClauses.push("#createdAt = if_not_exists(#createdAt, :recordCreatedAt)");
+
+  // Record the event time for the stale-event guard: every applied GA
+  // event writes its EventBridge `time` so future events can compare.
+  if (eventTime) {
+    names["#lastRegistryEventAt"] = "lastRegistryEventAt";
+    values[":lastRegistryEventAt"] = eventTime;
+    setClauses.push("#lastRegistryEventAt = :lastRegistryEventAt");
+  }
 
   const params: UpdateCommandInput = {
     TableName: tableName,
@@ -1802,8 +1835,43 @@ async function handleGaEvent(event: RegistryEvent): Promise<void> {
   const { resourceType, record } = resolved;
   const tableName = getTableForResourceType(resourceType);
 
+  // -----------------------------------------------------------------------
+  // Stale-event guard: if this event's `time` is older than the row's
+  // `lastRegistryEventAt`, skip the write. This prevents DLQ redrives from
+  // regressing a newer state (e.g. APPROVED back to PENDING_APPROVAL).
+  // -----------------------------------------------------------------------
+  const eventTime = event.time;
+  if (eventTime) {
+    try {
+      const keyAttr = resourceType === "agent" ? "agentId" : "toolId";
+      const existing = await docClient.send(
+        new GetCommand({
+          TableName: tableName,
+          Key: { [keyAttr]: registryRecordId },
+          ProjectionExpression: "lastRegistryEventAt",
+        }),
+      );
+      const lastEventAt = existing.Item?.lastRegistryEventAt as
+        | string
+        | undefined;
+      if (lastEventAt && eventTime <= lastEventAt) {
+        console.log(
+          `Stale GA event for ${resourceType} "${registryRecordId}": ` +
+            `event.time=${eventTime} <= lastRegistryEventAt=${lastEventAt}, skipping`,
+        );
+        return;
+      }
+    } catch (err) {
+      // Best-effort: if the guard read fails, proceed with the write
+      console.warn(
+        `Stale-event guard read failed for "${registryRecordId}" (proceeding):`,
+        err,
+      );
+    }
+  }
+
   try {
-    await handleGaUpsert(tableName, resourceType, registryRecordId, record);
+    await handleGaUpsert(tableName, resourceType, registryRecordId, record, eventTime);
     console.log(
       `Cache merge-upsert for ${resourceType} "${registryRecordId}" in ${tableName} (GA event)`,
     );
