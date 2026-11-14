@@ -72,13 +72,16 @@ describe('ModelOverrideSelect', () => {
   it('renders the platform-default option plus one option per enabled catalog entry', async () => {
     render(<ModelOverrideSelect value="" onChange={jest.fn()} />);
 
+    // Await a catalog-derived option so the async catalog load has settled.
+    // "Use platform default" is rendered statically before the load, so
+    // awaiting only that option would race with the catalog fetch.
     expect(
-      await screen.findByRole('option', { name: 'Use platform default' }),
+      await screen.findByRole('option', { name: 'provider.model-x · model-x · tools' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('option', { name: 'Use platform default' }),
     ).toBeInTheDocument();
     // supportsTools appends the ' · tools' suffix; both enabled entries render.
-    expect(
-      screen.getByRole('option', { name: 'provider.model-x · model-x · tools' }),
-    ).toBeInTheDocument();
     expect(
       screen.getByRole('option', { name: 'provider.model-y · model-y' }),
     ).toBeInTheDocument();
@@ -101,7 +104,8 @@ describe('ModelOverrideSelect', () => {
   it('calls onChange with an empty string when the platform-default option is selected', async () => {
     const onChange = jest.fn();
     render(<ModelOverrideSelect value="prov-model-x" onChange={onChange} />);
-    await screen.findByRole('option', { name: 'Use platform default' });
+    // Await a catalog-derived option so the async load has settled.
+    await screen.findByRole('option', { name: 'provider.model-x · model-x · tools' });
 
     fireEvent.change(screen.getByTestId('model-select'), {
       target: { value: '__default__' },
