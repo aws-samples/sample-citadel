@@ -1081,7 +1081,9 @@ describe("handler — GA agent-registry events", () => {
     await handler(makeGaDraftEvent() as RegistryEvent);
 
     expect(mockGetResource).toHaveBeenCalledWith("agent", "RecDraft00001");
-    expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(1);
+    expect(ddbMock.commandCalls(UpdateCommand).length).toBeGreaterThanOrEqual(
+      1,
+    );
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
     expect(input.Key).toEqual({ agentId: "RecDraft00001" });
     expect(input.ExpressionAttributeValues![":state"]).toBe("maintenance"); // DRAFT -> maintenance

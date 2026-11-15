@@ -75,6 +75,8 @@ export interface ParsedArgs {
   reconcileBindings: boolean;
   /** When true, backfill sourceProjectId on agent cache rows from Registry. */
   backfillSourceProjectId: boolean;
+  /** When true, heal state from registryStatus for drifted rows. */
+  healStateFromRegistryStatus: boolean;
   /** Literal name prefix for untitled draft matching. Default 'Untitled Workflow'. */
   namePrefix: string;
   /** Minimum age in hours before a row is eligible. Default 24. */
@@ -94,6 +96,7 @@ const KNOWN_FLAGS = new Set([
   "--delete-untitled-drafts",
   "--reconcile-bindings",
   "--backfill-source-project-id",
+  "--heal-state-from-registry-status",
   "--name-prefix",
   "--min-age-hours",
   "--apply",
@@ -111,6 +114,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let deleteUntitledDrafts = false;
   let reconcileBindings = false;
   let backfillSourceProjectId = false;
+  let healStateFromRegistryStatus = false;
   let namePrefix = "Untitled Workflow";
   let minAgeHours = 24;
 
@@ -156,6 +160,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
         break;
       case "--backfill-source-project-id":
         backfillSourceProjectId = true;
+        break;
+      case "--heal-state-from-registry-status":
+        healStateFromRegistryStatus = true;
         break;
       case "--name-prefix":
         namePrefix = argv[++i];
@@ -204,6 +211,13 @@ export function parseArgs(argv: string[]): ParsedArgs {
       );
       process.exit(1);
     }
+  } else if (healStateFromRegistryStatus) {
+    if (!tableAgents) {
+      console.error(
+        "Usage: --heal-state-from-registry-status --table-agents <table> [--apply]",
+      );
+      process.exit(1);
+    }
   } else if (!tableAgents || !tableTools) {
     console.error(
       "Usage: --table-agents <table> --table-tools <table> [--dry-run | --delete-orphans]",
@@ -222,6 +236,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     deleteUntitledDrafts,
     reconcileBindings,
     backfillSourceProjectId,
+    healStateFromRegistryStatus,
     namePrefix,
     minAgeHours,
   };
@@ -1404,6 +1419,114 @@ export async function runReconcileSourceProjectId(
 // Main
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Heal state from registryStatus
+// ---------------------------------------------------------------------------
+
+/** Status→state mapping used by the heal mode. */
+const REGISTRY_STATUS_TO_STATE: Record<string, string> = {
+  APPROVED: "active",
+  DEPRECATED: "inactive",
+  REJECTED: "inactive",
+};
+
+export interface HealStateSummary {
+  scanned: number;
+  drifted: number;
+  healed: number;
+  errors: number;
+}
+
+export interface HealStateOptions {
+  tableAgents: string;
+  dryRun: boolean;
+  docClient: DynamoDBDocumentClient;
+}
+
+/**
+ * Scans agent rows for state/registryStatus mismatches and corrects them.
+ * APPROVED → active, DEPRECATED/REJECTED → inactive.
+ */
+export async function runHealStateFromRegistryStatus(
+  opts: HealStateOptions,
+): Promise<HealStateSummary> {
+  const { tableAgents, dryRun, docClient } = opts;
+  const summary: HealStateSummary = {
+    scanned: 0,
+    drifted: 0,
+    healed: 0,
+    errors: 0,
+  };
+
+  console.log(
+    `[reconcile-legacy-rows] Mode: ${dryRun ? "DRY-RUN" : "APPLY"} ` +
+      `heal-state-from-registry-status table=${tableAgents}`,
+  );
+
+  // Full scan
+  const allItems: Record<string, unknown>[] = [];
+  let exclusiveStartKey: Record<string, NativeAttributeValue> | undefined;
+  do {
+    const resp = await docClient.send(
+      new ScanCommand({
+        TableName: tableAgents,
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }),
+    );
+    if (resp.Items) allItems.push(...resp.Items);
+    exclusiveStartKey = resp.LastEvaluatedKey;
+  } while (exclusiveStartKey);
+
+  summary.scanned = allItems.length;
+
+  for (const item of allItems) {
+    const agentId = item.agentId as string | undefined;
+    const registryStatus = item.registryStatus as string | undefined;
+    const currentState = item.state as string | undefined;
+
+    if (!agentId || !registryStatus) continue;
+
+    const desiredState = REGISTRY_STATUS_TO_STATE[registryStatus];
+    if (!desiredState) continue; // Not a status we know how to map
+    if (currentState === desiredState) continue; // Already correct
+
+    summary.drifted++;
+    console.log(
+      `[heal-state] ${dryRun ? "WOULD FIX" : "FIXING"} agentId="${agentId}" ` +
+        `registryStatus="${registryStatus}" state="${currentState}" → "${desiredState}"`,
+    );
+
+    if (!dryRun) {
+      try {
+        await docClient.send(
+          new UpdateCommand({
+            TableName: tableAgents,
+            Key: { agentId },
+            UpdateExpression: "SET #state = :state, #updatedAt = :now",
+            ExpressionAttributeNames: {
+              "#state": "state",
+              "#updatedAt": "updatedAt",
+            },
+            ExpressionAttributeValues: {
+              ":state": desiredState,
+              ":now": new Date().toISOString(),
+            },
+          }),
+        );
+        summary.healed++;
+      } catch (err) {
+        console.error(`[heal-state] Failed to heal agentId="${agentId}":`, err);
+        summary.errors++;
+      }
+    }
+  }
+
+  console.log(
+    `[reconcile-legacy-rows] Heal-state summary: ${JSON.stringify(summary)}`,
+  );
+  return summary;
+}
+
 export async function main(): Promise<void> {
   const { region, rest } = resolveRegionOrExit(process.argv.slice(2));
   const args = parseArgs(rest);
@@ -1476,6 +1599,13 @@ export async function main(): Promise<void> {
     if (summary.errors > 0) process.exit(1);
   } else if (args.backfillSourceProjectId) {
     const result = await runReconcileSourceProjectId({
+      tableAgents: args.tableAgents,
+      dryRun: args.dryRun,
+      docClient,
+    });
+    if (result.errors > 0) process.exit(1);
+  } else if (args.healStateFromRegistryStatus) {
+    const result = await runHealStateFromRegistryStatus({
       tableAgents: args.tableAgents,
       dryRun: args.dryRun,
       docClient,
