@@ -185,7 +185,10 @@ export const VALID_GA_RECORD_DETAIL_TYPES: ReadonlySet<string> = new Set(
 
 /** True if `detailType` is one of the GA "State changed to <X>" strings. */
 export function isGaRecordDetailType(detailType: unknown): boolean {
-  return typeof detailType === "string" && VALID_GA_RECORD_DETAIL_TYPES.has(detailType);
+  return (
+    typeof detailType === "string" &&
+    VALID_GA_RECORD_DETAIL_TYPES.has(detailType)
+  );
 }
 
 /**
@@ -269,11 +272,21 @@ export function getTableForResourceType(resourceType: ResourceType): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Maps a Registry record status to the internal application state.
- * Mirrors RegistryService.toInternalState.
+ * Maps a Registry record status OR an already-internal state value to the
+ * internal application state. Accepts both UPPERCASE registry statuses
+ * (APPROVED, DEPRECATED, etc.) and lowercase internal values (active,
+ * inactive, etc.) — the descriptor's `state` field may carry either form.
+ *
+ * When `recordStatus` is provided, unknown values derive state from the
+ * top-level record status (APPROVED → active, etc.) instead of defaulting
+ * to 'inactive'.
  */
-export function toInternalState(registryStatus: string): string {
+export function toInternalState(
+  registryStatus: string,
+  recordStatus?: string,
+): string {
   switch (registryStatus) {
+    // UPPERCASE registry statuses
     case "APPROVED":
       return "active";
     case "DEPRECATED":
@@ -282,11 +295,63 @@ export function toInternalState(registryStatus: string): string {
       return "maintenance";
     case "PENDING_APPROVAL":
       return "pending";
+    // Lowercase internal values — pass through
+    case "active":
+      return "active";
+    case "inactive":
+      return "inactive";
+    case "maintenance":
+      return "maintenance";
+    case "pending":
+      return "pending";
     default:
+      // Unknown: try deriving from the top-level record status if provided
+      if (recordStatus) {
+        const derived = toInternalStateFromRecordStatus(
+          registryStatus,
+          recordStatus,
+        );
+        if (derived !== undefined) return derived;
+      }
       console.warn(
         `Unknown registry status "${registryStatus}", mapping to "inactive"`,
       );
       return "inactive";
+  }
+}
+
+/**
+ * Derives internal state from a top-level record status when the descriptor's
+ * state field is unrecognised. Returns undefined if derivation is not possible.
+ */
+function toInternalStateFromRecordStatus(
+  rawState: string,
+  recordStatus: string,
+): string | undefined {
+  switch (recordStatus) {
+    case "APPROVED":
+      console.warn(
+        `Unknown descriptor state "${rawState}", deriving "active" from record.status "${recordStatus}"`,
+      );
+      return "active";
+    case "DEPRECATED":
+    case "REJECTED":
+      console.warn(
+        `Unknown descriptor state "${rawState}", deriving "inactive" from record.status "${recordStatus}"`,
+      );
+      return "inactive";
+    case "DRAFT":
+      console.warn(
+        `Unknown descriptor state "${rawState}", deriving "maintenance" from record.status "${recordStatus}"`,
+      );
+      return "maintenance";
+    case "PENDING_APPROVAL":
+      console.warn(
+        `Unknown descriptor state "${rawState}", deriving "pending" from record.status "${recordStatus}"`,
+      );
+      return "pending";
+    default:
+      return undefined;
   }
 }
 
@@ -641,6 +706,8 @@ export function buildAgentProjectionRow(
 
   const row: AgentProjectionRow = {
     ...base,
+    // Override state using record.status as fallback for unknown descriptor values
+    state: toInternalState(meta.state, record.status),
     // Override fields that buildAgentCacheRecord cannot set from the legacy path
     registryRecordId: record.recordId,
     registryStatus: record.status,
@@ -1468,20 +1535,46 @@ export async function handleGaUpsert(
 
   await docClient.send(new UpdateCommand(params));
 
-  // Write the full projection row (PutItem, keyed by recordId) so the
+  // Write the full projection row (UpdateCommand, keyed by recordId) so the
   // list-from-projection path has a complete, self-contained row for this
-  // resource. This is in addition to the merge-upsert above (which keeps
-  // legacy/name-keyed rows current). The projection row is a superset of
-  // the merge fields and carries projectionVersion + projectedAt.
+  // resource. Uses UpdateCommand (not PutItem) to avoid dropping
+  // lastRegistryEventAt — the stale-event guard depends on it persisting
+  // across events.
   const projectionRow =
     resourceType === "agent"
       ? buildAgentProjectionRow(record)
       : buildToolProjectionRow(record);
   try {
+    const projNames: Record<string, string> = {};
+    const projValues: Record<string, unknown> = {};
+    const projClauses: string[] = [];
+
+    const keyAttr = resourceType === "agent" ? "agentId" : "toolId";
+    for (const [attr, value] of Object.entries(projectionRow)) {
+      if (attr === keyAttr) continue; // skip the key attribute
+      const safeName = attr.replace(/[^a-zA-Z0-9_]/g, "_");
+      projNames[`#p_${safeName}`] = attr;
+      projValues[`:p_${safeName}`] = value;
+      projClauses.push(`#p_${safeName} = :p_${safeName}`);
+    }
+
+    // Ensure lastRegistryEventAt is set (and never regressed)
+    if (eventTime) {
+      projNames["#p_lastRegistryEventAt"] = "lastRegistryEventAt";
+      projValues[":p_lastRegistryEventAt"] = eventTime;
+      // Only SET if not already in the projection row's clauses
+      if (!projClauses.some((c) => c.includes("#p_lastRegistryEventAt"))) {
+        projClauses.push("#p_lastRegistryEventAt = :p_lastRegistryEventAt");
+      }
+    }
+
     await docClient.send(
-      new PutCommand({
+      new UpdateCommand({
         TableName: tableName,
-        Item: projectionRow,
+        Key: getKeyForResource(resourceType, resourceId),
+        UpdateExpression: `SET ${projClauses.join(", ")}`,
+        ExpressionAttributeNames: projNames,
+        ExpressionAttributeValues: projValues,
       }),
     );
   } catch (err) {
@@ -1852,8 +1945,7 @@ async function handleGaEvent(event: RegistryEvent): Promise<void> {
         }),
       );
       const lastEventAt = existing.Item?.lastRegistryEventAt as
-        | string
-        | undefined;
+        string | undefined;
       if (lastEventAt && eventTime <= lastEventAt) {
         console.log(
           `Stale GA event for ${resourceType} "${registryRecordId}": ` +
@@ -1871,7 +1963,13 @@ async function handleGaEvent(event: RegistryEvent): Promise<void> {
   }
 
   try {
-    await handleGaUpsert(tableName, resourceType, registryRecordId, record, eventTime);
+    await handleGaUpsert(
+      tableName,
+      resourceType,
+      registryRecordId,
+      record,
+      eventTime,
+    );
     console.log(
       `Cache merge-upsert for ${resourceType} "${registryRecordId}" in ${tableName} (GA event)`,
     );

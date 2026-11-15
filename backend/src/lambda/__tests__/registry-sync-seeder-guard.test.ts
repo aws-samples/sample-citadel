@@ -149,30 +149,28 @@ describe("handleGaUpsert seeder guard", () => {
         projectionVersion: PROJECTION_VERSION,
       },
     });
-    // Standard merge path: UpdateCommand + PutCommand
+    // Standard merge path: UpdateCommand (merge) + UpdateCommand (projection)
     ddbMock.on(UpdateCommand).resolves({});
-    ddbMock.on(PutCommand).resolves({});
 
     const record = makeRecord({ status: "APPROVED" });
     await handleGaUpsert(TABLE, "agent", RECORD_ID, record);
 
-    // Standard path writes a PutCommand (projection row)
-    const putCalls = ddbMock.commandCalls(PutCommand);
-    expect(putCalls.length).toBeGreaterThanOrEqual(1);
+    // Standard path writes UpdateCommands (merge + projection)
+    const updateCalls = ddbMock.commandCalls(UpdateCommand);
+    expect(updateCalls.length).toBeGreaterThanOrEqual(2);
   });
 
   it("falls through to standard merge when row does not exist", async () => {
     // GetCommand returns no item
     ddbMock.on(GetCommand).resolves({});
     ddbMock.on(UpdateCommand).resolves({});
-    ddbMock.on(PutCommand).resolves({});
 
     const record = makeRecord();
     await handleGaUpsert(TABLE, "agent", RECORD_ID, record);
 
-    // Standard path writes a PutCommand (projection row)
-    const putCalls = ddbMock.commandCalls(PutCommand);
-    expect(putCalls.length).toBeGreaterThanOrEqual(1);
+    // Standard path writes UpdateCommands (merge + projection)
+    const updateCalls = ddbMock.commandCalls(UpdateCommand);
+    expect(updateCalls.length).toBeGreaterThanOrEqual(2);
   });
 
   it("does not apply seeder guard for tool resources", async () => {
@@ -185,15 +183,14 @@ describe("handleGaUpsert seeder guard", () => {
       },
     });
     ddbMock.on(UpdateCommand).resolves({});
-    ddbMock.on(PutCommand).resolves({});
 
     const record = makeRecord({ recordId: "tool-123" });
     await handleGaUpsert("test-tools-table", "tool", "tool-123", record);
 
     // Should not have checked the seeder guard (no GetCommand for tools)
-    // The standard merge path runs: UpdateCommand + PutCommand
-    const putCalls = ddbMock.commandCalls(PutCommand);
-    expect(putCalls.length).toBeGreaterThanOrEqual(1);
+    // The standard merge path runs: UpdateCommand (merge) + UpdateCommand (projection)
+    const updateCalls = ddbMock.commandCalls(UpdateCommand);
+    expect(updateCalls.length).toBeGreaterThanOrEqual(2);
   });
 
   it("uses syncSeederOwnedRow when row is damaged (no createdBy) but has a pointer", async () => {
@@ -258,14 +255,13 @@ describe("handleGaUpsert seeder guard", () => {
       })
       .resolves({}); // no item — no pointer
     ddbMock.on(UpdateCommand).resolves({});
-    ddbMock.on(PutCommand).resolves({});
 
     const record = makeRecord();
     await handleGaUpsert(TABLE, "agent", RECORD_ID, record);
 
-    // Standard merge path runs
-    const putCalls = ddbMock.commandCalls(PutCommand);
-    expect(putCalls.length).toBeGreaterThanOrEqual(1);
+    // Standard merge path runs (merge + projection UpdateCommands)
+    const updateCalls = ddbMock.commandCalls(UpdateCommand);
+    expect(updateCalls.length).toBeGreaterThanOrEqual(2);
   });
 
   it("detects seeder-owned via pointer even when many rows precede it (old Scan+Limit=1 bug)", async () => {
