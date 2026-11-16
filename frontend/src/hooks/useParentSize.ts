@@ -29,18 +29,20 @@ export function useParentSize<T extends HTMLElement = HTMLDivElement>(): {
     const rect = node.getBoundingClientRect();
     setSize({ width: rect.width, height: rect.height });
 
-    // Observe future resizes
-    observerRef.current = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const { width, height } = entry.contentRect;
-        setSize((prev) =>
-          prev.width === width && prev.height === height
-            ? prev
-            : { width, height },
-        );
-      }
-    });
-    observerRef.current.observe(node);
+    // Observe future resizes (skip when ResizeObserver is unavailable, e.g. jsdom)
+    if (typeof ResizeObserver !== 'undefined') {
+      observerRef.current = new ResizeObserver((entries) => {
+        for (const entry of entries) {
+          const { width, height } = entry.contentRect;
+          setSize((prev) =>
+            prev.width === width && prev.height === height
+              ? prev
+              : { width, height },
+          );
+        }
+      });
+      observerRef.current.observe(node);
+    }
   }, []);
 
   // Cleanup on unmount
