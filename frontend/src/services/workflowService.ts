@@ -35,9 +35,10 @@ export function applyConditionStyle(
   return {
     ...edge,
     data: { ...edge.data, condition } as WorkflowEdge['data'],
-    style: { strokeDasharray: '6 3', stroke: 'hsl(var(--primary))' },
+    className: 'conditional-edge',
     label,
-    labelStyle: { fontSize: 10, fill: 'hsl(var(--primary))' },
+    labelBgPadding: [6, 3] as [number, number],
+    labelBgBorderRadius: 4,
   };
 }
 
@@ -50,6 +51,9 @@ export function clearConditionStyle(edge: WorkflowEdge): WorkflowEdge {
   delete cleaned.style;
   delete cleaned.label;
   delete cleaned.labelStyle;
+  delete (cleaned as Record<string, unknown>).className;
+  delete (cleaned as Record<string, unknown>).labelBgPadding;
+  delete (cleaned as Record<string, unknown>).labelBgBorderRadius;
   delete (cleaned as Record<string, unknown>).condition;
   return cleaned;
 }
