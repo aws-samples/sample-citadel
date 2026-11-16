@@ -46,7 +46,7 @@ export function AgenticStudio({ workflowId }: AgenticStudioProps = {}) {
           <BlueprintCatalog />
         </ErrorBoundary>
       </TabsContent>
-      <TabsContent value="agent-blueprints" className="flex-1 overflow-y-auto">
+      <TabsContent value="agent-blueprints" className="flex-1 overflow-hidden min-h-0">
         <ErrorBoundary>
           <AgentBlueprints workflowId={workflowId} />
         </ErrorBoundary>
