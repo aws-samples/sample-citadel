@@ -12,7 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from './ui/accordion';
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from './ui/resizable';
 import { Panel as ResizablePanelDirect } from 'react-resizable-panels';
-import type { ImperativePanelHandle } from 'react-resizable-panels';
+import type { PanelImperativeHandle } from 'react-resizable-panels';
 import type { Project } from '../services';
 import { projectService, type ProjectProgress } from '../services/projectService';
 import { sendMessageToAgent, getConversationHistoryForProject, subscribeToConversation, type ConversationMessage } from '../services/conversationService';
@@ -331,7 +331,7 @@ export function ProjectWorkspace({ project, onBack }: ProjectWorkspaceProps) {
   const prevProgressRef = useRef<ProjectProgress | null>(null);
   const docTabRefreshRef = useRef(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const docPanelRef = useRef<ImperativePanelHandle>(null);
+  const docPanelRef = useRef<PanelImperativeHandle>(null);
 
   // ── Auto-collapse doc panel until assessment is complete ────────────────
 
@@ -644,9 +644,9 @@ export function ProjectWorkspace({ project, onBack }: ProjectWorkspaceProps) {
         </DialogContent>
       </Dialog>
 
-      <ResizablePanelGroup direction="horizontal">
+      <ResizablePanelGroup orientation="horizontal">
         {/* Left: Chat */}
-        <ResizablePanel defaultSize={35} minSize={25}>
+        <ResizablePanel defaultSize="35" minSize="25">
           <div className="flex flex-col h-full">
             {/* Header */}
             <div className="flex items-center gap-2 px-4 py-3 border-b border-border/50">
@@ -862,13 +862,15 @@ export function ProjectWorkspace({ project, onBack }: ProjectWorkspaceProps) {
 
         {/* Right: Documents */}
         <ResizablePanelDirect
-          ref={docPanelRef}
-          defaultSize={65}
-          minSize={30}
+          panelRef={docPanelRef}
+          defaultSize="65"
+          minSize="30"
           collapsible
-          collapsedSize={0}
-          onCollapse={() => setDocPanelCollapsed(true)}
-          onExpand={() => setDocPanelCollapsed(false)}
+          collapsedSize="0"
+          onResize={(size) => {
+            const collapsed = size.asPercentage === 0;
+            setDocPanelCollapsed(collapsed);
+          }}
         >
           <div className="flex flex-col h-full overflow-hidden">
             <Tabs value={activeDocTab} onValueChange={setActiveDocTab} className="flex flex-col h-full">

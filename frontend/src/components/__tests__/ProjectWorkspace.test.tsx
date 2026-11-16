@@ -55,14 +55,15 @@ jest.mock('sonner', () => ({
 // this test; stub the whole module to plain divs so the DOM renders without
 // ref plumbing or layout measurement (which jsdom can't do anyway).
 jest.mock('react-resizable-panels', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
   const React = require('react');
   return {
-    PanelGroup: (props: any) => React.createElement('div', null, props.children),
-    Panel: React.forwardRef((props: any, ref: any) => {
-      React.useImperativeHandle(ref, () => ({ collapse: jest.fn(), expand: jest.fn() }));
-      return React.createElement('div', null, props.children);
-    }),
-    PanelResizeHandle: (props: any) => React.createElement('div', null, props.children),
+    Group: (props: Record<string, unknown>) => React.createElement('div', null, props.children),
+    Panel: ({ children, panelRef }: Record<string, unknown>) => {
+      React.useImperativeHandle(panelRef, () => ({ collapse: jest.fn(), expand: jest.fn() }));
+      return React.createElement('div', null, children);
+    },
+    Separator: (props: Record<string, unknown>) => React.createElement('div', null, props.children),
   };
 });
 
