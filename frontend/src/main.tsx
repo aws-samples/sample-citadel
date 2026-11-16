@@ -7,9 +7,13 @@ import './styles/custom.css';
 import './styles/workflow.css';
 import { initializeAmplify } from './config/amplify';
 import { initializeSubscriptionDebug } from './services/subscriptionDebug';
+import { registerPreloadErrorGuard } from './preload-error-guard'; // CIT-307
 
 // Initialize subscription debug tools in development mode
 initializeSubscriptionDebug();
+
+// CIT-307: one-shot reload on stale chunk 404 after deploy
+registerPreloadErrorGuard();
 
 // Initialize Amplify before rendering the app
 initializeAmplify().then((configured) => {
