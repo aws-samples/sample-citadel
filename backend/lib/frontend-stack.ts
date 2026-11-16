@@ -346,17 +346,63 @@ export class FrontendStack extends cdk.Stack {
       aws_cost_api_url: props.costApiUrl,
     };
 
-    // Deploy frontend build files to S3
+    // --- CIT-307: Split deployment for cache control ---
+    // Hashed assets (Vite output in assets/) get immutable caching.
+    // index.html and other non-hashed root files get no-cache so browsers
+    // always fetch the latest entry point after a deploy.
     const frontendBuildPath =
       process.env.FRONTEND_BUILD_PATH || "../frontend/build";
-    new s3deploy.BucketDeployment(this, "FrontendBuildDeployment", {
-      sources: [
-        s3deploy.Source.asset(frontendBuildPath),
-        s3deploy.Source.jsonData("aws-exports.json", frontendConfig),
-      ],
-      destinationBucket: this.bucket,
-      distribution: this.distribution,
-      distributionPaths: ["/*"],
+
+    // (1) Hashed assets — long-lived immutable cache, deployed first
+    const assetsDeployment = new s3deploy.BucketDeployment(
+      this,
+      "AssetsDeployment",
+      {
+        sources: [s3deploy.Source.asset(frontendBuildPath, { exclude: ["index.html", "aws-exports.json"] })],
+        destinationBucket: this.bucket,
+        distribution: this.distribution,
+        cacheControl: [
+          s3deploy.CacheControl.fromString(
+            "public, max-age=31536000, immutable",
+          ),
+        ],
+        prune: false,
+      },
+    );
+
+    // (2) index.html + non-hashed root files — no-cache, always revalidate
+    const indexDeployment = new s3deploy.BucketDeployment(
+      this,
+      "IndexDeployment",
+      {
+        sources: [
+          s3deploy.Source.asset(frontendBuildPath, { exclude: ["assets", "assets/**"] }),
+          s3deploy.Source.jsonData("aws-exports.json", frontendConfig),
+        ],
+        destinationBucket: this.bucket,
+        distribution: this.distribution,
+        distributionPaths: ["/index.html", "/"],
+        cacheControl: [
+          s3deploy.CacheControl.fromString(
+            "no-cache, no-store, must-revalidate",
+          ),
+        ],
+        prune: false,
+      },
+    );
+
+    // Ensure index deployment runs after assets so chunks are already
+    // present when the new index.html becomes live.
+    indexDeployment.node.addDependency(assetsDeployment);
+
+    // (3) Lifecycle rule: expire stale hashed chunks after 30 days.
+    // With prune: false, old chunks accumulate; this ages them out while
+    // keeping them available long enough for open tabs to finish loading.
+    this.bucket.addLifecycleRule({
+      prefix: "assets/",
+      expiration: cdk.Duration.days(30),
+      noncurrentVersionExpiration: cdk.Duration.days(30),
+      enabled: true,
     });
 
     // Outputs
