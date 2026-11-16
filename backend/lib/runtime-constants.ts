@@ -229,6 +229,11 @@ function lazyBuildImage(
         // `aws:cdk:bundling-stacks: []` never call .run(), and asset-hash
         // computation only reads .image — the placeholder string is fine.
         //
+        // CIT-305: when .run() IS called (PythonFunction bundling with
+        // bundlingRequired=true during `cdk synth`), return a no-op that
+        // copies the placeholder asset into the output directory instead
+        // of launching Docker.
+        //
         // SAFETY GUARD: the bundling-skip placeholder must NEVER reach a
         // real deployment.  Only allow it when the environment is 'test'
         // or unset (unit-test suite) — an explicitly non-test ENVIRONMENT
@@ -244,6 +249,21 @@ function lazyBuildImage(
                 `environment '${env}'. ` +
                 "Unset CITADEL_SKIP_BUNDLING or set ENVIRONMENT=test.",
             );
+          }
+          // CIT-305: no-op .run() — write a stub index.py so CDK's
+          // bundling output validation finds a non-empty directory.
+          if (prop === "run") {
+            return (options?: { outputDir?: string }) => {
+              if (options?.outputDir && fs.existsSync(options.outputDir)) {
+                const stubPath = path.join(options.outputDir, "index.py");
+                if (!fs.existsSync(stubPath)) {
+                  fs.writeFileSync(
+                    stubPath,
+                    "# skip-bundling placeholder\ndef handler(event, context): pass\n",
+                  );
+                }
+              }
+            };
           }
           return Reflect.get(target, prop, receiver);
         }
@@ -276,3 +296,164 @@ export const PYTHON_BUILD_IMAGE: cdk.DockerImage = lazyBuildImage(
     cacheDisabled: true,
   },
 );
+
+// ---------------------------------------------------------------------------
+// Unified Python asset helper (CIT-305: skip-bundling for layers+functions)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the placeholder-asset directory from either source or dist.
+ */
+function resolvePlaceholderAssetDir(startDir: string): string {
+  const candidates = [
+    path.join(startDir, "python-build-image", "placeholder-asset"),
+    path.join(
+      startDir,
+      "..",
+      "..",
+      "lib",
+      "python-build-image",
+      "placeholder-asset",
+    ),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  throw new Error(
+    `Unable to locate python-build-image/placeholder-asset from ${startDir}. ` +
+      `Tried: ${candidates.join(", ")}`,
+  );
+}
+
+const PLACEHOLDER_ASSET_DIR = resolvePlaceholderAssetDir(__dirname);
+
+/**
+ * Return value from {@link pythonAssetCode}.
+ */
+export interface PythonAssetResult {
+  /** Lambda `Code` object — use as `code:` in LayerVersion or Function. */
+  code: lambda.Code;
+  /** `true` when real Docker-based bundling is active (flag unset). */
+  isBundled: boolean;
+  /**
+   * The resolved bundling options (image, platform, command, etc.) when
+   * bundling is active; `undefined` when skipped.
+   */
+  bundlingOptions?: cdk.BundlingOptions;
+}
+
+/**
+ * Whether Docker-based bundling should be skipped.
+ *
+ * Returns `true` when `CITADEL_SKIP_BUNDLING=1` and `ENVIRONMENT=test`.
+ * Throws if the flag is set but the environment is not `test`.
+ */
+export function isSkipBundling(): boolean {
+  if (!process.env.CITADEL_SKIP_BUNDLING) return false;
+  const env = process.env.ENVIRONMENT;
+  if (env && env !== "test") {
+    throw new Error(
+      "CITADEL_SKIP_BUNDLING is set but ENVIRONMENT is not 'test'. " +
+        "Refusing to synthesise with a bundling-skip placeholder for " +
+        `environment '${env}'. ` +
+        "Unset CITADEL_SKIP_BUNDLING or set ENVIRONMENT=test.",
+    );
+  }
+  return true;
+}
+
+/**
+ * A local bundler that writes a stub `index.py` into the output
+ * directory, letting CDK's AssetStaging complete without Docker.
+ */
+const SKIP_BUNDLING_LOCAL: cdk.ILocalBundling = {
+  tryBundle(outputDir: string): boolean {
+    const stubPath = path.join(outputDir, "index.py");
+    fs.writeFileSync(
+      stubPath,
+      "# skip-bundling placeholder\ndef handler(event, context): pass\n",
+    );
+    return true;
+  },
+};
+
+/**
+ * Single entry point for every Docker-bundled Python asset in the CDK
+ * stacks (layers AND functions).
+ *
+ * - **Flag unset**: returns `Code.fromAsset(assetPath, { bundling: ... })`
+ *   with `PYTHON_BUILD_IMAGE` and `DOCKER_PLATFORM` merged in.
+ *
+ * - **`CITADEL_SKIP_BUNDLING=1` + `ENVIRONMENT=test`**: returns
+ *   `Code.fromAsset(PLACEHOLDER_ASSET_DIR)` with NO bundling, so
+ *   `cdk synth` produces a valid template without contacting Docker.
+ *
+ * - **`CITADEL_SKIP_BUNDLING=1` + any other `ENVIRONMENT`**: throws.
+ *
+ * @param assetPath    The real asset source directory.
+ * @param bundlingOpts Caller-specific bundling overrides.  `image` and
+ *                     `platform` are injected automatically.
+ * @param assetOpts    Optional top-level `AssetOptions` (e.g. `exclude`).
+ */
+export function pythonAssetCode(
+  assetPath: string,
+  bundlingOpts: Omit<cdk.BundlingOptions, "image" | "platform">,
+  assetOpts?: { exclude?: string[] },
+): PythonAssetResult {
+  if (isSkipBundling()) {
+    return {
+      code: lambda.Code.fromAsset(PLACEHOLDER_ASSET_DIR),
+      isBundled: false,
+    };
+  }
+
+  const resolved: cdk.BundlingOptions = {
+    image: PYTHON_BUILD_IMAGE,
+    platform: DOCKER_PLATFORM,
+    ...bundlingOpts,
+  };
+  return {
+    code: lambda.Code.fromAsset(assetPath, {
+      ...assetOpts,
+      bundling: resolved,
+    }),
+    isBundled: true,
+    bundlingOptions: resolved,
+  };
+}
+
+/**
+ * Bundling overrides for `PythonFunction` (and any other construct that
+ * accepts `BundlingOptions` separately from `Code`).
+ *
+ * - **Flag unset**: returns `{ image, platform, ...overrides }`.
+ * - **`CITADEL_SKIP_BUNDLING=1` + `ENVIRONMENT=test`**: returns overrides
+ *   with a `local` bundler that writes a stub, so CDK never calls Docker.
+ * - **`CITADEL_SKIP_BUNDLING=1` + any other `ENVIRONMENT`**: throws.
+ */
+export function pythonBundlingOverrides<
+  T extends Record<string, unknown> = Record<string, unknown>,
+>(
+  overrides?: T,
+): T & {
+  image: cdk.DockerImage;
+  platform: string;
+} {
+  const base = {
+    image: PYTHON_BUILD_IMAGE,
+    platform: DOCKER_PLATFORM,
+  };
+  if (isSkipBundling()) {
+    return {
+      ...base,
+      local: SKIP_BUNDLING_LOCAL,
+      ...(overrides as T),
+    } as T & typeof base;
+  }
+  return {
+    ...base,
+    ...(overrides as T),
+  } as T & typeof base;
+}
