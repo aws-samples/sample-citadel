@@ -100,16 +100,12 @@ jobs:
   # ── Backend build + synth (all stacks) ──
   backend-build:
     name: Backend Build + Synth
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     defaults:
       run:
         working-directory: backend
     steps:
       - uses: actions/checkout@v7
-
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
-        with:
-          platforms: arm64
 
       - uses: actions/setup-node@v7
         with:
@@ -181,16 +177,12 @@ jobs:
   # preference to avoid a duplicate synth.
   split-gates:
     name: Split Gates (IAM/policy)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     defaults:
       run:
         working-directory: backend
     steps:
       - uses: actions/checkout@v7
-
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
-        with:
-          platforms: arm64
 
       - uses: actions/setup-node@v7
         with:
@@ -275,16 +267,12 @@ jobs:
   # governance resolvers and the citadel-governance-test stack template.
   governance:
     name: Governance
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     defaults:
       run:
         working-directory: backend
     steps:
       - uses: actions/checkout@v7
-
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
-        with:
-          platforms: arm64
 
       - uses: actions/setup-node@v7
         with:
