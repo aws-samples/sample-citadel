@@ -11,6 +11,8 @@ Committed baselines for the split-gates rail 2 test (stateful logical-ID pin).
 
 Rail 2 (`test/split-gates-rail2-stateful-pin.test.ts`) reads the baseline matching the current `SPLIT_GATES_ENV` and asserts every stateful logical ID still exists in a fresh `cdk synth` output with unchanged deletion/update policies and key properties.
 
+> **x86 Linux hosts:** `npm run split:gates` bundles arm64 Lambda assets and requires QEMU emulation. See [Local arm64 Bundling](../../docs/DEPLOYMENT.md#local-arm64-bundling-x86-linux-hosts) in the deployment guide.
+
 ## Why two baselines?
 
 The dev and test stacks are deployed independently and may have different feature flags, CDK constructs, or resource sets enabled at any given time. Each baseline captures the **intended** state of its respective stack.

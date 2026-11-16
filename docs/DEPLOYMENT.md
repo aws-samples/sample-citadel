@@ -56,6 +56,26 @@ echo 'export CDK_DOCKER=finch' >> ~/.zshrc
 
 All CDK commands (`cdk synth`, `cdk deploy`, etc.) will then use Finch for container operations.
 
+### Local arm64 Bundling (x86 Linux Hosts)
+
+Every Lambda function and layer in Citadel targets arm64 (see `LAMBDA_ARCHITECTURE` in `backend/lib/runtime-constants.ts`). On Apple Silicon Macs this is native and requires no extra setup. On an **x86-64 Linux** host, Docker (or Finch) needs QEMU user-mode emulation registered so it can build arm64 container images.
+
+Register the emulator (not persistent across reboots on most distros):
+
+```bash
+docker run --privileged --rm tonistiigi/binfmt --install arm64
+```
+
+Verify it is active:
+
+```bash
+ls /proc/sys/fs/binfmt_misc | grep qemu-aarch64
+```
+
+If the emulator is **not** registered you will see `exec /bin/sh: exec format error` during `cdk synth` or any bundling command (`npm run split:gates`, etc.).
+
+> **Note:** Unit tests never require Docker — the `CITADEL_SKIP_BUNDLING` default in the Jest configuration stubs out all CDK bundling at test time.
+
 ## Configuration
 
 ### 1. Environment Variables
