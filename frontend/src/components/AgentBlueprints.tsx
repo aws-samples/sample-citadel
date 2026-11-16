@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { ReactFlowProvider, type NodeMouseHandler } from 'reactflow';
 import 'reactflow/dist/style.css';
+import { useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { AgentTray } from './AgentTray';
 import { WorkflowCanvas } from './WorkflowCanvas';
@@ -36,6 +37,8 @@ export interface AgentBlueprintsProps {
 }
 
 export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprintsProps = {}) {
+  const navigate = useNavigate();
+  const { workflowId: routeWorkflowId } = useParams<{ workflowId?: string }>();
   const [nodes, setNodes] = useState<WorkflowNode[]>([]);
   const [edges, setEdges] = useState<WorkflowEdge[]>([]);
   const [configNode, setConfigNode] = useState<WorkflowNode | null>(null);
@@ -77,6 +80,14 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
   useEffect(() => {
     workflowIdRef.current = workflowId;
   }, [workflowId]);
+
+  // URL sync: when the canvas has an active workflowId that differs from the
+  // current route, update the URL so a page reload re-opens this workflow.
+  useEffect(() => {
+    if (!workflowId) return;
+    if (routeWorkflowId === workflowId) return;
+    navigate(`/agentic-studio/workflows/${workflowId}`, { replace: true });
+  }, [workflowId, routeWorkflowId, navigate]);
 
   // Track the server's version for optimistic-locking on subsequent saves.
   // Version is monotonic; we never let it downgrade the locally-tracked publish status.

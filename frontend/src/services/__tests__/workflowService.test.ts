@@ -369,12 +369,12 @@ describe('deserializeWorkflow — edge condition loading', () => {
     expect(edges[0].label).toBe('result.route equals branch-a');
   });
 
-  it('applies dashed stroke style to conditional edges', async () => {
+  it('applies conditional-edge className to conditional edges', async () => {
     const { edges } = await deserializeWorkflow(conditionalDefinition, agentConfigMap);
-    expect(edges[0].style).toEqual(expect.objectContaining({ strokeDasharray: '6 3' }));
+    expect(edges[0].className).toBe('conditional-edge');
   });
 
-  it('does not set label or dashed style on unconditional edges', async () => {
+  it('does not set label or className on unconditional edges', async () => {
     const unconditionalDef: WorkflowDefinition = {
       ...conditionalDefinition,
       edges: [
@@ -383,7 +383,7 @@ describe('deserializeWorkflow — edge condition loading', () => {
     };
     const { edges } = await deserializeWorkflow(unconditionalDef, agentConfigMap);
     expect(edges[0].label).toBeUndefined();
-    expect(edges[0].style).toBeUndefined();
+    expect(edges[0].className).toBeUndefined();
     expect(edges[0].data?.condition).toBeUndefined();
   });
 });

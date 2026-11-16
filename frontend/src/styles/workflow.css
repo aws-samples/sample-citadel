@@ -113,6 +113,36 @@
   fill: #1a1a1a;
 }
 
+/* ===== Conditional Edge Styling ===== */
+
+/* Amber dashed stroke for conditioned edges */
+.react-flow__edge.conditional-edge .react-flow__edge-path {
+  stroke: #f59e0b;
+  stroke-width: 2;
+  stroke-dasharray: 6 3;
+}
+
+/* Readable label text on the dark background */
+.react-flow__edge.conditional-edge .react-flow__edge-text {
+  fill: #fcd34d;
+  font-size: 10px;
+}
+
+/* Label background matches the dark canvas */
+.react-flow__edge.conditional-edge .react-flow__edge-textbg {
+  fill: #1a1a1a;
+}
+
+/* Slightly brighter when selected */
+.react-flow__edge.conditional-edge.selected .react-flow__edge-path {
+  stroke: #fbbf24;
+  stroke-width: 3;
+}
+
+.react-flow__edge.conditional-edge.selected .react-flow__edge-text {
+  fill: #fde68a;
+}
+
 /* ===== Handle Styling ===== */
 
 /* Connection handles */

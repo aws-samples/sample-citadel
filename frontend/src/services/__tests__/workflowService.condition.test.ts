@@ -30,7 +30,7 @@ const echoAgent = {
 const agentMap = new Map<string, AgentConfig>([['demo-echo-agent', echoAgent]]);
 
 describe('applyConditionStyle', () => {
-  it('applies dashed stroke, primary colour, and label from condition', () => {
+  it('applies className, label, and labelBg props from condition', () => {
     const edge: WorkflowEdge = {
       id: 'e1',
       source: 'n1',
@@ -43,10 +43,11 @@ describe('applyConditionStyle', () => {
     const cond: EdgeCondition = { field: 'result.route', operator: 'equals', value: 'branch-a' };
     const styled = applyConditionStyle(edge, cond);
 
-    expect(styled.style).toEqual(expect.objectContaining({ strokeDasharray: '6 3' }));
-    expect(styled.style?.stroke).toMatch(/primary/);
+    expect(styled.className).toBe('conditional-edge');
     expect(styled.label).toBe('result.route equals branch-a');
     expect(styled.data?.condition).toEqual(cond);
+    expect(styled.labelBgPadding).toEqual([6, 3]);
+    expect(styled.labelBgBorderRadius).toBe(4);
   });
 
   it('formats exists condition without value in label', () => {
@@ -66,7 +67,7 @@ describe('applyConditionStyle', () => {
 });
 
 describe('clearConditionStyle', () => {
-  it('removes condition, style, label, and labelStyle', () => {
+  it('removes condition, className, label, and labelBg props', () => {
     const edge: WorkflowEdge = {
       id: 'e1',
       source: 'n1',
@@ -74,9 +75,10 @@ describe('clearConditionStyle', () => {
       sourceHandle: 'output',
       targetHandle: 'input',
       type: 'smoothstep',
-      style: { strokeDasharray: '6 3', stroke: 'hsl(var(--primary))' },
+      className: 'conditional-edge',
       label: 'result.route equals branch-a',
-      labelStyle: { fontSize: 10, fill: 'hsl(var(--primary))' },
+      labelBgPadding: [6, 3] as [number, number],
+      labelBgBorderRadius: 4,
       data: {
         sourceHandle: 'output',
         targetHandle: 'input',
@@ -84,9 +86,10 @@ describe('clearConditionStyle', () => {
       },
     };
     const cleared = clearConditionStyle(edge);
-    expect(cleared.style).toBeUndefined();
+    expect(cleared.className).toBeUndefined();
     expect(cleared.label).toBeUndefined();
-    expect(cleared.labelStyle).toBeUndefined();
+    expect((cleared as Record<string, unknown>).labelBgPadding).toBeUndefined();
+    expect((cleared as Record<string, unknown>).labelBgBorderRadius).toBeUndefined();
     expect(cleared.data?.condition).toBeUndefined();
   });
 });
@@ -141,8 +144,7 @@ describe('fast-check round-trip property: random conditions survive serialize→
 
           // Styling helper must have been applied during deserialization
           for (const rfEdge of rfEdges) {
-            expect(rfEdge.style).toBeDefined();
-            expect(rfEdge.style?.strokeDasharray).toBe('6 3');
+            expect(rfEdge.className).toBe('conditional-edge');
             expect(rfEdge.label).toBeDefined();
           }
         },
@@ -161,7 +163,7 @@ describe('clearConditionStyle removes legacy top-level condition', () => {
       target: 'n2',
       type: 'smoothstep',
       data: { sourceHandle: 'output', targetHandle: 'input', condition: cond },
-      style: { strokeDasharray: '6 3' },
+      className: 'conditional-edge',
       label: 'status equals done',
     };
     // Simulate a legacy top-level condition (the serializer fallback reads this)
