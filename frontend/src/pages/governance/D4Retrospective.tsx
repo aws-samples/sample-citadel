@@ -27,9 +27,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Group } from '@visx/group';
-import { ParentSize } from '@visx/responsive';
-import { Circle } from '@visx/shape';
+import { useParentSize } from '../../hooks/useParentSize';
 import { PageContainer } from '../../components/PageContainer';
 import { GovernanceBreadcrumbs } from '../../components/governance/GovernanceBreadcrumbs';
 import { Skeleton } from '../../components/ui/skeleton';
@@ -389,6 +387,9 @@ interface VennDiagramProps {
 }
 
 function VennDiagram({ report }: VennDiagramProps) {
+  const insufficientSize = useParentSize<HTMLDivElement>();
+  const normalSize = useParentSize<HTMLDivElement>();
+
   if (report.insufficientEvidence) {
     return (
       <Card
@@ -396,49 +397,56 @@ function VennDiagram({ report }: VennDiagramProps) {
         data-testid="d4-venn-insufficient"
         style={{ height: 400 }}
       >
-        <ParentSize>
-          {({ width }) => (
-            <svg
-              width={width}
-              height={400}
-              data-testid="d4-venn-svg"
-              role="img"
-              aria-label="Insufficient evidence — single grey circle"
-            >
-              <Group top={200} left={width / 2}>
-                <Circle
-                  cx={0}
-                  cy={0}
-                  r={120}
-                  className="fill-muted/60 stroke-border"
-                  strokeWidth={2}
-                  data-testid="d4-venn-insufficient-circle"
-                />
-                <text
-                  x={0}
-                  y={0}
-                  className="fill-muted-foreground text-xs"
-                  textAnchor="middle"
-                  dominantBaseline="middle"
-                >
-                  Insufficient evidence
-                </text>
-                <text
-                  x={0}
-                  y={20}
-                  className="fill-muted-foreground text-[10px]"
-                  textAnchor="middle"
-                  dominantBaseline="middle"
-                >
-                  less than 1 tool-handler finding observed in this window
-                </text>
-              </Group>
-            </svg>
-          )}
-        </ParentSize>
+        <div ref={insufficientSize.ref} className="w-full h-full">
+          <svg
+            width={insufficientSize.width}
+            height={400}
+            data-testid="d4-venn-svg"
+            role="img"
+            aria-label="Insufficient evidence — single grey circle"
+          >
+            <g transform={`translate(${insufficientSize.width / 2}, 200)`}>
+              <circle
+                cx={0}
+                cy={0}
+                r={120}
+                className="fill-muted/60 stroke-border"
+                strokeWidth={2}
+                data-testid="d4-venn-insufficient-circle"
+              />
+              <text
+                x={0}
+                y={0}
+                className="fill-muted-foreground text-xs"
+                textAnchor="middle"
+                dominantBaseline="middle"
+              >
+                Insufficient evidence
+              </text>
+              <text
+                x={0}
+                y={20}
+                className="fill-muted-foreground text-[10px]"
+                textAnchor="middle"
+                dominantBaseline="middle"
+              >
+                less than 1 tool-handler finding observed in this window
+              </text>
+            </g>
+          </svg>
+        </div>
       </Card>
     );
   }
+
+  const height = 400;
+  const geom = computeVennGeometry(
+    report.counts.distinctPreFilter,
+    report.counts.distinctToolHandler,
+    report.counts.overlap,
+    normalSize.width,
+    height,
+  );
 
   return (
     <Card
@@ -446,99 +454,87 @@ function VennDiagram({ report }: VennDiagramProps) {
       data-testid="d4-venn-container"
       style={{ height: 400 }}
     >
-      <ParentSize>
-        {({ width }) => {
-          const height = 400;
-          const geom = computeVennGeometry(
-            report.counts.distinctPreFilter,
-            report.counts.distinctToolHandler,
-            report.counts.overlap,
-            width,
-            height,
-          );
-          return (
-            <svg
-              width={width}
-              height={height}
-              data-testid="d4-venn-svg"
-              role="img"
-              aria-label="Two-circle Venn diagram comparing pre-filter and tool-handler denial sets"
+      <div ref={normalSize.ref} className="w-full h-full">
+        <svg
+          width={normalSize.width}
+          height={height}
+          data-testid="d4-venn-svg"
+          role="img"
+          aria-label="Two-circle Venn diagram comparing pre-filter and tool-handler denial sets"
+        >
+          <g>
+            <circle
+              cx={geom.cxA}
+              cy={geom.cy}
+              r={geom.rA}
+              className="fill-chart-4 stroke-chart-4"
+              fillOpacity={0.4}
+              strokeWidth={2}
+              data-testid="d4-venn-circle-a"
+            />
+            <circle
+              cx={geom.cxB}
+              cy={geom.cy}
+              r={geom.rB}
+              className="fill-destructive stroke-destructive"
+              fillOpacity={0.4}
+              strokeWidth={2}
+              data-testid="d4-venn-circle-b"
+            />
+            <text
+              x={geom.cxA}
+              y={geom.cy - geom.rA - 10}
+              textAnchor="middle"
+              className="fill-foreground text-xs font-medium"
+              data-testid="d4-venn-label-a"
             >
-              <Group>
-                <Circle
-                  cx={geom.cxA}
-                  cy={geom.cy}
-                  r={geom.rA}
-                  className="fill-chart-4 stroke-chart-4"
-                  fillOpacity={0.4}
-                  strokeWidth={2}
-                  data-testid="d4-venn-circle-a"
-                />
-                <Circle
-                  cx={geom.cxB}
-                  cy={geom.cy}
-                  r={geom.rB}
-                  className="fill-destructive stroke-destructive"
-                  fillOpacity={0.4}
-                  strokeWidth={2}
-                  data-testid="d4-venn-circle-b"
-                />
-                <text
-                  x={geom.cxA}
-                  y={geom.cy - geom.rA - 10}
-                  textAnchor="middle"
-                  className="fill-foreground text-xs font-medium"
-                  data-testid="d4-venn-label-a"
-                >
-                  Pre-filter
-                </text>
-                <text
-                  x={geom.cxA}
-                  y={geom.cy - geom.rA + 6}
-                  textAnchor="middle"
-                  className="fill-foreground text-[11px]"
-                >
-                  {report.counts.distinctPreFilter} tuples
-                </text>
-                <text
-                  x={geom.cxB}
-                  y={geom.cy - geom.rB - 10}
-                  textAnchor="middle"
-                  className="fill-foreground text-xs font-medium"
-                  data-testid="d4-venn-label-b"
-                >
-                  Tool-handler
-                </text>
-                <text
-                  x={geom.cxB}
-                  y={geom.cy - geom.rB + 6}
-                  textAnchor="middle"
-                  className="fill-foreground text-[11px]"
-                >
-                  {report.counts.distinctToolHandler} tuples
-                </text>
-                <text
-                  x={(geom.cxA + geom.cxB) / 2}
-                  y={geom.cy + 4}
-                  textAnchor="middle"
-                  className="fill-foreground text-sm font-semibold"
-                  data-testid="d4-venn-overlap-label"
-                >
-                  {report.counts.overlap}
-                </text>
-                <text
-                  x={(geom.cxA + geom.cxB) / 2}
-                  y={geom.cy + 22}
-                  textAnchor="middle"
-                  className="fill-muted-foreground text-[10px]"
-                >
-                  overlap
-                </text>
-              </Group>
-            </svg>
-          );
-        }}
-      </ParentSize>
+              Pre-filter
+            </text>
+            <text
+              x={geom.cxA}
+              y={geom.cy - geom.rA + 6}
+              textAnchor="middle"
+              className="fill-foreground text-[11px]"
+            >
+              {report.counts.distinctPreFilter} tuples
+            </text>
+            <text
+              x={geom.cxB}
+              y={geom.cy - geom.rB - 10}
+              textAnchor="middle"
+              className="fill-foreground text-xs font-medium"
+              data-testid="d4-venn-label-b"
+            >
+              Tool-handler
+            </text>
+            <text
+              x={geom.cxB}
+              y={geom.cy - geom.rB + 6}
+              textAnchor="middle"
+              className="fill-foreground text-[11px]"
+            >
+              {report.counts.distinctToolHandler} tuples
+            </text>
+            <text
+              x={(geom.cxA + geom.cxB) / 2}
+              y={geom.cy + 4}
+              textAnchor="middle"
+              className="fill-foreground text-sm font-semibold"
+              data-testid="d4-venn-overlap-label"
+            >
+              {report.counts.overlap}
+            </text>
+            <text
+              x={(geom.cxA + geom.cxB) / 2}
+              y={geom.cy + 22}
+              textAnchor="middle"
+              className="fill-muted-foreground text-[10px]"
+            >
+              overlap
+            </text>
+          </g>
+        </svg>
+      </div>
     </Card>
   );
 }

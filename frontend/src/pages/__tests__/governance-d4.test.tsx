@@ -1,7 +1,7 @@
 /**
  * GovernanceD4Retrospective tests.
  *
- * Mocks visx primitives, the governance service, OrganizationContext, and
+ * Mocks useParentSize, the governance service, OrganizationContext, and
  * the shadcn select/skeleton/button/label primitives so the test
  * environment renders inert SVG and predictable DOM. Mirrors the
  * jest.mock pattern used by governance-mismatches.test.tsx.
@@ -102,52 +102,14 @@ jest.mock('../../components/ui/label', () => ({
     React.createElement('label', { htmlFor, className }, children),
 }));
 
-// Mock visx primitives as inert SVG. The page only uses Group +
-// ParentSize + Circle, so we provide minimal renderers that surface the
-// supplied props as data attributes for assertions.
-jest.mock('@visx/group', () => {
-  const ReactLib = require('react');
-  return {
-    __esModule: true,
-    Group: ({ children, top, left }: any) =>
-      ReactLib.createElement(
-        'g',
-        {
-          'data-testid': 'visx-group',
-          'data-top': String(top ?? ''),
-          'data-left': String(left ?? ''),
-        },
-        children,
-      ),
-  };
-});
-
-jest.mock('@visx/responsive', () => {
-  const ReactLib = require('react');
-  return {
-    __esModule: true,
-    ParentSize: ({ children }: any) =>
-      ReactLib.createElement(
-        'div',
-        { 'data-testid': 'visx-parent-size' },
-        children({ width: 800, height: 400 }),
-      ),
-  };
-});
-
-jest.mock('@visx/shape', () => {
-  const ReactLib = require('react');
-  return {
-    __esModule: true,
-    Circle: ({ cx, cy, r, ...rest }: any) =>
-      ReactLib.createElement('circle', {
-        cx,
-        cy,
-        r,
-        ...rest,
-      }),
-  };
-});
+// Mock useParentSize hook to provide a fixed width in tests.
+jest.mock('../../hooks/useParentSize', () => ({
+  useParentSize: () => ({
+    ref: () => {},
+    width: 800,
+    height: 400,
+  }),
+}));
 
 const mockUseOrganization = jest.fn();
 jest.mock('../../contexts/OrganizationContext', () => ({
