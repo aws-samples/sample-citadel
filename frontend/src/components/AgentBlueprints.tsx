@@ -6,12 +6,13 @@ import { AgentTray } from './AgentTray';
 import { WorkflowCanvas } from './WorkflowCanvas';
 import { WorkflowToolbar } from './WorkflowToolbar';
 import { NodeConfigurationPanel } from './NodeConfigurationPanel';
+import { EdgeConditionSheet } from './EdgeConditionSheet';
 import { ExecutionOverlay } from './ExecutionOverlay';
 import { ExecutionHistoryPanel } from './ExecutionHistoryPanel';
 import { RunWorkflowDialog } from './RunWorkflowDialog';
 import { Button } from './ui/button';
-import type { WorkflowNode, WorkflowEdge, ValidationResult } from '../types/workflow';
-import { validateWorkflow, serializeWorkflow, deserializeWorkflow } from '../services/workflowService';
+import type { WorkflowNode, WorkflowEdge, EdgeCondition, ValidationResult } from '../types/workflow';
+import { validateWorkflow, serializeWorkflow, deserializeWorkflow, applyConditionStyle, clearConditionStyle } from '../services/workflowService';
 import { workflowApiService } from '../services/workflowApiService';
 import { executionApiService } from '../services/executionApiService';
 import { agentConfigService, type AgentConfig } from '../services/agentConfigService';
@@ -39,6 +40,8 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
   const [edges, setEdges] = useState<WorkflowEdge[]>([]);
   const [configNode, setConfigNode] = useState<WorkflowNode | null>(null);
   const [isConfigPanelOpen, setIsConfigPanelOpen] = useState(false);
+  const [conditionEdge, setConditionEdge] = useState<WorkflowEdge | null>(null);
+  const [isEdgeSheetOpen, setIsEdgeSheetOpen] = useState(false);
   const [validationResult, setValidationResult] = useState<ValidationResult | null>(null);
 
   // Server persistence + live execution state
@@ -323,6 +326,51 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
   }, []);
 
   /**
+   * Handle double-clicking an edge to open the condition editor
+   */
+  const handleEdgeDoubleClick = useCallback((_event: React.MouseEvent, edge: WorkflowEdge) => {
+    setConditionEdge(edge);
+    setIsEdgeSheetOpen(true);
+  }, []);
+
+  /**
+   * Apply a condition to the currently selected edge
+   */
+  const handleApplyCondition = useCallback((condition: EdgeCondition) => {
+    if (!conditionEdge) return;
+    setEdges((eds) =>
+      eds.map((e) =>
+        e.id === conditionEdge.id ? applyConditionStyle(e, condition) : e,
+      ),
+    );
+    setIsEdgeSheetOpen(false);
+    setConditionEdge(null);
+  }, [conditionEdge, setEdges]);
+
+  /**
+   * Remove condition from the currently selected edge
+   */
+  const handleRemoveCondition = useCallback(() => {
+    if (!conditionEdge) return;
+    setEdges((eds) =>
+      eds.map((e) => {
+        if (e.id !== conditionEdge.id) return e;
+        return clearConditionStyle(e);
+      }),
+    );
+    setIsEdgeSheetOpen(false);
+    setConditionEdge(null);
+  }, [conditionEdge, setEdges]);
+
+  /**
+   * Close the edge condition sheet
+   */
+  const handleCloseEdgeSheet = useCallback(() => {
+    setIsEdgeSheetOpen(false);
+    setConditionEdge(null);
+  }, []);
+
+  /**
    * Publish the current workflow. Surfaces server-side validation errors and,
    * on success, unlocks the Run control by moving the workflow to PUBLISHED.
    */
@@ -558,6 +606,7 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
               setNodes={setNodes}
               setEdges={setEdges}
               onNodeDoubleClick={handleNodeDoubleClick}
+              onEdgeDoubleClick={handleEdgeDoubleClick}
               validationResult={validationResult}
             />
           </main>
@@ -580,6 +629,16 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
           onClose={handleCloseConfiguration}
           onSave={handleSaveConfiguration}
           onRename={handleRenameNode}
+        />
+
+        {/* Edge Condition Sheet */}
+        <EdgeConditionSheet
+          edge={conditionEdge}
+          nodes={nodes}
+          isOpen={isEdgeSheetOpen}
+          onClose={handleCloseEdgeSheet}
+          onApply={handleApplyCondition}
+          onRemove={handleRemoveCondition}
         />
 
         {/* Run workflow dialog */}
