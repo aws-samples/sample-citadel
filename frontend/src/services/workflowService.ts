@@ -50,6 +50,7 @@ export function clearConditionStyle(edge: WorkflowEdge): WorkflowEdge {
   delete cleaned.style;
   delete cleaned.label;
   delete cleaned.labelStyle;
+  delete (cleaned as Record<string, unknown>).condition;
   return cleaned;
 }
 

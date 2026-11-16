@@ -151,3 +151,29 @@ describe('fast-check round-trip property: random conditions survive serialize→
     );
   });
 });
+
+describe('clearConditionStyle removes legacy top-level condition', () => {
+  it('serializeWorkflow emits no condition after Remove on edge with both data.condition and top-level condition', () => {
+    const cond: EdgeCondition = { field: 'status', operator: 'equals', value: 'done' };
+    const edge: WorkflowEdge = {
+      id: 'e1',
+      source: 'n1',
+      target: 'n2',
+      type: 'smoothstep',
+      data: { sourceHandle: 'output', targetHandle: 'input', condition: cond },
+      style: { strokeDasharray: '6 3' },
+      label: 'status equals done',
+    };
+    // Simulate a legacy top-level condition (the serializer fallback reads this)
+    (edge as Record<string, unknown>).condition = cond;
+
+    const cleaned = clearConditionStyle(edge);
+    // Build minimal node set so serializeWorkflow succeeds
+    const nodes = [
+      { id: 'n1', type: 'agentTask', position: { x: 0, y: 0 }, data: { label: 'A', agentId: 'a', config: {} } },
+      { id: 'n2', type: 'agentTask', position: { x: 100, y: 0 }, data: { label: 'B', agentId: 'b', config: {} } },
+    ] as any;
+    const result = serializeWorkflow(nodes, [cleaned]);
+    expect(result.edges[0].condition).toBeUndefined();
+  });
+});
