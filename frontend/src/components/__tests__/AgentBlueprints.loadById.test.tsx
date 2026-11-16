@@ -16,6 +16,11 @@ import '@testing-library/jest-dom';
 // uuid v13 is ESM-only and not in jest's transform whitelist; stub it so the
 // workflow serializer (which pulls in uuid) can be parsed under ts-jest.
 jest.mock('uuid', () => ({ v4: () => 'test-uuid' }));
+jest.mock('react-router-dom', () => ({
+  ...jest.requireActual('react-router-dom'),
+  useNavigate: () => jest.fn(),
+  useParams: () => ({}),
+}));
 
 // ReactFlowProvider is a lightweight context wrapper; pass children through so
 // we never mount the heavy canvas in jsdom.

@@ -10,6 +10,11 @@ import { render, screen, fireEvent, act } from '@testing-library/react';
 import '@testing-library/jest-dom';
 
 jest.mock('uuid', () => ({ v4: () => 'test-uuid' }));
+jest.mock('react-router-dom', () => ({
+  ...jest.requireActual('react-router-dom'),
+  useNavigate: () => jest.fn(),
+  useParams: () => ({}),
+}));
 
 jest.mock('reactflow', () => ({
   __esModule: true,
