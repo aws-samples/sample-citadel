@@ -1019,7 +1019,8 @@
             "Key": "Team",
             "Value": "platform"
           }
-        ]
+        ],
+        "DeletionProtectionEnabled": true
       }
     },
     "RegistryProvisionerFunctionLogsD015066A": {
@@ -1728,7 +1729,7 @@
             "Arn"
           ]
         },
-        "Version": "v1.2.0"
+        "Version": "v1.3.0"
       }
     },
     "SeedModelCatalogFunctionLogs76CE6A19": {
@@ -4982,6 +4983,16 @@
     ],
     "ReconcileAppsMetaScheduledFunction4D0CB960": [
       {
+        "actions": [
+          "sqs:SendMessage"
+        ],
+        "conditionKeys": [],
+        "effect": "Allow",
+        "resources": [
+          "GETATT:RegistrySyncDLQFB920991:Arn"
+        ]
+      },
+      {
         "effect": "Allow",
         "actions": [
           "bedrock-agentcore:GetRegistryRecord",
@@ -5017,6 +5028,16 @@
       }
     ],
     "ModelCatalogSyncFunction25BE66F5": [
+      {
+        "actions": [
+          "sqs:SendMessage"
+        ],
+        "conditionKeys": [],
+        "effect": "Allow",
+        "resources": [
+          "GETATT:RegistrySyncDLQFB920991:Arn"
+        ]
+      },
       {
         "effect": "Allow",
         "actions": [
@@ -6003,6 +6024,16 @@
     ],
     "GatewayRegistrationHandler00584901": [
       {
+        "actions": [
+          "sqs:SendMessage"
+        ],
+        "conditionKeys": [],
+        "effect": "Allow",
+        "resources": [
+          "GETATT:RegistrySyncDLQFB920991:Arn"
+        ]
+      },
+      {
         "effect": "Allow",
         "actions": [
           "dynamodb:BatchGetItem",
@@ -6412,6 +6443,16 @@
     ],
     "AppComponentRegistrationHandlerCD7DC5A3": [
       {
+        "actions": [
+          "sqs:SendMessage"
+        ],
+        "conditionKeys": [],
+        "effect": "Allow",
+        "resources": [
+          "GETATT:RegistrySyncDLQFB920991:Arn"
+        ]
+      },
+      {
         "effect": "Allow",
         "actions": [
           "dynamodb:BatchGetItem",
@@ -6494,6 +6535,16 @@
           "GETATT:UserPool6BA7E5F2:Arn"
         ],
         "conditionKeys": []
+      },
+      {
+        "actions": [
+          "cloudwatch:PutMetricData"
+        ],
+        "conditionKeys": [],
+        "effect": "Allow",
+        "resources": [
+          "*"
+        ]
       }
     ],
     "LogRetentionaae0aa3c5b4d4f87b02d85b201efdd8aFD4BFC8A": [
@@ -6510,6 +6561,16 @@
       }
     ],
     "WorkflowProgressFanoutFunctionB24A2000": [
+      {
+        "actions": [
+          "sqs:SendMessage"
+        ],
+        "conditionKeys": [],
+        "effect": "Allow",
+        "resources": [
+          "GETATT:RegistrySyncDLQFB920991:Arn"
+        ]
+      },
       {
         "effect": "Allow",
         "actions": [
@@ -6532,6 +6593,16 @@
       }
     ],
     "AgentMessageHandlerFunctionEF15B1DF": [
+      {
+        "actions": [
+          "sqs:SendMessage"
+        ],
+        "conditionKeys": [],
+        "effect": "Allow",
+        "resources": [
+          "GETATT:RegistrySyncDLQFB920991:Arn"
+        ]
+      },
       {
         "effect": "Allow",
         "actions": [
@@ -6610,6 +6681,16 @@
       }
     ],
     "AppInvokeHandlerFD7933F8": [
+      {
+        "actions": [
+          "sqs:SendMessage"
+        ],
+        "conditionKeys": [],
+        "effect": "Allow",
+        "resources": [
+          "GETATT:RegistrySyncDLQFB920991:Arn"
+        ]
+      },
       {
         "effect": "Allow",
         "actions": [

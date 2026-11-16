@@ -3,6 +3,8 @@
  *
  * IMPORTANT: intended stateful changes must be applied to BOTH baselines
  * (citadel-backend-dev.json AND citadel-backend-test.json) in split-baseline/.
+ * See split-gates-rail2-baseline-parity.test.ts for the parity guard that
+ * enforces this, and split-baseline/README.md for the full hand-pin procedure.
  *
  * Jest test asserting every stateful logical ID recorded in the committed
  * baseline still exists in a fresh synth, with its DeletionPolicy /
