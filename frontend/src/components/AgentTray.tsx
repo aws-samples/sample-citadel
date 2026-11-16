@@ -143,7 +143,7 @@ export const AgentTray = memo(function AgentTray({ onDragStart }: AgentTrayProps
 
   return (
     <nav 
-      className="flex flex-col h-full w-80 border-r border-border bg-background shadow-lg"
+      className="flex flex-col h-full w-80 border-r border-border bg-background shadow-lg min-h-0"
       aria-label="Agent catalog"
     >
       {/* Header */}
@@ -227,7 +227,7 @@ export const AgentTray = memo(function AgentTray({ onDragStart }: AgentTrayProps
       </div>
 
       {/* Agent List */}
-      <ScrollArea className="flex-1 agent-tray-scroll">
+      <ScrollArea className="flex-1 min-h-0 overflow-y-auto agent-tray-scroll">
         {/* Performance: For very large agent lists (100+), consider using react-window or react-virtual
              for virtualization. Current implementation is optimized with React.memo on AgentTrayItem
              to prevent unnecessary re-renders. */}

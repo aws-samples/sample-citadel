@@ -594,12 +594,12 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
           </div>
         )}
 
-        <div className="flex flex-1 overflow-hidden relative">
+        <div className="flex flex-1 min-h-0 overflow-hidden relative">
           {/* Agent Tray Sidebar */}
           <AgentTray />
 
           {/* Workflow Canvas */}
-          <main id="workflow-canvas" aria-label="Workflow builder main area" className="flex-1">
+          <main id="workflow-canvas" aria-label="Workflow builder main area" className="flex-1 min-h-0 min-w-0">
             <WorkflowCanvas
               nodes={nodes}
               edges={edges}
