@@ -21,6 +21,40 @@ import { isWorkflowDefinition } from '../types';
 import { agentConfigService, type AgentConfig } from './agentConfigService';
 
 /**
+ * Applies conditional-edge visual styling to a ReactFlow edge.
+ * Single source of truth — used by both deserializeWorkflow and EdgeConditionSheet.
+ */
+export function applyConditionStyle(
+  edge: WorkflowEdge,
+  condition: EdgeCondition,
+): WorkflowEdge {
+  const label =
+    condition.operator === 'exists'
+      ? `${condition.field} exists`
+      : `${condition.field} ${condition.operator} ${String(condition.value)}`;
+  return {
+    ...edge,
+    data: { ...edge.data, condition } as WorkflowEdge['data'],
+    style: { strokeDasharray: '6 3', stroke: 'hsl(var(--primary))' },
+    label,
+    labelStyle: { fontSize: 10, fill: 'hsl(var(--primary))' },
+  };
+}
+
+/**
+ * Removes conditional-edge styling and condition data from a ReactFlow edge.
+ */
+export function clearConditionStyle(edge: WorkflowEdge): WorkflowEdge {
+  const { condition: _removed, ...restData } = (edge.data ?? {}) as NonNullable<WorkflowEdge['data']>;
+  const cleaned = { ...edge, data: restData as WorkflowEdge['data'] };
+  delete cleaned.style;
+  delete cleaned.label;
+  delete cleaned.labelStyle;
+  delete (cleaned as Record<string, unknown>).condition;
+  return cleaned;
+}
+
+/**
  * Custom error class for workflow operations
  */
 export class WorkflowError extends Error {
@@ -250,9 +284,7 @@ export async function deserializeWorkflow(
         },
       };
       if (edgeDef.condition) {
-        edge.style = { strokeDasharray: '6 3' };
-        edge.label = `${edgeDef.condition.field} ${edgeDef.condition.operator} ${String(edgeDef.condition.value)}`;
-        edge.labelStyle = { fontSize: 10, fill: '#94a3b8' };
+        return applyConditionStyle(edge, edgeDef.condition);
       }
       return edge;
     });
@@ -615,4 +647,6 @@ export const workflowService = {
   findReachableNodes,
   findPredecessorNodes,
   topologicalSort,
+  applyConditionStyle,
+  clearConditionStyle,
 };

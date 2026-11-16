@@ -42,6 +42,7 @@ export interface WorkflowCanvasProps {
   setNodes: React.Dispatch<React.SetStateAction<WorkflowNode[]>>;
   setEdges: React.Dispatch<React.SetStateAction<WorkflowEdge[]>>;
   onNodeDoubleClick: NodeMouseHandler;
+  onEdgeDoubleClick?: (event: React.MouseEvent, edge: WorkflowEdge) => void;
   validationResult: ValidationResult | null;
 }
 
@@ -64,6 +65,7 @@ export const WorkflowCanvas = memo(function WorkflowCanvas({
   setNodes, 
   setEdges, 
   onNodeDoubleClick, 
+  onEdgeDoubleClick,
   validationResult 
 }: WorkflowCanvasProps) {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -414,6 +416,7 @@ export const WorkflowCanvas = memo(function WorkflowCanvas({
         isValidConnection={isValidConnection}
         onPaneClick={onPaneClick}
         onNodeDoubleClick={onNodeDoubleClick}
+        onEdgeDoubleClick={onEdgeDoubleClick as any}
         fitView
         className="bg-background w-full h-full"
         minZoom={0.1}

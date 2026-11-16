@@ -53,6 +53,9 @@ export function ConditionEditorPanel({
             onChange={(e) => onChange({ ...condition, field: e.target.value })}
             placeholder="e.g. result.status"
           />
+          <p className="text-xs text-muted-foreground mt-1">
+            Dot path into the upstream node output, e.g. <code>result.route</code>
+          </p>
         </div>
 
         <div>
@@ -78,17 +81,19 @@ export function ConditionEditorPanel({
           </Select>
         </div>
 
-        <div>
-          <label htmlFor="condition-value" className="block text-xs text-muted-foreground mb-1">
-            Value
-          </label>
-          <Input
-            id="condition-value"
-            value={condition.value ?? ''}
-            onChange={(e) => onChange({ ...condition, value: e.target.value })}
-            placeholder="Expected value"
-          />
-        </div>
+        {condition.operator !== 'exists' && (
+          <div>
+            <label htmlFor="condition-value" className="block text-xs text-muted-foreground mb-1">
+              Value
+            </label>
+            <Input
+              id="condition-value"
+              value={condition.value ?? ''}
+              onChange={(e) => onChange({ ...condition, value: e.target.value })}
+              placeholder="Expected value"
+            />
+          </div>
+        )}
       </div>
 
       {edgePreview && (
