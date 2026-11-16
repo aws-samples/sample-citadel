@@ -35,13 +35,38 @@ import * as crypto from "crypto";
 import { REGISTRY_GENERATION } from "./registry-generation";
 import {
   PYTHON_RUNTIME,
-  PYTHON_BUILD_IMAGE,
   LAMBDA_ARCHITECTURE,
   NODE_RUNTIME,
-  DOCKER_PLATFORM,
   archVerificationSnippet,
+  pythonAssetCode,
+  pythonBundlingOverrides,
+  isSkipBundling,
 } from "./runtime-constants";
 import { PYTHON_ASSET_EXCLUDES } from "./python-asset-excludes";
+import type { PythonFunctionProps } from "@aws-cdk/aws-lambda-python-alpha";
+
+// ---------------------------------------------------------------------------
+// CIT-305: PythonFunction factory that skips Docker under the flag.
+// PythonFunction always calls Docker internally (its Bundling class doesn't
+// support the `local` ILocalBundling interface). Under skip-bundling we
+// construct a plain lambda.Function with inert placeholder code instead.
+// ---------------------------------------------------------------------------
+function makePythonFunction(
+  scope: Construct,
+  id: string,
+  props: PythonFunctionProps,
+): lambda.Function {
+  if (isSkipBundling()) {
+    const { entry, index, handler, bundling, ...rest } = props;
+    const pyModule = (index ?? "index.py").replace(/\.py$/, "");
+    return new lambda.Function(scope, id, {
+      ...rest,
+      code: pythonAssetCode(entry, {}).code,
+      handler: `${pyModule}.${handler ?? "handler"}`,
+    });
+  }
+  return new PythonFunction(scope, id, props);
+}
 
 // Resolve the repo-root `arbiter/` directory regardless of whether this
 // module is loaded from source (`backend/lib/`) via ts-jest or from the
@@ -457,11 +482,9 @@ export class ArbiterStack extends cdk.Stack {
     // activation succeeds at /opt/python; prior finding 616dc6e6/40061019.
     const catalogLayer = new lambda.LayerVersion(this, "ArbiterCatalogLayer", {
       layerVersionName: `citadel-arbiter-catalog-${props.environment}`,
-      code: lambda.Code.fromAsset(ARBITER_ROOT, {
-        exclude: [...PYTHON_ASSET_EXCLUDES],
-        bundling: {
-          image: PYTHON_BUILD_IMAGE,
-          platform: DOCKER_PLATFORM,
+      code: pythonAssetCode(
+        ARBITER_ROOT,
+        {
           command: [
             "bash",
             "-c",
@@ -475,7 +498,8 @@ export class ArbiterStack extends cdk.Stack {
             ].join(" && "),
           ],
         },
-      }),
+        { exclude: [...PYTHON_ASSET_EXCLUDES] },
+      ).code,
       compatibleRuntimes: [PYTHON_RUNTIME],
       compatibleArchitectures: [LAMBDA_ARCHITECTURE],
       description:
@@ -504,7 +528,7 @@ export class ArbiterStack extends cdk.Stack {
       enforceSSL: true,
     });
 
-    const supervisorLambda = new PythonFunction(this, "SupervisorAgent", {
+    const supervisorLambda = makePythonFunction(this, "SupervisorAgent", {
       runtime: PYTHON_RUNTIME,
       architecture: LAMBDA_ARCHITECTURE,
       // Widened to the arbiter/ root (rather than arbiter/supervisor/) so
@@ -524,8 +548,7 @@ export class ArbiterStack extends cdk.Stack {
       index: "supervisor/index.py",
       handler: "handler",
       layers: [catalogLayer],
-      bundling: {
-        image: PYTHON_BUILD_IMAGE,
+      bundling: pythonBundlingOverrides({
         assetHashType: cdk.AssetHashType.SOURCE,
         commandHooks: stripLayerPackagesHook,
         assetExcludes: [
@@ -537,7 +560,7 @@ export class ArbiterStack extends cdk.Stack {
           "catalog",
           ...PYTHON_ASSET_EXCLUDES,
         ],
-      },
+      }),
       timeout: cdk.Duration.seconds(30),
       memorySize: 1024,
       environment: {
@@ -984,7 +1007,7 @@ export class ArbiterStack extends cdk.Stack {
       ]);
     }
 
-    const workerAgentWrapperLambda = new PythonFunction(
+    const workerAgentWrapperLambda = makePythonFunction(
       this,
       "WorkerAgentWrapper",
       {
@@ -993,12 +1016,11 @@ export class ArbiterStack extends cdk.Stack {
         entry: path.join(ARBITER_ROOT, "workerWrapper"),
         handler: "lambda_handler",
         layers: [catalogLayer],
-        bundling: {
-          image: PYTHON_BUILD_IMAGE,
+        bundling: pythonBundlingOverrides({
           assetHashType: cdk.AssetHashType.SOURCE,
           commandHooks: stripLayerPackagesHook,
           assetExcludes: [...PYTHON_ASSET_EXCLUDES],
-        },
+        }),
         timeout: cdk.Duration.minutes(15),
         memorySize: 1024,
         environment: {
@@ -1409,18 +1431,17 @@ export class ArbiterStack extends cdk.Stack {
       },
     });
 
-    const fabricatorLambda = new PythonFunction(this, "FabricatorAgent", {
+    const fabricatorLambda = makePythonFunction(this, "FabricatorAgent", {
       runtime: PYTHON_RUNTIME,
       architecture: LAMBDA_ARCHITECTURE,
       entry: path.join(ARBITER_ROOT, "fabricator"),
       handler: "lambda_handler",
       layers: [catalogLayer],
-      bundling: {
-        image: PYTHON_BUILD_IMAGE,
+      bundling: pythonBundlingOverrides({
         assetHashType: cdk.AssetHashType.SOURCE,
         commandHooks: stripLayerPackagesHook,
         assetExcludes: [...PYTHON_ASSET_EXCLUDES],
-      },
+      }),
       // Platform max reached — Lambda's hard cap is 900s (15 min): verified
       // against the installed generated service models (aws-cdk-lib 2.261.0
       // lambda.generated.d.ts and @aws-sdk/client-lambda 3.1071.0
@@ -1832,18 +1853,17 @@ export class ArbiterStack extends cdk.Stack {
     // arrives; a ConditionalCheckFailed turns into statusCode 404 in the
     // handler. Duplicate events are idempotent by construction since
     // UpdateItem overwrites with the same attribute value.
-    const activatorLambda = new PythonFunction(this, "ActivatorAgent", {
+    const activatorLambda = makePythonFunction(this, "ActivatorAgent", {
       runtime: PYTHON_RUNTIME,
       architecture: LAMBDA_ARCHITECTURE,
       entry: path.join(ARBITER_ROOT, "activator"),
       handler: "handler",
       layers: [catalogLayer],
-      bundling: {
-        image: PYTHON_BUILD_IMAGE,
+      bundling: pythonBundlingOverrides({
         assetHashType: cdk.AssetHashType.SOURCE,
         commandHooks: stripLayerPackagesHook,
         assetExcludes: [...PYTHON_ASSET_EXCLUDES],
-      },
+      }),
       timeout: cdk.Duration.seconds(30),
       memorySize: 512,
       environment: {
