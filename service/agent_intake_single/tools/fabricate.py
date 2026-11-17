@@ -657,6 +657,7 @@ def plan_fabrication() -> str:
         return json.dumps({
             "ok": False,
             "status": "consent_required",
+            "consent_action": "plan_fabrication",
             "summary": "I need your confirmation before I can plan the fabrication. "
                        "Please use the button above to confirm.",
         })
@@ -715,6 +716,7 @@ def confirm_fabrication_plan(plan_json: str) -> str:
         return json.dumps({
             "ok": False,
             "status": "consent_required",
+            "consent_action": "confirm_fabrication_plan",
             "summary": "I need your confirmation before I can confirm the fabrication plan. "
                        "Please use the button above to confirm.",
         })

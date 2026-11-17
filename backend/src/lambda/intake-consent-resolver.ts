@@ -43,7 +43,7 @@ function conversationsTable(): string {
 /** 10-minute window for the user to confirm and the agent to consume. */
 export const CONSENT_TTL_SECONDS = 600;
 
-const VALID_ACTIONS = new Set([
+export const VALID_ACTIONS = new Set([
   "activate_agents",
   "create_agent_app",
   "generate_process_blueprint",
