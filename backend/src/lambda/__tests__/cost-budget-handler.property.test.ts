@@ -180,13 +180,31 @@ describe("cost-budget-handler org-scoping property (binding)", () => {
     );
   });
 
-  test("PUT /budgets/{scope} non-admin: UpdateItem Key is always ORG#<claimOrg>#BUDGET#ORG — never any other org", async () => {
+  test("PUT /budgets/{scope} non-admin: rejected 403 before any DDB call (E23-b: admin-only write gate)", async () => {
     await fc.assert(
       fc.asyncProperty(orgIdArb, orgIdArb, async (orgA, orgB) => {
         fc.pre(orgA !== orgB);
         ddbMock.resetHistory();
 
         const event = makePutBudgetEvent(orgA, false);
+        const res = await handler(event);
+        expect(res.statusCode).toBe(403);
+
+        // No DDB write should have been attempted
+        const updateCalls = ddbMock.commandCalls(UpdateCommand);
+        expect(updateCalls).toHaveLength(0);
+      }),
+      { numRuns: 50 },
+    );
+  });
+
+  test("PUT /budgets/{scope} admin: UpdateItem Key is always ORG#<claimOrg>#BUDGET#ORG", async () => {
+    await fc.assert(
+      fc.asyncProperty(orgIdArb, orgIdArb, async (orgA, orgB) => {
+        fc.pre(orgA !== orgB);
+        ddbMock.resetHistory();
+
+        const event = makePutBudgetEvent(orgA, true);
         const res = await handler(event);
         expect(res.statusCode).toBe(200);
 
