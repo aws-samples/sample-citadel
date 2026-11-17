@@ -26,7 +26,7 @@ import { Button } from './ui/button';
  * - Validation error indicators and tooltips
  */
 export const AgentNode = memo(({ id, data, selected }: NodeProps<AgentNodeData>) => {
-  const { label, icon, agentConfig, validationErrors } = data;
+  const { label, icon, agentConfig, validationErrors, isPlaceholder } = data;
   const { setNodes, setEdges } = useReactFlow();
   const hasErrors = validationErrors && validationErrors.length > 0;
 
@@ -81,7 +81,7 @@ export const AgentNode = memo(({ id, data, selected }: NodeProps<AgentNodeData>)
   };
 
   // Generate accessible description
-  const ariaLabel = `${label} agent node${hasErrors ? ', has validation errors' : ''}${selected ? ', selected' : ''}`;
+  const ariaLabel = `${label} agent node${isPlaceholder ? ', agent no longer in catalog' : ''}${hasErrors ? ', has validation errors' : ''}${selected ? ', selected' : ''}`;
   const ariaDescription = hasErrors 
     ? `Validation errors: ${validationErrors?.map(e => e.message).join(', ')}`
     : `${agentConfig.config?.description || 'Agent node in workflow'}`;
@@ -101,9 +101,11 @@ export const AgentNode = memo(({ id, data, selected }: NodeProps<AgentNodeData>)
         focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-surface-0
         ${hasErrors
           ? 'border-destructive shadow-lg shadow-red-500/30 has-error'
-          : selected 
-            ? 'border-primary shadow-lg shadow-blue-500/40' 
-            : 'border-border hover:border-input shadow-md shadow-black/20 hover:shadow-lg hover:shadow-black/30'
+          : isPlaceholder
+            ? 'border-amber-500/60 shadow-md shadow-amber-500/20'
+            : selected 
+              ? 'border-primary shadow-lg shadow-blue-500/40' 
+              : 'border-border hover:border-input shadow-md shadow-black/20 hover:shadow-lg hover:shadow-black/30'
         }
       `}
       title={hasErrors ? validationErrors?.map(e => e.message).join('\n') : undefined}
@@ -130,6 +132,17 @@ export const AgentNode = memo(({ id, data, selected }: NodeProps<AgentNodeData>)
           title={validationErrors?.map(e => e.message).join('\n')}
         >
           !
+        </div>
+      )}
+
+      {/* Placeholder Badge — agent no longer in catalog */}
+      {isPlaceholder && !hasErrors && (
+        <div
+          className="absolute -top-2 -right-2 size-6 bg-amber-500 rounded-full flex items-center justify-center text-white text-xs font-bold shadow-lg z-10"
+          title="Agent no longer exists in the catalog"
+          data-testid={`placeholder-badge-${id}`}
+        >
+          ?
         </div>
       )}
 
@@ -179,7 +192,12 @@ export const AgentNode = memo(({ id, data, selected }: NodeProps<AgentNodeData>)
           </div>
         ) : (
           <div className="text-muted-foreground text-xs">
-            {agentConfig.state === 'active' ? (
+            {isPlaceholder ? (
+              <span className="flex items-center gap-1">
+                <span className="size-2 bg-amber-500 rounded-full"></span>
+                Agent removed
+              </span>
+            ) : agentConfig.state === 'active' ? (
               <span className="flex items-center gap-1">
                 <span className="size-2 bg-chart-2 rounded-full"></span>
                 Active

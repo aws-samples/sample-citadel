@@ -21,6 +21,8 @@ export interface AgentNodeData {
   inputCount: number;
   outputCount: number;
   validationErrors?: ValidationError[];
+  /** True when the agent is no longer in the catalog (stale draft restore). */
+  isPlaceholder?: boolean;
   /** Tool bindings resolved from ToolConfig entries for this agent's tools */
   toolBindings?: ToolBindingSummary[];
 }
