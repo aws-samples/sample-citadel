@@ -165,15 +165,6 @@ function subscribe(ws, subscriptionQuery, variables, idToken, host) {
 }
 
 // ---------------------------------------------------------------------------
-// Decode orgId from JWT (base64url → JSON)
-// ---------------------------------------------------------------------------
-function decodeOrgId(idToken) {
-  const payload = idToken.split(".")[1];
-  const json = JSON.parse(Buffer.from(payload, "base64url").toString());
-  return json["custom:orgId"] || json["custom:organization"] || "";
-}
-
-// ---------------------------------------------------------------------------
 // Check implementations
 // ---------------------------------------------------------------------------
 const checks = [];
@@ -209,7 +200,6 @@ async function runChecks() {
   }
 
   const { wsUrl, host } = buildWsUrl(idToken);
-  const orgId = decodeOrgId(idToken);
 
   // ---- (2) Subscription negative ----------------------------------------
   {
