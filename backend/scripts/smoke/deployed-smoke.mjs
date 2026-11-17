@@ -28,6 +28,26 @@ const { classifyMessage, classifySubNegative, classifyWorkflowEvent, isTerminalE
 export { classifyMessage, classifySubNegative, classifyWorkflowEvent, isTerminalExecution, shapeReport, withTimeout };
 
 // ---------------------------------------------------------------------------
+// GraphQL documents — exported so tests can validate them against the schema.
+// ---------------------------------------------------------------------------
+export const DOCUMENTS = {
+  subNegative: `subscription OnConvMsg($pid: ID!) { onConversationMessage(projectId: $pid) { id messageType message } }`,
+  subPositive: `subscription OnConvMsg($pid: ID!) { onConversationMessage(projectId: $pid) { id messageType message agentId } }`,
+  sendMessage: `mutation Send($pid: ID!, $msg: ConversationMessageInput!) {
+          sendMessage(projectId: $pid, message: $msg) { id messageType }
+        }`,
+  testTool: `mutation TestTool($tid: String!, $inputs: AWSJSON!) {
+            testTool(toolId: $tid, inputs: $inputs) { success output error executionTimeMs }
+          }`,
+  startExecution: `mutation StartExec($wid: ID!, $input: AWSJSON) {
+            startExecution(workflowId: $wid, input: $input) { executionId status }
+          }`,
+  subWorkflowProgress: `subscription OnWfProg($eid: ID!) { onWorkflowProgress(executionId: $eid) { executionId workflowId eventType nodeId status output error timestamp } }`,
+  getExecution: `query GetExec($eid: ID!) { getExecution(executionId: $eid) { executionId status } }`,
+  listBlueprints: `query ListBP { listBlueprints { items { workflowId name description isBlueprint } } }`,
+};
+
+// ---------------------------------------------------------------------------
 // Env template (--print-env-template)
 // ---------------------------------------------------------------------------
 const ENV_TEMPLATE = `# Citadel deployed-smoke environment template
@@ -205,7 +225,7 @@ async function runChecks() {
             if (msg.type === "connection_ack") {
               subscribe(
                 ws,
-                `subscription OnConvMsg($pid: ID!) { onConversationMessage(projectId: $pid) { id messageType message } }`,
+                DOCUMENTS.subNegative,
                 { pid: ZERO },
                 idToken,
                 host,
@@ -269,7 +289,7 @@ async function runChecks() {
 
       subscribe(
         ws,
-        `subscription OnConvMsg($pid: ID!) { onConversationMessage(projectId: $pid) { id messageType message agentId } }`,
+        DOCUMENTS.subPositive,
         { pid: PROJECT_ID },
         idToken,
         host,
@@ -278,9 +298,7 @@ async function runChecks() {
       // Small delay to let subscription register, then send the message.
       await new Promise((r) => setTimeout(r, 500));
       await gqlFetch(
-        `mutation Send($pid: ID!, $msg: ConversationMessageInput!) {
-          sendMessage(projectId: $pid, message: $msg) { id messageType }
-        }`,
+        DOCUMENTS.sendMessage,
         {
           pid: PROJECT_ID,
           msg: {
@@ -309,10 +327,8 @@ async function runChecks() {
     try {
       const data = await withTimeout(
         gqlFetch(
-          `mutation TestTool($tid: String!, $inputs: AWSJSON!, $oid: String!) {
-            testTool(toolId: $tid, inputs: $inputs, orgId: $oid) { success output error executionTimeMs }
-          }`,
-          { tid: SMOKE_TOOL_ID, inputs: JSON.stringify({ key: "value" }), oid: orgId },
+          DOCUMENTS.testTool,
+          { tid: SMOKE_TOOL_ID, inputs: JSON.stringify({ key: "value" }) },
           idToken,
         ),
         30_000,
@@ -354,9 +370,7 @@ async function runChecks() {
       let startData;
       try {
         startData = await gqlFetch(
-          `mutation StartExec($wid: ID!, $input: AWSJSON) {
-            startExecution(workflowId: $wid, input: $input) { executionId status }
-          }`,
+          DOCUMENTS.startExecution,
           { wid: ECHO_WORKFLOW_ID, input: JSON.stringify({}) },
           idToken,
         );
@@ -425,7 +439,7 @@ async function runChecks() {
         // Subscribe for this executionId.
         subscribe(
           ws,
-          `subscription OnWfProg($eid: ID!) { onWorkflowProgress(executionId: $eid) { executionId workflowId eventType nodeId status output error timestamp } }`,
+          DOCUMENTS.subWorkflowProgress,
           { eid: executionId },
           idToken,
           host,
@@ -438,7 +452,7 @@ async function runChecks() {
           if (resolved) return;
           try {
             const data = await gqlFetch(
-              `query GetExec($eid: ID!) { getExecution(executionId: $eid) { executionId status } }`,
+              DOCUMENTS.getExecution,
               { eid: executionId },
               idToken,
             );
@@ -465,7 +479,7 @@ async function runChecks() {
     try {
       const data = await withTimeout(
         gqlFetch(
-          `query ListBP { listBlueprints { items { workflowId name description isBlueprint } } }`,
+          DOCUMENTS.listBlueprints,
           {},
           idToken,
         ),
