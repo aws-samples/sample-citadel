@@ -78,6 +78,7 @@ import { hasPermission } from "../utils/auth";
 import {
   extractOrgFromEvent,
   deriveRoles,
+  isAdminFromEvent,
   resolveScopedOrgFromEvent,
 } from "../utils/auth-event";
 import { emitGovernanceEvent } from "../utils/notifier-base";
@@ -933,6 +934,16 @@ export async function computeEvalComparison(
       `ValidationError: baseline run ${baselineEvalRunId} must be COMPLETED (status=${baselineRun.status})`,
     );
   }
+  if (baselineRun.suiteId !== input.suiteId) {
+    throw new Error(
+      `ValidationError: baseline run ${baselineEvalRunId} belongs to suite ${baselineRun.suiteId}, expected ${input.suiteId}`,
+    );
+  }
+  if (baselineRun.agentTargetId !== suite.agentTargetId) {
+    throw new Error(
+      `ValidationError: baseline run ${baselineEvalRunId} targets agent ${baselineRun.agentTargetId}, expected ${suite.agentTargetId}`,
+    );
+  }
 
   const candidateRuns: EvalRun[] = [];
   for (const runId of input.candidateEvalRunIds) {
@@ -944,6 +955,16 @@ export async function computeEvalComparison(
     if (run.status !== "COMPLETED") {
       throw new Error(
         `ValidationError: candidate run ${runId} must be COMPLETED (status=${run.status})`,
+      );
+    }
+    if (run.suiteId !== input.suiteId) {
+      throw new Error(
+        `ValidationError: candidate run ${runId} belongs to suite ${run.suiteId}, expected ${input.suiteId}`,
+      );
+    }
+    if (run.agentTargetId !== suite.agentTargetId) {
+      throw new Error(
+        `ValidationError: candidate run ${runId} targets agent ${run.agentTargetId}, expected ${suite.agentTargetId}`,
       );
     }
     candidateRuns.push(run);
@@ -1128,9 +1149,13 @@ async function readCaseDetailFromS3(
  * extractOrgFromEvent to an expectedOrgId that the fetched row is asserted
  * against (assertRowOrg/CrossOrgRowError — same discipline as every other
  * read path in this file). The GraphQL schema has no orgId argument for
- * this field, so identity is the only source of an expectedOrgId; a null
- * claim (API-key/IAM caller, or no event passed at all) is a pass-through,
- * matching execution-resolver.ts's getExecution precedent.
+ * this field, so identity is the only source of an expectedOrgId.
+ *
+ * Fail-closed: a caller with an event but no resolvable org claim is
+ * refused (UnauthorizedError) unless isAdminFromEvent — admin callers
+ * bypass the row-org check (same pattern as tool-config-resolver.ts).
+ * Callers without an event at all (direct function call, no identity
+ * context) skip the check entirely.
  */
 export async function getEvalComparisonHydrated(
   comparisonId: string,
@@ -1138,9 +1163,19 @@ export async function getEvalComparisonHydrated(
 ): Promise<EvalComparisonRow | null> {
   const row = await getEvalComparison(comparisonId);
   if (!row) return null;
-  const expectedOrgId = event ? await extractOrgFromEvent(event) : null;
-  if (expectedOrgId) {
-    assertRowOrg(EVAL_COMPARISONS_TABLE, row, expectedOrgId);
+  // Fail closed: callers with an event MUST have a resolvable org claim.
+  // Admin callers bypass the row-org assertion (same discipline as
+  // tool-config-resolver.ts's assertRowOrg / isAdminFromEvent pattern).
+  if (event) {
+    const expectedOrgId = await extractOrgFromEvent(event);
+    if (!expectedOrgId && !isAdminFromEvent(event)) {
+      throw new Error(
+        "UnauthorizedError: caller organization could not be resolved",
+      );
+    }
+    if (expectedOrgId) {
+      assertRowOrg(EVAL_COMPARISONS_TABLE, row, expectedOrgId);
+    }
   }
   if (row.caseDetailRef && !row.caseDetail) {
     const hydrated = await readCaseDetailFromS3(row.caseDetailRef);
