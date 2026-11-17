@@ -386,6 +386,7 @@ case "$1 $2 $3" in
   "rev-parse --abbrev-ref HEAD") echo "${FAKE_BRANCH:-main}"; exit 0 ;;
 esac
 case "$1 $2" in
+  "status --porcelain") echo "${FAKE_UNTRACKED:-}"; exit 0 ;;
   "rev-parse --short") echo "${FAKE_SHORT_SHA:-abc1234}"; exit 0 ;;
   "rev-parse --verify")
     # `git rev-parse --verify -q origin/main`
@@ -1219,6 +1220,51 @@ else
 fi
 
 ########################################
+########################################
+# E23-d: check_tree_state refuses non-ignored untracked files; --allow-untracked overrides
+########################################
+section "check_tree_state: untracked files refuse; --allow-untracked proceeds"
+reset_fakes
+write_fake_git
+export FAKE_DIRTY="clean"; export FAKE_IS_ANCESTOR=1; export FAKE_HAS_ORIGIN_MAIN=1
+export FAKE_UNTRACKED=$'?? leftover.txt\n?? debug.log'
+
+set +e
+untracked_out=$(PATH="$FAKE_BIN:$PATH" DEPLOY_LOG="$TMP_DIR/deploy.log" check_tree_state "" "false" "false" 2>&1)
+untracked_rc=$?
+allow_untracked_out=$(PATH="$FAKE_BIN:$PATH" DEPLOY_LOG="$TMP_DIR/deploy.log" check_tree_state "" "false" "true" 2>&1)
+allow_untracked_rc=$?
+set -e 2>/dev/null || true
+
+untracked_plain=$(echo "$untracked_out" | sed 's/\x1b\[[0-9;]*m//g')
+if [ $untracked_rc -ne 0 ] && echo "$untracked_plain" | grep -qi "untracked"; then
+  pass "untracked files refuse by default (rc=$untracked_rc), citing untracked"
+else
+  fail "expected untracked refusal; rc=$untracked_rc output=$untracked_plain"
+fi
+if echo "$untracked_plain" | grep -q "leftover.txt"; then
+  pass "refusal message lists the untracked file names"
+else
+  fail "expected file names in refusal; output=$untracked_plain"
+fi
+if [ $allow_untracked_rc -eq 0 ] && echo "$allow_untracked_out" | sed 's/\x1b\[[0-9;]*m//g' | grep -qi "allow-untracked"; then
+  pass "--allow-untracked proceeds with a loud warning (rc=$allow_untracked_rc)"
+else
+  fail "expected --allow-untracked to proceed with warning; rc=$allow_untracked_rc output=$allow_untracked_out"
+fi
+
+# Clean tree with no untracked files should pass
+export FAKE_UNTRACKED=""
+set +e
+clean_out=$(PATH="$FAKE_BIN:$PATH" DEPLOY_LOG="$TMP_DIR/deploy.log" check_tree_state "" "false" "false" 2>&1)
+clean_rc=$?
+set -e 2>/dev/null || true
+if [ $clean_rc -eq 0 ]; then
+  pass "no untracked files -> check_tree_state passes (rc=0)"
+else
+  fail "expected clean pass; rc=$clean_rc output=$clean_out"
+fi
+
 # Summary
 ########################################
 echo ""
