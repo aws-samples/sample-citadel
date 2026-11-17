@@ -245,8 +245,8 @@ describe('AgentBlueprints run experience', () => {
       });
     });
 
-    const badge = screen.getByTestId('node-status-node-1');
-    expect(badge).toHaveClass('bg-primary');
+    const badge = screen.getByTestId('execution-summary');
+    expect(badge).toHaveTextContent(/Running step/);
   });
 
   it('surfaces publish validation errors and keeps Run disabled', async () => {

@@ -23,6 +23,8 @@ export interface AgentNodeData {
   validationErrors?: ValidationError[];
   /** True when the agent is no longer in the catalog (stale draft restore). */
   isPlaceholder?: boolean;
+  /** Per-node execution status injected by AgentBlueprints during/after a run. */
+  executionStatus?: 'pending' | 'running' | 'completed' | 'skipped' | 'failed';
   /** Tool bindings resolved from ToolConfig entries for this agent's tools */
   toolBindings?: ToolBindingSummary[];
 }

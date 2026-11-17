@@ -51,41 +51,11 @@ describe('ExecutionOverlay', () => {
     jest.useRealTimers();
   });
 
-  describe('node status rendering', () => {
-    it('renders pending node with gray indicator', () => {
-      const nodeResults: Record<string, NodeResultEntry> = {
-        'node-1': { status: 'pending', output: null, error: null },
-      };
-      mockUseExecutionSubscription.mockReturnValue({
-        nodeResults,
-        executionStatus: 'running',
-        events: [],
-      });
-
-      render(
-        <ExecutionOverlay
-          nodeResults={nodeResults}
-          executionStatus="running"
-          workflowStatus="PUBLISHED"
-          onRun={jest.fn()}
-          onCancel={jest.fn()}
-          executionId="exec-1"
-        />
-      );
-
-      const indicator = screen.getByTestId('node-status-node-1');
-      expect(indicator).toHaveClass('bg-muted-foreground');
-    });
-
-    it('renders running node with blue spinner indicator', () => {
+  describe('node status rendering (compact summary)', () => {
+    it('shows summary text for a running execution', () => {
       const nodeResults: Record<string, NodeResultEntry> = {
         'node-1': { status: 'running', output: null, error: null },
       };
-      mockUseExecutionSubscription.mockReturnValue({
-        nodeResults,
-        executionStatus: 'running',
-        events: [],
-      });
 
       render(
         <ExecutionOverlay
@@ -98,20 +68,13 @@ describe('ExecutionOverlay', () => {
         />
       );
 
-      const indicator = screen.getByTestId('node-status-node-1');
-      expect(indicator).toHaveClass('bg-primary');
-      expect(indicator.querySelector('.animate-spin')).toBeInTheDocument();
+      expect(screen.getByTestId('execution-summary')).toBeInTheDocument();
     });
 
-    it('renders completed node with green check indicator', () => {
+    it('shows completed summary for all-completed execution', () => {
       const nodeResults: Record<string, NodeResultEntry> = {
         'node-1': { status: 'completed', output: '{"ok":true}', error: null },
       };
-      mockUseExecutionSubscription.mockReturnValue({
-        nodeResults,
-        executionStatus: 'completed',
-        events: [],
-      });
 
       render(
         <ExecutionOverlay
@@ -124,20 +87,13 @@ describe('ExecutionOverlay', () => {
         />
       );
 
-      const indicator = screen.getByTestId('node-status-node-1');
-      expect(indicator).toHaveClass('bg-chart-2');
-      expect(indicator).toHaveTextContent('✓');
+      expect(screen.getByTestId('execution-summary')).toHaveTextContent('Completed');
     });
 
-    it('renders failed node with red X indicator', () => {
+    it('shows failed summary for a failed execution', () => {
       const nodeResults: Record<string, NodeResultEntry> = {
         'node-1': { status: 'failed', output: null, error: 'Agent timeout' },
       };
-      mockUseExecutionSubscription.mockReturnValue({
-        nodeResults,
-        executionStatus: 'failed',
-        events: [],
-      });
 
       render(
         <ExecutionOverlay
@@ -150,20 +106,14 @@ describe('ExecutionOverlay', () => {
         />
       );
 
-      const indicator = screen.getByTestId('node-status-node-1');
-      expect(indicator).toHaveClass('bg-destructive');
-      expect(indicator).toHaveTextContent('✗');
+      expect(screen.getByTestId('execution-summary')).toHaveTextContent(/Failed at/);
     });
 
-    it('renders skipped node with gray dashed indicator', () => {
+    it('shows skipped count in summary for skipped nodes', () => {
       const nodeResults: Record<string, NodeResultEntry> = {
-        'node-1': { status: 'skipped', output: null, error: null },
+        'node-1': { status: 'completed', output: '{}', error: null },
+        'node-2': { status: 'skipped', output: null, error: null },
       };
-      mockUseExecutionSubscription.mockReturnValue({
-        nodeResults,
-        executionStatus: 'completed',
-        events: [],
-      });
 
       render(
         <ExecutionOverlay
@@ -176,20 +126,14 @@ describe('ExecutionOverlay', () => {
         />
       );
 
-      const indicator = screen.getByTestId('node-status-node-1');
-      expect(indicator).toHaveClass('border-dashed');
-      expect(indicator).toHaveClass('border-border');
+      expect(screen.getByTestId('execution-summary')).toHaveTextContent(/1 skipped/);
     });
 
-    it('renders unreachable node with dashed muted indicator and ∅ symbol', () => {
+    it('treats unreachable as skipped in summary', () => {
       const nodeResults: Record<string, NodeResultEntry> = {
-        'node-1': { status: 'unreachable', output: null, error: null },
+        'node-1': { status: 'completed', output: '{}', error: null },
+        'node-2': { status: 'unreachable', output: null, error: null },
       };
-      mockUseExecutionSubscription.mockReturnValue({
-        nodeResults,
-        executionStatus: 'completed',
-        events: [],
-      });
 
       render(
         <ExecutionOverlay
@@ -202,23 +146,15 @@ describe('ExecutionOverlay', () => {
         />
       );
 
-      const indicator = screen.getByTestId('node-status-node-1');
-      expect(indicator).toHaveClass('border-dashed');
-      expect(indicator).toHaveTextContent('∅');
-      expect(indicator).toHaveAttribute('title', 'Skipped because an upstream condition routed around this step');
+      expect(screen.getByTestId('execution-summary')).toHaveTextContent(/1 skipped/);
     });
   });
 
   describe('real-time updates from subscription', () => {
-    it('updates node status when subscription data changes', () => {
+    it('updates summary when subscription data changes', () => {
       const initialResults: Record<string, NodeResultEntry> = {
         'node-1': { status: 'pending', output: null, error: null },
       };
-      mockUseExecutionSubscription.mockReturnValue({
-        nodeResults: initialResults,
-        executionStatus: 'running',
-        events: [],
-      });
 
       const { rerender } = render(
         <ExecutionOverlay
@@ -231,18 +167,12 @@ describe('ExecutionOverlay', () => {
         />
       );
 
-      // Verify initial pending state
-      expect(screen.getByTestId('node-status-node-1')).toHaveClass('bg-muted-foreground');
+      expect(screen.getByTestId('execution-summary')).toHaveTextContent('Pending');
 
       // Simulate subscription update — node transitions to running
       const updatedResults: Record<string, NodeResultEntry> = {
         'node-1': { status: 'running', output: null, error: null },
       };
-      mockUseExecutionSubscription.mockReturnValue({
-        nodeResults: updatedResults,
-        executionStatus: 'running',
-        events: [],
-      });
 
       rerender(
         <ExecutionOverlay
@@ -255,20 +185,15 @@ describe('ExecutionOverlay', () => {
         />
       );
 
-      expect(screen.getByTestId('node-status-node-1')).toHaveClass('bg-primary');
+      expect(screen.getByTestId('execution-summary')).toHaveTextContent(/Running step/);
     });
   });
 
-  describe('error tooltip on failed nodes', () => {
-    it('shows error message tooltip on failed node', async () => {
+  describe('failed node label in summary', () => {
+    it('shows node id as label when nodeLabels not provided', () => {
       const nodeResults: Record<string, NodeResultEntry> = {
         'node-1': { status: 'failed', output: null, error: 'Agent timeout' },
       };
-      mockUseExecutionSubscription.mockReturnValue({
-        nodeResults,
-        executionStatus: 'failed',
-        events: [],
-      });
 
       render(
         <ExecutionOverlay
@@ -281,8 +206,27 @@ describe('ExecutionOverlay', () => {
         />
       );
 
-      const failedNode = screen.getByTestId('node-status-node-1');
-      expect(failedNode).toHaveAttribute('title', 'Agent timeout');
+      expect(screen.getByTestId('execution-summary')).toHaveTextContent('Failed at node-1');
+    });
+
+    it('shows human label when nodeLabels provided', () => {
+      const nodeResults: Record<string, NodeResultEntry> = {
+        'node-1': { status: 'failed', output: null, error: 'Agent timeout' },
+      };
+
+      render(
+        <ExecutionOverlay
+          nodeResults={nodeResults}
+          executionStatus="failed"
+          workflowStatus="PUBLISHED"
+          onRun={jest.fn()}
+          onCancel={jest.fn()}
+          executionId="exec-1"
+          nodeLabels={{ 'node-1': 'Router Agent' }}
+        />
+      );
+
+      expect(screen.getByTestId('execution-summary')).toHaveTextContent('Failed at Router Agent');
     });
   });
 
