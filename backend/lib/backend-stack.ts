@@ -2929,13 +2929,6 @@ export class BackendStack extends cdk.Stack {
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
 
-    userManagementLambdaDataSource.createResolver("ChangePasswordResolver", {
-      typeName: "Mutation",
-      fieldName: "changePassword",
-      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
-      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
-    });
-
     userManagementLambdaDataSource.createResolver(
       "AdminResetUserPasswordResolver",
       {

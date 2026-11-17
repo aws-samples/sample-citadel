@@ -32,6 +32,7 @@ import {
   AlertDialogTitle,
 } from '../components/ui/alert-dialog';
 import { userManagementService, User, Organization } from '../services/userManagementService';
+import { updatePassword, signOut } from 'aws-amplify/auth';
 import { useOrganization } from '../contexts/OrganizationContext';
 import { PageContainer } from '../components/PageContainer';
 import { TagPolicyEditor } from '../components/TagPolicyEditor';
@@ -49,6 +50,8 @@ export function Team() {
   const [assigning, setAssigning] = useState(false);
   const [expandedUserId, setExpandedUserId] = useState<string | null>(null);
   const [newPassword, setNewPassword] = useState('');
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
   const [verifyPassword, setVerifyPassword] = useState('');
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [showVerifyPassword, setShowVerifyPassword] = useState(false);
@@ -172,7 +175,7 @@ export function Team() {
   };
 
   const handleChangePassword = async () => {
-    if (!newPassword || !verifyPassword) {
+    if (!currentPassword || !newPassword || !verifyPassword) {
       setError('Please fill in all password fields');
       return;
     }
@@ -191,17 +194,21 @@ export function Team() {
       setPasswordChanging(true);
       setError(null);
 
-      const response = await userManagementService.changePassword(newPassword);
+      // Use Cognito ChangePassword via Amplify — proves the current
+      // password client-side (finding a: no more AdminSetUserPassword
+      // without credential proof).
+      await updatePassword({ oldPassword: currentPassword, newPassword });
 
-      if (response.success) {
-        setNewPassword('');
-        setVerifyPassword('');
-        setExpandedUserId(null);
-        setError(null);
-        toast.success('Password changed successfully');
-      } else {
-        setError(response.message || 'Failed to change password');
-      }
+      // Revoke all sessions so stolen tokens from before the change are
+      // invalidated (finding a: session revocation).
+      await signOut({ global: true });
+
+      setCurrentPassword('');
+      setNewPassword('');
+      setVerifyPassword('');
+      setExpandedUserId(null);
+      setError(null);
+      toast.success('Password changed successfully. You have been signed out.');
     } catch (err: any) {
       console.error('Failed to change password:', err);
       setError(err.message || 'Failed to change password');
@@ -797,6 +804,29 @@ export function Team() {
                               </AccordionTrigger>
                               <AccordionContent>
                                 <div className="flex flex-col gap-4 pt-2">
+                                  <div>
+                                    <label className="text-foreground text-sm font-medium mb-2 block">
+                                      Current Password
+                                    </label>
+                                    <div className="relative">
+                                      <Input
+                                        type={showCurrentPassword ? 'text' : 'password'}
+                                        className="pr-10"
+                                        value={currentPassword}
+                                        onChange={(e) => setCurrentPassword(e.target.value)}
+                                        placeholder="Enter current password"
+                                      />
+                                      <Button
+                                        type="button"
+                                        variant="ghost"
+                                        size="icon"
+                                        className="absolute right-1 top-1/2 -translate-y-1/2 size-8"
+                                        onClick={() => setShowCurrentPassword(!showCurrentPassword)}
+                                      >
+                                        {showCurrentPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                                      </Button>
+                                    </div>
+                                  </div>
                                   <div>
                                     <label className="text-foreground text-sm font-medium mb-2 block">
                                       New Password

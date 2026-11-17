@@ -86,15 +86,6 @@ const LIST_ORGANIZATIONS = `
   }
 `;
 
-const CHANGE_PASSWORD = `
-  mutation ChangePassword($input: ChangePasswordInput!) {
-    changePassword(input: $input) {
-      success
-      message
-    }
-  }
-`;
-
 const ADMIN_RESET_USER_PASSWORD = `
   mutation AdminResetUserPassword($userId: String!) {
     adminResetUserPassword(userId: $userId) {
@@ -277,27 +268,6 @@ export const userManagementService = {
     } catch (error) {
       console.error('Error listing organizations:', error);
       throw error;
-    }
-  },
-
-  async changePassword(newPassword: string): Promise<UserManagementResponse> {
-    try {
-      const response = await serverService.mutate<{ changePassword: UserManagementResponse }>(
-        CHANGE_PASSWORD,
-        {
-          input: {
-            newPassword,
-          },
-        }
-      );
-
-      return response.changePassword;
-    } catch (error: any) {
-      console.error('Error changing password:', error);
-      return {
-        success: false,
-        message: error.message || 'Failed to change password',
-      };
     }
   },
 

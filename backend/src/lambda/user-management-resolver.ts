@@ -44,9 +44,6 @@ interface AssignUserRoleInput {
   organization?: string;
 }
 
-interface ChangePasswordInput {
-  newPassword: string;
-}
 
 interface AdminCreateUserInput {
   email: string;
@@ -88,7 +85,7 @@ interface UserManagementResolverEvent {
   arguments: {
     userId: string;
     role: string;
-    input: AssignUserRoleInput & ChangePasswordInput & AdminCreateUserInput;
+    input: AssignUserRoleInput & AdminCreateUserInput;
   };
 }
 
@@ -150,8 +147,6 @@ export const handler = async (event: UserManagementResolverEvent) => {
           event.arguments.role,
           event,
         );
-      case "changePassword":
-        return await changePassword(event, event.arguments.input);
       case "adminResetUserPassword":
         return await adminResetUserPassword(event, event.arguments.userId);
       case "adminResendInvitation":
@@ -238,12 +233,28 @@ async function getUser(
   const callerUsername = requireCallerUsername(event);
   const callerIsAdmin = isAdminFromEvent(event);
 
-  const response = await cognitoClient.send(
-    new AdminGetUserCommand({
-      UserPoolId: USER_POOL_ID,
-      Username: userId,
-    }),
-  );
+  // Wrap the Cognito lookup so that a non-existent userId produces the
+  // same error as a cross-tenant mismatch — callers must not be able to
+  // probe whether a username exists in another organization (finding b).
+  let response;
+  try {
+    response = await cognitoClient.send(
+      new AdminGetUserCommand({
+        UserPoolId: USER_POOL_ID,
+        Username: userId,
+      }),
+    );
+  } catch (err: unknown) {
+    if (
+      err &&
+      typeof err === "object" &&
+      "name" in err &&
+      (err as { name: string }).name === "UserNotFoundException"
+    ) {
+      throw new Error("User not found or not accessible");
+    }
+    throw err;
+  }
 
   const attributes = response.UserAttributes || [];
   const email = attributes.find((attr) => attr.Name === "email")?.Value || "";
@@ -262,7 +273,7 @@ async function getUser(
     // closed otherwise (finding f21582e6).
     const callerOrg = await requireCallerOrg(event);
     if (organization !== callerOrg) {
-      throw new Error("User not found");
+      throw new Error("User not found or not accessible");
     }
   }
 
@@ -601,46 +612,6 @@ async function listOrganizations(event: UserManagementResolverEvent) {
     });
 }
 
-async function changePassword(
-  event: UserManagementResolverEvent,
-  input: ChangePasswordInput,
-) {
-  const { newPassword } = input;
-
-  // Get username from the Cognito identity
-  const username = event.identity?.username || event.identity?.claims?.username;
-
-  if (!username) {
-    throw new Error("Unable to determine current user from request context");
-  }
-
-  try {
-    // Use AdminSetUserPassword to change the user's password
-    // Since the user is already authenticated, we know they have valid credentials
-    await cognitoClient.send(
-      new AdminSetUserPasswordCommand({
-        UserPoolId: USER_POOL_ID,
-        Username: username,
-        Password: newPassword,
-        Permanent: true, // This is a permanent password, not temporary
-      }),
-    );
-
-    return {
-      success: true,
-      message: "Password changed successfully",
-    };
-  } catch (error: unknown) {
-    console.error("Error changing password:", error);
-    return {
-      success: false,
-      message:
-        (error instanceof Error ? error.message : "") ||
-        "Failed to change password",
-    };
-  }
-}
-
 async function adminResetUserPassword(
   event: UserManagementResolverEvent,
   userId: string,
@@ -673,9 +644,18 @@ async function adminResetUserPassword(
       }),
     );
 
+    // Revoke all existing sessions so the old password/tokens cannot be
+    // reused after the admin reset (finding a — session revocation).
+    await cognitoClient.send(
+      new AdminUserGlobalSignOutCommand({
+        UserPoolId: USER_POOL_ID,
+        Username: userId,
+      }),
+    );
+
     return {
       success: true,
-      message: "Password reset successfully.",
+      message: "Password reset successfully. All existing sessions have been revoked.",
     };
   } catch (error: unknown) {
     console.error("Error resetting password:", error);

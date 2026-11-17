@@ -304,7 +304,6 @@ type Mutation {
   adminCreateUser(input: AdminCreateUserInput!): UserManagementResponse
   assignUserRole(input: AssignUserRoleInput!): UserManagementResponse
   removeUserRole(userId: String!, role: String!): UserManagementResponse
-  changePassword(input: ChangePasswordInput!): UserManagementResponse
   adminResetUserPassword(userId: String!): UserManagementResponse
   adminResendInvitation(userId: String!): UserManagementResponse
   createOrganization(input: CreateOrganizationInput!): Organization
@@ -1414,10 +1413,6 @@ input AssignUserRoleInput {
   userId: String!
   role: String!
   organization: String
-}
-
-input ChangePasswordInput {
-  newPassword: String!
 }
 
 input CreateOrganizationInput {
