@@ -109,17 +109,20 @@ describe("cost-budget-handler routing", () => {
   test("PUT /budgets/{scope} validates and upserts a budget row", async () => {
     ddbMock.on(UpdateCommand).resolves({});
 
-    const event = makeEvent({
-      routeKey: "PUT /budgets/{scope}",
-      rawPath: "/budgets/org",
-      pathParameters: { scope: "org" },
-      body: JSON.stringify({
-        periodType: "monthly",
-        limitMicros: 1_000_000_000,
-        thresholds: [0.8, 1.0],
-        currency: "USD",
-      }),
-    } as Partial<APIGatewayProxyEventV2WithJWTAuthorizer>);
+    const event = makeEvent(
+      {
+        routeKey: "PUT /budgets/{scope}",
+        rawPath: "/budgets/org",
+        pathParameters: { scope: "org" },
+        body: JSON.stringify({
+          periodType: "monthly",
+          limitMicros: 1_000_000_000,
+          thresholds: [0.8, 1.0],
+          currency: "USD",
+        }),
+      } as Partial<APIGatewayProxyEventV2WithJWTAuthorizer>,
+      { "custom:organization": "org-1", "cognito:groups": ["admin"] },
+    );
 
     const res = await handler(event);
     expect(res.statusCode).toBe(200);
@@ -130,29 +133,35 @@ describe("cost-budget-handler routing", () => {
   });
 
   test("PUT /budgets/{scope} rejects a malformed body with 400", async () => {
-    const event = makeEvent({
-      routeKey: "PUT /budgets/{scope}",
-      rawPath: "/budgets/org",
-      pathParameters: { scope: "org" },
-      body: JSON.stringify({ periodType: "yearly" }),
-    } as Partial<APIGatewayProxyEventV2WithJWTAuthorizer>);
+    const event = makeEvent(
+      {
+        routeKey: "PUT /budgets/{scope}",
+        rawPath: "/budgets/org",
+        pathParameters: { scope: "org" },
+        body: JSON.stringify({ periodType: "yearly" }),
+      } as Partial<APIGatewayProxyEventV2WithJWTAuthorizer>,
+      { "custom:organization": "org-1", "cognito:groups": ["admin"] },
+    );
 
     const res = await handler(event);
     expect(res.statusCode).toBe(400);
   });
 
   test("PUT /budgets/{scope} rejects an invalid scope with 400", async () => {
-    const event = makeEvent({
-      routeKey: "PUT /budgets/{scope}",
-      rawPath: "/budgets/bogus",
-      pathParameters: { scope: "bogus" },
-      body: JSON.stringify({
-        periodType: "monthly",
-        limitMicros: 1,
-        thresholds: [0.5],
-        currency: "USD",
-      }),
-    } as Partial<APIGatewayProxyEventV2WithJWTAuthorizer>);
+    const event = makeEvent(
+      {
+        routeKey: "PUT /budgets/{scope}",
+        rawPath: "/budgets/bogus",
+        pathParameters: { scope: "bogus" },
+        body: JSON.stringify({
+          periodType: "monthly",
+          limitMicros: 1,
+          thresholds: [0.5],
+          currency: "USD",
+        }),
+      } as Partial<APIGatewayProxyEventV2WithJWTAuthorizer>,
+      { "custom:organization": "org-1", "cognito:groups": ["admin"] },
+    );
 
     const res = await handler(event);
     expect(res.statusCode).toBe(400);
@@ -175,6 +184,45 @@ describe("cost-budget-handler routing", () => {
     );
     const res = await handler(event);
     expect(res.statusCode).toBe(403);
+  });
+
+  test("PUT /budgets/{scope} by a non-admin user returns 403 (E23-b: admin-only write gate via isAdminFromHttpEvent)", async () => {
+    const event = makeEvent(
+      {
+        routeKey: "PUT /budgets/{scope}",
+        rawPath: "/budgets/org",
+        pathParameters: { scope: "org" },
+        body: JSON.stringify({
+          periodType: "monthly",
+          limitMicros: 1_000_000,
+          thresholds: [0.8],
+          currency: "USD",
+        }),
+      } as Partial<APIGatewayProxyEventV2WithJWTAuthorizer>,
+      { "custom:organization": "org-1" },
+    );
+    const res = await handler(event);
+    expect(res.statusCode).toBe(403);
+  });
+
+  test("PUT /budgets/{scope} by an admin user succeeds (E23-b)", async () => {
+    ddbMock.on(UpdateCommand).resolves({});
+    const event = makeEvent(
+      {
+        routeKey: "PUT /budgets/{scope}",
+        rawPath: "/budgets/org",
+        pathParameters: { scope: "org" },
+        body: JSON.stringify({
+          periodType: "monthly",
+          limitMicros: 1_000_000,
+          thresholds: [0.8],
+          currency: "USD",
+        }),
+      } as Partial<APIGatewayProxyEventV2WithJWTAuthorizer>,
+      { "custom:organization": "org-1", "cognito:groups": ["admin"] },
+    );
+    const res = await handler(event);
+    expect(res.statusCode).toBe(200);
   });
 
   test("missing org claim on GET /budgets returns 403", async () => {

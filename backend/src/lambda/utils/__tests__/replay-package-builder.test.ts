@@ -125,6 +125,27 @@ describe("assembleReplayPackage — cross-org refusal", () => {
       assembleReplayPackage("org-1", "execution", "exec-1"),
     ).rejects.toThrow(CrossOrgRowError);
   });
+
+  test("throws CrossOrgRowError when a governance finding has no orgId (finding E23-a: null-orgId rows must not leak to non-admin callers)", async () => {
+    ddbMock.on(GetCommand).resolves({ Item: undefined });
+    ddbMock.on(GetCommand, { TableName: "executions-test" }).resolves({
+      Item: baseExecutionItem("org-1"),
+    });
+    ddbMock.on(QueryCommand).resolves({
+      Items: [
+        {
+          findingId: "f-no-org",
+          workflowId: "wf-1",
+          // orgId intentionally absent — the row has no org claim
+          decision: "PERMIT",
+        },
+      ],
+    });
+
+    await expect(
+      assembleReplayPackage("org-1", "execution", "exec-1"),
+    ).rejects.toThrow(CrossOrgRowError);
+  });
 });
 
 describe("assembleReplayPackage — unknown execution", () => {

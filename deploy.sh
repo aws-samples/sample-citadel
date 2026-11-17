@@ -849,6 +849,7 @@ verify_expected_ref() {
 check_tree_state() {
   local expected="${1:-}"
   local allow_dirty="${2:-false}"
+  local allow_untracked="${3:-false}"
 
   local dirty="clean"
   if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
@@ -862,6 +863,24 @@ check_tree_state() {
       err "Working tree is DIRTY — refusing to deploy."
       err "A dirty tree corresponds to no commit, so the recorded provenance sha would misrepresent what is running (finding 7f42ae86)."
       err "Commit or stash your changes, or pass --allow-dirty to deploy anyway (recorded as dirty)."
+      return 1
+    fi
+  fi
+
+  # E23-d: refuse non-ignored untracked files — they indicate uncommitted
+  # work that the deploy would silently omit, misrepresenting the state.
+  local untracked_files
+  untracked_files=$(git status --porcelain 2>/dev/null | grep '^??' || true)
+  if [ -n "$untracked_files" ]; then
+    if [ "$allow_untracked" = "true" ]; then
+      warn "--allow-untracked supplied — proceeding despite untracked files."
+    else
+      err "Non-ignored untracked files detected — refusing to deploy."
+      err "These files are not committed and will be absent from the deployed artifact:"
+      echo "$untracked_files" | while IFS= read -r line; do
+        err "  ${line#\?\? }"
+      done
+      err "Commit, .gitignore, or remove them, or pass --allow-untracked to proceed anyway."
       return 1
     fi
   fi
@@ -1122,6 +1141,7 @@ print_usage() {
   echo "  --allow-deletions    Proceed even if cdk diff shows resource DELETIONS (default: refuse)"
   echo "  --allow-replacements Proceed even if cdk diff shows hard resource REPLACEMENTS (default: refuse)"
   echo "  --allow-dirty        Proceed even if the working tree is dirty (default: refuse)"
+  echo "  --allow-untracked    Proceed even if non-ignored untracked files exist (default: refuse)"
   echo "  --admin-email <addr> Admin email for initial user (overrides ADMIN_EMAIL env var)"
   echo "  --help               Show this help message"
 }
@@ -1157,6 +1177,7 @@ EXPECT_REF=""
 ALLOW_DELETIONS=false
 ALLOW_REPLACEMENTS=false
 ALLOW_DIRTY=false
+ALLOW_UNTRACKED=false
 DEPLOY_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 while [[ $# -gt 0 ]]; do
@@ -1174,6 +1195,7 @@ while [[ $# -gt 0 ]]; do
     --allow-deletions) ALLOW_DELETIONS=true; shift ;;
     --allow-replacements) ALLOW_REPLACEMENTS=true; shift ;;
     --allow-dirty)    ALLOW_DIRTY=true; shift ;;
+    --allow-untracked) ALLOW_UNTRACKED=true; shift ;;
     --admin-email)    ADMIN_EMAIL_ARG="$2"; shift 2 ;;
     -*)
       echo "Unknown argument: $1" >&2
@@ -1222,7 +1244,7 @@ fi
 if ! verify_expected_ref "$EXPECT_REF"; then
   exit 1
 fi
-if ! check_tree_state "$EXPECT_REF" "$ALLOW_DIRTY"; then
+if ! check_tree_state "$EXPECT_REF" "$ALLOW_DIRTY" "$ALLOW_UNTRACKED"; then
   exit 1
 fi
 

@@ -4,6 +4,7 @@ import tempfile
 import os
 import json
 import re
+import hashlib
 
 s3 = boto3.client('s3')
 
@@ -168,7 +169,9 @@ def handler(event, context):
             cmd, capture_output=True, text=True, check=True, env=env
         )
         
-        print(f"Pandoc output: {result.stdout}")
+        # E23-c: log only exit code, not stdout/stderr which may contain
+        # document text.
+        print(f"Pandoc succeeded: exit_code=0")
         
         # Upload PDF to S3
         pdf_key = key.replace('.md', '.pdf')
@@ -191,7 +194,15 @@ def handler(event, context):
         }
         
     except subprocess.CalledProcessError as e:
-        print(f"❌ Pandoc error: {e.stderr}")
+        # E23-c: stderr may contain document text — log only exit code,
+        # byte length, and sha256 so the error is diagnosable without
+        # leaking user content into CloudWatch.
+        stderr_bytes = (e.stderr or "").encode()
+        stderr_sha = hashlib.sha256(stderr_bytes).hexdigest()
+        print(
+            f"❌ Pandoc error: exit_code={e.returncode} "
+            f"stderr_len={len(e.stderr or '')} stderr_sha256={stderr_sha}"
+        )
         raise
     except Exception as e:
         print(f"❌ Error: {str(e)}")

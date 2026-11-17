@@ -33,7 +33,7 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import type { APIGatewayProxyEventV2WithJWTAuthorizer } from "aws-lambda";
 
-import { extractOrgFromHttpEvent } from "./utils/auth-http-event";
+import { extractOrgFromHttpEvent, isAdminFromHttpEvent } from "./utils/auth-http-event";
 import {
   badRequest,
   forbidden,
@@ -169,6 +169,10 @@ async function handlePutBudget(
 ): Promise<HttpResponse> {
   const claimOrg = extractOrgFromHttpEvent(event);
   if (!claimOrg) return forbidden();
+
+  // E23-b: budget writes are admin-only — same isAdminFromHttpEvent gate
+  // used by resolveScopedOrg's cross-org path in handleListBudgets.
+  if (!isAdminFromHttpEvent(event)) return forbidden();
 
   const rawScope = event.pathParameters?.scope;
   if (!rawScope) return badRequest("Missing {scope} path parameter");

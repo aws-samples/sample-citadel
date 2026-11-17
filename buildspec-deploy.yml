@@ -20,6 +20,9 @@ phases:
   pre_build:
     commands:
       - export GIT_SHA=$(git rev-parse --short HEAD)
+      # E23-e: git-provenance.ts reads CITADEL_GIT_SHA for the GitSha stack tag
+      - export CITADEL_GIT_SHA="${CODEBUILD_RESOLVED_SOURCE_VERSION:-$(git rev-parse HEAD)}"
+      - export CITADEL_GIT_REF="${CODEBUILD_SOURCE_VERSION:-unknown}"
       - echo "Deploying $ENVIRONMENT from $GIT_SHA"
       # CDK diff for audit trail
       - cd backend

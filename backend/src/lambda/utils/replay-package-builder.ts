@@ -104,6 +104,22 @@ function assertRowOrg(
   }
 }
 
+/**
+ * Strict variant for governance/findings rows (E23-a): a row with NO orgId
+ * (undefined, null, or non-string) is treated as a mismatch. Such a row must
+ * never reach a non-admin caller's package — it could belong to any org.
+ */
+function assertGovernanceRowOrg(
+  table: string,
+  row: Record<string, unknown>,
+  expectedOrgId: string,
+): void {
+  const rowOrgId = typeof row.orgId === "string" ? row.orgId : undefined;
+  if (rowOrgId === undefined || rowOrgId !== expectedOrgId) {
+    throw new CrossOrgRowError(table, rowOrgId ?? "(missing)", expectedOrgId);
+  }
+}
+
 interface NodeResultRow {
   nodeId?: string;
   agentId?: string | null;
@@ -468,7 +484,7 @@ export async function assembleReplayPackage(
   if (execSpec) assertRowOrg(execSpec.tableName, execSpec.item, orgId);
   if (modelConfig) assertRowOrg(modelConfig.tableName, modelConfig.item, orgId);
   for (const finding of governance.items) {
-    assertRowOrg(governance.tableName, finding, orgId);
+    assertGovernanceRowOrg(governance.tableName, finding, orgId);
   }
   for (const usageRow of costUsage.items) {
     assertRowOrg(costUsage.tableName, usageRow, orgId);
@@ -572,7 +588,7 @@ async function assembleConversationReplayPackage(
   if (runIds.length > 0) {
     const runIdFindings = await readGovernanceFindingsByRunIds(runIds);
     for (const finding of runIdFindings.items) {
-      assertRowOrg(runIdFindings.tableName, finding, orgId);
+      assertGovernanceRowOrg(runIdFindings.tableName, finding, orgId);
     }
     // runId-confirmed findings join properly — no longer the honest
     // partial/unjoinable shape for this conversation. An empty match set
