@@ -120,3 +120,6 @@ packaged-template.yaml
 # PDF generator local test folder
 service/hld_pdf_generator/test/
 backend/src/lambda/.mutant-scratch/
+
+# Split-gates local artifacts
+backend/.split-gates/
