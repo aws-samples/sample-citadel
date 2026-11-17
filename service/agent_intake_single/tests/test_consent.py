@@ -134,11 +134,12 @@ class TestConsentIsolation:
 
 
 class TestNonPrivilegedActions:
-    """Actions not in PRIVILEGED_ACTIONS pass through unconditionally."""
+    """Actions not in ACTION_CATALOGUE are now rejected."""
 
-    def test_non_privileged_action_passes(self, mock_table):
-        # Should not raise and should not even call DynamoDB
-        require_consent("sess-1", "check_fabrication_status")
+    def test_non_privileged_action_rejected(self, mock_table):
+        # Unknown actions raise ConsentRequired with unknown_action reason
+        with pytest.raises(ConsentRequired, match="unknown_action"):
+            require_consent("sess-1", "check_fabrication_status")
         mock_table.get_item.assert_not_called()
 
 

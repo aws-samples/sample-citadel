@@ -26,7 +26,10 @@ export type IntakeConsentAction =
   | 'activate_agents'
   | 'create_agent_app'
   | 'generate_process_blueprint'
-  | 'import_blueprint_to_app';
+  | 'import_blueprint_to_app'
+  | 'plan_fabrication'
+  | 'confirm_fabrication_plan'
+  | 'retry_failed_fabrication';
 
 /**
  * Map from action button label substrings to the consent action that must be
@@ -37,6 +40,9 @@ const CONSENT_LABEL_PATTERNS: readonly [RegExp, IntakeConsentAction][] = [
   [/create\b.*app|create\s+'[^']*'/i, 'create_agent_app'],
   [/generate.*blueprint/i, 'generate_process_blueprint'],
   [/add\b.*to\b|import/i, 'import_blueprint_to_app'],
+  [/plan fabrication/i, 'plan_fabrication'],
+  [/confirm fabrication/i, 'confirm_fabrication_plan'],
+  [/retry failed/i, 'retry_failed_fabrication'],
 ];
 
 /**

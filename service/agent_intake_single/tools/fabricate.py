@@ -9,6 +9,7 @@ from boto3.dynamodb.conditions import Key
 from strands.tools import tool
 from tools.kb import s3_get, s3_put
 from tools.converse_utils import extract_text, capture_converse_usage
+from tools.consent import require_consent, ConsentRequired
 from config import bedrock, get_agent_model_id
 import request_context
 
@@ -650,6 +651,15 @@ def plan_fabrication() -> str:
         JSON string with the fabrication plan for each agent.
     """
     session_id = request_context.current_session_id()
+    try:
+        require_consent(session_id, "plan_fabrication")
+    except ConsentRequired:
+        return json.dumps({
+            "ok": False,
+            "status": "consent_required",
+            "summary": "I need your confirmation before I can plan the fabrication. "
+                       "Please use the button above to confirm.",
+        })
     td2 = s3_get(SECTION_KEY.format(session_id=session_id))
     if not td2:
         return "Error: Agent Definitions (td_2.md) not found. Generate the technical design first."
@@ -698,6 +708,16 @@ def confirm_fabrication_plan(plan_json: str) -> str:
     session_id = request_context.current_session_id()
     if not FABRICATOR_QUEUE_URL:
         return "Error: FABRICATOR_QUEUE_URL not set."
+
+    try:
+        require_consent(session_id, "confirm_fabrication_plan")
+    except ConsentRequired:
+        return json.dumps({
+            "ok": False,
+            "status": "consent_required",
+            "summary": "I need your confirmation before I can confirm the fabrication plan. "
+                       "Please use the button above to confirm.",
+        })
 
     plan = json.loads(plan_json)
 
@@ -775,6 +795,18 @@ def retry_failed_fabrication(agent_names: str = "") -> str:
             "I can't re-queue builds automatically right now.",
             "Want me to try again in a moment?",
             [_retry_action("Try again", "Retry the agents that didn't finish"),
+             _retry_action("Stop here", "Stop here")],
+        )
+
+    try:
+        require_consent(session_id, "retry_failed_fabrication")
+    except ConsentRequired:
+        return _retry_result(
+            False, "consent_required",
+            "I need your confirmation before I can retry the failed builds. "
+            "Please use the button above to confirm.",
+            "Want me to retry the builds that didn't finish?",
+            [_retry_action("Retry failed builds", "Retry the agents that didn't finish"),
              _retry_action("Stop here", "Stop here")],
         )
 
