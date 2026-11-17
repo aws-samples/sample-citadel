@@ -29,6 +29,7 @@ import {
   PYTHON_RUNTIME,
   LAMBDA_ARCHITECTURE,
   NODE_RUNTIME,
+  resolveBackendSrcDir,
 } from "./runtime-constants";
 import {
   SEED_VERSION as SEED_BLUEPRINTS_VERSION,
@@ -85,6 +86,8 @@ export const AGENTS_TABLE_GSI_NAME = "sourceProjectId-index";
  */
 export const WORKFLOWS_TABLE_ORG_STATUS_INDEX = "OrgStatusIndex";
 export const WORKFLOWS_TABLE_BLUEPRINT_INDEX = "BlueprintIndex";
+
+const BACKEND_SRC = resolveBackendSrcDir(__dirname);
 
 export class BackendStack extends cdk.Stack {
   public readonly appSyncApi: appsync.GraphqlApi;
@@ -1890,7 +1893,7 @@ export class BackendStack extends cdk.Stack {
         architecture: LAMBDA_ARCHITECTURE,
         handler: "index.handler",
         code: lambda.Code.fromAsset(
-          path.join(__dirname, "../../src/lambda/seed-organizations"),
+          path.join(BACKEND_SRC, "lambda/seed-organizations"),
         ),
         timeout: cdk.Duration.seconds(30),
         environment: {

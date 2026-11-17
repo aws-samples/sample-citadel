@@ -18,34 +18,8 @@ import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
 
-// Ensure asset directories expected by FrontendStack synth.
-// FrontendStack uses `path.join(__dirname, "../../src/lambda/update-email-templates")`
-// — when ts-jest runs the source directly (__dirname = backend/lib), the
-// `../../` goes two levels up (to the worktree root). We create stub dirs
-// at both paths (real + resolved-from-lib) so the test can synth.
+// backend/ root — used for schema path below
 const backendDir = path.resolve(__dirname, "..");
-const resolvedFromLib = path.resolve(backendDir, "lib", "../../src/lambda/update-email-templates");
-const resolvedCognitoTemplates = path.resolve(backendDir, "lib", "../../src/cognito-email-templates");
-for (const dir of [resolvedFromLib, resolvedCognitoTemplates]) {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
-// Stub the Lambda handler file and cognito email templates
-if (!fs.existsSync(path.join(resolvedFromLib, "index.py"))) {
-  fs.writeFileSync(
-    path.join(resolvedFromLib, "index.py"),
-    "def handler(event, context): pass\n",
-  );
-}
-for (const tpl of [
-  "verification-email.html",
-  "invitation-email.html",
-  "password-reset-email.html",
-]) {
-  const tplPath = path.join(resolvedCognitoTemplates, tpl);
-  if (!fs.existsSync(tplPath)) {
-    fs.writeFileSync(tplPath, "<html>https://your-domain.com</html>");
-  }
-}
 
 // Create a minimal frontend build directory for BucketDeployment source
 const tmpBuildDir = fs.mkdtempSync(path.join(os.tmpdir(), "fe-build-"));

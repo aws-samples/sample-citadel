@@ -26,7 +26,6 @@ scaffoldBackendAssetDirs(["dist/lambda", "src/schema"]);
 
 // BackendStack references asset paths that may not exist in CI.
 const EXTRA_ASSET_DIRS = [
-  path.resolve(__dirname, "../../src/lambda/seed-organizations"),
   path.resolve(__dirname, "../src/lambda/seed-admin-user"),
   path.resolve(__dirname, "../src/lambda/seed-organizations"),
 ];

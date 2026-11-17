@@ -109,11 +109,9 @@ import { hasPermission, createAuthContext } from "../src/utils/auth";
 // P1/P5 read the SYNTHESIZED backend template from cdk.out instead of
 // instantiating BackendStack in-process (finding: CannotFindAsset in CI —
 // BackendStack's SeedOrganizationsFunction resolves its Lambda asset via
-// `path.join(__dirname, "../../src/lambda/seed-organizations")` relative to
-// lib/backend-stack.ts, which only lands on `backend/src/lambda/...` when
-// the process cwd is `backend/`; CI's jest cwd has no such guarantee and the
-// asset staging step fails before synth ever reaches the Cognito
-// resources). This mirrors the established approach in
+// `resolveBackendSrcDir(__dirname)` in lib/backend-stack.ts; CI's jest cwd
+// has no such guarantee and the asset staging step fails before synth ever
+// reaches the Cognito resources). This mirrors the established approach in
 // schema-resolver-parity-guard.test.ts / duplicate-alarm-name-guard.test.ts:
 // read `cdk.out/citadel-backend-<env>.template.json`, produced by the
 // Backend Build + Synth CI job and downloaded as an artifact before Backend

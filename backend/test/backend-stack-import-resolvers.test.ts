@@ -25,7 +25,6 @@ const requiredAssetDirs = [
   path.resolve(__dirname, "../dist/lambda"),
   path.resolve(__dirname, "../src/schema"),
   path.resolve(__dirname, "../src/lambda/seed-admin-user"),
-  path.resolve(__dirname, "../../src/lambda/seed-organizations"),
 ];
 
 const dirsCreatedByThisTest: string[] = [];

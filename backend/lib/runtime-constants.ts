@@ -329,6 +329,38 @@ function resolvePlaceholderAssetDir(startDir: string): string {
 
 const PLACEHOLDER_ASSET_DIR = resolvePlaceholderAssetDir(__dirname);
 
+// ---------------------------------------------------------------------------
+// Backend src/ directory (shared asset root for Lambda code + templates)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve `backend/src/` from either source (`backend/lib/`) or compiled
+ * output (`backend/dist/lib/`).  Uses the same candidate-probe pattern as
+ * {@link resolveBuildImageDir} and `resolveArbiterRoot` in arbiter-stack.ts.
+ *
+ * Marker: the `lambda/update-email-templates` subdirectory — a Python
+ * Lambda asset that exists only in the real `backend/src/`, never in
+ * `backend/dist/src/` (which contains only TypeScript-compiled JS plus
+ * HTML files copied by the build step).
+ */
+export function resolveBackendSrcDir(startDir: string): string {
+  const candidates = [
+    path.join(startDir, "..", "src"), // source: backend/lib/ -> backend/src/
+    path.join(startDir, "..", "..", "src"), // dist:   backend/dist/lib/ -> backend/src/
+  ];
+  for (const candidate of candidates) {
+    if (
+      fs.existsSync(path.join(candidate, "lambda", "update-email-templates"))
+    ) {
+      return candidate;
+    }
+  }
+  throw new Error(
+    `Unable to locate backend/src/ directory from ${startDir}. ` +
+      `Tried: ${candidates.join(", ")}`,
+  );
+}
+
 /**
  * Return value from {@link pythonAssetCode}.
  */

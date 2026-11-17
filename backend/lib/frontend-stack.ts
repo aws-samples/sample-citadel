@@ -12,7 +12,13 @@ import * as ssm from "aws-cdk-lib/aws-ssm";
 import * as fs from "fs";
 import * as path from "path";
 import { Construct } from "constructs";
-import { PYTHON_RUNTIME, LAMBDA_ARCHITECTURE } from "./runtime-constants";
+import {
+  PYTHON_RUNTIME,
+  LAMBDA_ARCHITECTURE,
+  resolveBackendSrcDir,
+} from "./runtime-constants";
+
+const BACKEND_SRC = resolveBackendSrcDir(__dirname);
 
 interface FrontendStackProps extends cdk.StackProps {
   appSyncApi: appsync.GraphqlApi;
@@ -222,8 +228,8 @@ export class FrontendStack extends cdk.Stack {
     const verificationEmailTemplate = fs
       .readFileSync(
         path.join(
-          __dirname,
-          "../src/cognito-email-templates/verification-email.html",
+          BACKEND_SRC,
+          "cognito-email-templates/verification-email.html",
         ),
         "utf-8",
       )
@@ -232,8 +238,8 @@ export class FrontendStack extends cdk.Stack {
     const invitationEmailTemplate = fs
       .readFileSync(
         path.join(
-          __dirname,
-          "../src/cognito-email-templates/invitation-email.html",
+          BACKEND_SRC,
+          "cognito-email-templates/invitation-email.html",
         ),
         "utf-8",
       )
@@ -242,8 +248,8 @@ export class FrontendStack extends cdk.Stack {
     const passwordResetEmailTemplate = fs
       .readFileSync(
         path.join(
-          __dirname,
-          "../src/cognito-email-templates/password-reset-email.html",
+          BACKEND_SRC,
+          "cognito-email-templates/password-reset-email.html",
         ),
         "utf-8",
       )
@@ -258,7 +264,7 @@ export class FrontendStack extends cdk.Stack {
         architecture: LAMBDA_ARCHITECTURE,
         handler: "index.handler",
         code: cdk.aws_lambda.Code.fromAsset(
-          path.join(__dirname, "../../src/lambda/update-email-templates"),
+          path.join(BACKEND_SRC, "lambda/update-email-templates"),
         ),
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, "UpdateEmailTemplatesFunctionLogs", {
