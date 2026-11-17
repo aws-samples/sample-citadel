@@ -19,7 +19,7 @@ import {
   PutCommand,
   ScanCommand,
 } from "@aws-sdk/lib-dynamodb";
-import { extractOrgFromEvent } from "../utils/auth-event";
+import { extractOrgFromEvent, isAdminFromEvent } from "../utils/auth-event";
 import { assertOrgNameExists } from "../utils/org-name";
 
 const cognitoClient = new CognitoIdentityProviderClient({});
@@ -31,10 +31,12 @@ const ORGANISATION_TABLE = process.env.ORGANISATION_TABLE!;
 // this table by Cognito `sub`; the user attribute is display/back-compat.
 const USER_ORG_MEMBERSHIP_TABLE = process.env.USER_ORG_MEMBERSHIP_TABLE;
 
-// Cache for user groups to reduce Cognito API calls
-// Cache persists across warm Lambda invocations
+// Cache for TARGET-user group listings (display only). NEVER used for
+// CALLER authorization — caller admin status comes from the JWT
+// `cognito:groups` claim via isAdminFromEvent (finding a: demoted admin
+// kept admin on warm instances when the cache was the authority).
+// Entries are invalidated on role mutations via invalidateGroupCache().
 const groupCache = new Map<string, { groups: string[]; timestamp: number }>();
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
 interface AssignUserRoleInput {
   userId: string;
@@ -71,31 +73,12 @@ interface User {
 }
 
 /**
- * Check if a user is an admin with caching to reduce Cognito API calls
+ * Invalidate a target user's cached group listing after a role mutation.
+ * The cache is populated by AdminListGroupsForUser calls in listUsers/getUser
+ * (display only — never used for authorization).
  */
-async function isUserAdmin(username: string): Promise<boolean> {
-  // Check cache first
-  const cached = groupCache.get(username);
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    console.log(`Cache hit for user ${username}`);
-    return cached.groups.includes("admin");
-  }
-
-  // Cache miss - fetch from Cognito
-  console.log(`Cache miss for user ${username}, fetching from Cognito`);
-  const groupsResponse = await cognitoClient.send(
-    new AdminListGroupsForUserCommand({
-      UserPoolId: USER_POOL_ID,
-      Username: username,
-    }),
-  );
-
-  const groups = groupsResponse.Groups?.map((g) => g.GroupName!) || [];
-
-  // Update cache
-  groupCache.set(username, { groups, timestamp: Date.now() });
-
-  return groups.includes("admin");
+function invalidateGroupCache(username: string): void {
+  groupCache.delete(username);
 }
 
 /** AppSync event slice this resolver reads: Cognito identity + arguments. */
@@ -183,11 +166,8 @@ export const handler = async (event: UserManagementResolverEvent) => {
 };
 
 async function listUsers(event: UserManagementResolverEvent): Promise<User[]> {
-  const callerUsername = requireCallerUsername(event);
-  const callerIsAdmin = await isUserAdmin(callerUsername);
-  // Non-admin callers are confined to their own org; fail closed if it
-  // cannot be resolved (finding f21582e6). The GLOBAL 'admin' Cognito
-  // group retains cross-tenant visibility, preserved deliberately.
+  requireCallerUsername(event); // fail closed on absent identity
+  const callerIsAdmin = isAdminFromEvent(event);
   const callerOrg = callerIsAdmin ? null : await requireCallerOrg(event);
 
   const response = await cognitoClient.send(
@@ -256,7 +236,7 @@ async function getUser(
   event: UserManagementResolverEvent,
 ): Promise<User> {
   const callerUsername = requireCallerUsername(event);
-  const callerIsAdmin = await isUserAdmin(callerUsername);
+  const callerIsAdmin = isAdminFromEvent(event);
 
   const response = await cognitoClient.send(
     new AdminGetUserCommand({
@@ -349,8 +329,8 @@ async function assignUserRole(
     throw new Error("Unable to determine caller identity");
   }
 
-  // Check if caller is admin (with caching)
-  const callerIsAdmin = await isUserAdmin(callerUsername);
+  // Check if caller is admin (JWT claim — finding a)
+  const callerIsAdmin = isAdminFromEvent(event);
 
   if (!callerIsAdmin) {
     throw new Error("Only administrators can assign user roles");
@@ -466,22 +446,28 @@ async function assignUserRole(
       }),
     );
 
-    // Sign out the target's existing sessions ONLY on a real change, and
-    // ONLY AFTER both writes complete — the next login then regenerates a
-    // token whose custom:organization claim the pre-token-generation
-    // trigger reads from the membership row written above. This revokes
-    // refresh tokens; an already-issued, unexpired access/ID token remains
-    // valid at AppSync until its own TTL (known limitation, see design
-    // notes).
+    // Sign out the target's existing sessions on a real org change, AFTER
+    // both writes complete. Role-change sign-out is handled below
+    // (unconditionally), so we only need org-specific sign-out here when
+    // the org actually changed AND no role-change sign-out would follow.
+    // However, since role always changes in assignUserRole (all groups are
+    // removed then the new one is added), the unconditional sign-out
+    // below covers this case too — kept for clarity if the flow changes.
     if (organization !== previousOrg) {
-      await cognitoClient.send(
-        new AdminUserGlobalSignOutCommand({
-          UserPoolId: USER_POOL_ID,
-          Username: userId,
-        }),
-      );
+      // The unconditional sign-out below will handle this.
     }
   }
+
+  // Finding (b): Role change invalidates the target's token claims
+  // (cognito:groups). Sign out the target so the next login picks up the
+  // new group membership. Also invalidate the target's group cache entry.
+  invalidateGroupCache(userId);
+  await cognitoClient.send(
+    new AdminUserGlobalSignOutCommand({
+      UserPoolId: USER_POOL_ID,
+      Username: userId,
+    }),
+  );
 
   console.log(
     `Successfully assigned role ${role} and organization ${organization} to user ${userId}`,
@@ -506,8 +492,8 @@ async function removeUserRole(
     throw new Error("Unable to determine caller identity");
   }
 
-  // Check if caller is admin (with caching)
-  const callerIsAdmin = await isUserAdmin(callerUsername);
+  // Check if caller is admin (JWT claim — finding a)
+  const callerIsAdmin = isAdminFromEvent(event);
 
   if (!callerIsAdmin) {
     throw new Error("Only administrators can remove user roles");
@@ -518,6 +504,17 @@ async function removeUserRole(
       UserPoolId: USER_POOL_ID,
       Username: userId,
       GroupName: role,
+    }),
+  );
+
+  // Finding (b): Role removal invalidates the target's token claims
+  // (cognito:groups). Sign out the target so the next login picks up the
+  // updated group membership. Also invalidate the target's group cache.
+  invalidateGroupCache(userId);
+  await cognitoClient.send(
+    new AdminUserGlobalSignOutCommand({
+      UserPoolId: USER_POOL_ID,
+      Username: userId,
     }),
   );
 
@@ -548,8 +545,8 @@ async function listAvailableRoles(
 }
 
 async function listOrganizations(event: UserManagementResolverEvent) {
-  const callerUsername = requireCallerUsername(event);
-  const callerIsAdmin = await isUserAdmin(callerUsername);
+  requireCallerUsername(event); // fail closed on absent identity
+  const callerIsAdmin = isAdminFromEvent(event);
   // Non-admin callers are confined to their own org; the GLOBAL 'admin'
   // Cognito group retains cross-tenant visibility, preserved deliberately.
   const callerOrg = callerIsAdmin ? null : await requireCallerOrg(event);
@@ -656,8 +653,8 @@ async function adminResetUserPassword(
     throw new Error("Unable to determine caller identity");
   }
 
-  // Check if caller is admin (with caching)
-  const callerIsAdmin = await isUserAdmin(callerUsername);
+  // Check if caller is admin (JWT claim — finding a)
+  const callerIsAdmin = isAdminFromEvent(event);
 
   if (!callerIsAdmin) {
     throw new Error("Only administrators can reset user passwords");
@@ -703,8 +700,8 @@ async function adminCreateUser(
     throw new Error("Unable to determine caller identity");
   }
 
-  // Check if caller is admin (with caching)
-  const callerIsAdmin = await isUserAdmin(callerUsername);
+  // Check if caller is admin (JWT claim — finding a)
+  const callerIsAdmin = isAdminFromEvent(event);
 
   if (!callerIsAdmin) {
     throw new Error("Only administrators can create users");
@@ -832,6 +829,15 @@ async function adminCreateUser(
             "adminCreateUser: compensation AdminDeleteUser also failed",
             deleteError,
           );
+          // Finding (c): be honest — the Cognito user could NOT be removed.
+          throw new Error(
+            "User created in Cognito but the organization membership could not be " +
+              "written, and the compensating Cognito user deletion also failed. " +
+              "A partial user record may remain — an administrator should manually " +
+              "remove the Cognito user for " +
+              email +
+              " before retrying.",
+          );
         }
         throw new Error(
           "User created in Cognito but the organization membership could not be " +
@@ -876,8 +882,8 @@ async function adminResendInvitation(
     throw new Error("Unable to determine caller identity");
   }
 
-  // Check if caller is admin (with caching)
-  const callerIsAdmin = await isUserAdmin(callerUsername);
+  // Check if caller is admin (JWT claim — finding a)
+  const callerIsAdmin = isAdminFromEvent(event);
 
   if (!callerIsAdmin) {
     throw new Error("Only administrators can resend invitations");

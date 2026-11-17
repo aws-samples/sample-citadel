@@ -81,7 +81,7 @@ describe("assignUserRole — AdminUserGlobalSignOut on real organization change"
 
     const event = buildEvent(
       "assignUserRole",
-      { username: "admin-user" },
+      { username: "admin-user", claims: { "cognito:groups": ["admin"] } },
       {
         input: {
           userId: "target-user",
@@ -118,7 +118,7 @@ describe("assignUserRole — AdminUserGlobalSignOut on real organization change"
 
     const event = buildEvent(
       "assignUserRole",
-      { username: "admin-user" },
+      { username: "admin-user", claims: { "cognito:groups": ["admin"] } },
       {
         input: {
           userId: "target-user",
@@ -133,12 +133,12 @@ describe("assignUserRole — AdminUserGlobalSignOut on real organization change"
     expect(callOrder).toEqual(["update-attrs", "global-signout"]);
   });
 
-  test("does NOT sign out when organization is unchanged (exact same value)", async () => {
+  test("signs out even when organization is unchanged because role changed (finding b)", async () => {
     withPreviousOrg("Same Org");
 
     const event = buildEvent(
       "assignUserRole",
-      { username: "admin-user" },
+      { username: "admin-user", claims: { "cognito:groups": ["admin"] } },
       {
         input: {
           userId: "target-user",
@@ -150,25 +150,29 @@ describe("assignUserRole — AdminUserGlobalSignOut on real organization change"
 
     await handler(event);
 
+    // Finding (b): role change always signs out the target, even when the
+    // org is unchanged, because cognito:groups claims in the old token are
+    // now stale.
     expect(
       cognitoMock.commandCalls(AdminUserGlobalSignOutCommand),
-    ).toHaveLength(0);
+    ).toHaveLength(1);
   });
 
-  test("does NOT sign out on a role-only change (organization omitted)", async () => {
+  test("signs out on a role-only change even when organization is omitted (finding b)", async () => {
     withPreviousOrg("Existing Org");
 
     const event = buildEvent(
       "assignUserRole",
-      { username: "admin-user" },
+      { username: "admin-user", claims: { "cognito:groups": ["admin"] } },
       { input: { userId: "target-user", role: "developer" } },
     );
 
     await handler(event);
 
+    // Finding (b): role change always signs out the target.
     expect(
       cognitoMock.commandCalls(AdminUserGlobalSignOutCommand),
-    ).toHaveLength(0);
+    ).toHaveLength(1);
     expect(
       cognitoMock.commandCalls(AdminUpdateUserAttributesCommand),
     ).toHaveLength(0);
@@ -179,7 +183,7 @@ describe("assignUserRole — AdminUserGlobalSignOut on real organization change"
 
     const event = buildEvent(
       "assignUserRole",
-      { username: "admin-user" },
+      { username: "admin-user", claims: { "cognito:groups": ["admin"] } },
       {
         input: {
           userId: "target-user",
@@ -201,7 +205,7 @@ describe("assignUserRole — AdminUserGlobalSignOut on real organization change"
 
     const event = buildEvent(
       "assignUserRole",
-      { username: "admin-user" },
+      { username: "admin-user", claims: { "cognito:groups": ["admin"] } },
       {
         input: {
           userId: "target-user",

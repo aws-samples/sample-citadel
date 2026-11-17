@@ -69,7 +69,7 @@ function withTarget(opts: { sub?: string; previousOrg?: string }) {
 function assignEvent(organization?: string) {
   return buildEvent(
     "assignUserRole",
-    { username: "admin-user" },
+    { username: "admin-user", claims: { "cognito:groups": ["admin"] } },
     {
       input: {
         userId: "target-user",
@@ -194,14 +194,16 @@ describe("assignUserRole — membership table is authoritative (decision 00d40a3
     ).toHaveLength(0);
   });
 
-  test("unchanged organization still upserts the membership row but does NOT sign the user out", async () => {
+  test("unchanged organization still upserts the membership row and signs out for the role change (finding b)", async () => {
     withTarget({ sub: TARGET_SUB, previousOrg: "Same Org" });
 
     await handler(assignEvent("Same Org"));
 
     expect(dynamoMock.commandCalls(PutCommand)).toHaveLength(1);
+    // Finding (b): role change always signs out the target, even when org
+    // is unchanged.
     expect(
       cognitoMock.commandCalls(AdminUserGlobalSignOutCommand),
-    ).toHaveLength(0);
+    ).toHaveLength(1);
   });
 });

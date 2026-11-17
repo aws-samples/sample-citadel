@@ -74,7 +74,7 @@ describe("adminCreateUser — validates organization exists before any Cognito w
   test("calls assertOrgNameExists with the supplied organization before AdminCreateUserCommand", async () => {
     const event = buildEvent(
       "adminCreateUser",
-      { username: "admin-user" },
+      { username: "admin-user", claims: { "cognito:groups": ["admin"] } },
       {
         input: {
           email: "new.user@example.com",
@@ -103,7 +103,7 @@ describe("adminCreateUser — validates organization exists before any Cognito w
 
     const event = buildEvent(
       "adminCreateUser",
-      { username: "admin-user" },
+      { username: "admin-user", claims: { "cognito:groups": ["admin"] } },
       {
         input: {
           email: "new.user@example.com",
@@ -125,7 +125,7 @@ describe("adminCreateUser — validates organization exists before any Cognito w
 
     const event = buildEvent(
       "adminCreateUser",
-      { username: "admin-user" },
+      { username: "admin-user", claims: { "cognito:groups": ["admin"] } },
       {
         input: {
           email: "new.user@example.com",
@@ -149,7 +149,7 @@ describe("assignUserRole — validates organization exists before any Cognito wr
 
     const event = buildEvent(
       "assignUserRole",
-      { username: "admin-user" },
+      { username: "admin-user", claims: { "cognito:groups": ["admin"] } },
       {
         input: {
           userId: "target-user",
@@ -180,7 +180,7 @@ describe("assignUserRole — validates organization exists before any Cognito wr
 
     const event = buildEvent(
       "assignUserRole",
-      { username: "admin-user" },
+      { username: "admin-user", claims: { "cognito:groups": ["admin"] } },
       {
         input: {
           userId: "target-user",
@@ -206,7 +206,7 @@ describe("assignUserRole — validates organization exists before any Cognito wr
 
     const event = buildEvent(
       "assignUserRole",
-      { username: "admin-user" },
+      { username: "admin-user", claims: { "cognito:groups": ["admin"] } },
       {
         input: {
           userId: "target-user",
@@ -229,7 +229,7 @@ describe("assignUserRole — validates organization exists before any Cognito wr
 
     const event = buildEvent(
       "assignUserRole",
-      { username: "admin-user" },
+      { username: "admin-user", claims: { "cognito:groups": ["admin"] } },
       { input: { userId: "target-user", role: "developer" } },
     );
 

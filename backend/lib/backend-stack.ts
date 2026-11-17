@@ -1831,6 +1831,7 @@ export class BackendStack extends cdk.Stack {
           "cognito-idp:ListGroups",
           "cognito-idp:AdminSetUserPassword",
           "cognito-idp:AdminUserGlobalSignOut",
+          "cognito-idp:AdminDeleteUser",
         ],
         resources: [this.userPool.userPoolArn],
       }),
