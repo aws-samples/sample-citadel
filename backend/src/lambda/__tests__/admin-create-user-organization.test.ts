@@ -104,7 +104,7 @@ describe("adminCreateUser — organization is required and wired into custom:org
 
     const event = buildEvent(
       "adminCreateUser",
-      { username: "admin-user" },
+      { username: "admin-user", claims: { "cognito:groups": ["admin"] } },
       {
         input: {
           email: "new.user@example.com",
@@ -130,7 +130,7 @@ describe("adminCreateUser — organization is required and wired into custom:org
 
     const event = buildEvent(
       "adminCreateUser",
-      { username: "admin-user" },
+      { username: "admin-user", claims: { "cognito:groups": ["admin"] } },
       {
         input: {
           email: "new.user@example.com",
@@ -156,7 +156,7 @@ describe("adminCreateUser — organization is required and wired into custom:org
   test("rejects a create with NO organization, with a clear message, and does NOT call AdminCreateUserCommand (fail clearly, no silent default)", async () => {
     const event = buildEvent(
       "adminCreateUser",
-      { username: "admin-user" },
+      { username: "admin-user", claims: { "cognito:groups": ["admin"] } },
       {
         input: {
           email: "no-org@example.com",
@@ -179,7 +179,7 @@ describe("adminCreateUser — organization is required and wired into custom:org
   test("rejects a create with an EMPTY-STRING organization the same way as a missing one", async () => {
     const event = buildEvent(
       "adminCreateUser",
-      { username: "admin-user" },
+      { username: "admin-user", claims: { "cognito:groups": ["admin"] } },
       {
         input: {
           email: "blank-org@example.com",
@@ -228,7 +228,7 @@ describe("adminCreateUser — membership table write (finding H20 / decision 00d
 
     const event = buildEvent(
       "adminCreateUser",
-      { username: "admin-user" },
+      { username: "admin-user", claims: { "cognito:groups": ["admin"] } },
       {
         input: {
           email: "alpha.user@example.com",
@@ -276,7 +276,7 @@ describe("adminCreateUser — membership table write (finding H20 / decision 00d
 
     const event = buildEvent(
       "adminCreateUser",
-      { username: "admin-user" },
+      { username: "admin-user", claims: { "cognito:groups": ["admin"] } },
       {
         input: {
           email: "bad-org@example.com",
@@ -308,7 +308,7 @@ describe("adminCreateUser — membership table write (finding H20 / decision 00d
 
     const event = buildEvent(
       "adminCreateUser",
-      { username: "admin-user" },
+      { username: "admin-user", claims: { "cognito:groups": ["admin"] } },
       {
         input: {
           email: "fail-put@example.com",
@@ -353,7 +353,7 @@ describe("adminCreateUser — membership table write (finding H20 / decision 00d
 
     const event = buildEvent(
       "adminCreateUser",
-      { username: "admin-user" },
+      { username: "admin-user", claims: { "cognito:groups": ["admin"] } },
       {
         input: {
           email: "no-sub@example.com",
@@ -398,7 +398,7 @@ describe("adminCreateUser — membership table write (finding H20 / decision 00d
 
     const event = buildEvent(
       "removeUserRole",
-      { username: "admin-user" },
+      { username: "admin-user", claims: { "cognito:groups": ["admin"] } },
       { userId: "target-user", role: "developer" },
     );
 

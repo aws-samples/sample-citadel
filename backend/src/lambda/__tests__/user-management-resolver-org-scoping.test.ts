@@ -161,7 +161,7 @@ describe("listUsers — org scoping", () => {
       .on(AdminListGroupsForUserCommand, { Username: "carol" })
       .resolves({ Groups: [{ GroupName: "developer" }] });
 
-    const event = buildEvent("listUsers", { username: "admin-user" });
+    const event = buildEvent("listUsers", { username: "admin-user", claims: { "cognito:groups": ["admin"] } });
     const result = (await handler(event)) as UserResult[];
 
     const ids = result.map((u) => u.userId).sort();
@@ -269,7 +269,7 @@ describe("getUser — org scoping", () => {
 
     const event = buildEvent(
       "getUser",
-      { username: "admin-user" },
+      { username: "admin-user", claims: { "cognito:groups": ["admin"] } },
       { userId: "carol" },
     );
     const result = (await handler(event)) as UserResult;
@@ -329,7 +329,7 @@ describe("listOrganizations — org scoping", () => {
       .resolves({ Groups: [{ GroupName: "admin" }] });
     dynamoMock.on(ScanCommand).resolves({ Items: orgItems });
 
-    const event = buildEvent("listOrganizations", { username: "admin-user" });
+    const event = buildEvent("listOrganizations", { username: "admin-user", claims: { "cognito:groups": ["admin"] } });
     const result = (await handler(event)) as OrganizationResult[];
 
     expect(result.map((o) => o.name).sort()).toEqual(["Org A", "Org B"]);
@@ -386,7 +386,7 @@ describe("adminResetUserPassword / adminResendInvitation — no temp password in
   test("adminResetUserPassword response never contains the temp password", async () => {
     const event = buildEvent(
       "adminResetUserPassword",
-      { username: "admin-user" },
+      { username: "admin-user", claims: { "cognito:groups": ["admin"] } },
       { userId: "bob" },
     );
     const result = (await handler(event)) as UserManagementResponseResult;
@@ -400,7 +400,7 @@ describe("adminResetUserPassword / adminResendInvitation — no temp password in
   test("adminResendInvitation response never contains the temp password", async () => {
     const event = buildEvent(
       "adminResendInvitation",
-      { username: "admin-user" },
+      { username: "admin-user", claims: { "cognito:groups": ["admin"] } },
       { userId: "bob" },
     );
     const result = (await handler(event)) as UserManagementResponseResult;
