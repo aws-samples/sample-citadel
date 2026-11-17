@@ -1079,15 +1079,16 @@ describe("read-path cross-org isolation", () => {
     expect(result?.comparisonId).toBe("cmp-1");
   });
 
-  test("getEvalComparisonHydrated allows the row through when no org claim is present (API-key/IAM caller)", async () => {
+  test("getEvalComparisonHydrated rejects when no org claim is present (fail closed)", async () => {
     ddbMock
       .on(GetCommand, { TableName: "citadel-eval-comparisons-test" })
       .resolves({
         Item: { comparisonId: "cmp-1", orgId: "org-2", suiteId: "suite-1" },
       });
 
-    const result = await getEvalComparisonHydrated("cmp-1", { identity: {} });
-    expect(result?.comparisonId).toBe("cmp-1");
+    await expect(
+      getEvalComparisonHydrated("cmp-1", { identity: {} }),
+    ).rejects.toThrow(/UnauthorizedError.*org/i);
   });
 
   test("handler dispatch rejects cross-org getEvalComparison via the identity claim", async () => {
