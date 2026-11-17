@@ -255,3 +255,27 @@ describe("provenance tags skip Update-requires-Replacement resource types", () =
     );
   });
 });
+
+describe("CI deploy paths set CITADEL_GIT_SHA (E23-e)", () => {
+  const fs = require("fs") as typeof import("fs");
+  const path = require("path") as typeof import("path");
+
+  test("buildspec-deploy.yml exports CITADEL_GIT_SHA from CODEBUILD_RESOLVED_SOURCE_VERSION", () => {
+    const content = fs.readFileSync(
+      path.resolve(__dirname, "../../buildspec-deploy.yml"),
+      "utf8",
+    );
+    expect(content).toMatch(/CITADEL_GIT_SHA/);
+    expect(content).toMatch(/CODEBUILD_RESOLVED_SOURCE_VERSION/);
+  });
+
+  test(".github/workflows/deploy.yml exports CITADEL_GIT_SHA from github.sha", () => {
+    const content = fs.readFileSync(
+      path.resolve(__dirname, "../../.github/workflows/deploy.yml"),
+      "utf8",
+    );
+    expect(content).toMatch(/CITADEL_GIT_SHA/);
+    // github.sha or needs.build.outputs.git_sha
+    expect(content).toMatch(/github\.sha|GITHUB_SHA|git_sha/);
+  });
+});
