@@ -264,3 +264,27 @@ features used in the project). No 0.5.x release of `@tailwindcss/typography` shi
 **Recommended follow-ups:**
 1. Check for aws-cdk-lib, eslint, jest, and test-exclude releases with `minimatch >=11.0.1`.
 2. When available, bump and remove this allowlist entry from `.audit-ci.json` and `frontend/.audit-ci.json`.
+## GHSA-fc5q-39xc-vjpf — picomatch (HIGH ReDoS via single-branch repeated extglobs)
+
+**Added: 2026-11-17** | **revisitBy: 2027-02-17**
+
+**Affected instances:**
+- Root lockfile: `picomatch@4.0.7` (transitive via jest@30.5.2 → jest-haste-map, @parcel/watcher, tinyglobby; also lint-staged@17.6.0) and `picomatch@2.3.2` (transitive via jest@30.5.2 → jest-haste-map → anymatch@3.1.3)
+- Frontend lockfile: same chains (`picomatch@4.0.7` ×7, `picomatch@2.3.2` ×1)
+
+**Advisory:** `picomatch <= 4.0.7` — ReDoS through single-branch repeated extglobs. No patched version published upstream (4.0.7 is `latest` as of 2026-11-17).
+
+**Why remediation is blocked:**
+- `picomatch@4.0.7` is the latest release in the 4.x line. The advisory covers all versions `<= 4.0.7` with no `first_patched_version` in the GitHub advisory record.
+- `picomatch@2.3.2` is the latest release in the 2.x line, also within the advisory range.
+- No `overrides` can resolve this — there is no patched version to pin to in either major line.
+
+**Exposure & Risk Acceptance:**
+- All picomatch instances are **dev-only** transitive dependencies via jest, @typescript-eslint, anymatch, and lint-staged. No production bundle contains picomatch.
+- The ReDoS attack vector requires attacker-controlled glob patterns. In this project, all glob patterns are developer-authored configuration (jest `testMatch`, lint-staged globs, tsconfig `include`/`exclude`), never user input.
+- Acceptance: risk is minimal in this context; no remediation path exists until a patched picomatch release appears.
+
+**Recommended follow-ups:**
+1. Check for a picomatch release beyond 4.0.7 that patches the advisory.
+2. When available, bump (or add `overrides`) and remove this allowlist entry from `.audit-ci.json` and `frontend/.audit-ci.json`.
+3. Dependabot will propose the upgrade when a patched version is published.
