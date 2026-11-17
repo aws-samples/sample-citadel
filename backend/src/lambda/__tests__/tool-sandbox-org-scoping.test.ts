@@ -26,17 +26,19 @@ import {
 jest.mock("../../utils/auth-event", () => ({
   extractOrgFromEvent: jest.fn(),
   isAdminFromEvent: jest.fn(),
+  requireCallerOrg: jest.fn(),
   deriveRoles: jest.fn(() => []),
 }));
 jest.mock("../../utils/auth", () => ({
   hasPermission: jest.fn(),
 }));
 
-import { extractOrgFromEvent, isAdminFromEvent } from "../../utils/auth-event";
+import { extractOrgFromEvent, isAdminFromEvent, requireCallerOrg } from "../../utils/auth-event";
 import { hasPermission } from "../../utils/auth";
 
-const mockExtractOrgFromEvent = extractOrgFromEvent as jest.Mock;
+const _mockExtractOrgFromEvent = extractOrgFromEvent as jest.Mock;
 const mockIsAdminFromEvent = isAdminFromEvent as jest.Mock;
+const mockRequireCallerOrg = requireCallerOrg as jest.Mock;
 const mockHasPermission = hasPermission as jest.Mock;
 
 function makeAuthContext(overrides: Partial<AuthContext> = {}): AuthContext {
@@ -216,8 +218,9 @@ describe("executeTool — H19 fail-closed org guard", () => {
 });
 
 describe("handler — server-derives org from identity, never trusts the argument (finding 615aa5bb)", () => {
-  it("rejects when the client-supplied orgId argument does not match the caller-derived org", async () => {
-    mockExtractOrgFromEvent.mockResolvedValue("org-real");
+  it("ignores any client-supplied orgId in event.arguments and uses requireCallerOrg", async () => {
+    // Non-admin: requireCallerOrg derives the org, arguments.orgId is irrelevant
+    mockRequireCallerOrg.mockResolvedValue("org-real");
     mockIsAdminFromEvent.mockReturnValue(false);
     mockHasPermission.mockReturnValue(true);
 
@@ -226,18 +229,24 @@ describe("handler — server-derives org from identity, never trusts the argumen
       arguments: {
         toolId: "tool-1",
         inputs: JSON.stringify({ a: 1 }),
-        orgId: "org-spoofed", // attacker-supplied, does not match identity
+        orgId: "org-spoofed", // present but ignored — handler no longer reads it
       },
     };
 
-    const result = await handler(event);
+    await handler(event as Parameters<typeof handler>[0]);
 
-    expect(result.success).toBe(false);
-    expect(result.error).toMatch(/UnauthorizedError|org/i);
+    // requireCallerOrg was called (not extractOrgFromEvent for the gate)
+    expect(mockRequireCallerOrg).toHaveBeenCalled();
   });
 
   it("rejects when no server-derivable org exists for the caller", async () => {
-    mockExtractOrgFromEvent.mockResolvedValue(null);
+    // requireCallerOrg throws OrgUnresolvedError when org is absent
+    const { OrgUnresolvedError } = jest.requireActual("../../utils/auth-event") as {
+      OrgUnresolvedError: new (msg?: string) => Error;
+    };
+    mockRequireCallerOrg.mockRejectedValue(
+      new (OrgUnresolvedError || Error)("Organisation could not be determined for this account"),
+    );
     mockIsAdminFromEvent.mockReturnValue(false);
     mockHasPermission.mockReturnValue(true);
 
@@ -246,13 +255,9 @@ describe("handler — server-derives org from identity, never trusts the argumen
       arguments: {
         toolId: "tool-1",
         inputs: JSON.stringify({ a: 1 }),
-        orgId: "org-x",
       },
     };
 
-    const result = await handler(event);
-
-    expect(result.success).toBe(false);
-    expect(result.error).toMatch(/UnauthorizedError|org/i);
+    await expect(handler(event as Parameters<typeof handler>[0])).rejects.toThrow(/Organisation could not be determined/i);
   });
 });

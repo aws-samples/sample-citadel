@@ -15,6 +15,7 @@ import * as vm from "vm";
 import {
   extractOrgFromEvent,
   isAdminFromEvent,
+  requireCallerOrg,
   deriveRoles,
 } from "../utils/auth-event";
 import { hasPermission } from "../utils/auth";
@@ -507,23 +508,21 @@ export async function handler(event: {
   arguments: {
     toolId: string;
     inputs: string | Record<string, unknown>;
-    /** Client-supplied org — advisory only. The caller's ACTUAL org is
-     * always re-derived server-side via extractOrgFromEvent (finding
-     * 615aa5bb); a value here that disagrees with the derived org is
-     * rejected as a cross-org attempt rather than silently ignored, so a
-     * caller gets clear feedback instead of a confusing implicit
-     * substitution (mirrors decideToolApproval's cross-org-input guard in
-     * tool-approval-resolver.ts). */
-    orgId: string;
   };
 }): Promise<ToolTestResult> {
-  const { toolId, inputs: inputsJson, orgId: suppliedOrgId } = event.arguments;
+  const { toolId, inputs: inputsJson } = event.arguments;
   const authContext = authContextFromEvent(event.identity);
 
   const admin = isAdminFromEvent(event);
-  const callerOrgId = await extractOrgFromEvent(event);
 
-  if (!admin) {
+  // Server-authoritative org derivation (board 663c0271): the orgId
+  // argument was removed from the schema. Non-admin callers MUST have a
+  // resolvable org (requireCallerOrg throws OrgUnresolvedError on
+  // failure). Admins fall back to extractOrgFromEvent which returns null
+  // when absent — the downstream executeTool org-match gate handles it.
+  let effectiveOrgId: string;
+  if (admin) {
+    const callerOrgId = await extractOrgFromEvent(event);
     if (!callerOrgId) {
       return {
         success: false,
@@ -531,20 +530,10 @@ export async function handler(event: {
         executionTimeMs: 0,
       };
     }
-    if (suppliedOrgId && suppliedOrgId !== callerOrgId) {
-      return {
-        success: false,
-        error:
-          "UnauthorizedError: orgId argument does not match caller's organization",
-        executionTimeMs: 0,
-      };
-    }
+    effectiveOrgId = callerOrgId;
+  } else {
+    effectiveOrgId = await requireCallerOrg(event, "ToolSandbox");
   }
-
-  // Server-derived org always wins; admins without a resolvable org fall
-  // back to the (still permission-gated, still config-orgId-checked)
-  // supplied value so admin tooling isn't blocked.
-  const effectiveOrgId = callerOrgId || suppliedOrgId;
 
   // Validate inputs — AWSJSON! may arrive as an already-parsed object
   // (AppSync resolves the scalar before invoking the Lambda) or as a raw

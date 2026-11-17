@@ -50,8 +50,8 @@ export function addToHistory<T>(
 // --- GraphQL ---
 
 const testToolMutation = `
-  mutation TestTool($toolId: String!, $inputs: AWSJSON!, $orgId: String!) {
-    testTool(toolId: $toolId, inputs: $inputs, orgId: $orgId) {
+  mutation TestTool($toolId: String!, $inputs: AWSJSON!) {
+    testTool(toolId: $toolId, inputs: $inputs) {
       success
       output
       error
@@ -261,7 +261,6 @@ export function ToolTestingSandbox({ tool, orgId, onClose }: ToolTestingSandboxP
         {
           toolId: tool.toolId,
           inputs: JSON.stringify(inputs),
-          orgId,
         }
       );
 
@@ -280,7 +279,7 @@ export function ToolTestingSandbox({ tool, orgId, onClose }: ToolTestingSandboxP
     } finally {
       setIsRunning(false);
     }
-  }, [buildInputs, tool.toolId, orgId]);
+  }, [buildInputs, tool.toolId]);
 
   return (
     <Card className="border-input bg-accent">

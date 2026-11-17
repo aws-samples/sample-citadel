@@ -26,7 +26,7 @@ import { BackendStack } from "../lib/backend-stack";
  *
  * The other five fields (updateAgentStatus — see
  * projects-stack.test.ts — plus the four that stay allowlisted:
- * updateProjectProgress, testTool, getDashboardMetrics, getRecentActivity)
+ * updateProjectProgress, testTool)
  * are covered elsewhere; see schema-resolver-parity-guard.test.ts for the
  * justification comments on the four deliberately-unwired fields.
  */

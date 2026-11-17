@@ -16,6 +16,7 @@ const adminIdentity = {
   username: "admin",
   "cognito:groups": ["admin"] as string[],
   "custom:role": "admin",
+  "custom:organization": "org-1",
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- intentional: we test runtime rejection of invalid types
@@ -25,7 +26,6 @@ function makeEvent(inputs: unknown) {
     arguments: {
       toolId: "tool-abc123",
       inputs: inputs as string | Record<string, unknown>,
-      orgId: "org-1",
     },
   };
 }

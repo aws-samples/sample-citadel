@@ -2,13 +2,12 @@
  * Dashboard Chart Row 4: System Health, Recent Activity, Quick Actions
  * Lazy-loaded — rendered when scrolled into view.
  */
-import { useState, useEffect } from 'react';
+import React from 'react';
 import {
   Activity, Cpu, Workflow, Plug, Zap, Clock, CheckCircle,
   Plus, Users, BarChart3,
 } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card';
-import { appApiService } from '../../services/appApiService';
 import { Skeleton } from '../../components/ui/skeleton';
 import { Button } from '../../components/ui/button';
 
@@ -46,15 +45,12 @@ function badgeLabel(score: number) {
 }
 
 export default function ChartRow4({ counts, dataStores: _dataStores }: ChartRow4Props) {
-  const [activity, setActivity] = useState<any[]>([]);
-  const [activityLoading, setActivityLoading] = useState(true);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dead endpoint stub
+  const activity: any[] = [];
+  const activityLoading = false;
 
-  useEffect(() => {
-    appApiService.getRecentActivity('default', 5)
-      .then(r => setActivity(r?.items || []))
-      .catch(() => setActivity([]))
-      .finally(() => setActivityLoading(false));
-  }, []);
+  // getRecentActivity was removed (no resolver was ever wired).
+  // Activity feed is empty until a real endpoint is built.
 
   const agentsHealth = healthPct(counts.deployedAgents, counts.deployedAgents + (counts.totalWorkflows > 0 ? 1 : 0) || 1);
   const workflowsHealth = counts.totalWorkflows > 0 ? 100 : 0;

@@ -358,35 +358,6 @@ const GET_APP_METRICS = `
   }
 `;
 
-const GET_DASHBOARD_METRICS = `
-  query GetDashboardMetrics($orgId: String!, $startTime: AWSDateTime!, $endTime: AWSDateTime!) {
-    getDashboardMetrics(orgId: $orgId, startTime: $startTime, endTime: $endTime) {
-      dailyActivity {
-        date
-        successCount
-        errorCount
-      }
-      totalRequests
-      successRate
-      avgLatency
-    }
-  }
-`;
-
-const GET_RECENT_ACTIVITY = `
-  query GetRecentActivity($orgId: String!, $limit: Int) {
-    getRecentActivity(orgId: $orgId, limit: $limit) {
-      items {
-        entityType
-        entityId
-        title
-        description
-        timestamp
-      }
-    }
-  }
-`;
-
 // --- Auth Config Mutation ---
 
 const SET_APP_AUTH_CONFIG = `
@@ -606,22 +577,6 @@ class AppApiService {
       { appId, startTime, endTime }
     );
     return response.getAppMetrics;
-  }
-
-  async getDashboardMetrics(orgId: string, startTime: string, endTime: string) {
-    const response = await serverService.query<{ getDashboardMetrics: any }>(
-      GET_DASHBOARD_METRICS,
-      { orgId, startTime, endTime }
-    );
-    return response.getDashboardMetrics;
-  }
-
-  async getRecentActivity(orgId: string, limit?: number) {
-    const response = await serverService.query<{ getRecentActivity: any }>(
-      GET_RECENT_ACTIVITY,
-      { orgId, limit: limit || 10 }
-    );
-    return response.getRecentActivity;
   }
 
   // --- Auth Config ---
