@@ -97,6 +97,16 @@ jobs:
           # present.
           SPLIT_GATES_ENV: test
 
+      - name: Verify tests leave the tree clean
+        run: |
+          UNTRACKED=$(git status --porcelain --untracked-files=all -- ':!backend/cdk.out' ':!backend/coverage')
+          if [ -n "$UNTRACKED" ]; then
+            echo "::error::Tests left new or modified files in the tree:"
+            echo "$UNTRACKED"
+            exit 1
+          fi
+        working-directory: ${{ github.workspace }}
+
   # ── Backend build + synth (all stacks) ──
   backend-build:
     name: Backend Build + Synth

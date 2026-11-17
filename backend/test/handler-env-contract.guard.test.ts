@@ -34,12 +34,10 @@ import { scaffoldBackendAssetDirs } from "./helpers/scaffold-stub-assets";
 
 scaffoldBackendAssetDirs(["dist/lambda", "src/schema"]);
 
-// BackendStack references additional asset paths that resolve outside
-// backend/ (e.g. path.join(__dirname, "../../src/lambda/seed-organizations")
-// in backend-stack.ts resolves to <repo-root>/src/lambda/seed-organizations).
+// BackendStack references additional asset paths resolved via
+// resolveBackendSrcDir() in backend-stack.ts.
 // Create stubs so synthBackendStack() doesn't throw CannotFindAsset in CI.
 const EXTRA_ASSET_DIRS = [
-  path.resolve(__dirname, "../../src/lambda/seed-organizations"),
   path.resolve(__dirname, "../src/lambda/seed-admin-user"),
   path.resolve(__dirname, "../src/lambda/seed-organizations"),
 ];

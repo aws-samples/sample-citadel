@@ -35,7 +35,6 @@ scaffoldArbiterStubs();
 
 // BackendStack also needs these seed-lambda asset dirs to synth.
 for (const dir of [
-  path.resolve(__dirname, "../../src/lambda/seed-organizations"),
   path.resolve(__dirname, "../src/lambda/seed-admin-user"),
   path.resolve(__dirname, "../src/lambda/seed-organizations"),
 ]) {

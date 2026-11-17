@@ -16,7 +16,6 @@ scaffoldBackendAssetDirs(["dist/lambda", "src/schema"]);
 // BackendStack references asset paths outside backend/ — stub them so synth
 // succeeds in CI without a full build.
 const EXTRA_ASSET_DIRS = [
-  path.resolve(__dirname, "../../src/lambda/seed-organizations"),
   path.resolve(__dirname, "../src/lambda/seed-admin-user"),
   path.resolve(__dirname, "../src/lambda/seed-organizations"),
 ];
