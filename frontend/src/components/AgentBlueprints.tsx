@@ -102,22 +102,76 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
    * best-effort fallback layer beneath server persistence — the server workflow
    * is the source of truth once a workflowId exists. Skipped entirely when the
    * canvas is opening an existing server workflow.
+   *
+   * Lenient restore: if any saved nodes reference agents that no longer exist
+   * in the catalog, the nodes are still rendered but marked as placeholders
+   * (data.isPlaceholder = true) and a single informational toast names the
+   * missing agents (deduped). This avoids surfacing a confusing error for a
+   * stale draft the user did not explicitly open.
    */
   useEffect(() => {
     if (initialWorkflowId) return;
-    try {
-      const saved = localStorage.getItem(AUTOSAVE_KEY);
-      if (saved) {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const saved = localStorage.getItem(AUTOSAVE_KEY);
+        if (!saved) return;
+
         const { nodes: savedNodes, edges: savedEdges } = JSON.parse(saved);
-        if (Array.isArray(savedNodes) && savedNodes.length > 0 && Array.isArray(savedEdges)) {
+        if (!Array.isArray(savedNodes) || savedNodes.length === 0 || !Array.isArray(savedEdges)) return;
+
+        // Fetch current agent catalog to detect stale agent references.
+        let catalogIds: Set<string>;
+        try {
+          const configs = await agentConfigService.listAgentConfigs();
+          catalogIds = new Set(configs.map((c: { agentId: string }) => c.agentId));
+        } catch {
+          // Catalog unavailable — restore nodes as-is (no placeholder check).
+          if (!cancelled) {
+            setNodes(savedNodes);
+            setEdges(savedEdges);
+          }
+          return;
+        }
+
+        if (cancelled) return;
+
+        // Identify missing agents (deduped).
+        const missingSet = new Set<string>();
+        for (const node of savedNodes) {
+          const agentId = node?.data?.agentId;
+          if (agentId && !catalogIds.has(agentId)) {
+            missingSet.add(agentId);
+          }
+        }
+
+        if (missingSet.size > 0) {
+          // Mark stale nodes as placeholders so the canvas renders them with
+          // a visual cue rather than treating them as fully healthy.
+          const patchedNodes = savedNodes.map((node: WorkflowNode) => {
+            if (node?.data?.agentId && missingSet.has(node.data.agentId)) {
+              return { ...node, data: { ...node.data, isPlaceholder: true } };
+            }
+            return node;
+          });
+
+          setNodes(patchedNodes);
+          setEdges(savedEdges);
+
+          const names = [...missingSet].join(', ');
+          toast.info(`Draft restored; ${missingSet.size} agent${missingSet.size > 1 ? 's' : ''} no longer exist: ${names}`);
+        } else {
           setNodes(savedNodes);
           setEdges(savedEdges);
         }
+      } catch (error) {
+        console.error('Failed to restore local workflow cache:', error);
+        localStorage.removeItem(AUTOSAVE_KEY);
       }
-    } catch (error) {
-      console.error('Failed to restore local workflow cache:', error);
-      localStorage.removeItem(AUTOSAVE_KEY);
-    }
+    })();
+
+    return () => { cancelled = true; };
   }, [initialWorkflowId]);
 
   /**
@@ -142,7 +196,9 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
 
         // Build a lenient agent-config map: agents referenced by the definition
         // but absent from the catalog (e.g. app-bound ids created by blueprint
-        // import) get a placeholder so the workflow still opens.
+        // import) get a placeholder so the workflow still opens. The lenient
+        // flag on deserializeWorkflow handles this automatically and reports
+        // which agents were substituted.
         let configs: AgentConfig[] = [];
         try {
           configs = await agentConfigService.listAgentConfigs();
@@ -150,20 +206,12 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
           console.error('Failed to list agent configs; using placeholders:', configError);
         }
         const configMap = new Map<string, AgentConfig>(configs.map((c) => [c.agentId, c]));
-        for (const nodeDef of definition?.nodes ?? []) {
-          if (nodeDef?.agentId && !configMap.has(nodeDef.agentId)) {
-            configMap.set(nodeDef.agentId, {
-              agentId: nodeDef.agentId,
-              name: nodeDef.agentId,
-              config: { name: nodeDef.agentId },
-              state: 'active',
-            });
-          }
-        }
 
-        const { nodes: loadedNodes, edges: loadedEdges } = await deserializeWorkflow(
+        const { nodes: loadedNodes, edges: loadedEdges, missingAgents } = await deserializeWorkflow(
           definition,
-          configMap
+          configMap,
+          undefined,
+          { lenient: true }
         );
         if (cancelled) return;
 
@@ -176,6 +224,13 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
         setNodes(loadedNodes);
         setEdges(loadedEdges);
         setLoadError(null);
+
+        if (missingAgents && missingAgents.length > 0) {
+          const names = missingAgents.join(', ');
+          toast.info(
+            `Draft restored; ${missingAgents.length} agent${missingAgents.length > 1 ? 's' : ''} no longer exist: ${names}`
+          );
+        }
       } catch (error: any) {
         if (cancelled) return;
         console.error('Failed to load workflow', initialWorkflowId, error);

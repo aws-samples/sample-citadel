@@ -184,14 +184,19 @@ export function normalizeWorkflowDefinition(
  * @param workflowJson - JSON string or WorkflowDefinition object
  * @param agentConfigs - Optional map of agent configs (if not provided, will fetch from service)
  * @param meta - Optional catalog identity threaded to normalizeWorkflowDefinition
- * @returns Object containing nodes and edges arrays for ReactFlow
- * @throws WorkflowError if JSON is invalid or references missing agents
+ * @param options - Optional settings; `lenient` skips the MISSING_AGENTS throw
+ *   and instead creates placeholder nodes (data.isPlaceholder = true) for any
+ *   agents absent from the catalog. The returned `missingAgents` array lists
+ *   the deduped agent-ids that were substituted.
+ * @returns Object containing nodes, edges, and (when lenient) missingAgents
+ * @throws WorkflowError if JSON is invalid or (non-lenient) references missing agents
  */
 export async function deserializeWorkflow(
   workflowJson: string | WorkflowDefinition,
   agentConfigs?: Map<string, AgentConfig>,
-  meta?: { id?: string; name?: string }
-): Promise<{ nodes: WorkflowNode[]; edges: WorkflowEdge[] }> {
+  meta?: { id?: string; name?: string },
+  options?: { lenient?: boolean }
+): Promise<{ nodes: WorkflowNode[]; edges: WorkflowEdge[]; missingAgents?: string[] }> {
   try {
     // Parse JSON if string
     let workflow: WorkflowDefinition;
@@ -240,17 +245,36 @@ export async function deserializeWorkflow(
     }
 
     if (missingAgents.length > 0) {
-      throw new WorkflowError(
-        'validation',
-        'MISSING_AGENTS',
-        `Workflow references agents that do not exist: ${missingAgents.join(', ')}`,
-        { missingAgents }
-      );
+      if (options?.lenient) {
+        // Lenient mode: synthesize placeholder configs for missing agents so
+        // the workflow can still render, then report which agents were absent.
+        for (const agentId of missingAgents) {
+          if (!agentConfigMap.has(agentId)) {
+            agentConfigMap.set(agentId, {
+              agentId,
+              name: agentId,
+              config: { name: agentId },
+              state: 'active',
+            });
+          }
+        }
+      } else {
+        throw new WorkflowError(
+          'validation',
+          'MISSING_AGENTS',
+          `Workflow references agents that do not exist: ${missingAgents.join(', ')}`,
+          { missingAgents }
+        );
+      }
     }
+
+    // Deduplicated set of missing agent ids for the caller.
+    const dedupedMissing = [...new Set(missingAgents)];
 
     // Convert to ReactFlow nodes
     const nodes: WorkflowNode[] = workflow.nodes.map((nodeDef): WorkflowNode => {
       const agentConfig = agentConfigMap!.get(nodeDef.agentId)!;
+      const isPlaceholder = dedupedMissing.includes(nodeDef.agentId);
       
       return {
         id: nodeDef.id,
@@ -268,6 +292,7 @@ export async function deserializeWorkflow(
           configuration: nodeDef.configuration,
           inputCount: 1,
           outputCount: 1,
+          ...(isPlaceholder ? { isPlaceholder: true } : {}),
         },
       };
     });
@@ -293,7 +318,7 @@ export async function deserializeWorkflow(
       return edge;
     });
 
-    return { nodes, edges };
+    return { nodes, edges, ...(dedupedMissing.length > 0 ? { missingAgents: dedupedMissing } : {}) };
   } catch (error) {
     if (error instanceof WorkflowError) {
       throw error;
