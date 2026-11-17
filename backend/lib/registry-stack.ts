@@ -366,25 +366,50 @@ export class RegistryStack extends cdk.Stack {
         ],
       }),
     );
-    // Invoke grants for imported-agent dry-runs. Targets are operator-
-    // supplied per import and unknowable at synth time, so the resource
-    // segment is wildcard WITHIN this account (function:*, runtime/*,
-    // agent-alias/*, execute-api:*). Accepted risk: tracked for tag-based
-    // conditions once imports tag targets (CIT-042 follow-up).
+    // Invoke grants for imported-agent dry-runs (CIT-176 scoping).
+    //
+    // Targets are operator-supplied per import and unknowable at synth
+    // time, so the resource segment is wildcard WITHIN this account
+    // (function:*, execute-api:*, runtime/*, agent-alias/*). Split into
+    // two statements so each pair carries its own condition set:
+    //
+    //   (1) lambda:InvokeFunction + execute-api:Invoke — pinned to this
+    //       account via aws:ResourceAccount as defense-in-depth (a
+    //       confused-deputy cannot redirect invoke traffic out-of-account
+    //       even if the ARN pattern were ever broadened). Tag-based
+    //       conditions are not feasible because operator-owned functions
+    //       do not carry Citadel-managed tags; this is the tightest
+    //       feasible scope for external agent invocations.
+    //
+    //   (2) bedrock-agentcore:InvokeAgentRuntime + bedrock:InvokeAgent —
+    //       already account-scoped by the ARN pattern; no additional
+    //       condition needed (Bedrock resources are Citadel-managed).
+    agentImportResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          "lambda:InvokeFunction",
+          "execute-api:Invoke",
+        ],
+        resources: [
+          `arn:aws:lambda:*:${this.account}:function:*`,
+          `arn:aws:execute-api:*:${this.account}:*`,
+        ],
+        conditions: {
+          StringEquals: { "aws:ResourceAccount": this.account },
+        },
+      }),
+    );
     agentImportResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
           "bedrock-agentcore:InvokeAgentRuntime",
-          "lambda:InvokeFunction",
           "bedrock:InvokeAgent",
-          "execute-api:Invoke",
         ],
         resources: [
           `arn:aws:bedrock-agentcore:*:${this.account}:runtime/*`,
-          `arn:aws:lambda:*:${this.account}:function:*`,
           `arn:aws:bedrock:*:${this.account}:agent-alias/*`,
-          `arn:aws:execute-api:*:${this.account}:*`,
         ],
       }),
     );
