@@ -20,6 +20,7 @@ import { agentConfigService, type AgentConfig } from '../services/agentConfigSer
 import { useWorkflowPersistence } from '../hooks/useWorkflowPersistence';
 import { useExecutionSubscription } from '../hooks/useExecutionSubscription';
 import { useOrganization } from '../contexts/OrganizationContext';
+import { mapExecutionToNodeStatus } from '../services/mapExecutionToNodeStatus';
 
 const AUTOSAVE_KEY = 'workflow-autosave';
 const AUTOSAVE_DELAY = 2000; // 2 seconds debounce before first server create
@@ -74,6 +75,40 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
   // Hydrating an existing workflow sets nodes/edges without user input; skip
   // the autosave those state changes would otherwise schedule.
   const skipNextSaveRef = useRef(false);
+
+  // Merge per-node execution status into node data so AgentNode can render
+  // badges. Runs whenever nodeResults changes. Clears when executionId resets.
+  const prevExecIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    // When a new execution starts, clear old badges
+    if (executionId !== prevExecIdRef.current) {
+      prevExecIdRef.current = executionId;
+      if (!executionId) {
+        // No active execution — clear all execution statuses
+        setNodes((nds) =>
+          nds.map((n) => (n.data.executionStatus ? { ...n, data: { ...n.data, executionStatus: undefined } } : n))
+        );
+        return;
+      }
+    }
+
+    if (!executionId) return;
+    const statusMap = mapExecutionToNodeStatus(nodeResults as Record<string, import('./ExecutionOverlay').NodeResultEntry>, nodes);
+    const needsUpdate = nodes.some((n) => n.data.executionStatus !== statusMap[n.id]);
+    if (!needsUpdate) return;
+
+    skipNextSaveRef.current = true;
+    setNodes((nds) =>
+      nds.map((n) => {
+        const newStatus = statusMap[n.id];
+        if (n.data.executionStatus === newStatus) return n;
+        return { ...n, data: { ...n.data, executionStatus: newStatus } };
+      })
+    );
+  }, [nodeResults, executionId, nodes, setNodes]);
+
+  // Build nodeLabels map for the ExecutionOverlay summary
+  const nodeLabels = Object.fromEntries(nodes.map((n) => [n.id, n.data.label]));
 
   // Keep a synchronous mirror of workflowId so the debounced create effect never
   // races into a second createWorkflow call.
@@ -627,6 +662,7 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
             onPause={handlePause}
             onApprove={handleApprove}
             onDeny={handleDeny}
+            nodeLabels={nodeLabels}
           />
         </div>
 

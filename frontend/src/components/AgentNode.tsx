@@ -9,7 +9,7 @@
 
 import { memo } from 'react';
 import { Handle, Position, NodeProps, useReactFlow } from 'reactflow';
-import { Trash2, Settings } from 'lucide-react';
+import { Trash2, Settings, CheckCircle2, XCircle, MinusCircle, Loader2 } from 'lucide-react';
 import type { AgentNodeData } from '../types';
 import { ResourceBadge } from './ResourceBadge';
 import { Card } from './ui/card';
@@ -26,7 +26,7 @@ import { Button } from './ui/button';
  * - Validation error indicators and tooltips
  */
 export const AgentNode = memo(({ id, data, selected }: NodeProps<AgentNodeData>) => {
-  const { label, icon, agentConfig, validationErrors, isPlaceholder } = data;
+  const { label, icon, agentConfig, validationErrors, isPlaceholder, executionStatus } = data;
   const { setNodes, setEdges } = useReactFlow();
   const hasErrors = validationErrors && validationErrors.length > 0;
 
@@ -103,9 +103,17 @@ export const AgentNode = memo(({ id, data, selected }: NodeProps<AgentNodeData>)
           ? 'border-destructive shadow-lg shadow-red-500/30 has-error'
           : isPlaceholder
             ? 'border-amber-500/60 shadow-md shadow-amber-500/20'
-            : selected 
-              ? 'border-primary shadow-lg shadow-blue-500/40' 
-              : 'border-border hover:border-input shadow-md shadow-black/20 hover:shadow-lg hover:shadow-black/30'
+            : executionStatus === 'completed'
+              ? 'border-chart-2/60 shadow-md shadow-green-500/20'
+              : executionStatus === 'failed'
+                ? 'border-destructive/60 shadow-md shadow-red-500/20'
+                : executionStatus === 'running'
+                  ? 'border-primary/60 shadow-md shadow-blue-500/20'
+                  : executionStatus === 'skipped'
+                    ? 'border-muted-foreground/40 shadow-md'
+                    : selected 
+                      ? 'border-primary shadow-lg shadow-blue-500/40' 
+                      : 'border-border hover:border-input shadow-md shadow-black/20 hover:shadow-lg hover:shadow-black/30'
         }
       `}
       title={hasErrors ? validationErrors?.map(e => e.message).join('\n') : undefined}
@@ -143,6 +151,44 @@ export const AgentNode = memo(({ id, data, selected }: NodeProps<AgentNodeData>)
           data-testid={`placeholder-badge-${id}`}
         >
           ?
+        </div>
+      )}
+
+      {/* Execution Status Badge — top-right corner during/after a run */}
+      {executionStatus === 'running' && !hasErrors && !isPlaceholder && (
+        <div
+          className="absolute -top-2 -right-2 size-6 bg-primary rounded-full flex items-center justify-center text-primary-foreground shadow-lg z-10"
+          aria-label="Running"
+          data-testid={`exec-badge-${id}`}
+        >
+          <Loader2 size={14} aria-hidden="true" className="motion-safe:animate-spin motion-reduce:animate-none" />
+        </div>
+      )}
+      {executionStatus === 'completed' && !hasErrors && !isPlaceholder && (
+        <div
+          className="absolute -top-2 -right-2 size-6 bg-chart-2 rounded-full flex items-center justify-center text-foreground shadow-lg z-10"
+          aria-label="Completed"
+          data-testid={`exec-badge-${id}`}
+        >
+          <CheckCircle2 size={14} aria-hidden="true" />
+        </div>
+      )}
+      {executionStatus === 'failed' && !hasErrors && !isPlaceholder && (
+        <div
+          className="absolute -top-2 -right-2 size-6 bg-destructive rounded-full flex items-center justify-center text-foreground shadow-lg z-10"
+          aria-label="Failed"
+          data-testid={`exec-badge-${id}`}
+        >
+          <XCircle size={14} aria-hidden="true" />
+        </div>
+      )}
+      {executionStatus === 'skipped' && !hasErrors && !isPlaceholder && (
+        <div
+          className="absolute -top-2 -right-2 size-6 bg-muted-foreground/60 rounded-full flex items-center justify-center text-foreground shadow-lg z-10"
+          aria-label="Skipped"
+          data-testid={`exec-badge-${id}`}
+        >
+          <MinusCircle size={14} aria-hidden="true" />
         </div>
       )}
 

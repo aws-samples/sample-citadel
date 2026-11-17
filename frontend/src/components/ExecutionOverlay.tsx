@@ -29,52 +29,47 @@ export interface ExecutionOverlayProps {
   onPause?: (executionId: string) => void;
   onApprove?: (executionId: string) => void;
   onDeny?: (executionId: string) => void;
+  /** Optional map of nodeId → human label, used for failure messages. */
+  nodeLabels?: Record<string, string>;
 }
 
-function NodeStatusIndicator({ nodeId, result }: { nodeId: string; result: NodeResultEntry }) {
-  const { status, error } = result;
+function ExecutionSummary({ nodeResults, nodeLabels }: { nodeResults: Record<string, NodeResultEntry>; nodeLabels: Record<string, string> }) {
+  const entries = Object.entries(nodeResults);
+  const total = entries.length;
+  if (total === 0) return null;
 
-  if (status === 'skipped') {
-    return (
-      <div
-        data-testid={`node-status-${nodeId}`}
-        className="border-dashed border-border border-2 rounded-full size-6 flex items-center justify-center text-xs"
-        title={error ?? undefined}
-      />
-    );
+  let completed = 0;
+  let skipped = 0;
+  let failed = 0;
+  let running = 0;
+  let firstFailedId: string | null = null;
+
+  for (const [nodeId, entry] of entries) {
+    const s = entry.status;
+    if (s === 'completed') completed++;
+    else if (s === 'skipped' || s === 'unreachable') skipped++;
+    else if (s === 'failed') { failed++; if (!firstFailedId) firstFailedId = nodeId; }
+    else if (s === 'running') running++;
   }
 
-  if (status === 'unreachable') {
-    return (
-      <div
-        data-testid={`node-status-${nodeId}`}
-        className="border-dashed border-muted-foreground/50 border-2 rounded-full size-6 flex items-center justify-center text-xs text-muted-foreground/60"
-        title="Skipped because an upstream condition routed around this step"
-      >
-        ∅
-      </div>
-    );
+  let text: string;
+  if (failed > 0 && firstFailedId) {
+    const label = nodeLabels[firstFailedId] ?? firstFailedId;
+    text = `Failed at ${label}`;
+  } else if (running > 0) {
+    text = `Running step ${completed + 1} of ${total}`;
+  } else if (completed === total) {
+    text = 'Completed';
+  } else if (skipped > 0 && completed + skipped === total) {
+    text = `Completed ${completed}/${total}, ${skipped} skipped`;
+  } else {
+    text = 'Pending';
   }
-
-  const statusStyles: Record<string, string> = {
-    pending: 'bg-muted-foreground',
-    running: 'bg-primary',
-    completed: 'bg-chart-2',
-    failed: 'bg-destructive',
-  };
-
-  const baseClass = `${statusStyles[status] ?? 'bg-muted-foreground'} rounded-full size-6 flex items-center justify-center text-xs text-foreground`;
 
   return (
-    <div
-      data-testid={`node-status-${nodeId}`}
-      className={baseClass}
-      title={status === 'failed' && error ? error : undefined}
-    >
-      {status === 'running' && <span className="animate-spin">⟳</span>}
-      {status === 'completed' && '✓'}
-      {status === 'failed' && '✗'}
-    </div>
+    <span data-testid="execution-summary" className="text-sm text-muted-foreground" role="status" aria-live="polite">
+      {text}
+    </span>
   );
 }
 
@@ -89,6 +84,7 @@ export function ExecutionOverlay({
   onPause,
   onApprove,
   onDeny,
+  nodeLabels = {},
 }: ExecutionOverlayProps) {
   const [fadedOut, setFadedOut] = useState(false);
 
@@ -205,13 +201,9 @@ export function ExecutionOverlay({
         )}
       </div>
 
-      {/* Per-node status indicators */}
+      {/* Compact execution summary */}
       {hasNodes && (
-        <div className="flex flex-wrap gap-2">
-          {Object.entries(nodeResults).map(([nodeId, result]) => (
-            <NodeStatusIndicator key={nodeId} nodeId={nodeId} result={result} />
-          ))}
-        </div>
+        <ExecutionSummary nodeResults={nodeResults} nodeLabels={nodeLabels} />
       )}
     </div>
   );
