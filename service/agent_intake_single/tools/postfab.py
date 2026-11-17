@@ -443,6 +443,7 @@ def _consent_refusal(action: str, consent_question: str, actions: list[dict]) ->
         "I need your confirmation before I can do that. "
         "Please use the button above to confirm.",
         consent_question, actions,
+        consent_action=action,
     )
 
 

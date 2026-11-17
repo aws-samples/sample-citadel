@@ -25,7 +25,7 @@ import {
 } from '../services/documentService';
 import { diffLines, type Change } from 'diff';
 import { FabricationStatusPanel } from './FabricationStatusPanel';
-import { consentActionForLabel, recordIntakeConsent } from '../services/intakeConsentService';
+import { consentActionForId, recordIntakeConsent } from '../services/intakeConsentService';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -502,7 +502,7 @@ export function ProjectWorkspace({ project, onBack }: ProjectWorkspaceProps) {
     const matches = Array.from(content.matchAll(thinkingRegex));
     const actionMatches = Array.from(content.matchAll(actionsRegex));
     const thinking = matches.length ? matches.map((m) => m[1].trim()).join('\n\n---\n\n') : null;
-    let actions: { label: string; value: string }[] | null = null;
+    let actions: ({ label: string; value: string } | { consent: string })[] | null = null;
     if (actionMatches.length) {
       try { actions = JSON.parse(actionMatches[actionMatches.length - 1][1]); } catch { /* ignore */ }
     }
@@ -748,30 +748,50 @@ export function ProjectWorkspace({ project, onBack }: ProjectWorkspaceProps) {
                         </div>
                         {!isUser && actions && (
                           <div className="flex flex-wrap gap-2 mt-2">
-                            {actions.map((action, ai) => (
-                              <Button
-                                key={ai}
-                                variant="outline"
-                                size="sm"
-                                className="h-7 text-xs"
-                                disabled={sending || !isLastAssistant}
-                                onClick={async () => {
-                                  setInput('');
-                                  setSending(true);
-                                  try {
-                                    const consentAction = consentActionForLabel(action.label);
-                                    if (consentAction) {
-                                      await recordIntakeConsent(project.id, consentAction);
+                            {actions.map((action, ai) => {
+                              const isConsent = 'consent' in action;
+                              const consentId = isConsent ? (action as { consent: string }).consent : null;
+                              const catalogueEntry = consentId ? consentActionForId(consentId) : null;
+
+                              if (isConsent && !catalogueEntry) {
+                                console.warn(`Unknown consent id: ${consentId}`);
+                                return (
+                                  <Button key={ai} variant="outline" size="sm" className="h-7 text-xs" disabled>
+                                    {consentId}
+                                  </Button>
+                                );
+                              }
+
+                              const buttonLabel = isConsent ? catalogueEntry!.label : (action as { label: string }).label;
+                              const buttonTitle = isConsent ? catalogueEntry!.description : undefined;
+
+                              return (
+                                <Button
+                                  key={ai}
+                                  variant="outline"
+                                  size="sm"
+                                  className="h-7 text-xs"
+                                  disabled={sending || !isLastAssistant}
+                                  title={buttonTitle}
+                                  onClick={async () => {
+                                    setInput('');
+                                    setSending(true);
+                                    try {
+                                      if (isConsent) {
+                                        await recordIntakeConsent(project.id, consentId! as Parameters<typeof recordIntakeConsent>[1]);
+                                        await sendMessageToAgent(project.id, 'agent_intake_single', catalogueEntry!.confirmMessage);
+                                      } else {
+                                        await sendMessageToAgent(project.id, 'agent_intake_single', (action as { value: string }).value);
+                                      }
+                                    } catch {
+                                      setSending(false);
                                     }
-                                    await sendMessageToAgent(project.id, 'agent_intake_single', action.value);
-                                  } catch {
-                                    setSending(false);
-                                  }
-                                }}
-                              >
-                                {action.label}
-                              </Button>
-                            ))}
+                                  }}
+                                >
+                                  {buttonLabel}
+                                </Button>
+                              );
+                            })}
                           </div>
                         )}
                         {!isUser && thinking && (

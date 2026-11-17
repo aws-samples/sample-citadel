@@ -1,6 +1,11 @@
 /**
  * Intake consent gate — writes a short-lived consent record to the backend
  * before the user's message triggers a privileged post-fabrication tool.
+ *
+ * Consent buttons are bound to an explicit catalogue id defined in the
+ * canonical consent_catalogue.json (service/agent_intake_single/tools/).
+ * The frontend renders the catalogue label and records consent for the id;
+ * model-authored label/value is never used for consent determination.
  */
 import serverService from './server';
 
@@ -19,7 +24,7 @@ export interface IntakeConsentResult {
 }
 
 /**
- * The four privileged post-fabrication actions. The action string must match
+ * The privileged post-fabrication actions. The action string must match
  * both the backend enum and the Python tools/consent.py PRIVILEGED_ACTIONS.
  */
 export type IntakeConsentAction =
@@ -31,29 +36,63 @@ export type IntakeConsentAction =
   | 'confirm_fabrication_plan'
   | 'retry_failed_fabrication';
 
-/**
- * Map from action button label substrings to the consent action that must be
- * recorded before the message is sent. Order matters: the first match wins.
- */
-const CONSENT_LABEL_PATTERNS: readonly [RegExp, IntakeConsentAction][] = [
-  [/activate/i, 'activate_agents'],
-  [/create\b.*app|create\s+'[^']*'/i, 'create_agent_app'],
-  [/generate.*blueprint/i, 'generate_process_blueprint'],
-  [/add\b.*to\b|import/i, 'import_blueprint_to_app'],
-  [/plan fabrication/i, 'plan_fabrication'],
-  [/confirm fabrication/i, 'confirm_fabrication_plan'],
-  [/retry failed/i, 'retry_failed_fabrication'],
-];
+export interface ConsentCatalogueEntry {
+  label: string;
+  confirmMessage: string;
+  description: string;
+}
 
 /**
- * Determines whether an action button click requires a consent record.
- * Returns the action name if consent is needed, null otherwise.
+ * Server-defined consent action catalogue. This is the frontend copy of
+ * service/agent_intake_single/tools/consent_catalogue.json. Parity with
+ * the JSON source is enforced by a test.
  */
-export function consentActionForLabel(label: string): IntakeConsentAction | null {
-  for (const [pattern, action] of CONSENT_LABEL_PATTERNS) {
-    if (pattern.test(label)) return action;
-  }
-  return null;
+export const CONSENT_CATALOGUE: Record<IntakeConsentAction, ConsentCatalogueEntry> = {
+  activate_agents: {
+    label: 'Activate the agents',
+    confirmMessage: 'Yes, activate the agents',
+    description: 'Activate fabricated agents so they are ready to use',
+  },
+  create_agent_app: {
+    label: 'Create the app',
+    confirmMessage: 'Yes, create the app',
+    description: 'Create a new Agent App to bring the agents together',
+  },
+  generate_process_blueprint: {
+    label: 'Generate blueprint',
+    confirmMessage: 'Yes, generate the blueprint',
+    description: 'Generate and publish the process blueprint',
+  },
+  import_blueprint_to_app: {
+    label: 'Add blueprint to app',
+    confirmMessage: 'Yes, add the blueprint to the app',
+    description: 'Import the published blueprint into the app as a workflow',
+  },
+  plan_fabrication: {
+    label: 'Plan fabrication',
+    confirmMessage: 'Yes, plan the fabrication',
+    description: 'Analyse the design and produce a fabrication plan',
+  },
+  confirm_fabrication_plan: {
+    label: 'Confirm fabrication plan',
+    confirmMessage: 'Yes, confirm the fabrication plan',
+    description: 'Save the confirmed plan and queue agents for build',
+  },
+  retry_failed_fabrication: {
+    label: 'Retry failed builds',
+    confirmMessage: 'Yes, retry the failed builds',
+    description: 'Re-queue fabrication for agents whose build failed or stalled',
+  },
+};
+
+/**
+ * Look up a consent action by its explicit id.
+ * Returns the catalogue entry if the id is known, null otherwise.
+ */
+export function consentActionForId(
+  id: string,
+): ConsentCatalogueEntry | null {
+  return (CONSENT_CATALOGUE as Record<string, ConsentCatalogueEntry>)[id] ?? null;
 }
 
 /**

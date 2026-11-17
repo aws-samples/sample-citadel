@@ -19,6 +19,7 @@ Record shape in SESSION_MEMORY_TABLE:
     SK (s_key): "consent#<action>"
     ttl:        <epoch seconds, +10 minutes from grant>
 """
+import json
 import logging
 import os
 import time
@@ -32,41 +33,22 @@ _dynamodb = boto3.resource(
     region_name=os.environ.get("AWS_REGION", "ap-southeast-2"),
 )
 
+_CATALOGUE_PATH = os.path.join(os.path.dirname(__file__), "consent_catalogue.json")
+
+with open(_CATALOGUE_PATH) as _f:
+    _RAW_CATALOGUE: dict[str, dict[str, str]] = json.load(_f)
+
 ACTION_CATALOGUE: dict[str, dict[str, str]] = {
-    "activate_agents": {
-        "label": "Activate the agents",
-        "description": "Activate fabricated agents so they are ready to use",
-    },
-    "create_agent_app": {
-        "label": "Create the app",
-        "description": "Create a new Agent App to bring the agents together",
-    },
-    "generate_process_blueprint": {
-        "label": "Generate blueprint",
-        "description": "Generate and publish the process blueprint",
-    },
-    "import_blueprint_to_app": {
-        "label": "Add blueprint to app",
-        "description": "Import the published blueprint into the app as a workflow",
-    },
-    "plan_fabrication": {
-        "label": "Plan fabrication",
-        "description": "Analyse the design and produce a fabrication plan",
-    },
-    "confirm_fabrication_plan": {
-        "label": "Confirm fabrication plan",
-        "description": "Save the confirmed plan and queue agents for build",
-    },
-    "retry_failed_fabrication": {
-        "label": "Retry failed builds",
-        "description": "Re-queue fabrication for agents whose build failed or stalled",
-    },
+    action_id: {"label": entry["label"], "description": entry["description"]}
+    for action_id, entry in _RAW_CATALOGUE.items()
 }
 """Server-defined catalogue of privileged action ids.
 
-Every privileged tool passes its own constant id from this catalogue to
-``require_consent``. Unknown ids are rejected. Button labels shown to the
-user come from the ``label`` field — the model cannot alter them.
+Loaded from ``consent_catalogue.json`` — the canonical source of truth shared
+with the backend and frontend. Every privileged tool passes its own constant id
+from this catalogue to ``require_consent``. Unknown ids are rejected. Button
+labels shown to the user come from the ``label`` field — the model cannot alter
+them.
 """
 
 PRIVILEGED_ACTIONS = frozenset(ACTION_CATALOGUE.keys())

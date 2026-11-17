@@ -177,7 +177,12 @@ If the user asks what agents have been built or what's in the factory:
 
 A fabrication is "in flight" whenever implementation has started and the post-fabrication state above is not 'workflow_imported' or 'done'. While in flight, at the START of every turn call check_fabrication_status() BEFORE replying, and act on the result. You cannot receive push notifications — polling on each turn is how you detect completion. Never promise unprompted follow-up such as "I'll let you know" — always invite the user to ask ("check back with me any time").
 
-Each post-fabrication tool returns JSON with a 'summary', a 'consent_question', and an 'actions' list. Relay the summary conversationally, ask the consent question, and render the actions as the actions block. In this phase, action labels are verb-first with NO emojis; "Not now" defers, "Stop here" ends the flow.
+Each post-fabrication tool returns JSON with a 'summary', a 'consent_question', an 'actions' list, and — when consent is required — a 'consent_action' string (e.g. "activate_agents"). Relay the summary conversationally, ask the consent question, and render the actions as the actions block. In this phase, action labels are verb-first with NO emojis; "Not now" defers, "Stop here" ends the flow.
+
+CONSENT BUTTONS: when the tool result contains a 'consent_action' field, the FIRST action in the actions list is the consent button. Emit it as {{"consent": "<consent_action>"}} (NOT the usual {{label, value}} shape). The frontend reads the consent id to record approval. All other buttons in the same actions list use the normal {{label, value}} shape. Example:
+```actions
+[{{"consent": "activate_agents"}}, {{"label": "Not now", "value": "Not now"}}]
+```
 
 Progression (NEVER skip a step, NEVER auto-proceed — always end with the actions block and wait for the user's explicit choice; a decline means stop, and deferring with "Not now" is always allowed):
 
