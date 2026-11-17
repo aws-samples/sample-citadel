@@ -125,12 +125,15 @@ describe("intake-consent-resolver", () => {
     expect(item.ttl).toBeLessThanOrEqual(after + CONSENT_TTL_SECONDS);
   });
 
-  it("accepts all four valid actions", async () => {
+  it("accepts all seven valid actions", async () => {
     for (const action of [
       "activate_agents",
       "create_agent_app",
       "generate_process_blueprint",
       "import_blueprint_to_app",
+      "plan_fabrication",
+      "confirm_fabrication_plan",
+      "retry_failed_fabrication",
     ]) {
       mockSend.mockClear();
       const result = await handler(makeEvent({ projectId: "proj-1", action }));

@@ -33,3 +33,5 @@ def _bypass_consent(monkeypatch):
     """
     import tools.postfab as postfab
     monkeypatch.setattr(postfab, "require_consent", lambda session_id, action: None)
+    import tools.fabricate as fabricate
+    monkeypatch.setattr(fabricate, "require_consent", lambda session_id, action: None)

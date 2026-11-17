@@ -24,6 +24,9 @@ describe('consentActionForLabel', () => {
     ["Create 'Acme Claims'", 'create_agent_app'],
     ['Generate blueprint', 'generate_process_blueprint'],
     ["Add it to 'Acme Claims'", 'import_blueprint_to_app'],
+    ['Plan fabrication', 'plan_fabrication'],
+    ['Confirm fabrication plan', 'confirm_fabrication_plan'],
+    ['Retry failed builds', 'retry_failed_fabrication'],
   ])('maps "%s" → %s', (label, expected) => {
     expect(consentActionForLabel(label)).toBe(expected);
   });

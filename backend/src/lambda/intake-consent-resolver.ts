@@ -48,6 +48,9 @@ const VALID_ACTIONS = new Set([
   "create_agent_app",
   "generate_process_blueprint",
   "import_blueprint_to_app",
+  "plan_fabrication",
+  "confirm_fabrication_plan",
+  "retry_failed_fabrication",
 ]);
 
 interface ConsentArgs {
