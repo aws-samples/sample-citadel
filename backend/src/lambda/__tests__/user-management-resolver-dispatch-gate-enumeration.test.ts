@@ -141,9 +141,6 @@ const GATED_OPS: Record<string, { reason: string }> = {
     reason:
       "pre-existing admin-gated mutation; org-confinement gap accepted separately (finding 59e5a79c), NOT touched here",
   },
-  changePassword: {
-    reason: "pre-existing self-scoped mutation (own password only)",
-  },
   adminResetUserPassword: { reason: "pre-existing admin-gated mutation" },
   adminResendInvitation: { reason: "pre-existing admin-gated mutation" },
 };
@@ -164,7 +161,7 @@ describe("user-management-resolver — dispatch enumeration completeness", () =>
   const cases = extractDispatchCases(source);
 
   test("the dispatch switch actually has cases to check (sanity check on the parser itself)", () => {
-    expect(cases.length).toBeGreaterThanOrEqual(11);
+    expect(cases.length).toBeGreaterThanOrEqual(10);
     expect(cases).toContain("listUsers");
     expect(cases).toContain("getUser");
     expect(cases).toContain("listOrganizations");

@@ -2332,9 +2332,6 @@
     "AgenticAIApiListOrganizationsResolver8FD88AE8": {
       "type": "AWS::AppSync::Resolver"
     },
-    "AgenticAIApiChangePasswordResolver0E627B6A": {
-      "type": "AWS::AppSync::Resolver"
-    },
     "AgenticAIApiAdminResetUserPasswordResolverB23AD895": {
       "type": "AWS::AppSync::Resolver"
     },
@@ -3997,16 +3994,6 @@
       "logicalId": "AgenticAIApiListOrganizationsResolver8FD88AE8",
       "typeName": "Query",
       "fieldName": "listOrganizations",
-      "dataSourceName": "UserManagementLambdaDataSource",
-      "requestMappingTemplateHash": "2f2497aef01d4761da9770d7e06bc71ba79a8730f1998aa19fefe42597054ceb",
-      "responseMappingTemplateHash": "ab69f2706d9d99b192e66c6d21e4991121923239858099d329a9a5a8a86ba4f3",
-      "requestMappingTemplateBytes": 79,
-      "responseMappingTemplateBytes": 25
-    },
-    "Mutation.changePassword": {
-      "logicalId": "AgenticAIApiChangePasswordResolver0E627B6A",
-      "typeName": "Mutation",
-      "fieldName": "changePassword",
       "dataSourceName": "UserManagementLambdaDataSource",
       "requestMappingTemplateHash": "2f2497aef01d4761da9770d7e06bc71ba79a8730f1998aa19fefe42597054ceb",
       "responseMappingTemplateHash": "ab69f2706d9d99b192e66c6d21e4991121923239858099d329a9a5a8a86ba4f3",

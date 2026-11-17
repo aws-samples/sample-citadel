@@ -1196,6 +1196,14 @@ export const REMOVAL_ALLOWLIST: AllowlistEntry[] = [
     logicalId: "AgenticAIApiGetAppMetricsResolverCD9FD173",
     justification: "Moved to CitadelRegistryStack as GetAppMetricsResolver.",
   },
+  {
+    logicalId: "AgenticAIApiChangePasswordResolver0E627B6A",
+    justification:
+      "Removed: self-service password change moved to frontend via Cognito " +
+      "ChangePassword API (Amplify updatePassword). Backend mutation removed " +
+      "because it used AdminSetUserPassword without proving the current " +
+      "password — a privilege escalation vector.",
+  },
 ];
 
 /** Resolver fields moved to a satellite stack, for rail 3 parity + rail 7 equivalence. */
