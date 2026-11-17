@@ -86,9 +86,8 @@ const DELIBERATELY_UNWIRED: ReadonlyMap<string, string> = new Map([
   // --- finding 0018a6d7 follow-up: 3 of 7 fields wired (updateAgentStatus,
   // listAvailableDataSources, listIntegrationOperations — see backend-stack.ts
   // / projects-stack.ts resolver additions and the corresponding CDK template
-  // assertions). The remaining 4 stay allowlisted below because wiring them
-  // as-is would introduce or reach a real authz/tenant-isolation gap; each
-  // entry below names the specific missing control. ---
+  // assertions). The remaining field stays allowlisted because wiring it
+  // as-is would introduce a real authz/tenant-isolation gap. ---
   [
     "Mutation.updateProjectProgress",
     "No AppSync-compatible handler exists. The only related Lambda " +
@@ -101,24 +100,9 @@ const DELIBERATELY_UNWIRED: ReadonlyMap<string, string> = new Map([
       "and, done naively, would let any authenticated caller write another " +
       "org's project progress with no org-membership check. Finding 0018a6d7.",
   ],
-  [
-    "Query.getDashboardMetrics",
-    "Finding 615aa5bb: cross-tenant scan fixed (app-metrics-handler.ts now " +
-      "scopes via AppsTable.OrgIndex + per-app GroupIndex, no ScanCommand " +
-      "remains). Still not wired — no AppSync-shaped Lambda/resolver is " +
-      "deployed for this field at all (the only deployed Lambda for this " +
-      "file, AppMetricsHandler in gateway-stack.ts, is a CloudWatch Logs " +
-      "subscription consumer, not a GraphQL resolver). Was: finding 0018a6d7.",
-  ],
-  [
-    "Query.getRecentActivity",
-    "Finding 615aa5bb: cross-tenant scan fixed (recent-activity-resolver.ts " +
-      "now scopes projects via OrganizationIndex, workflows via " +
-      "OrgStatusIndex, integrations via a direct org-keyed Query — agent " +
-      "activity is excluded rather than scanned, since AgentConfigTable has " +
-      "no org attribute/GSI). Still not wired — no Lambda is deployed for " +
-      "this field at all. Was: finding 0018a6d7.",
-  ],
+  // Query.getDashboardMetrics and Query.getRecentActivity REMOVED from
+  // schema (board task 663c0271) — dead fields with no deployed resolver.
+  // The parity guard now protects them from silent resurrection.
 ]);
 
 function cdkOutTemplatePath(stackName: string): string {

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import React from 'react';
 import { Activity, Cpu, Workflow, Plug } from 'lucide-react';
 import { BarChart, Bar, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { Banner } from '../components/ui/banner';
@@ -13,18 +13,7 @@ import ChartRow3 from './dashboard/ChartRow3';
 import ChartRow4 from './dashboard/ChartRow4';
 import CostChartRow from './dashboard/CostChartRow';
 import { useDashboardData } from '../hooks/useDashboardData';
-import { appApiService } from '../services/appApiService';
 import { CHART_TOOLTIP_STYLE, CHART_GRID_STROKE, CHART_AXIS_STROKE, CHART_LEGEND_STYLE } from './dashboard/chartStyles';
-
-const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-
-function computeWeeklyData(dailyActivity: Array<{ date: string; successCount: number; errorCount: number }>) {
-  return dailyActivity.map(d => ({
-    day: DAY_NAMES[new Date(d.date + 'T00:00:00Z').getUTCDay()],
-    Completed: d.successCount,
-    Failed: d.errorCount,
-  }));
-}
 
 function computeGrowthData(agents: any[]) {
   const validAgents = agents.filter(a => a.createdAt);
@@ -77,21 +66,12 @@ function MetricCard({ label, value, loading, error: _error, icon, borderClass, i
 
 export function Dashboard() {
   const { projects, agents, dataStores, counts, loading, error } = useDashboardData();
-  const [weeklyData, setWeeklyData] = useState<any[]>([]);
-  const [metricsLoading, setMetricsLoading] = useState(true);
-  const [dashboardMetrics, setDashboardMetrics] = useState<any>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- dead endpoint stub
+  const weeklyData: any[] = [];
+  const metricsLoading = false;
 
-  useEffect(() => {
-    const now = new Date();
-    const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-    appApiService.getDashboardMetrics('default', weekAgo.toISOString(), now.toISOString())
-      .then(metrics => {
-        setDashboardMetrics(metrics);
-        setWeeklyData(computeWeeklyData(metrics?.dailyActivity || []));
-      })
-      .catch(() => setWeeklyData([]))
-      .finally(() => setMetricsLoading(false));
-  }, []);
+  // getDashboardMetrics was removed (no resolver was ever wired).
+  // Weekly chart is data-less until a real metrics endpoint is built.
 
   const growthData = computeGrowthData(agents);
 
@@ -178,13 +158,13 @@ export function Dashboard() {
 
         <ErrorBoundary>
           <LazyLoadSection fallback={<ChartRow2Skeleton />}>
-            <ChartRow2 projects={projects} agents={agents} dashboardMetrics={dashboardMetrics} counts={counts} />
+            <ChartRow2 projects={projects} agents={agents} dashboardMetrics={null} counts={counts} />
           </LazyLoadSection>
         </ErrorBoundary>
 
         <ErrorBoundary>
           <LazyLoadSection fallback={<ChartRow3Skeleton />}>
-            <ChartRow3 projects={projects} dashboardMetrics={dashboardMetrics} />
+            <ChartRow3 projects={projects} dashboardMetrics={null} />
           </LazyLoadSection>
         </ErrorBoundary>
 

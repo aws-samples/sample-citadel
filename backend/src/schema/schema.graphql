@@ -64,8 +64,6 @@ type Query {
   listAppApiKeys(appId: ID!): [AppApiKey!]!
   getAppMetrics(appId: ID!, startTime: AWSDateTime!, endTime: AWSDateTime!): AppMetrics
   listAppAccessEntries(appId: ID!): [AppAccessEntry!]!
-  getDashboardMetrics(orgId: String!, startTime: AWSDateTime!, endTime: AWSDateTime!): DashboardMetricsResult
-  getRecentActivity(orgId: String!, limit: Int): RecentActivityResult
   searchAgentConfigs(query: String!): [AgentConfig]
   searchToolConfigs(query: String!): [ToolConfig]
 
@@ -329,7 +327,7 @@ type Mutation {
   connectDataStore(dataStoreId: ID!): DataStore
   disconnectDataStore(dataStoreId: ID!): DataStore
   testDataStoreConnection(dataStoreId: ID!): DataStoreTestResult
-  testTool(toolId: String!, inputs: AWSJSON!, orgId: String!): ToolTestResult!
+  testTool(toolId: String!, inputs: AWSJSON!): ToolTestResult!
   addAppComponent(appId: ID!, component: RegistryAgentComponentInput!): RegistryAgentRecord
   removeAppComponent(appId: ID!, componentType: String!, componentId: String!): RegistryAgentRecord
   updateAgentBinding(input: UpdateRegistryAgentBindingInput!): RegistryAgentRecord
@@ -2206,31 +2204,6 @@ input WorkflowProgressInput {
   output: AWSJSON
   error: String
   timestamp: AWSDateTime!
-}
-
-type DailyActivity {
-  date: String!
-  successCount: Int!
-  errorCount: Int!
-}
-
-type DashboardMetricsResult {
-  dailyActivity: [DailyActivity!]!
-  totalRequests: Int!
-  successRate: Float!
-  avgLatency: Float!
-}
-
-type ActivityItem {
-  entityType: String!
-  entityId: String!
-  title: String!
-  description: String!
-  timestamp: AWSDateTime!
-}
-
-type RecentActivityResult {
-  items: [ActivityItem!]!
 }
 
 # ExecutionSpecification (do not interleave with)
