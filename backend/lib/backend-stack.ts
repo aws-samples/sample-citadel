@@ -2287,10 +2287,25 @@ export class BackendStack extends cdk.Stack {
       },
       logConfig: {
         fieldLogLevel: appsync.FieldLogLevel.ALL,
+        excludeVerboseContent: true,
         retention: logs.RetentionDays.ONE_WEEK,
       },
       xrayEnabled: true,
     });
+
+    // cdk-nag AwsSolutions-ASC3: the rule treats excludeVerboseContent=true
+    // as "request logging disabled" because verbose request/response bodies
+    // are omitted. We deliberately exclude verbose content to prevent
+    // Authorization headers from leaking into CloudWatch — field-level
+    // metrics (who called, which field, latency) are still logged.
+    NagSuppressions.addResourceSuppressions(this.appSyncApi, [
+      {
+        id: "AwsSolutions-ASC3",
+        reason:
+          "excludeVerboseContent is intentionally true to prevent " +
+          "Authorization header leakage into CloudWatch logs.",
+      },
+    ]);
 
     // Override the auto-generated AWS::AppSync::GraphQLSchema to use a
     // content-hashed S3 asset rather than the inline Definition string.
