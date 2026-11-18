@@ -363,4 +363,120 @@ describe("RegistryService viewer visibility (CIT-043)", () => {
       expect(result.createdBy).toBeUndefined();
     });
   });
+
+  // -----------------------------------------------------------------------
+  // PR-3: mapper no longer collapses absent orgId to "" (finding: an
+  // unstamped record mapped to orgId:"" read as system-shared under the
+  // old orgMatch, leaking cross-org). Absent meta.orgId must now surface
+  // orgUnknown:true and leave orgId undefined.
+  // -----------------------------------------------------------------------
+
+  describe("PR-3: mapToAgentConfig/mapToToolConfig preserve absent orgId (no collapse to '')", () => {
+    it("mapToAgentConfig sets orgUnknown:true and leaves orgId undefined when meta.orgId is absent", () => {
+      const result = service.mapToAgentConfig({
+        recordId: "a-unstamped",
+        name: "Unstamped",
+        status: RegistryRecordStatusValues.DRAFT,
+        customDescriptorContent: agentMeta({ orgId: undefined }),
+      });
+      expect(result.orgId).toBeUndefined();
+      expect(result.orgUnknown).toBe(true);
+    });
+
+    it("mapToAgentConfig does not set orgUnknown when meta.orgId is present (including explicit '')", () => {
+      const present = service.mapToAgentConfig({
+        recordId: "a-present",
+        name: "Present",
+        status: RegistryRecordStatusValues.APPROVED,
+        customDescriptorContent: agentMeta({ orgId: "org-1" }),
+      });
+      expect(present.orgId).toBe("org-1");
+      expect(present.orgUnknown).toBeUndefined();
+    });
+
+    it("mapToToolConfig sets orgUnknown:true and leaves orgId undefined when meta.orgId is absent", () => {
+      const result = service.mapToToolConfig({
+        recordId: "t-unstamped",
+        name: "Unstamped",
+        status: RegistryRecordStatusValues.DRAFT,
+        customDescriptorContent: toolMeta({ orgId: undefined }),
+      });
+      expect(result.orgId).toBeUndefined();
+      expect(result.orgUnknown).toBe(true);
+    });
+
+    it("mapToToolConfig does not set orgUnknown when meta.orgId is present", () => {
+      const present = service.mapToToolConfig({
+        recordId: "t-present",
+        name: "Present",
+        status: RegistryRecordStatusValues.APPROVED,
+        customDescriptorContent: toolMeta({ orgId: "org-1" }),
+      });
+      expect(present.orgId).toBe("org-1");
+      expect(present.orgUnknown).toBeUndefined();
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // PR-3: listResources/searchResources viewer filters exclude
+  // blank/absent-orgId non-APPROVED records cross-org; include ALL_ORGS.
+  // -----------------------------------------------------------------------
+
+  describe("PR-3: listResources/searchResources fail closed on blank/absent orgId", () => {
+    function stubList(
+      records: Array<{
+        id: string;
+        name: string;
+        status: string;
+        meta: string;
+      }>,
+    ) {
+      sdkMock.on(ListRegistryRecordsCommand).resolves({
+        registryRecords: records.map((r) =>
+          makeSummary(r.id, r.name, r.status),
+        ),
+        nextToken: undefined,
+      });
+      for (const r of records) {
+        sdkMock.on(GetRegistryRecordCommand, { recordId: r.id }).resolves({
+          recordId: r.id,
+          name: r.name,
+          status: r.status,
+          descriptors: { custom: { data: r.meta } },
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+      }
+    }
+
+    it("architect from a different org does not see a blank-orgId PENDING_APPROVAL record", async () => {
+      stubList([
+        {
+          id: "rec-blank-pend",
+          name: "BlankPending",
+          status: "PENDING_APPROVAL",
+          meta: agentMeta({ orgId: "" }),
+        },
+      ]);
+      const results = await service.listResources("agent", {
+        viewer: architectOtherOrg,
+      });
+      expect(results.map((r) => r.recordId)).toEqual([]);
+    });
+
+    it("architect from a different org DOES see an ALL_ORGS PENDING_APPROVAL record", async () => {
+      stubList([
+        {
+          id: "rec-all-orgs-pend",
+          name: "AllOrgsPending",
+          status: "PENDING_APPROVAL",
+          meta: agentMeta({ orgId: "All Organizations" }),
+        },
+      ]);
+      const results = await service.listResources("agent", {
+        viewer: architectOtherOrg,
+      });
+      expect(results.map((r) => r.recordId)).toEqual(["rec-all-orgs-pend"]);
+    });
+  });
 });

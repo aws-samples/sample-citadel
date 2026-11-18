@@ -145,7 +145,7 @@ describe("listAgentConfigsRegistry — list-from-projection", () => {
         // Projection scan (FilterExpression has projectionVersion)
         Items: [
           PROJECTION_ROW("rec-1", "Agent1", "org-a"),
-          PROJECTION_ROW("rec-2", "Agent2", ""),
+          PROJECTION_ROW("rec-2", "Agent2", "All Organizations"),
         ],
       })
       .resolvesOnce({
@@ -201,7 +201,7 @@ describe("listAgentConfigsRegistry — list-from-projection", () => {
         Items: [
           PROJECTION_ROW("rec-1", "Agent1", "org-a"),
           PROJECTION_ROW("rec-2", "Agent2", "org-b"), // different org
-          PROJECTION_ROW("rec-3", "Agent3", ""), // system-shared
+          PROJECTION_ROW("rec-3", "Agent3", "All Organizations"), // system-shared
         ],
       })
       .resolvesOnce({ Items: [] });
@@ -209,6 +209,24 @@ describe("listAgentConfigsRegistry — list-from-projection", () => {
     const result = await listAgentConfigsRegistry(nonAdminEvent("org-a"));
     const ids = result.map((c) => c.agentId).sort();
     expect(ids).toEqual(["rec-1", "rec-3"]); // org-b excluded, system-shared included
+  });
+
+  test("PR-3 CRITICAL: a blank-orgId projection row is excluded for a non-admin caller (fail-closed, not a wildcard)", async () => {
+    process.env.LIST_FROM_PROJECTION = "true";
+
+    dynamoMock
+      .on(ScanCommand)
+      .resolvesOnce({
+        Items: [
+          PROJECTION_ROW("rec-1", "Agent1", "org-a"),
+          PROJECTION_ROW("rec-blank", "AgentBlank", ""),
+        ],
+      })
+      .resolvesOnce({ Items: [] });
+
+    const result = await listAgentConfigsRegistry(nonAdminEvent("org-a"));
+    const ids = result.map((c) => c.agentId).sort();
+    expect(ids).toEqual(["rec-1"]);
   });
 
   test("decision fields present in projection rows", async () => {

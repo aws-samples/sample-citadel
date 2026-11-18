@@ -221,16 +221,18 @@ describe("RegistryService record mapping", () => {
       expect(service.mapToAgentConfig(record).orgId).toBe("team-rocket");
     });
 
-    it("defaults orgId to '' when customDescriptorContent is absent (legacy records)", () => {
+    it("leaves orgId undefined and sets orgUnknown when customDescriptorContent is absent (legacy records) — PR-3: no longer collapses to ''", () => {
       const record: RegistryRecord = {
         recordId: "a1",
         name: "A",
         status: RegistryRecordStatusValues.APPROVED,
       };
-      expect(service.mapToAgentConfig(record).orgId).toBe("");
+      const result = service.mapToAgentConfig(record);
+      expect(result.orgId).toBeUndefined();
+      expect(result.orgUnknown).toBe(true);
     });
 
-    it("defaults orgId to '' when customDescriptorContent has no orgId field", () => {
+    it("leaves orgId undefined and sets orgUnknown when customDescriptorContent has no orgId field — PR-3: no longer collapses to ''", () => {
       const record: RegistryRecord = {
         recordId: "a1",
         name: "A",
@@ -241,7 +243,9 @@ describe("RegistryService record mapping", () => {
           state: "active",
         }),
       };
-      expect(service.mapToAgentConfig(record).orgId).toBe("");
+      const result = service.mapToAgentConfig(record);
+      expect(result.orgId).toBeUndefined();
+      expect(result.orgUnknown).toBe(true);
     });
 
     it("surfaces decidedBy, decidedAt, and statusReason when present in metadata", () => {
@@ -507,16 +511,18 @@ describe("RegistryService record mapping", () => {
       expect(service.mapToToolConfig(record).orgId).toBe("team-rocket");
     });
 
-    it("defaults orgId to '' when customDescriptorContent is absent (legacy records)", () => {
+    it("leaves orgId undefined and sets orgUnknown when customDescriptorContent is absent (legacy records) — PR-3: no longer collapses to ''", () => {
       const record: RegistryRecord = {
         recordId: "t1",
         name: "T",
         status: RegistryRecordStatusValues.APPROVED,
       };
-      expect(service.mapToToolConfig(record).orgId).toBe("");
+      const result = service.mapToToolConfig(record);
+      expect(result.orgId).toBeUndefined();
+      expect(result.orgUnknown).toBe(true);
     });
 
-    it("defaults orgId to '' when customDescriptorContent has no orgId field", () => {
+    it("leaves orgId undefined and sets orgUnknown when customDescriptorContent has no orgId field — PR-3: no longer collapses to ''", () => {
       const record: RegistryRecord = {
         recordId: "t1",
         name: "T",
@@ -527,7 +533,9 @@ describe("RegistryService record mapping", () => {
           state: "active",
         }),
       };
-      expect(service.mapToToolConfig(record).orgId).toBe("");
+      const result = service.mapToToolConfig(record);
+      expect(result.orgId).toBeUndefined();
+      expect(result.orgUnknown).toBe(true);
     });
   });
 });
