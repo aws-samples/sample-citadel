@@ -23,6 +23,7 @@ scripts/*
 !scripts/test-deploy-sh.sh
 !scripts/verify-doc-claims.js
 !scripts/check-allowlist-expiry.sh
+!scripts/audit_missing_required_permissions.py
 !scripts/__tests__/
 !scripts/__tests__/**
 !scripts/smoke/
