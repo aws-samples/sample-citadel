@@ -34,6 +34,8 @@ describe("RdsAdapter.provision - PostgreSQL reserved username validation", () =>
       {
         masterUsername: "dbadmin",
         masterPassword: "pass123",
+        dataStoreId: "ds-1",
+        orgId: "org-1",
       },
       MOCK_SCOPED_CREDENTIALS,
     );
@@ -56,6 +58,8 @@ describe("RdsAdapter.provision - MySQL allows admin username", () => {
       {
         masterUsername: "admin",
         masterPassword: "pass123",
+        dataStoreId: "ds-1",
+        orgId: "org-1",
       },
       MOCK_SCOPED_CREDENTIALS,
     );

@@ -105,6 +105,18 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
   }
 
   /**
+   * Create a Bedrock Agent client using the Lambda execution role (platform
+   * credentials). ONLY for control-plane provisioning: CreateKnowledgeBase.
+   * Continuum C3 (PR-2): this moves bedrock:CreateKnowledgeBase off the
+   * vended citadel-ds-<id> role entirely — the role is now connect-only.
+   * Runs under the datastore-resolver Lambda's directly-granted, tag/
+   * region-constrained grants (backend-stack.ts).
+   */
+  private platformBedrockProvisionClient(): BedrockAgentClient {
+    return new BedrockAgentClient({});
+  }
+
+  /**
    * Create an OSS client using the Lambda execution role (platform credentials).
    * ONLY for control-plane provisioning: creating AOSS security/access/network
    * policies and collections. These operations run under the datastore-resolver
@@ -196,46 +208,36 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
     _accountId: string,
     _region: string,
   ): RequiredPolicies {
-    // H4 (§3d): scope provision policies to THIS datastore's id-derived
-    // service role and collection, so the resolver always mints and vends
-    // a scoped role on the KB create path (previously `provision: []`
-    // left `scopedCredentials` undefined, which was the root enabler of
-    // the caller-credential fallback this PR removes). Absent ids ->
-    // empty (nothing safe to scope yet; provision() itself fails closed
-    // on absent ids regardless).
+    // Continuum C3 (PR-2): `.provision` is CDK-mirrored platform-only
+    // documentation — it is NEVER minted onto the tenant-assumable
+    // citadel-ds-<id> role (the resolver mints only `.connect`, from
+    // concrete post-provision ARNs). The create-verb
+    // bedrock:CreateKnowledgeBase/TagResource grant now lives exclusively
+    // on the datastore-resolver Lambda's own role (backend-stack.ts),
+    // narrowed with an aws:RequestTag condition — it is never a candidate
+    // for vending to a tenant-assumable role, so there is nothing left to
+    // scope here by dataStoreId/orgId as the pre-PR-2 H4 fix did.
     const dataStoreId =
       typeof _config.dataStoreId === "string" ? _config.dataStoreId : undefined;
-    const orgId = typeof _config.orgId === "string" ? _config.orgId : undefined;
 
-    const provision = [];
-    if (dataStoreId && orgId) {
-      const collectionName = this.deriveCollectionName(orgId, dataStoreId);
-      provision.push(
-        {
-          // Create-verb wildcard: the KB doesn't exist yet. Identical in
-          // shape to the accepted s3:CreateBucket wildcard in S3Adapter.
-          // Narrowing this further is tracked as C3, out of scope here.
-          actions: [
-            "bedrock:CreateKnowledgeBase",
-            "bedrock:GetKnowledgeBase",
-            "bedrock:TagResource",
-          ],
-          resources: ["*"],
-        },
-        {
-          actions: ["iam:PassRole"],
-          resources: [
-            `arn:aws:iam::${_accountId}:role/${this.deriveServiceRoleName(dataStoreId)}`,
-          ],
-        },
-        {
-          actions: ["aoss:APIAccessAll"],
-          resources: [
-            `arn:aws:aoss:${_region}:${_accountId}:collection/${collectionName}`,
-          ],
-        },
-      );
-    }
+    const provision = dataStoreId
+      ? [
+          {
+            actions: [
+              "bedrock:CreateKnowledgeBase",
+              "bedrock:GetKnowledgeBase",
+              "bedrock:TagResource",
+            ],
+            resources: ["*"],
+          },
+          {
+            actions: ["iam:PassRole"],
+            resources: [
+              `arn:aws:iam::${_accountId}:role/${this.deriveServiceRoleName(dataStoreId)}`,
+            ],
+          },
+        ]
+      : [];
 
     // CIT-299: scope connect policies to the datastore's own knowledge base
     // and collection. Both knowledgeBaseId and collectionId are REQUIRED at
@@ -836,9 +838,13 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
 
   async provision(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>,
+    _credentials?: Record<string, unknown>,
   ): Promise<ProvisionResult> {
-    const client = this.makeClient(credentials, "provision");
+    // Continuum C3 (PR-2): CreateKnowledgeBase runs on the platform path —
+    // no scoped role exists yet (it is minted connect-only AFTER provision
+    // completes), so the datastore-resolver Lambda's own ambient
+    // credentials are used instead of a vended tenant role.
+    const client = this.platformBedrockProvisionClient();
     const name =
       (config.name as string | undefined) ??
       (config.resourceName as string | undefined) ??

@@ -283,14 +283,20 @@ describe("Property 1: Adapter SDK error wrapping", () => {
     "DynamoDBAdapter",
     () => new DynamoDBAdapter(),
     mockDdbSend,
-    { tableName: "t" },
+    { tableName: "t", dataStoreId: "ds-1", orgId: "org-1" },
     MOCK_SCOPED_CREDENTIALS,
   );
   testProvisionWrapping(
     "RdsAdapter",
     () => new RdsAdapter("postgres"),
     mockRdsSend,
-    { dbInstanceIdentifier: "db" },
+    {
+      dbInstanceIdentifier: "db",
+      masterUsername: "u",
+      masterPassword: "p",
+      dataStoreId: "ds-1",
+      orgId: "org-1",
+    },
     markScopedCredentials({
       masterUsername: "u",
       masterPassword: "p",
