@@ -57,7 +57,7 @@ function makePythonFunction(
   props: PythonFunctionProps,
 ): lambda.Function {
   if (isSkipBundling()) {
-    const { entry, index, handler, bundling, ...rest } = props;
+    const { entry, index, handler, bundling: _bundling, ...rest } = props;
     const pyModule = (index ?? "index.py").replace(/\.py$/, "");
     return new lambda.Function(scope, id, {
       ...rest,
@@ -782,6 +782,7 @@ export class ArbiterStack extends cdk.Stack {
           ...(props.integrationsTable && {
             INTEGRATIONS_TABLE: props.integrationsTable.tableName,
           }),
+          MODEL_CATALOG_TABLE: `citadel-model-catalog-${props.environment}`,
         },
         initialPolicy: [
           new PolicyStatement({
@@ -817,6 +818,14 @@ export class ArbiterStack extends cdk.Stack {
     props.agentConfigTable.grantReadData(credentialVenderLambda);
     props.dataStoresTable?.grantReadData(credentialVenderLambda);
     props.integrationsTable?.grantReadData(credentialVenderLambda);
+
+    // Model catalog read access for inference-profile ARN resolution
+    const venderModelCatalogTable = dynamodb.Table.fromTableName(
+      this,
+      "VenderModelCatalogTableRef",
+      `citadel-model-catalog-${props.environment}`,
+    );
+    venderModelCatalogTable.grantReadData(credentialVenderLambda);
 
     // Tool-call idempotency ledger (PR1). Org-scoped, TTL'd operational
     // dedupe table — NOT an audit artifact (distinct from the 90-day
