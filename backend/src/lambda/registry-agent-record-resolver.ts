@@ -75,6 +75,7 @@ import { v4 as uuidv4 } from "uuid";
 import Ajv from "ajv";
 import addFormats from "ajv-formats";
 import { getUserId } from "../utils/appsync";
+import { isSystemOrg } from "../utils/org-constants";
 import {
   isAdminFromEvent,
   extractOrgFromEvent,
@@ -879,13 +880,14 @@ function projectAgentAppNormalized(record: RegistryRecord): ProjectedAgentApp {
  *     ordinary pages of recordId-shaped bindings.
  *
  * Tenant validation: a binding's `name` is populated ONLY when the bound
- * agent's own manifest orgId EXPLICITLY matches `appOrgId`, or is an
- * EXPLICIT empty string (`orgId === ''`, the established "system-shared"
- * convention `agent-config-resolver` also uses). An agent record whose
- * orgId is missing/undefined (malformed or legacy metadata) is treated as
- * belonging to neither org and FAILS CLOSED — it must never be treated as
- * system-shared merely because the field is absent. An agent belonging to a
- * different (non-empty) org is likewise left unresolved (name unset,
+ * agent's own manifest orgId EXPLICITLY matches `appOrgId`, or is the
+ * explicit `ALL_ORGS` system-shared sentinel (PR-3: the previous bare
+ * empty-string convention was a fail-open cross-tenant wildcard and has
+ * been removed — no alias). An agent record whose orgId is missing/
+ * undefined (malformed or legacy metadata) is treated as belonging to
+ * neither org and FAILS CLOSED — it must never be treated as system-shared
+ * merely because the field is absent. An agent belonging to a
+ * different (non-shared) org is likewise left unresolved (name unset,
  * callers fall back to displaying the raw agentId) rather than leaking its
  * name across tenants.
  *
@@ -955,7 +957,7 @@ async function resolveAgentBindingNames(
   for (const binding of bindings) {
     const entry = resolved.get(binding.agentId);
     if (!entry) continue;
-    const sameOrg = entry.orgId === appOrgId || entry.orgId === "";
+    const sameOrg = entry.orgId === appOrgId || isSystemOrg(entry.orgId);
     if (sameOrg && entry.name) {
       binding.name = entry.name;
     }

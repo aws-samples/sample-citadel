@@ -1,5 +1,7 @@
 /**
- * Property-based tests for record-visibility policy (decision fa3f8363).
+ * Property-based tests for record-visibility policy (decision fa3f8363,
+ * updated by PR-3: blank/absent orgId is fail-closed immediately — only the
+ * explicit `ALL_ORGS` sentinel is a cross-tenant wildcard).
  *
  * Uses fast-check to exhaustively probe the visibility matrix across all
  * combinations of persona (admin / architect / other), governed status,
@@ -12,6 +14,7 @@ import {
   Viewer,
   VisibleRecord,
 } from "../record-visibility";
+import { ALL_ORGS } from "../org-constants";
 
 // ---------------------------------------------------------------------------
 // Arbitrary generators
@@ -301,11 +304,12 @@ describe("record-visibility policy (decision fa3f8363)", () => {
   });
 
   // -----------------------------------------------------------------------
-  // 5. fast-check property: system-shared records (orgId === "")
+  // 5. PR-3: blank/absent orgId fails closed immediately; only the explicit
+  //    ALL_ORGS sentinel is a cross-tenant wildcard. No empty-string alias.
   // -----------------------------------------------------------------------
 
-  describe("property: system-shared records visible to same-org architects", () => {
-    test("PENDING_APPROVAL with empty orgId visible to any architect", () => {
+  describe("PR-3: fail-closed on blank/absent orgId; ALL_ORGS is the only shared marker", () => {
+    test("PENDING_APPROVAL with empty orgId is NOT visible to a foreign-org architect (was: leaked)", () => {
       const viewer: Viewer = {
         isAdmin: false,
         roles: ["architect"],
@@ -314,19 +318,89 @@ describe("record-visibility policy (decision fa3f8363)", () => {
       };
       expect(
         isRecordVisible(viewer, { status: "PENDING_APPROVAL", orgId: "" }),
-      ).toBe(true);
+      ).toBe(false);
     });
 
-    test("DRAFT with empty orgId + no createdBy visible to architect (org fallback)", () => {
+    test("DRAFT with absent orgId and no createdBy is NOT visible (org-fallback no longer treats absent as shared)", () => {
       const viewer: Viewer = {
         isAdmin: false,
         roles: ["architect"],
         orgId: VIEWER_ORG,
         userId: VIEWER_USER,
       };
-      // orgId "" → orgMatch returns true → ownerMatch fallback → orgMatch → true
-      expect(isRecordVisible(viewer, { status: "DRAFT", orgId: "" })).toBe(
-        true,
+      expect(isRecordVisible(viewer, { status: "DRAFT" })).toBe(false);
+    });
+
+    test("DRAFT with orgUnknown:true is NOT visible even when createdBy is absent", () => {
+      const viewer: Viewer = {
+        isAdmin: false,
+        roles: ["architect"],
+        orgId: VIEWER_ORG,
+        userId: VIEWER_USER,
+      };
+      expect(
+        isRecordVisible(viewer, { status: "DRAFT", orgUnknown: true }),
+      ).toBe(false);
+    });
+
+    test("a genuinely shared record (orgId === ALL_ORGS) IS visible cross-org to an architect", () => {
+      const viewer: Viewer = {
+        isAdmin: false,
+        roles: ["architect"],
+        orgId: VIEWER_ORG,
+        userId: VIEWER_USER,
+      };
+      expect(
+        isRecordVisible(viewer, {
+          status: "PENDING_APPROVAL",
+          orgId: ALL_ORGS,
+        }),
+      ).toBe(true);
+      expect(
+        isRecordVisible(viewer, { status: "DRAFT", orgId: ALL_ORGS }),
+      ).toBe(true);
+    });
+
+    test("ALL_ORGS record with orgUnknown:true (contradictory/corrupt) still fails closed", () => {
+      const viewer: Viewer = {
+        isAdmin: false,
+        roles: ["architect"],
+        orgId: VIEWER_ORG,
+        userId: VIEWER_USER,
+      };
+      expect(
+        isRecordVisible(viewer, {
+          status: "PENDING_APPROVAL",
+          orgId: ALL_ORGS,
+          orgUnknown: true,
+        }),
+      ).toBe(false);
+    });
+
+    test("property: non-APPROVED record is visible to an architect only when orgId===ALL_ORGS or orgId===viewer.orgId, and never when orgUnknown", () => {
+      fc.assert(
+        fc.property(
+          fc.constantFrom("DRAFT", "PENDING_APPROVAL") as fc.Arbitrary<string>,
+          fc.constantFrom(VIEWER_ORG, OTHER_ORG, ALL_ORGS, "", undefined),
+          fc.boolean(),
+          (status, orgId, orgUnknown) => {
+            const viewer: Viewer = {
+              isAdmin: false,
+              roles: ["architect"],
+              orgId: VIEWER_ORG,
+              userId: VIEWER_USER,
+            };
+            const record: VisibleRecord = { status, orgId, orgUnknown };
+            const visible = isRecordVisible(viewer, record);
+            if (orgUnknown) {
+              expect(visible).toBe(false);
+              return;
+            }
+            const shouldBeVisible = orgId === ALL_ORGS || orgId === VIEWER_ORG;
+            expect(visible).toBe(shouldBeVisible);
+          },
+        ),
+        { numRuns: 200 },
       );
     });
   });

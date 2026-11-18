@@ -327,4 +327,75 @@ describe("CIT-043 agent config visibility scoping", () => {
       expect.objectContaining({ createdBy: USER_A }),
     );
   });
+
+  // --- PR-3 regression: blank orgId must never be a cross-tenant wildcard ---
+
+  describe("PR-3: blank-orgId cross-tenant wildcard fail-closed", () => {
+    const BLANK_PENDING_OTHER_CREATOR = registryRecord(
+      "r-blank-pending",
+      "BlankPending",
+      "",
+      "PENDING_APPROVAL",
+      "user-b",
+    );
+    const BLANK_DRAFT_NO_CREATEDBY = {
+      recordId: "r-blank-draft",
+      name: "BlankDraft",
+      status: "DRAFT",
+      description: '{"name":"BlankDraft"}',
+      customDescriptorContent: JSON.stringify({
+        orgId: "",
+        citadelKind: "agent",
+      }),
+    };
+    const ALL_ORGS_PENDING = registryRecord(
+      "r-all-orgs-pending",
+      "AllOrgsPending",
+      "All Organizations",
+      "PENDING_APPROVAL",
+      "user-system",
+    );
+
+    test("searchAgentConfigsRegistry excludes a blank-orgId PENDING_APPROVAL record for an architect in a different org (was: leaked cross-tenant)", async () => {
+      mockSearchResources.mockResolvedValue([
+        BLANK_PENDING_OTHER_CREATOR,
+        ALL_ORGS_PENDING,
+      ]);
+      const result = await searchAgentConfigsRegistry(
+        "test",
+        architectEvent(ORG_A, USER_A),
+      );
+      const ids = idsOf(result);
+      expect(ids).not.toContain("r-blank-pending");
+      expect(ids).toContain("r-all-orgs-pending");
+    });
+
+    test("searchAgentConfigsRegistry excludes a blank-orgId DRAFT with no createdBy for a foreign-org architect", async () => {
+      mockSearchResources.mockResolvedValue([BLANK_DRAFT_NO_CREATEDBY]);
+      const result = await searchAgentConfigsRegistry(
+        "test",
+        architectEvent(ORG_A, USER_A),
+      );
+      expect(idsOf(result)).not.toContain("r-blank-draft");
+    });
+
+    test("listAgentConfigsRegistry (registry path) excludes blank-orgId non-APPROVED records for a non-admin architect", async () => {
+      mockListResources.mockResolvedValue([
+        ...ALL_RECORDS,
+        BLANK_PENDING_OTHER_CREATOR,
+      ]);
+      const result = await listAgentConfigsRegistry(
+        architectEvent(ORG_A, USER_A),
+      );
+      expect(idsOf(result)).not.toContain("r-blank-pending");
+    });
+
+    test("listAgentConfigsRegistry (registry path) includes an ALL_ORGS PENDING_APPROVAL record for any architect", async () => {
+      mockListResources.mockResolvedValue([...ALL_RECORDS, ALL_ORGS_PENDING]);
+      const result = await listAgentConfigsRegistry(
+        architectEvent(ORG_A, USER_A),
+      );
+      expect(idsOf(result)).toContain("r-all-orgs-pending");
+    });
+  });
 });

@@ -412,7 +412,30 @@ describe("registry-agent-record-resolver — server-side name resolution", () =>
       expect(result.agentBindings[0].name).toBeUndefined();
     });
 
-    test('resolves a binding name when the bound agent is system-shared (orgId "")', async () => {
+    test('resolves a binding name when the bound agent is system-shared (orgId "All Organizations")', async () => {
+      seedApp({
+        orgId: "org-1",
+        agentBindings: [
+          {
+            agentId: AGENT_SHARED,
+            status: "READY",
+            addedAt: "2024-01-01T00:00:00Z",
+          },
+        ],
+      });
+      seedAgentCache(AGENT_SHARED, "Shared Agent", "All Organizations");
+
+      const result = await invokeHandler(
+        makeEvent("getApp", { appId: "app-1" }, { orgId: "org-1" }),
+      );
+
+      expect(result.agentBindings[0].name).toBe("Shared Agent");
+    });
+
+    test("leaves name unset (fails CLOSED, not open) when the cached agent row has a blank orgId (PR-3: no empty-string alias)", async () => {
+      // An EXPLICIT empty-string orgId no longer counts as shared — only
+      // the ALL_ORGS sentinel does. This pins the Continuum CRITICAL fix:
+      // blank must never be treated as a cross-tenant wildcard.
       seedApp({
         orgId: "org-1",
         agentBindings: [
@@ -429,7 +452,7 @@ describe("registry-agent-record-resolver — server-side name resolution", () =>
         makeEvent("getApp", { appId: "app-1" }, { orgId: "org-1" }),
       );
 
-      expect(result.agentBindings[0].name).toBe("Shared Agent");
+      expect(result.agentBindings[0].name).toBeUndefined();
     });
 
     test("leaves name unset (fails CLOSED, not open) when the cached agent row has no orgId at all", async () => {

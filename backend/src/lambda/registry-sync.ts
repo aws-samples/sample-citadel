@@ -28,6 +28,7 @@ import {
   TypeMismatchError,
 } from "../services/registry-service";
 import type { RegistryRecord } from "../services/registry-service";
+import { ALL_ORGS } from "../utils/org-constants";
 
 // ---------------------------------------------------------------------------
 // Environment
@@ -1156,15 +1157,10 @@ export async function syncNameKeyedRow(
   // makes the check atomic, but we pre-flight here for a clear log message
   // and metric before even attempting the write.
   // -----------------------------------------------------------------------
-  const ALL_ORGS = "All Organizations";
-  const rowOrgId =
-    typeof existing.orgId === "string" && existing.orgId !== ""
-      ? existing.orgId
-      : undefined;
-  const recordOrgId =
-    typeof record.orgId === "string" && record.orgId !== ""
-      ? record.orgId
-      : undefined;
+  const blankToUndefined = (v: unknown): string | undefined =>
+    typeof v === "string" && v.length > 0 ? v : undefined;
+  const rowOrgId = blankToUndefined(existing.orgId);
+  const recordOrgId = blankToUndefined(record.orgId);
 
   // If the existing row has an orgId that is NOT "All Organizations" and
   // differs from the incoming record's org, skip the write.  An existing

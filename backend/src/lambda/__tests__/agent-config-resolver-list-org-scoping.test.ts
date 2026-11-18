@@ -1,22 +1,29 @@
 /**
- * Tests for listAgentConfigsRegistry org scoping — orgId='' as system-shared.
+ * Tests for listAgentConfigsRegistry org scoping — PR-3 update: the explicit
+ * `ALL_ORGS` ("All Organizations") sentinel is system-shared; a blank or
+ * absent orgId is fail-closed and NEVER a cross-tenant wildcard.
  *
- * Seeded system agents (e.g. demo-echo-agent) carry orgId '' and must be
- * visible to every org-scoped (non-admin) caller alongside that caller's
+ * Seeded system agents (e.g. demo-echo-agent) carry orgId=ALL_ORGS and must
+ * be visible to every org-scoped (non-admin) caller alongside that caller's
  * own-org agents, on BOTH the Registry filter path and the legacy-DynamoDB
- * merge path. Admin behavior (sees all), the non-admin-without-orgId
- * empty-list behavior, cross-org isolation, and dedupe-by-name are locked
- * down as regression guards.
+ * merge path. A legacy row with NO orgId (unstamped) must NOT be visible to
+ * a foreign-org caller — that is the Continuum CRITICAL finding this test
+ * file now pins closed. Admin behavior (sees all), the non-admin-without-
+ * orgId empty-list behavior, cross-org isolation, and dedupe-by-name are
+ * locked down as regression guards.
  */
 import { DynamoDBDocumentClient, ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { mockClient } from "aws-sdk-client-mock";
 
 const dynamoMock = mockClient(DynamoDBDocumentClient);
 
+const ALL_ORGS = "All Organizations";
+
 // ---------------------------------------------------------------------------
 // Mock RegistryService — only the members used by listAgentConfigsRegistry.
-// mapToAgentConfig mirrors the real mapping's org handling: orgId comes from
-// the deserialized customDescriptorContent, defaulting to '' when absent.
+// mapToAgentConfig mirrors the REAL mapping's PR-3 org handling: orgId comes
+// from the deserialized customDescriptorContent, left undefined (with
+// orgUnknown:true) when absent — never collapsed to "".
 // ---------------------------------------------------------------------------
 
 interface TestRegistryRecord {
@@ -29,11 +36,14 @@ interface TestRegistryRecord {
 
 const mockListResources = jest.fn();
 const mockMapToAgentConfig = jest.fn((record: TestRegistryRecord) => {
-  const meta = JSON.parse(record.customDescriptorContent) as { orgId?: string };
+  const meta = JSON.parse(record.customDescriptorContent) as {
+    orgId?: string;
+  };
   return {
     agentId: record.recordId,
     name: record.name,
-    orgId: typeof meta.orgId === "string" ? meta.orgId : "",
+    orgId: meta.orgId,
+    ...(meta.orgId === undefined ? { orgUnknown: true } : {}),
     config: record.description,
     state: "active",
     categories: [] as string[],
@@ -79,16 +89,19 @@ const registryRecord = (
   customDescriptorContent: JSON.stringify({ orgId, citadelKind: "agent" }),
 });
 
-// Registry records: one own-org, one system-shared (orgId ''), one other-org.
+// Registry records: one own-org, one system-shared (orgId=ALL_ORGS), one
+// other-org, one UNSTAMPED (blank orgId — must fail closed, not leak).
 const REGISTRY_RECORDS: TestRegistryRecord[] = [
   registryRecord("reg-own", "OwnOrgAgent", "org-a"),
-  registryRecord("reg-system", "Echo Demo Agent", ""),
+  registryRecord("reg-system", "Echo Demo Agent", ALL_ORGS),
   registryRecord("reg-other", "OtherOrgAgent", "org-b"),
+  registryRecord("reg-unstamped", "UnstampedAgent", ""),
 ];
 
-// Legacy DynamoDB items: one own-org, one system-shared (no orgId → maps to
-// ''), one other-org. Names are distinct from the Registry ones so the
-// dedupe-by-name step does not interfere with the scoping assertions.
+// Legacy DynamoDB items: one own-org, one system-shared (explicit
+// orgId=ALL_ORGS), one other-org, one UNSTAMPED (no orgId attribute at all —
+// must fail closed for a foreign-org caller, per the Continuum CRITICAL
+// finding this test pins closed).
 const DYNAMO_ITEMS = [
   {
     agentId: "dyn-own",
@@ -96,11 +109,21 @@ const DYNAMO_ITEMS = [
     config: '{"name":"LegacyOwn"}',
     state: "active",
   },
-  { agentId: "dyn-system", config: '{"name":"LegacyShared"}', state: "active" },
+  {
+    agentId: "dyn-system",
+    orgId: ALL_ORGS,
+    config: '{"name":"LegacyShared"}',
+    state: "active",
+  },
   {
     agentId: "dyn-other",
     orgId: "org-b",
     config: '{"name":"LegacyOther"}',
+    state: "active",
+  },
+  {
+    agentId: "dyn-unstamped",
+    config: '{"name":"LegacyUnstamped"}',
     state: "active",
   },
 ];
@@ -109,14 +132,16 @@ const nonAdminEvent = (orgId: string) => ({
   identity: { claims: { "custom:organization": orgId } },
 });
 const adminEvent = {
-  identity: { claims: { "custom:role": "admin", "cognito:groups": ["admin"] } },
+  identity: {
+    claims: { "custom:role": "admin", "cognito:groups": ["admin"] },
+  },
 };
 const noOrgEvent = { identity: {} };
 
 const agentIdsOf = (configs: Array<{ agentId: string }>): string[] =>
   configs.map((c) => c.agentId).sort();
 
-describe("listAgentConfigsRegistry — orgId scoping with system-shared agents", () => {
+describe("listAgentConfigsRegistry — orgId scoping with system-shared agents (PR-3)", () => {
   const originalEnv = process.env;
 
   beforeEach(() => {
@@ -143,7 +168,7 @@ describe("listAgentConfigsRegistry — orgId scoping with system-shared agents",
     expect(agentIdsOf(result)).toContain("reg-own");
   });
 
-  test("(b) non-admin with orgId also sees system-shared (orgId='') registry agents", async () => {
+  test("(b) non-admin with orgId also sees system-shared (orgId=ALL_ORGS) registry agents", async () => {
     const result = await listAgentConfigsRegistry(nonAdminEvent("org-a"));
 
     expect(agentIdsOf(result)).toContain("reg-system");
@@ -157,7 +182,15 @@ describe("listAgentConfigsRegistry — orgId scoping with system-shared agents",
     expect(ids).not.toContain("dyn-other");
   });
 
-  test("(d) admin sees all agents across all orgs, including system-shared (unchanged)", async () => {
+  test("(c2) PR-3 CRITICAL: non-admin never sees an unstamped (blank/absent orgId) agent — fail closed, not a wildcard", async () => {
+    const result = await listAgentConfigsRegistry(nonAdminEvent("org-a"));
+
+    const ids = agentIdsOf(result);
+    expect(ids).not.toContain("reg-unstamped");
+    expect(ids).not.toContain("dyn-unstamped");
+  });
+
+  test("(d) admin sees all agents across all orgs, including system-shared and unstamped (unchanged)", async () => {
     const result = await listAgentConfigsRegistry(adminEvent);
 
     expect(agentIdsOf(result)).toEqual(
@@ -165,9 +198,11 @@ describe("listAgentConfigsRegistry — orgId scoping with system-shared agents",
         "reg-own",
         "reg-system",
         "reg-other",
+        "reg-unstamped",
         "dyn-own",
         "dyn-system",
         "dyn-other",
+        "dyn-unstamped",
       ].sort(),
     );
   });
@@ -179,13 +214,15 @@ describe("listAgentConfigsRegistry — orgId scoping with system-shared agents",
     expect(mockListResources).not.toHaveBeenCalled();
   });
 
-  test("(f) legacy-Dynamo merge path: non-admin with orgId sees own-org AND system-shared (orgId='') legacy agents", async () => {
+  test("(f) legacy-Dynamo merge path: non-admin with orgId sees own-org AND system-shared (orgId=ALL_ORGS) legacy agents, never unstamped", async () => {
     const result = await listAgentConfigsRegistry(nonAdminEvent("org-a"));
 
     const ids = agentIdsOf(result);
     expect(ids).toContain("dyn-own");
     expect(ids).toContain("dyn-system");
-    // Full expected visibility for org-a: own-org + system-shared from both sources.
+    expect(ids).not.toContain("dyn-unstamped");
+    // Full expected visibility for org-a: own-org + system-shared from both
+    // sources. Unstamped rows from either source are excluded.
     expect(ids).toEqual(
       ["dyn-own", "dyn-system", "reg-own", "reg-system"].sort(),
     );
@@ -200,6 +237,7 @@ describe("listAgentConfigsRegistry — orgId scoping with system-shared agents",
         ...DYNAMO_ITEMS,
         {
           agentId: "dyn-echo-dup",
+          orgId: ALL_ORGS,
           config: '{"name":"Echo Demo Agent"}',
           state: "active",
         },

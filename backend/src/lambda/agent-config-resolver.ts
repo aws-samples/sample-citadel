@@ -31,6 +31,7 @@ import {
 import { assertProjectOrgAccess } from "../utils/project-org-access";
 import { extractUserIdFromEvent } from "../utils/auth";
 import { isRecordVisible, viewerFromEvent } from "../utils/record-visibility";
+import { isSystemOrg } from "../utils/org-constants";
 import { getGovernanceEnforce } from "../utils/governance-flag";
 import { publishEvent } from "../utils/events";
 import { normaliseTags } from "../utils/tag-policy";
@@ -180,7 +181,17 @@ interface AgentConfig {
   agentId: string;
   /** Human-readable agent name (Registry top-level or legacy config.name). */
   name?: string;
-  orgId: string;
+  /**
+   * Absent when the source metadata never stamped an orgId — PR-3 no
+   * longer collapses this to "". See `orgUnknown`.
+   */
+  orgId?: string;
+  /**
+   * Set when the source metadata never stamped an orgId (unstamped/legacy
+   * record). Distinct from an explicit empty-string orgId — PR-3 fail-closed
+   * fix: a record flagged `orgUnknown` is never treated as cross-org shared.
+   */
+  orgUnknown?: boolean;
   config: string | Record<string, unknown>;
   /** Human-readable description surfaced from the Registry record. */
   description?: string;
@@ -380,7 +391,13 @@ export async function getAgentConfigRegistry(
       const mapped = registryService.mapToAgentConfig(record);
       // Cross-org access is reported as not-found (404-style, not 403) so we
       // don't leak existence to other orgs. Admins bypass.
-      if (!admin && mapped.orgId && mapped.orgId !== callerOrgId) {
+      // PR-3: blank/absent orgId (and orgUnknown) must fail closed here too —
+      // `mapped.orgId &&` was falsy for "" and undefined alike, letting any
+      // non-admin in any org read an unstamped record by id.
+      if (
+        !admin &&
+        !callerMayConsiderOrg(mapped.orgId, mapped.orgUnknown, callerOrgId)
+      ) {
         return null;
       }
       return mapped;
@@ -394,7 +411,10 @@ export async function getAgentConfigRegistry(
   // Fallback to DynamoDB for legacy records (or on Registry error)
   const legacy = await getAgentConfig(agentId);
   if (!legacy) return null;
-  if (!admin && legacy.orgId && legacy.orgId !== callerOrgId) {
+  if (
+    !admin &&
+    !callerMayConsiderOrg(legacy.orgId, legacy.orgUnknown, callerOrgId)
+  ) {
     return null;
   }
   return legacy;
@@ -462,6 +482,24 @@ function emitListSourceMetric(
  * to the AgentConfig API shape. Returns an empty array when no projection
  * rows exist.
  */
+/**
+ * Fail-closed pre-filter: whether a non-admin caller in `callerOrgId` is
+ * allowed to even consider `candidateOrgId` (before the finer-grained
+ * `isRecordVisible` status check runs). Shared by every list/search org
+ * pre-filter below (PR-3: previously each repeated an empty-string
+ * fail-open escape hatch, which treated a blank orgId as a cross-tenant
+ * wildcard — only the explicit `ALL_ORGS` sentinel is).
+ */
+function callerMayConsiderOrg(
+  candidateOrgId: string | undefined,
+  orgUnknown: boolean | undefined,
+  callerOrgId: string | null,
+): boolean {
+  if (orgUnknown === true) return false;
+  if (isSystemOrg(candidateOrgId)) return true;
+  return candidateOrgId !== undefined && candidateOrgId === callerOrgId;
+}
+
 async function listAgentConfigsFromProjection(
   callerOrgId: string | null,
   admin: boolean,
@@ -490,11 +528,14 @@ async function listAgentConfigsFromProjection(
     if (items.length === 0) return [];
 
     // Map DynamoDB items to AgentConfig shape and apply the same filters
-    // as the registry path.
+    // as the registry path. PR-3: do not collapse an absent orgId column to
+    // "" — carry orgUnknown so the fail-closed pre-filter below treats it
+    // correctly instead of as an explicit (if harmless) blank string.
     const configs: AgentConfig[] = items.map((item) => ({
       agentId: item.agentId,
       name: typeof item.name === "string" ? item.name : undefined,
-      orgId: item.orgId ?? "",
+      orgId: typeof item.orgId === "string" ? item.orgId : undefined,
+      ...(typeof item.orgId === "string" ? {} : { orgUnknown: true }),
       config: toAwsJsonConfig(item.config, item.agentId),
       description:
         typeof item.description === "string" ? item.description : undefined,
@@ -522,7 +563,8 @@ async function listAgentConfigsFromProjection(
     }));
 
     return configs.filter((a) => {
-      if (!admin && a.orgId !== callerOrgId && a.orgId !== "") return false;
+      if (!admin && !callerMayConsiderOrg(a.orgId, a.orgUnknown, callerOrgId))
+        return false;
       return isRecordVisible(viewer, {
         status: a.registryStatus ?? undefined,
         orgId: a.orgId,
@@ -585,7 +627,8 @@ export async function listAgentConfigsRegistry(
       // Merge legacy rows that have no registryRecordId (genuinely local-only)
       const allDynamoConfigs = await listAgentConfigs();
       const dynamoConfigs = allDynamoConfigs.filter((a) => {
-        if (!admin && a.orgId !== callerOrgId && a.orgId !== "") return false;
+        if (!admin && !callerMayConsiderOrg(a.orgId, a.orgUnknown, callerOrgId))
+          return false;
         return isRecordVisible(viewer, {
           status: a.registryStatus,
           orgId: a.orgId,
@@ -633,7 +676,8 @@ export async function listAgentConfigsRegistry(
   );
   // Org filter (existing) + status/ownership visibility (CIT-043).
   const registryConfigs = allRegistryConfigs.filter((a) => {
-    if (!admin && a.orgId !== callerOrgId && a.orgId !== "") return false;
+    if (!admin && !callerMayConsiderOrg(a.orgId, a.orgUnknown, callerOrgId))
+      return false;
     return isRecordVisible(viewer, {
       status: a.registryStatus ?? undefined,
       orgId: a.orgId,
@@ -646,7 +690,8 @@ export async function listAgentConfigsRegistry(
   //    per policy: legacy records predate governance).
   const allDynamoConfigs = await listAgentConfigs();
   const dynamoConfigs = allDynamoConfigs.filter((a) => {
-    if (!admin && a.orgId !== callerOrgId && a.orgId !== "") return false;
+    if (!admin && !callerMayConsiderOrg(a.orgId, a.orgUnknown, callerOrgId))
+      return false;
     return isRecordVisible(viewer, {
       status: a.registryStatus,
       orgId: a.orgId,
@@ -1520,7 +1565,8 @@ export async function searchAgentConfigsRegistry(
     registryService.mapToAgentConfig(record),
   );
   return configs.filter((a) => {
-    if (!admin && a.orgId !== callerOrgId && a.orgId !== "") return false;
+    if (!admin && !callerMayConsiderOrg(a.orgId, a.orgUnknown, callerOrgId))
+      return false;
     return isRecordVisible(viewer, {
       status: a.registryStatus ?? undefined,
       orgId: a.orgId,
@@ -1628,11 +1674,17 @@ export async function findProjectAgentRecords(
   } while (exclusiveStartKey);
 
   // ── Step 2: Filter by orgId at the GSI level (cheap, avoids registry calls) ──
+  // PR-3: the prior check `rowOrg !== "" && rowOrg !== "All Organizations"`
+  // was the same fail-open escape removed elsewhere in this file — a blank
+  // or absent orgId row passed through to any caller. Route through the
+  // shared fail-closed helper instead, and stop hard-coding the ALL_ORGS
+  // literal.
   const candidates = gsiItems.filter((item) => {
     if (!item.registryRecordId) return false;
     if (orgId !== undefined) {
-      const rowOrg = (item.orgId as string) ?? "";
-      if (rowOrg !== "" && rowOrg !== "All Organizations" && rowOrg !== orgId) {
+      const rowOrgId = typeof item.orgId === "string" ? item.orgId : undefined;
+      const rowOrgUnknown = typeof item.orgId === "string" ? undefined : true;
+      if (!callerMayConsiderOrg(rowOrgId, rowOrgUnknown, orgId)) {
         return false;
       }
     }
@@ -1864,7 +1916,8 @@ async function listAgentConfigs(): Promise<AgentConfig[]> {
   return (result.Items || []).map((item) => ({
     agentId: item.agentId,
     name: typeof item.name === "string" ? item.name : undefined,
-    orgId: item.orgId || "",
+    orgId: typeof item.orgId === "string" ? item.orgId : undefined,
+    ...(typeof item.orgId === "string" ? {} : { orgUnknown: true }),
     config: toAwsJsonConfig(item.config, item.agentId),
     state: item.state || "active",
     categories: item.categories || [],
@@ -1893,9 +1946,13 @@ async function getAgentConfig(agentId: string): Promise<AgentConfig | null> {
     return null;
   }
 
+  // PR-3: preserve the absent/blank distinction instead of collapsing to ""
+  // (the collapse made an unstamped row read as the system-shared marker).
   return {
     agentId: result.Item.agentId,
-    orgId: result.Item.orgId || "",
+    orgId:
+      typeof result.Item.orgId === "string" ? result.Item.orgId : undefined,
+    ...(typeof result.Item.orgId === "string" ? {} : { orgUnknown: true }),
     config: toAwsJsonConfig(result.Item.config, result.Item.agentId),
     state: result.Item.state || "active",
     categories: result.Item.categories || [],
@@ -2208,7 +2265,8 @@ async function publishAgentManifest(
   const item = result.Attributes!;
   return {
     agentId: item.agentId,
-    orgId: item.orgId || "",
+    orgId: typeof item.orgId === "string" ? item.orgId : undefined,
+    ...(typeof item.orgId === "string" ? {} : { orgUnknown: true }),
     config: toAwsJsonConfig(item.config, item.agentId),
     state: item.state || "active",
     categories: item.categories || [],

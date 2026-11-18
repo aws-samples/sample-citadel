@@ -226,3 +226,30 @@ class TestOrgUnknownFilterByOrg:
         result = filter_by_org(items, "org-a", allow_system=True, component="test")
         assert len(result) == 1
         assert result[0]["agentId"] == "a1"
+
+
+# ---------------------------------------------------------------------------
+# PR-3 (Continuum CRITICAL): Hypothesis property sweeping orgUnknown
+# randomly alongside org/sentinel values — pins that filter_by_org NEVER
+# returns a record flagged orgUnknown, regardless of what its orgId
+# happens to hold (including a value that would otherwise be system-shared
+# or same-org — a contradictory/corrupt record still fails closed).
+# ---------------------------------------------------------------------------
+@given(
+    org_a=st.text(min_size=1, max_size=20, alphabet=st.characters(categories=("L", "N"))),
+    orgid_choice=st.sampled_from(["org_a", "org_b", "", ALL_ORGS]),
+    org_unknown=st.booleans(),
+)
+def test_orgUnknown_record_never_returned_regardless_of_orgId_value(
+    org_a, orgid_choice, org_unknown
+):
+    org_b = org_a + "-other"
+    orgid_map = {"org_a": org_a, "org_b": org_b, "": "", ALL_ORGS: ALL_ORGS}
+    record_org = orgid_map[orgid_choice]
+    item = {"agentId": "r1", "orgId": record_org, "orgUnknown": org_unknown}
+    result = filter_by_org([item], org_a, allow_system=True, component="test")
+    if org_unknown:
+        assert result == [], (
+            f"orgUnknown=True record with orgId={record_org!r} was returned "
+            f"— must fail closed regardless of orgId value"
+        )
