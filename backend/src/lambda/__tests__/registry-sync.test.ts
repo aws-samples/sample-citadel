@@ -1462,7 +1462,7 @@ describe("handler — GA agent-registry events", () => {
     );
   });
 
-  test("GA merge does NOT set sourceProjectId — GA records carry no reliable source for it", async () => {
+  test("GA merge DOES set sourceProjectId when the Citadel descriptor carries it", async () => {
     mockGetResource.mockResolvedValueOnce({
       ...zdRecord,
       customDescriptorContent: JSON.stringify({
@@ -1478,10 +1478,11 @@ describe("handler — GA agent-registry events", () => {
     await handler(makeGaDraftEvent() as RegistryEvent);
 
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
-    expect(input.UpdateExpression).not.toContain("sourceProjectId");
+    // sourceProjectId should be set via if_not_exists (never overwrites existing)
+    expect(input.UpdateExpression).toContain("if_not_exists(#sourceProjectId");
     expect(
       input.ExpressionAttributeValues![":sourceProjectId"],
-    ).toBeUndefined();
+    ).toBe("proj-sneaky");
   });
 });
 // ---------------------------------------------------------------------------

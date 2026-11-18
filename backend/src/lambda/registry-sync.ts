@@ -963,7 +963,7 @@ function isPresentNonEmpty(value: unknown): value is string {
   return typeof value === "string" && value !== "";
 }
 
-function buildGaMergeFields(
+export function buildGaMergeFields(
   resourceType: ResourceType,
   record: RegistryRecord,
 ): Record<string, unknown> {
@@ -1042,11 +1042,19 @@ function buildGaMergeFields(
   if (isPresentNonEmpty(meta.orgId)) fields.orgId = meta.orgId;
   else skipped.push("orgId");
 
-  // Deliberately NOT setting config/createdBy/sourceProjectId here — the GA
-  // record carries no reliable source for them (see diag: `config` and
-  // `sourceProjectId` are absent from GA entirely; GA's `createdBy` is a
-  // numeric AWS account ID, a different form than DDB's value). Existing
-  // DDB values for these attributes must survive untouched.
+  // Fabricator-written descriptors (the Citadel metadata shape) carry
+  // `config` and `sourceProjectId` inside customDescriptorContent. When
+  // present, propagate them so the cache row is complete on the first
+  // UpdateCommand — the project GSI and supervisor's load_config both read
+  // from the cache row, so leaving them absent breaks activation (#534).
+  // Non-Citadel descriptors (no config in metadata) are unchanged.
+  const coercedConfig = coerceAgentConfig(record.recordId, meta.config);
+  if (coercedConfig !== undefined) {
+    fields.config = coercedConfig;
+  }
+  if (isPresentNonEmpty(meta.sourceProjectId)) {
+    fields.sourceProjectId = meta.sourceProjectId;
+  }
   const mappedState = toInternalStateFromGaStatus(record.status);
   if (mappedState !== undefined) fields.state = mappedState;
 
@@ -1425,18 +1433,26 @@ export async function handleGaUpsert(
   // Only update approval/status fields — never overwrite config, orgId,
   // or projection metadata.
   // -----------------------------------------------------------------------
+  // Track existing sourceProjectId for the divergence warning below.
+  let existingSourceProjectId: string | undefined;
+
   if (resourceType === "agent") {
     try {
       const existing = await docClient.send(
         new GetCommand({
           TableName: tableName,
           Key: { agentId: resourceId },
-          ProjectionExpression: "createdBy, projectionVersion",
+          ProjectionExpression: "createdBy, projectionVersion, sourceProjectId",
         }),
       );
       let isSeederOwned =
         existing.Item?.createdBy === "seedConfig" &&
         existing.Item?.projectionVersion != null;
+
+      // Capture for the sourceProjectId divergence warning (emitted later).
+      if (typeof existing.Item?.sourceProjectId === "string") {
+        existingSourceProjectId = existing.Item.sourceProjectId;
+      }
 
       // Fallback: check for a pointer row whose _canonicalRecordId matches
       // this resourceId (handles damaged rows missing createdBy).
@@ -1492,6 +1508,21 @@ export async function handleGaUpsert(
   }
 
   const fields = buildGaMergeFields(resourceType, record);
+
+  // Warn when the descriptor's sourceProjectId differs from an existing
+  // cached value — the if_not_exists guard in the SET clause keeps the
+  // existing value, but operators should investigate the mismatch.
+  if (
+    typeof fields.sourceProjectId === "string" &&
+    existingSourceProjectId !== undefined &&
+    existingSourceProjectId !== fields.sourceProjectId
+  ) {
+    console.warn(
+      `handleGaUpsert: sourceProjectId divergence for "${resourceId}": ` +
+        `existing="${existingSourceProjectId}", descriptor="${fields.sourceProjectId}" — keeping existing`,
+    );
+  }
+
   const names: Record<string, string> = {};
   const values: Record<string, unknown> = {};
   const setClauses: string[] = [];
@@ -1499,15 +1530,26 @@ export async function handleGaUpsert(
   for (const [key, value] of Object.entries(fields)) {
     names[`#${key}`] = key;
     values[`:${key}`] = value;
-    setClauses.push(`#${key} = :${key}`);
+    // sourceProjectId: use if_not_exists so we never silently overwrite a
+    // different existing value (e.g. a re-fabrication into a new project
+    // should not clobber the original attribution).
+    if (key === "sourceProjectId") {
+      setClauses.push(`#${key} = if_not_exists(#${key}, :${key})`);
+    } else {
+      setClauses.push(`#${key} = :${key}`);
+    }
   }
 
   // Ensure newly-created items (where the key was absent) get a complete
   // cache row: config and createdAt default via if_not_exists so existing
-  // items keep their values untouched.
-  names["#config"] = "config";
-  values[":emptyConfig"] = resourceType === "tool" ? "" : {};
-  setClauses.push("#config = if_not_exists(#config, :emptyConfig)");
+  // items keep their values untouched. When the merge fields already carry
+  // config (Citadel descriptor), skip the if_not_exists fallback — the
+  // direct SET from the fields loop takes precedence.
+  if (!("config" in fields)) {
+    names["#config"] = "config";
+    values[":emptyConfig"] = resourceType === "tool" ? "" : {};
+    setClauses.push("#config = if_not_exists(#config, :emptyConfig)");
+  }
 
   names["#createdAt"] = "createdAt";
   const recordCreatedAt =
