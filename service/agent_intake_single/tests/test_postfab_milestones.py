@@ -303,8 +303,9 @@ def test_confirm_fabrication_plan_sets_implementation_to_10(monkeypatch):
     monkeypatch.setattr(fabricate, "FABRICATOR_QUEUE_URL", "https://sqs/q")
     monkeypatch.setattr(fabricate, "_send_to_fabricator", mock.MagicMock())
 
-    plan = json.dumps([{"name": "AgentA", "action": "build", "reason": "new", "spec": "spec"}])
-    fabricate.confirm_fabrication_plan(plan)
+    plan_data = [{"name": "AgentA", "action": "build", "reason": "new", "spec": "spec"}]
+    monkeypatch.setattr(fabricate, "_load_plan_from_session", lambda sid, pid: plan_data)
+    fabricate.confirm_fabrication_plan(plan_id="test-plan-id")
 
     spy.assert_called_once()
     kwargs = spy.call_args.kwargs

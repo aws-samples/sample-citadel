@@ -35,7 +35,7 @@ from tools.state import get_postfab_marker, set_postfab_marker, _internal_update
 from tools.registry_name import sanitize_registry_name
 import request_context
 
-from tools.consent import require_consent, ConsentRequired
+from tools.consent import require_consent, consume_consent, ConsentRequired
 
 logger = logging.getLogger(__name__)
 
@@ -961,7 +961,7 @@ def activate_agents() -> str:
             )
 
     try:
-        require_consent(session_id, "activate_agents")
+        consent_handle = require_consent(session_id, "activate_agents")
     except ConsentRequired:
         return _consent_refusal(
             "activate_agents",
@@ -974,6 +974,9 @@ def activate_agents() -> str:
         data = appsync_client.execute(_ACTIVATE_MUTATION, {"sessionId": session_id}, session_id)
     except AppSyncError as err:
         return _error_return(session_id, err, "activating the agents")
+
+    # Consume consent AFTER the privileged mutation succeeds.
+    consume_consent(consent_handle)
 
     outcome = data.get("intakeActivateProjectAgents") or {}
     activated = outcome.get("activated") or []
@@ -1139,7 +1142,7 @@ def create_agent_app(confirmed_name: str = "") -> str:
 
     name = confirmed_name.strip()
     try:
-        require_consent(session_id, "create_agent_app")
+        consent_handle = require_consent(session_id, "create_agent_app")
     except ConsentRequired:
         question, actions = _app_gate(session_id, marker)
         return _consent_refusal("create_agent_app", question, actions)
@@ -1153,6 +1156,9 @@ def create_agent_app(confirmed_name: str = "") -> str:
         )
     except AppSyncError as err:
         return _error_return(session_id, err, "creating the app")
+
+    # Consume consent AFTER the privileged mutation succeeds.
+    consume_consent(consent_handle)
 
     record = data.get("intakeCreateApp") or {}
     app_id = record.get("appId")
@@ -1417,7 +1423,7 @@ def generate_process_blueprint(regenerate: bool = False) -> str:
         )
 
     try:
-        require_consent(session_id, "generate_process_blueprint")
+        consent_handle = require_consent(session_id, "generate_process_blueprint")
     except ConsentRequired:
         question, actions = _blueprint_gate()
         return _consent_refusal("generate_process_blueprint", question, actions)
@@ -1496,6 +1502,9 @@ def generate_process_blueprint(regenerate: bool = False) -> str:
 
     outcome = data.get("intakeCreateBlueprint") or {}
     status = outcome.get("status")
+
+    # Consume consent AFTER the privileged mutation succeeds.
+    consume_consent(consent_handle)
 
     if status == "PUBLISHED" and outcome.get("blueprintId"):
         blueprint_id = outcome["blueprintId"]
@@ -1619,7 +1628,7 @@ def import_blueprint_to_app() -> str:
         )
 
     try:
-        require_consent(session_id, "import_blueprint_to_app")
+        consent_handle = require_consent(session_id, "import_blueprint_to_app")
     except ConsentRequired:
         question, actions = _import_gate(app_name)
         return _consent_refusal("import_blueprint_to_app", question, actions)
@@ -1633,6 +1642,9 @@ def import_blueprint_to_app() -> str:
         )
     except AppSyncError as err:
         return _error_return(session_id, err, "importing the workflow")
+
+    # Consume consent AFTER the privileged mutation succeeds.
+    consume_consent(consent_handle)
 
     workflow = data.get("intakeImportBlueprintToApp") or {}
     workflow_id = workflow.get("workflowId")

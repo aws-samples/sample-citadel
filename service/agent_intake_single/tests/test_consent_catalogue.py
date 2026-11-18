@@ -162,8 +162,10 @@ class TestExistingHappyPaths:
                 "ttl": int(time.time()) + 600,
             }
         }
-        require_consent("sess-1", action)  # should not raise
-        mock_table.delete_item.assert_called_once()
+        handle = require_consent("sess-1", action)  # should not raise
+        # require_consent no longer deletes; consume_consent does
+        mock_table.delete_item.assert_not_called()
+        assert handle is not None
 
     @pytest.mark.parametrize("action", sorted(PRIVILEGED_ACTIONS))
     def test_all_privileged_checked(self, action, mock_table):

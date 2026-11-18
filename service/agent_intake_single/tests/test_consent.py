@@ -27,7 +27,7 @@ import request_context
 os.environ.setdefault("APPSYNC_GRAPHQL_URL", "https://test.example/graphql")
 os.environ.setdefault("SESSION_MEMORY_TABLE", "test-session-memory")
 
-from tools.consent import require_consent, ConsentRequired, PRIVILEGED_ACTIONS
+from tools.consent import require_consent, consume_consent, ConsentRequired, PRIVILEGED_ACTIONS
 from tools import consent as _consent_module
 
 
@@ -92,7 +92,10 @@ class TestConsentGranted:
                 "ttl": int(time.time()) + 600,
             }
         }
-        require_consent("sess-1", "activate_agents")
+        handle = require_consent("sess-1", "activate_agents")
+        # require_consent no longer deletes — call consume_consent
+        mock_table.delete_item.assert_not_called()
+        consume_consent(handle)
         mock_table.delete_item.assert_called_once_with(
             Key={"p_key": "sess-1", "s_key": "consent#activate_agents"}
         )
@@ -108,7 +111,8 @@ class TestConsentGranted:
         }
         mock_table.get_item.return_value = valid_item
 
-        require_consent("sess-1", "activate_agents")  # first call: OK
+        handle = require_consent("sess-1", "activate_agents")  # first call: OK
+        consume_consent(handle)  # consume the consent
 
         # Now the record is consumed (deleted); simulate empty response
         mock_table.get_item.return_value = {}

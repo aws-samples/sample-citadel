@@ -43,15 +43,20 @@ def _stub_io(monkeypatch):
     # behavior rather than the tenancy gate — a dedicated test below proves
     # the unresolved case still refuses.
     monkeypatch.setattr(fab, "_resolve_session_organization", lambda session_id: "org-status-test")
+    # Mock _load_plan_from_session to return the plan by plan_id
+    monkeypatch.setattr(fab, "_load_plan_from_session", lambda sid, pid: _plan_list())
     yield
 
 
-def _plan():
-    return json.dumps([
+def _plan_list():
+    return [
         {"name": "AgentA", "action": "build", "reason": "new", "spec": "spec A"},
         {"name": "AgentB", "action": "build", "reason": "new", "spec": "spec B"},
         {"name": "AgentC", "action": "reuse", "reason": "exists", "spec": "spec C"},
-    ])
+    ]
+
+
+PLAN_ID = "test-plan-id"
 
 
 def test_writes_pending_row_per_build_agent(monkeypatch):
@@ -59,7 +64,7 @@ def test_writes_pending_row_per_build_agent(monkeypatch):
     table = mock.MagicMock()
     monkeypatch.setattr(fab.dynamodb, "Table", mock.MagicMock(return_value=table))
 
-    fab.confirm_fabrication_plan(_plan())
+    fab.confirm_fabrication_plan(plan_id=PLAN_ID)
 
     # One PutItem per BUILD agent (2), not for reuse.
     assert table.put_item.call_count == 2
@@ -83,7 +88,7 @@ def test_status_write_failure_does_not_break_enqueue(monkeypatch):
     monkeypatch.setattr(fab.dynamodb, "Table", mock.MagicMock(return_value=table))
 
     # Should not raise; SQS sends still happen for both build agents.
-    result = fab.confirm_fabrication_plan(_plan())
+    result = fab.confirm_fabrication_plan(plan_id=PLAN_ID)
     assert fab.sqs.send_message.call_count == 2
     assert "AgentA" in result and "AgentB" in result
 
@@ -93,7 +98,7 @@ def test_skips_status_write_when_table_unset(monkeypatch):
     table = mock.MagicMock()
     monkeypatch.setattr(fab.dynamodb, "Table", mock.MagicMock(return_value=table))
 
-    fab.confirm_fabrication_plan(_plan())
+    fab.confirm_fabrication_plan(plan_id=PLAN_ID)
 
     assert fab.sqs.send_message.call_count == 2
     table.put_item.assert_not_called()
@@ -109,7 +114,7 @@ def test_enqueue_refuses_when_organisation_unresolved(monkeypatch):
     monkeypatch.setattr(fab.dynamodb, "Table", mock.MagicMock(return_value=table))
 
     with pytest.raises(Exception, match=r"cannot fabricate: no organisation resolved"):
-        fab.confirm_fabrication_plan(_plan())
+        fab.confirm_fabrication_plan(plan_id=PLAN_ID)
 
     fab.sqs.send_message.assert_not_called()
     table.put_item.assert_not_called()

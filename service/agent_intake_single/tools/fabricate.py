@@ -9,7 +9,7 @@ from boto3.dynamodb.conditions import Key
 from strands.tools import tool
 from tools.kb import s3_get, s3_put
 from tools.converse_utils import extract_text, capture_converse_usage
-from tools.consent import require_consent, ConsentRequired
+from tools.consent import require_consent, consume_consent, ConsentRequired
 from config import bedrock, get_agent_model_id
 import request_context
 
@@ -280,6 +280,60 @@ def _llm(system: str, user: str, session_id: str = "", max_tokens: int = 8192) -
         if raw.startswith("json"):
             raw = raw[4:]
     return raw.strip()
+
+
+# ── Session-memory plan storage ──────────────────────────────────────────
+# plan_fabrication stores the full plan in SESSION_MEMORY_TABLE (keyed by
+# session + a server-minted plan_id with 24h TTL). confirm_fabrication_plan
+# loads by plan_id so the model never re-types the spec JSON.
+
+PLAN_TTL_SECONDS = 24 * 60 * 60  # 24 hours
+
+
+def _store_plan_in_session(session_id: str, plan: list[dict]) -> str:
+    """Persist a fabrication plan in session memory and return its plan_id."""
+    import uuid as _uuid
+    plan_id = str(_uuid.uuid4())
+    table_name = os.environ.get("SESSION_MEMORY_TABLE", "")
+    if not table_name:
+        logger.warning("SESSION_MEMORY_TABLE not set; plan not persisted")
+        return plan_id
+    try:
+        dynamodb.Table(table_name).put_item(Item={
+            "p_key": session_id,
+            "s_key": f"fabrication_plan#{plan_id}",
+            "plan": json.dumps(plan),
+            "ttl": int(time.time()) + PLAN_TTL_SECONDS,
+        })
+    except Exception as e:
+        logger.error("Failed to store fabrication plan session=%s: %s", session_id, e)
+    return plan_id
+
+
+def _load_plan_from_session(session_id: str, plan_id: str) -> list[dict] | None:
+    """Load a fabrication plan from session memory by plan_id.
+
+    Returns None when the plan is missing, expired, or corrupt.
+    """
+    table_name = os.environ.get("SESSION_MEMORY_TABLE", "")
+    if not table_name:
+        return None
+    try:
+        resp = dynamodb.Table(table_name).get_item(
+            Key={"p_key": session_id, "s_key": f"fabrication_plan#{plan_id}"},
+        )
+        item = resp.get("Item")
+        if not item:
+            return None
+        # TTL check (DDB eventual deletion can lag)
+        if item.get("ttl", 0) < int(time.time()):
+            return None
+        plan = json.loads(item.get("plan", "[]"))
+        return plan if isinstance(plan, list) else None
+    except Exception as e:
+        logger.error("Failed to load fabrication plan session=%s plan_id=%s: %s",
+                     session_id, plan_id, e)
+        return None
 
 
 def _extract_agents(td2_content: str, session_id: str = "") -> list[dict]:
@@ -644,15 +698,15 @@ def _send_to_fabricator(session_id: str, agent: dict, agent_index: int = 0, tota
 @tool
 def plan_fabrication() -> str:
     """Analyse the technical design and existing factory agents to produce a fabrication plan.
-    Returns a JSON plan classifying each agent as: build, reuse, or external.
-    Present this to the user for confirmation before proceeding.
+    Returns a JSON result with the plan, a server-minted plan_id, and
+    server-authored next-action buttons for the UI.
 
     Returns:
-        JSON string with the fabrication plan for each agent.
+        JSON string with plan, plan_id, and actions for the next step.
     """
     session_id = request_context.current_session_id()
     try:
-        require_consent(session_id, "plan_fabrication")
+        consent_handle = require_consent(session_id, "plan_fabrication")
     except ConsentRequired:
         return json.dumps({
             "ok": False,
@@ -660,6 +714,10 @@ def plan_fabrication() -> str:
             "consent_action": "plan_fabrication",
             "summary": "I need your confirmation before I can plan the fabrication. "
                        "Please use the button above to confirm.",
+            "actions": [
+                {"consent": "plan_fabrication"},
+                {"label": "Not now", "value": "Not now"},
+            ],
         })
     td2 = s3_get(SECTION_KEY.format(session_id=session_id))
     if not td2:
@@ -692,16 +750,35 @@ def plan_fabrication() -> str:
             "spec": agent["spec"],
         })
 
-    return json.dumps(plan, indent=2)
+    # Store the plan in session memory so confirm_fabrication_plan can load
+    # it by plan_id — the model never re-types the spec JSON.
+    plan_id = _store_plan_in_session(session_id, plan)
+
+    # Consume consent AFTER the plan is successfully generated and stored.
+    consume_consent(consent_handle)
+
+    return json.dumps({
+        "ok": True,
+        "status": "planned",
+        "plan": plan,
+        "plan_id": plan_id,
+        "summary": f"Fabrication plan ready with {len(plan)} agent(s).",
+        "consent_question": "Want me to confirm the fabrication plan and start building?",
+        "actions": [
+            {"consent": "confirm_fabrication_plan"},
+            {"label": "✏️ I want to adjust the plan", "value": "I want to adjust the plan"},
+        ],
+    }, indent=2)
 
 
 @tool
-def confirm_fabrication_plan(plan_json: str) -> str:
+def confirm_fabrication_plan(plan_id: str) -> str:
     """Save the confirmed fabrication plan to S3 and queue 'build' agents for fabrication.
     Call this after the user has confirmed the plan from plan_fabrication.
+    The plan is loaded from session memory by plan_id — the model never re-types specs.
 
     Args:
-        plan_json: The confirmed plan JSON (may be modified by user confirmation)
+        plan_id: The plan_id returned by plan_fabrication.
 
     Returns:
         Summary of what was saved and queued.
@@ -711,7 +788,7 @@ def confirm_fabrication_plan(plan_json: str) -> str:
         return "Error: FABRICATOR_QUEUE_URL not set."
 
     try:
-        require_consent(session_id, "confirm_fabrication_plan")
+        consent_handle = require_consent(session_id, "confirm_fabrication_plan")
     except ConsentRequired:
         return json.dumps({
             "ok": False,
@@ -719,9 +796,25 @@ def confirm_fabrication_plan(plan_json: str) -> str:
             "consent_action": "confirm_fabrication_plan",
             "summary": "I need your confirmation before I can confirm the fabrication plan. "
                        "Please use the button above to confirm.",
+            "actions": [
+                {"consent": "confirm_fabrication_plan"},
+                {"label": "Not now", "value": "Not now"},
+            ],
         })
 
-    plan = json.loads(plan_json)
+    # Load plan from session memory by plan_id
+    plan = _load_plan_from_session(session_id, plan_id)
+    if plan is None:
+        return json.dumps({
+            "ok": False,
+            "status": "plan_not_found",
+            "summary": "The fabrication plan has expired or was not found. "
+                       "Please run plan_fabrication again to create a fresh plan.",
+            "actions": [
+                {"consent": "plan_fabrication"},
+                {"label": "Not now", "value": "Not now"},
+            ],
+        })
 
     # Write markdown plan to S3. The status table is wrapped in the owned-
     # section markers so the plan-document refresher (tools/plan_doc.py) can
@@ -754,6 +847,9 @@ def confirm_fabrication_plan(plan_json: str) -> str:
 
     reuse = [a["name"] for a in plan if a["action"] == "reuse"]
     external = [a["name"] for a in plan if a["action"] == "external"]
+
+    # Consume consent AFTER the privileged work (S3 write + SQS send) succeeds.
+    consume_consent(consent_handle)
 
     summary = f"Fabrication plan saved.\n"
     if queued:   summary += f"🔨 Queued for build: {', '.join(queued)}\n"
@@ -801,7 +897,7 @@ def retry_failed_fabrication(agent_names: str = "") -> str:
         )
 
     try:
-        require_consent(session_id, "retry_failed_fabrication")
+        consent_handle = require_consent(session_id, "retry_failed_fabrication")
     except ConsentRequired:
         return _retry_result(
             False, "consent_required",
@@ -940,6 +1036,9 @@ def retry_failed_fabrication(agent_names: str = "") -> str:
             f"I couldn't recover the build details for {_plain_join(missing)}, "
             f"so {tail} re-queued."
         )
+
+    # Consume consent AFTER the SQS sends succeed.
+    consume_consent(consent_handle)
 
     return _retry_result(
         True, "retried", " ".join(parts),

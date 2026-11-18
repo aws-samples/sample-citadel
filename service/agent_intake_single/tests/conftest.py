@@ -27,11 +27,19 @@ def _bind_default_session():
 def _bypass_consent(monkeypatch):
     """Auto-bypass the consent check for existing postfab tests.
 
-    Tests that explicitly test the consent gate (test_consent.py) provide
-    their own mocks. This fixture ensures all other postfab tests continue
-    to work without needing consent records in DynamoDB.
+    Tests that explicitly test the consent gate (test_consent.py,
+    test_consent_flow.py) provide their own mocks. This fixture ensures all
+    other postfab tests continue to work without needing consent records in
+    DynamoDB.
+
+    require_consent now returns a ConsentHandle (check-without-delete);
+    consume_consent deletes. Both are stubbed to no-ops here.
     """
+    from tools.consent import ConsentHandle
+    _noop_handle = ConsentHandle(session_id="bypass", action="bypass")
     import tools.postfab as postfab
-    monkeypatch.setattr(postfab, "require_consent", lambda session_id, action: None)
+    monkeypatch.setattr(postfab, "require_consent", lambda session_id, action: _noop_handle)
+    monkeypatch.setattr(postfab, "consume_consent", lambda handle: None)
     import tools.fabricate as fabricate
-    monkeypatch.setattr(fabricate, "require_consent", lambda session_id, action: None)
+    monkeypatch.setattr(fabricate, "require_consent", lambda session_id, action: _noop_handle)
+    monkeypatch.setattr(fabricate, "consume_consent", lambda handle: None)
