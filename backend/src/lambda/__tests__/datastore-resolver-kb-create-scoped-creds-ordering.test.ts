@@ -1,14 +1,15 @@
 /**
- * H4 §3d regression guard: on the KNOWLEDGE_BASE CREATE_NEW path the
- * resolver must inject config.dataStoreId + config.orgId BEFORE calling
- * adapter.requiredPolicies(), because KnowledgeBaseAdapter.requiredPolicies
- * derives its (non-empty) provision policy from those ids and returns
- * `provision: []` when they are absent. If the ids are injected after the
- * call, no scoped role is minted, dispatchCreds() yields `undefined` for
- * the IAM_ROLE adapter, and provision is dispatched with no credentials.
+ * Continuum C3 (PR-2) supersedes the H4 §3d test this file originally
+ * contained: `ensureRole` is now called from `.connect`, never
+ * `.provision`, and only AFTER `adapter.provision` has run on the
+ * platform path (no scoped credentials dispatched to provision).
  *
- * The mock adapter below reproduces the real adapter's id-dependent
- * requiredPolicies contract instead of hard-coding a policy list.
+ * The mock adapter below reproduces the real KnowledgeBaseAdapter's
+ * id-dependent `requiredPolicies` contract: `.connect` is non-empty only
+ * once `knowledgeBaseId`/`collectionId` are present in config — which, for
+ * CREATE_NEW, only happens AFTER `adapter.provision` has run and enriched
+ * `config` (CIT-299 config-writeback, persisted by the resolver before
+ * `.connect` is computed).
  */
 
 const mockDynamoSend = jest.fn();
@@ -56,7 +57,8 @@ jest.mock("@aws-sdk/client-secrets-manager", () => ({
     .mockImplementation((input) => ({ _type: "DeleteSecret", input })),
 }));
 
-const idsSeenAtCallTime: Array<{ dataStoreId: unknown; orgId: unknown }> = [];
+const idsSeenAtPreflightTime: Array<{ dataStoreId: unknown; orgId: unknown }> =
+  [];
 
 const mockAdapter = {
   category: "datastore" as const,
@@ -67,40 +69,42 @@ const mockAdapter = {
     authentication: { method: "IAM_ROLE", fields: [], secretStructure: {} },
     configuration: { required: [], optional: [], ssmParameters: [] },
   },
-  // Mirrors KnowledgeBaseAdapter.requiredPolicies: provision policy exists
-  // ONLY when the resolver has already injected dataStoreId + orgId.
-  requiredPolicies: jest.fn(
-    (config: Record<string, unknown>, accountId: string) => {
-      // Snapshot at call time: the resolver mutates this same object later,
-      // so inspecting mock.calls[0][0] after the fact would be misleading.
-      idsSeenAtCallTime.push({
-        dataStoreId: config.dataStoreId,
-        orgId: config.orgId,
-      });
-      const hasIds =
-        typeof config.dataStoreId === "string" &&
-        typeof config.orgId === "string";
-      return {
-        provision: hasIds
-          ? [
-              {
-                actions: ["bedrock:CreateKnowledgeBase"],
-                resources: ["*"],
-              },
-              {
-                actions: ["iam:PassRole"],
-                resources: [
-                  `arn:aws:iam::${accountId}:role/citadel-ds-kb-svc-${config.dataStoreId}`,
-                ],
-              },
-            ]
-          : [],
-        connect: [],
-      };
-    },
-  ),
-  provision: jest.fn().mockResolvedValue({
-    resourceArn: "arn:aws:bedrock:us-east-1:123:knowledge-base/KB1",
+  // Mirrors KnowledgeBaseAdapter.requiredPolicies: `.connect` is non-empty
+  // ONLY once knowledgeBaseId + collectionId are present — i.e. only after
+  // provision() has enriched config.
+  requiredPolicies: jest.fn((config: Record<string, unknown>) => {
+    const hasConnectIds =
+      typeof config.knowledgeBaseId === "string" &&
+      typeof config.collectionId === "string";
+    return {
+      provision: [],
+      connect: hasConnectIds
+        ? [
+            {
+              actions: ["bedrock:GetKnowledgeBase", "bedrock:Retrieve"],
+              resources: [
+                `arn:aws:bedrock:us-east-1:123456789012:knowledge-base/${config.knowledgeBaseId}`,
+              ],
+            },
+          ]
+        : [],
+    };
+  }),
+  preflight: jest.fn((config: Record<string, unknown>) => {
+    idsSeenAtPreflightTime.push({
+      dataStoreId: config.dataStoreId,
+      orgId: config.orgId,
+    });
+    return Promise.resolve(undefined);
+  }),
+  // Mirrors the real adapter: provision enriches config with the
+  // resolved knowledgeBaseId/collectionId (CIT-299).
+  provision: jest.fn((config: Record<string, unknown>) => {
+    config.knowledgeBaseId = "KB1";
+    config.collectionId = "COLL1";
+    return Promise.resolve({
+      resourceArn: "arn:aws:bedrock:us-east-1:123:knowledge-base/KB1",
+    });
   }),
   connect: jest.fn().mockResolvedValue(undefined),
   disconnect: jest.fn().mockResolvedValue(undefined),
@@ -137,10 +141,10 @@ import { handler } from "../datastore-resolver";
 
 type HandlerEvent = Parameters<typeof handler>[0];
 
-describe("createDataStore KNOWLEDGE_BASE CREATE_NEW — ids injected before requiredPolicies", () => {
+describe("createDataStore KNOWLEDGE_BASE CREATE_NEW — provision runs before connect-only role mint", () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    idsSeenAtCallTime.length = 0;
+    idsSeenAtPreflightTime.length = 0;
     jest.useFakeTimers({ advanceTimers: true });
     mockDynamoSend.mockImplementation((cmd: { _type?: string }) => {
       if (cmd._type === "Query") return Promise.resolve({ Items: [] });
@@ -177,20 +181,37 @@ describe("createDataStore KNOWLEDGE_BASE CREATE_NEW — ids injected before requ
     identity: { username: "test-user", "custom:organization": "org-test" },
   } as unknown as HandlerEvent;
 
-  test("requiredPolicies receives config with dataStoreId and orgId already injected", async () => {
+  test("preflight receives config with dataStoreId and orgId already injected", async () => {
     await handler(event);
-    expect(idsSeenAtCallTime.length).toBeGreaterThan(0);
-    expect(idsSeenAtCallTime[0]).toEqual({
+    expect(idsSeenAtPreflightTime.length).toBeGreaterThan(0);
+    expect(idsSeenAtPreflightTime[0]).toEqual({
       dataStoreId: "test-uuid",
       orgId: "org-test",
     });
   });
 
-  test("a scoped role is minted and vended, and provision is dispatched with the scoped credentials", async () => {
+  test("provision runs before ensureRole, with no scoped credentials dispatched", async () => {
+    await handler(event);
+    expect(mockAdapter.provision).toHaveBeenCalledTimes(1);
+    expect(mockAdapter.provision.mock.calls[0][1]).toBeUndefined();
+    const provisionOrder = mockAdapter.provision.mock.invocationCallOrder[0];
+    const ensureRoleOrder =
+      mockPolicyManager.ensureRole.mock.invocationCallOrder[0];
+    expect(provisionOrder).toBeLessThan(ensureRoleOrder);
+  });
+
+  test("a connect-only scoped role is minted and vended AFTER provision enriches config", async () => {
     await handler(event);
     expect(mockPolicyManager.ensureRole).toHaveBeenCalledTimes(1);
+    const policiesArg = mockPolicyManager.ensureRole.mock.calls[0][1];
+    expect(policiesArg).toEqual([
+      {
+        actions: ["bedrock:GetKnowledgeBase", "bedrock:Retrieve"],
+        resources: [
+          "arn:aws:bedrock:us-east-1:123456789012:knowledge-base/KB1",
+        ],
+      },
+    ]);
     expect(mockPolicyManager.assumeScopedRole).toHaveBeenCalledTimes(1);
-    expect(mockAdapter.provision).toHaveBeenCalledTimes(1);
-    expect(mockAdapter.provision.mock.calls[0][1]).toBe(SCOPED);
   });
 });
