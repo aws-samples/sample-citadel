@@ -478,35 +478,30 @@ describe("agent-config-resolver", () => {
       expect(result.alreadyActive).toEqual([]);
     });
 
-    test("returns empty arrays when no agents match the project", async () => {
+    test("throws ValidationError when no agents match the project", async () => {
       // GSI returns empty for proj-1
       dynamoMock.on(QueryCommand).resolves({ Items: [] });
 
-      const result = await handler(
-        makeEvent("activateProjectAgents", { projectId: "proj-1" }),
-      );
+      await expect(
+        handler(
+          makeEvent("activateProjectAgents", { projectId: "proj-1" }),
+        ),
+      ).rejects.toThrow("ValidationError: No agents found for project proj-1");
 
       expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
-      expect(result).toEqual(
-        expect.objectContaining({
-          activated: [],
-          failed: [],
-          alreadyActive: [],
-        }),
-      );
     });
 
-    test("returns empty when GSI has no rows (replaces old throttled-partial test)", async () => {
+    test("throws ValidationError when GSI has no rows (replaces old throttled-partial test)", async () => {
       // The GSI path doesn't throw RegistryThrottledError; it simply
-      // returns whatever the GSI has. This test verifies graceful behaviour.
+      // returns whatever the GSI has. This test verifies the zero-records error.
       dynamoMock.on(QueryCommand).resolves({ Items: [] });
 
-      const result = await handler(
-        makeEvent("activateProjectAgents", { projectId: "proj-1" }),
-      );
+      await expect(
+        handler(
+          makeEvent("activateProjectAgents", { projectId: "proj-1" }),
+        ),
+      ).rejects.toThrow("ValidationError: No agents found for project proj-1");
 
-      expect(result.activated).toEqual([]);
-      expect(result.failed).toEqual([]);
       expect(mockSubmitForApproval).not.toHaveBeenCalled();
     });
 

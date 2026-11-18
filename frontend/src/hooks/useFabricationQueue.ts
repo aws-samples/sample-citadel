@@ -9,13 +9,13 @@
  * (in-chat stream) so both share the same polling cadence and state.
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useContext } from 'react';
 import {
   fabricatorQueueService,
   type FabricationQueueItem,
   type FabricationEvent,
 } from '../services/fabricatorQueueService';
-import { useOrganization } from '../contexts/OrganizationContext';
+import { OrganizationContext } from '../contexts/OrganizationContext';
 
 const TERMINAL_STATUSES = new Set<string>(['COMPLETED', 'FAILED']);
 const POLL_INTERVAL_MS = 10_000;
@@ -37,8 +37,11 @@ export function useFabricationQueue(projectId: string): UseFabricationQueueRetur
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const mountedRef = useRef(true);
 
-  const { currentUser } = useOrganization();
-  const callerOrgId = currentUser?.organization ?? null;
+  // Optional context accessor: returns null outside OrganizationProvider
+  // instead of throwing, so the hook is safe in tests and pages without
+  // the provider.
+  const orgCtx = useContext(OrganizationContext);
+  const callerOrgId = orgCtx?.currentUser?.organization ?? null;
 
   const loadQueue = useCallback(async () => {
     try {

@@ -16,21 +16,31 @@ jest.mock('../../services/fabricatorQueueService', () => ({
   },
 }));
 
-const mockUseOrganization = jest.fn();
-jest.mock('../../contexts/OrganizationContext', () => ({
-  __esModule: true,
-  useOrganization: () => mockUseOrganization(),
-}));
+jest.mock('../../contexts/OrganizationContext', () => {
+  const React = require('react');
+  const ctx = React.createContext(undefined);
+  return {
+    __esModule: true,
+    OrganizationContext: ctx,
+    useOrganization: () => {
+      const value = React.useContext(ctx);
+      if (!value) throw new Error('useOrganization must be used within an OrganizationProvider');
+      return value;
+    },
+  };
+});
 
 jest.mock('sonner', () => ({
   __esModule: true,
   toast: { success: jest.fn(), error: jest.fn() },
 }));
 
+import React from 'react';
 import { renderHook, act, waitFor } from '@testing-library/react';
 import { fabricatorQueueService } from '../../services/fabricatorQueueService';
 import type { FabricationQueueItem, FabricationEvent } from '../../services/fabricatorQueueService';
 import { useFabricationQueue } from '../useFabricationQueue';
+import { OrganizationContext } from '../../contexts/OrganizationContext';
 
 const mockGetQueue = fabricatorQueueService.getFabricatorQueue as jest.MockedFunction<
   typeof fabricatorQueueService.getFabricatorQueue
@@ -40,15 +50,28 @@ const mockSubscribe = fabricatorQueueService.subscribeToFabricationEvents as jes
 >;
 
 const CALLER_ORG_ID = 'org-caller-1';
-function withCallerOrg(org: string | null = CALLER_ORG_ID) {
-  mockUseOrganization.mockReturnValue({
+function makeOrgValue(org: string | null = CALLER_ORG_ID) {
+  return {
     currentUser: org ? { organization: org } : null,
     selectedOrganization: null,
     setSelectedOrganization: jest.fn(),
-    organizations: [],
+    organizations: [] as string[],
     isAdmin: false,
+    canApproveExecutions: false,
     loading: false,
-  });
+  };
+}
+
+/** Wrapper that provides OrganizationContext so the hook resolves callerOrgId. */
+function makeWrapper(org: string | null = CALLER_ORG_ID) {
+  const value = makeOrgValue(org);
+  return function Wrapper({ children }: { children: React.ReactNode }) {
+    return React.createElement(
+      (OrganizationContext as React.Context<any>).Provider,
+      { value },
+      children,
+    );
+  };
 }
 
 const MIXED_ITEMS: FabricationQueueItem[] = [
@@ -67,7 +90,6 @@ describe('useFabricationQueue(projectId)', () => {
     jest.useFakeTimers();
     mockSubscribe.mockReturnValue(() => {});
     mockGetQueue.mockResolvedValue([]);
-    withCallerOrg();
   });
 
   afterEach(() => {
@@ -75,13 +97,13 @@ describe('useFabricationQueue(projectId)', () => {
   });
 
   it('passes projectId to getFabricatorQueue', async () => {
-    renderHook(() => useFabricationQueue('proj-42'));
+    renderHook(() => useFabricationQueue('proj-42'), { wrapper: makeWrapper() });
     await waitFor(() => expect(mockGetQueue).toHaveBeenCalledWith('proj-42'));
   });
 
   it('polls every 10 s while any item is non-terminal', async () => {
     mockGetQueue.mockResolvedValue(MIXED_ITEMS);
-    const { result } = renderHook(() => useFabricationQueue('proj-1'));
+    const { result } = renderHook(() => useFabricationQueue('proj-1'), { wrapper: makeWrapper() });
 
     // Wait for initial load and state update
     await waitFor(() => expect(result.current.items.length).toBe(2));
@@ -99,7 +121,7 @@ describe('useFabricationQueue(projectId)', () => {
 
   it('stops polling when all items become terminal', async () => {
     mockGetQueue.mockResolvedValue(ALL_DONE);
-    renderHook(() => useFabricationQueue('proj-1'));
+    renderHook(() => useFabricationQueue('proj-1'), { wrapper: makeWrapper() });
 
     await waitFor(() => expect(mockGetQueue).toHaveBeenCalledTimes(1));
 
@@ -110,7 +132,7 @@ describe('useFabricationQueue(projectId)', () => {
 
   it('stops polling on unmount', async () => {
     mockGetQueue.mockResolvedValue(MIXED_ITEMS);
-    const { unmount } = renderHook(() => useFabricationQueue('proj-1'));
+    const { unmount } = renderHook(() => useFabricationQueue('proj-1'), { wrapper: makeWrapper() });
 
     await waitFor(() => expect(mockGetQueue).toHaveBeenCalledTimes(1));
     unmount();
@@ -125,7 +147,7 @@ describe('useFabricationQueue(projectId)', () => {
     let emit: (e: FabricationEvent) => void = () => {};
     mockSubscribe.mockImplementation((onEvent) => { emit = onEvent; return () => {}; });
 
-    const { result } = renderHook(() => useFabricationQueue('proj-1'));
+    const { result } = renderHook(() => useFabricationQueue('proj-1'), { wrapper: makeWrapper() });
     await waitFor(() => expect(result.current.items.length).toBe(2));
 
     act(() => {
@@ -139,13 +161,13 @@ describe('useFabricationQueue(projectId)', () => {
 
   it('exposes allTerminal=true when every item is COMPLETED or FAILED', async () => {
     mockGetQueue.mockResolvedValue(ALL_DONE);
-    const { result } = renderHook(() => useFabricationQueue('proj-1'));
+    const { result } = renderHook(() => useFabricationQueue('proj-1'), { wrapper: makeWrapper() });
     await waitFor(() => expect(result.current.allTerminal).toBe(true));
   });
 
   it('exposes allBuilt=true when every item is COMPLETED', async () => {
     mockGetQueue.mockResolvedValue(ALL_DONE);
-    const { result } = renderHook(() => useFabricationQueue('proj-1'));
+    const { result } = renderHook(() => useFabricationQueue('proj-1'), { wrapper: makeWrapper() });
     await waitFor(() => expect(result.current.allBuilt).toBe(true));
   });
 
@@ -154,9 +176,18 @@ describe('useFabricationQueue(projectId)', () => {
       { requestId: 'r1', agentName: 'a', taskDescription: '', status: 'COMPLETED', submittedAt: '' },
       { requestId: 'r2', agentName: 'b', taskDescription: '', status: 'FAILED', submittedAt: '' },
     ]);
-    const { result } = renderHook(() => useFabricationQueue('proj-1'));
+    const { result } = renderHook(() => useFabricationQueue('proj-1'), { wrapper: makeWrapper() });
     await waitFor(() => expect(result.current.items.length).toBe(2));
     expect(result.current.allBuilt).toBe(false);
     expect(result.current.allTerminal).toBe(true);
+  });
+
+  it('works without OrganizationProvider (no throw, no subscription)', async () => {
+    mockGetQueue.mockResolvedValue(ALL_DONE);
+    // No wrapper — context returns undefined, callerOrgId is null.
+    const { result } = renderHook(() => useFabricationQueue('proj-1'));
+    await waitFor(() => expect(result.current.allBuilt).toBe(true));
+    // No subscription since there's no orgId.
+    expect(mockSubscribe).not.toHaveBeenCalled();
   });
 });

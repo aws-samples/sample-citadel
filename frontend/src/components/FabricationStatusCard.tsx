@@ -158,7 +158,7 @@ export function FabricationStatusCard({ items, projectId, allBuilt }: Fabricatio
 
       {/* Activation result */}
       {activation.kind === 'result' && (
-        <div className="mt-1.5 text-xs space-y-0.5">
+        <div className="mt-1.5 text-xs flex flex-col gap-0.5">
           {activation.result.activated.length > 0 && (
             <p className="text-chart-2">{activation.result.activated.length} activated</p>
           )}
