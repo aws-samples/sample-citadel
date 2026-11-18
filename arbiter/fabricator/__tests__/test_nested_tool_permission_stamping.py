@@ -99,4 +99,4 @@ class TestNestedCreateCustomToolStampsPermissions:
 
         call_kwargs = mock_client.create_registry_record.call_args[1]
         custom_data = json.loads(call_kwargs["descriptors"]["custom"]["data"])
-        assert custom_data["requiredPermissions"] == {"integrations": [], "dataStores": []}
+        assert custom_data["requiredPermissions"] == {"integrations": [], "dataStores": [], "models": []}
