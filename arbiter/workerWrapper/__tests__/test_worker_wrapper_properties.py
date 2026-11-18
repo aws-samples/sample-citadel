@@ -73,7 +73,7 @@ class TestRunAgentSubprocessProperties:
                 import index
 
                 with patch('subprocess.run', return_value=mock_result) as mock_run:
-                    index.run_agent_in_subprocess(request, creds)
+                    index.run_agent_in_subprocess(request, creds, credential_mode='scoped' if creds else 'none')
 
                     call_kwargs = mock_run.call_args[1]
                     child_env = call_kwargs['env']
@@ -83,9 +83,12 @@ class TestRunAgentSubprocessProperties:
                         assert child_env['AWS_SECRET_ACCESS_KEY'] == creds['secretAccessKey']
                         assert child_env['AWS_SESSION_TOKEN'] == creds['sessionToken']
                     else:
-                        # Credentials should be removed from child env
-                        assert 'AWS_ACCESS_KEY_ID' not in child_env or \
-                               child_env.get('AWS_ACCESS_KEY_ID') == os.environ.get('AWS_ACCESS_KEY_ID')
+                        # PR-4 fail-closed: credential_mode='none' always SCRUBS
+                        # ambient AWS credential keys — they never survive into
+                        # the child env (the superseded ambient-inherit branch
+                        # is gone).
+                        import credential_guard as cg
+                        assert not (set(child_env) & cg.AMBIENT_AWS_KEYS)
 
     @given(request=request_dicts)
     @settings(max_examples=30, suppress_health_check=[HealthCheck.too_slow])
@@ -115,7 +118,7 @@ class TestRunAgentSubprocessProperties:
                 import index
 
                 with patch('subprocess.run', return_value=mock_result):
-                    index.run_agent_in_subprocess(request, creds)
+                    index.run_agent_in_subprocess(request, creds, credential_mode='scoped')
 
                 # Verify parent env wasn't polluted with scoped creds
                 assert os.environ.get('AWS_ACCESS_KEY_ID') != creds['accessKeyId']
@@ -139,7 +142,7 @@ class TestRunAgentSubprocessProperties:
                 import index
 
                 with patch('subprocess.run', return_value=mock_result):
-                    result = index.run_agent_in_subprocess({}, None)
+                    result = index.run_agent_in_subprocess({}, None, credential_mode='none')
                     assert "could not be completed" in result
 
     def test_invalid_json_stdout_returns_raw(self):
@@ -160,7 +163,7 @@ class TestRunAgentSubprocessProperties:
                 import index
 
                 with patch('subprocess.run', return_value=mock_result):
-                    result = index.run_agent_in_subprocess({}, None)
+                    result = index.run_agent_in_subprocess({}, None, credential_mode='none')
                     assert result == "not json output"
 
     def test_empty_stdout_returns_no_output_message(self):
@@ -181,7 +184,7 @@ class TestRunAgentSubprocessProperties:
                 import index
 
                 with patch('subprocess.run', return_value=mock_result):
-                    result = index.run_agent_in_subprocess({}, None)
+                    result = index.run_agent_in_subprocess({}, None, credential_mode='none')
                     assert result == "Agent produced no output"
 
 
@@ -226,7 +229,7 @@ class TestRunAgentUsageSinkEnvelope:
                 index = self._fresh_index()
                 with patch('subprocess.run', return_value=mock_result):
                     sink = []
-                    result = index.run_agent_in_subprocess({}, None, usage_sink=sink)
+                    result = index.run_agent_in_subprocess({}, None, usage_sink=sink, credential_mode='none')
                     assert result == "ok"
                     assert sink == records
 
@@ -245,7 +248,7 @@ class TestRunAgentUsageSinkEnvelope:
             with patch('boto3.resource'), patch('boto3.client'):
                 index = self._fresh_index()
                 with patch('subprocess.run', return_value=mock_result):
-                    result = index.run_agent_in_subprocess({}, None)
+                    result = index.run_agent_in_subprocess({}, None, credential_mode='none')
                     assert result == "ok"
 
     def test_old_response_only_envelope_still_parses_usage_sink_stays_empty(self):
@@ -265,7 +268,7 @@ class TestRunAgentUsageSinkEnvelope:
                 index = self._fresh_index()
                 with patch('subprocess.run', return_value=mock_result):
                     sink = []
-                    result = index.run_agent_in_subprocess({}, None, usage_sink=sink)
+                    result = index.run_agent_in_subprocess({}, None, usage_sink=sink, credential_mode='none')
                     assert result == "legacy-ok"
                     assert sink == []
 
@@ -285,7 +288,7 @@ class TestRunAgentUsageSinkEnvelope:
                 index = self._fresh_index()
                 with patch('subprocess.run', return_value=mock_result):
                     sink = []
-                    result = index.run_agent_in_subprocess({}, None, usage_sink=sink)
+                    result = index.run_agent_in_subprocess({}, None, usage_sink=sink, credential_mode='none')
                     assert result == "plain text output"
                     assert sink == []
 
@@ -306,7 +309,7 @@ class TestRunAgentUsageSinkEnvelope:
                 index = self._fresh_index()
                 with patch('subprocess.run', return_value=mock_result):
                     sink = []
-                    result = index.run_agent_in_subprocess({}, None, usage_sink=sink)
+                    result = index.run_agent_in_subprocess({}, None, usage_sink=sink, credential_mode='none')
                     assert result == "ok"
                     assert sink == []
 
@@ -324,7 +327,7 @@ class TestRunAgentUsageSinkEnvelope:
             with patch('boto3.resource'), patch('boto3.client'):
                 index = self._fresh_index()
                 with patch('subprocess.run', return_value=mock_result):
-                    result = index.run_agent_in_subprocess({}, None, usage_sink=None)
+                    result = index.run_agent_in_subprocess({}, None, usage_sink=None, credential_mode='none')
                     assert result == "ok"
 
 
@@ -468,17 +471,29 @@ class TestGetScopedCredentialsProperties:
                 result = index.get_scoped_credentials("agent1", {"actions": ["s3:GetObject"]})
                 assert result is None
 
-    def test_returns_none_without_permissions(self):
-        """Returns None when required_permissions is empty/None."""
+    def test_returns_none_without_permissions_but_org_present(self):
+        """PR-4 (owner decision 5750aeec): get_scoped_credentials no longer
+        special-cases empty/None required_permissions — that deny-default
+        decision now belongs to the dispatch GATE
+        (``_is_absent_or_empty_permissions`` / ``_refuse_dispatch_fail_closed``),
+        not this function. With an org_id present and no permissions, the
+        vender is still invoked (and in this mocked environment returns no
+        'credentials' key, so the result is None) — the function itself does
+        not fail open OR closed on empty permissions; the CALLER decides."""
         with patch.dict('os.environ', {
             'AGENT_CONFIG_TABLE': 'test-table',
             'CREDENTIAL_VENDER_FUNCTION': 'test-fn',
         }):
-            with patch('boto3.resource'), patch('boto3.client'):
+            with patch('boto3.resource'):
                 import importlib
                 import sys
                 sys.modules.pop('index', None)
                 import index
 
-                assert index.get_scoped_credentials("agent1", None) is None
-                assert index.get_scoped_credentials("agent1", {}) is None
+                mock_lambda = MagicMock()
+                mock_lambda.invoke.return_value = {
+                    'Payload': MagicMock(read=lambda: json.dumps({}).encode())
+                }
+                with patch.object(index, '_get_lambda_client', return_value=mock_lambda):
+                    assert index.get_scoped_credentials("agent1", None, org_id="org-1") is None
+                    assert index.get_scoped_credentials("agent1", {}, org_id="org-1") is None

@@ -59,7 +59,7 @@ class TestWorkflowNodeRouting:
             with patch('boto3.resource'), patch('boto3.client', return_value=mock_events):
                 index = _fresh_index()
                 with patch.object(index, 'load_config_from_dynamodb',
-                                  return_value={'config': {'filename': 'agent.py'}}), \
+                                  return_value={'config': {'filename': 'agent.py', 'credentialMode': 'none'}}), \
                      patch.object(index, 'get_scoped_credentials', return_value=None), \
                      patch.object(index, 'load_file_from_s3_into_tmp'), \
                      patch('subprocess.run', return_value=mock_result):
@@ -101,7 +101,7 @@ class TestWorkflowNodeRouting:
             with patch('boto3.resource'), patch('boto3.client', return_value=mock_events):
                 index = _fresh_index()
                 with patch.object(index, 'load_config_from_dynamodb',
-                                  return_value={'config': {'filename': 'agent.py'}}), \
+                                  return_value={'config': {'filename': 'agent.py', 'credentialMode': 'none'}}), \
                      patch.object(index, 'get_scoped_credentials', return_value=None), \
                      patch.object(index, 'load_file_from_s3_into_tmp'), \
                      patch('subprocess.run', return_value=mock_result):
@@ -123,7 +123,7 @@ class TestWorkflowNodeRouting:
             with patch('boto3.resource'), patch('boto3.client', return_value=mock_events):
                 index = _fresh_index()
                 with patch.object(index, 'load_config_from_dynamodb',
-                                  return_value={'config': {'filename': 'agent.py'}}), \
+                                  return_value={'config': {'filename': 'agent.py', 'credentialMode': 'none'}}), \
                      patch.object(index, 'get_scoped_credentials', return_value=None), \
                      patch.object(index, 'load_file_from_s3_into_tmp'), \
                      patch('subprocess.run', return_value=mock_result):
@@ -163,7 +163,7 @@ class TestSupervisorTaskUnchanged:
             with patch('boto3.resource'), patch('boto3.client', return_value=mock_events):
                 index = _fresh_index()
                 with patch.object(index, 'load_config_from_dynamodb',
-                                  return_value={'config': {'filename': 'agent.py', 'tools': []}}), \
+                                  return_value={'config': {'filename': 'agent.py', 'tools': [], 'credentialMode': 'none'}}), \
                      patch.object(index, 'get_scoped_credentials', return_value=None), \
                      patch.object(index, 'load_file_from_s3_into_tmp'), \
                      patch.object(index, 'build_subprocess_env', return_value={}), \
@@ -206,7 +206,7 @@ class TestWorkflowNodeGovernanceEnv:
             with patch('boto3.resource'), patch('boto3.client', return_value=mock_events):
                 index = _fresh_index()
                 with patch.object(index, 'load_config_from_dynamodb',
-                                  return_value={'config': {'filename': 'agent.py'}}), \
+                                  return_value={'config': {'filename': 'agent.py', 'credentialMode': 'none'}}), \
                      patch.object(index, 'get_scoped_credentials', return_value=None), \
                      patch.object(index, 'load_file_from_s3_into_tmp'), \
                      patch.object(index, 'run_agent_in_subprocess',
@@ -233,7 +233,7 @@ class TestWorkflowNodeGovernanceEnv:
             with patch('boto3.resource'), patch('boto3.client', return_value=mock_events):
                 index = _fresh_index()
                 with patch.object(index, 'load_config_from_dynamodb',
-                                  return_value={'config': {'filename': 'agent.py'}}), \
+                                  return_value={'config': {'filename': 'agent.py', 'credentialMode': 'none'}}), \
                      patch.object(index, 'get_scoped_credentials', return_value=None), \
                      patch.object(index, 'load_file_from_s3_into_tmp'), \
                      patch.object(index, 'run_agent_in_subprocess',

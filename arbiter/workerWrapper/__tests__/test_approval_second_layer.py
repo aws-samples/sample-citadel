@@ -100,7 +100,7 @@ class TestWorkflowNodePathSecondLayer:
                                   return_value=_make_state('shadow')), \
                      patch.object(index, 'load_config_from_dynamodb',
                                   return_value={
-                                      'config': {'filename': 'agent.py'},
+                                      'config': {'filename': 'agent.py', 'credentialMode': 'none'},
                                       'registryStatus': 'REJECTED',
                                   }), \
                      patch.object(index, 'get_scoped_credentials', return_value=None), \
@@ -123,7 +123,7 @@ class TestWorkflowNodePathSecondLayer:
                                   return_value=_make_state('strict')), \
                      patch.object(index, 'load_config_from_dynamodb',
                                   return_value={
-                                      'config': {'filename': 'agent.py'},
+                                      'config': {'filename': 'agent.py', 'credentialMode': 'none'},
                                       'registryStatus': 'APPROVED',
                                   }), \
                      patch.object(index, 'get_scoped_credentials', return_value=None), \
@@ -148,7 +148,7 @@ class TestWorkflowNodePathSecondLayer:
                 ), \
                      patch.object(index, 'load_config_from_dynamodb',
                                   return_value={
-                                      'config': {'filename': 'agent.py'},
+                                      'config': {'filename': 'agent.py', 'credentialMode': 'none'},
                                       'createdAt': '2025-01-01T00:00:00Z',
                                   }), \
                      patch.object(index, 'get_scoped_credentials', return_value=None), \
@@ -189,7 +189,7 @@ class TestSupervisorTaskPathSecondLayer:
                                   return_value=_make_state('shadow')), \
                      patch.object(index, 'load_config_from_dynamodb',
                                   return_value={
-                                      'config': {'filename': 'agent.py', 'tools': []},
+                                      'config': {'filename': 'agent.py', 'tools': [], 'credentialMode': 'none'},
                                       'registryStatus': 'REJECTED',
                                   }), \
                      patch.object(index, 'get_scoped_credentials', return_value=None), \
@@ -209,7 +209,7 @@ class TestSupervisorTaskPathSecondLayer:
                                   return_value=_make_state('strict')), \
                      patch.object(index, 'load_config_from_dynamodb',
                                   return_value={
-                                      'config': {'filename': 'agent.py', 'tools': []},
+                                      'config': {'filename': 'agent.py', 'tools': [], 'credentialMode': 'none'},
                                       'registryStatus': 'APPROVED',
                                   }), \
                      patch.object(index, 'get_scoped_credentials', return_value=None), \
@@ -231,7 +231,7 @@ class TestSupervisorTaskPathSecondLayer:
                 ), \
                      patch.object(index, 'load_config_from_dynamodb',
                                   return_value={
-                                      'config': {'filename': 'agent.py', 'tools': []},
+                                      'config': {'filename': 'agent.py', 'tools': [], 'credentialMode': 'none'},
                                       'createdAt': '2025-01-01T00:00:00Z',
                                   }), \
                      patch.object(index, 'get_scoped_credentials', return_value=None), \

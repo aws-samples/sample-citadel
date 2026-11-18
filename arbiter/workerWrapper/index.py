@@ -40,6 +40,20 @@ from worker_governance import (
     get_blocked_tools,
 )
 
+# PR-4 fail-closed credentialing (owner decision 5750aeec: FAIL CLOSED, no
+# grandfathering). Bundle-sibling, top-level importable module shipped
+# alongside this file in every worker Lambda bundle — no try/except fallback
+# needed (unlike the layer-staged imports above): credential_guard.py is
+# always co-deployed with index.py.
+from credential_guard import (
+    CredentialRefusal,
+    NO_ORG,
+    NO_REQUIRED_PERMISSIONS,
+    VEND_FAILED,
+    VEND_REFUSED,
+    build_agent_credential_env,
+)
+
 # Shared workflow node dispatch/result contract (source of truth co-owned with
 # the step runner). Imported defensively: a workflow-node message only appears
 # once the step runner's dispatch path is live, and the shared module is
@@ -765,6 +779,104 @@ def _merge_required_permissions(agent_permissions: dict | None, tool_bindings: d
 
     return merged if merged else None
 
+
+# ---------------------------------------------------------------------------
+# PR-4 dispatch-time fail-closed credential gate (owner decision 5750aeec:
+# FAIL CLOSED, no grandfathering). Shared by BOTH worker dispatch paths
+# (workflow-node and supervisor task) so the refusal contract — what counts
+# as "no permissions", what the no-cloud sentinel looks like, and how a
+# refusal is logged/ledgered — cannot drift between them.
+# ---------------------------------------------------------------------------
+
+NO_CLOUD_SENTINEL = {"credentialMode": "none"}
+
+
+def _is_absent_or_empty_permissions(required_permissions: dict | None) -> bool:
+    """True when *required_permissions* declares no resource access at all —
+    the deny-default condition the fail-closed gate refuses on (unless the
+    explicit no-cloud sentinel is set)."""
+    if not required_permissions:
+        return True
+    return not (
+        required_permissions.get('integrations') or required_permissions.get('dataStores')
+    )
+
+
+def _resolve_credential_mode(config: dict, required_permissions: dict | None) -> str:
+    """Resolve the explicit credential mode for this dispatch: ``'none'``
+    IFF the agent config (or its ``requiredPermissions`` dict) carries the
+    explicit no-cloud sentinel ``{"credentialMode": "none"}`` / top-level
+    ``credentialMode == "none"``; ``'scoped'`` otherwise. This is the ONLY
+    way an agent with no declared resource access may still run — every
+    other absent/empty case is refused by :func:`_is_absent_or_empty_permissions`."""
+    if config.get('credentialMode') == 'none':
+        return 'none'
+    if isinstance(required_permissions, dict) and required_permissions.get('credentialMode') == 'none':
+        return 'none'
+    return 'scoped'
+
+
+def _write_credential_refusal_finding(
+    *, agent_id: str, reason: str, workflow_id: str | None, org_id: str | None = None,
+) -> None:
+    """Best-effort governance ledger write for a fail-closed credential
+    refusal. Layer-staged import (mirrors ``tool_breaker_hook._emit_finding``
+    / ``governed_tool_handler``'s pattern elsewhere in this bundle): a
+    missing ``governance`` package must never prevent the refusal itself —
+    the structured ERROR log (written by both call sites before this helper
+    runs) is the backstop."""
+    try:
+        from governance.models import ArbitrationDecision, GovernanceFinding
+        from governance.ledger import write_finding
+    except ImportError as exc:  # pragma: no cover — Lambda bundle path before follow-up
+        print(json.dumps({
+            'level': 'WARN',
+            'component': 'WorkerWrapper',
+            'action': 'credential_refusal_finding_import_failed',
+            'agentId': agent_id,
+            'error': str(exc),
+        }))
+        return
+    try:
+        write_finding(GovernanceFinding.create(
+            workflow_id=workflow_id or "unknown-workflow",
+            decision=ArbitrationDecision.DENY,
+            requesting_agent=agent_id or "unknown-agent",
+            target_agent=agent_id or "unknown-agent",
+            reason=f"credential_refusal_fail_closed:{reason}",
+            org_id=org_id or None,
+        ))
+    except Exception as exc:  # noqa: BLE001 — ledger write must never mask the refusal
+        print(json.dumps({
+            'level': 'WARN',
+            'component': 'WorkerWrapper',
+            'action': 'credential_refusal_finding_write_failed',
+            'agentId': agent_id,
+            'error': str(exc),
+        }))
+
+
+def _refuse_dispatch_fail_closed(
+    *, agent_id: str, reason: str, workflow_id: str | None, org_id: str | None = None,
+) -> None:
+    """Log + ledger a fail-closed dispatch refusal, then raise
+    ``CredentialRefusal`` so the caller's existing exception handling emits
+    the failed node/task result. Never spawns a subprocess — this always
+    runs BEFORE ``run_agent_in_subprocess`` is reached."""
+    print(json.dumps({
+        'level': 'ERROR',
+        'component': 'WorkerWrapper',
+        'action': 'agent_dispatch_refused_fail_closed',
+        'reason': reason,
+        'agentId': agent_id,
+        'workflowId': workflow_id,
+    }))
+    _write_credential_refusal_finding(
+        agent_id=agent_id, reason=reason, workflow_id=workflow_id, org_id=org_id,
+    )
+    raise CredentialRefusal(reason, agent_id)
+
+
 def get_scoped_credentials(agent_name: str, required_permissions: dict, app_id: str | None = None, org_id: str | None = None) -> dict | None:
     """
     Invoke the credential vender Lambda to get scoped IAM credentials
@@ -773,16 +885,26 @@ def get_scoped_credentials(agent_name: str, required_permissions: dict, app_id: 
     (citadel-agent-{appId}) instead of the agent-level role (Req 4 AC 5).
 
     ``org_id`` is the SERVER-DERIVED org carried on the Supervisor's worker
-    dispatch payload (never trusted from agent/subprocess output). Wave 2b
-    (branch fix/vender-org-scoping): fail CLOSED — issue no credential
-    request at all, with a clear log — when org_id is missing/empty, rather
-    than letting the vender silently grant org-blind AssumeRole access.
+    dispatch payload (never trusted from agent/subprocess output).
+
+    PR-4 (owner decision 5750aeec: FAIL CLOSED, no grandfathering) replaces
+    the former fail-OPEN contract (finding b): a vend refusal, a vend
+    transport/parse failure, or a missing org_id now RAISE
+    ``credential_guard.CredentialRefusal`` instead of returning ``None``.
+    Returning ``None`` previously let the caller silently fall through to
+    an un-vetted (ambient-role) dispatch; a raised ``CredentialRefusal`` is
+    non-retryable and propagates to the dispatch gate, which refuses the
+    node/task and never spawns the agent subprocess.
+
+    The ONE remaining ``None`` return is the deliberately-unchanged
+    "vending is not wired up in this deployment at all" case
+    (``CREDENTIAL_VENDER_FUNCTION`` unset) — that is an environment
+    configuration fact, not a vend failure, and is left to the dispatch
+    gate's ``credential_mode`` decision (the explicit ``"none"`` sentinel
+    for pure-compute agents, or a refusal otherwise).
     """
     if not CREDENTIAL_VENDER_FUNCTION:
         print("CREDENTIAL_VENDER_FUNCTION not set, skipping credential vending")
-        return None
-
-    if not required_permissions:
         return None
 
     if not isinstance(org_id, str) or not org_id:
@@ -794,7 +916,7 @@ def get_scoped_credentials(agent_name: str, required_permissions: dict, app_id: 
             'error': 'org_id missing/empty on dispatch payload — refusing to '
                      'request scoped credentials (fail closed, no vender call).',
         }))
-        return None
+        raise CredentialRefusal(NO_ORG, agent_name)
 
     try:
         payload_data = {
@@ -816,22 +938,40 @@ def get_scoped_credentials(agent_name: str, required_permissions: dict, app_id: 
 
         if payload.get('error'):
             print(f"Credential vender error: {payload['error']}")
-            return None
+            raise CredentialRefusal(VEND_REFUSED, agent_name)
 
         return payload.get('credentials')
+    except CredentialRefusal:
+        raise
     except Exception as e:
         print(f"Failed to invoke credential vender: {e}")
-        return None
+        raise CredentialRefusal(VEND_FAILED, agent_name) from e
 
-def run_agent_in_subprocess(request: dict, scoped_credentials: dict | None, extra_env: dict | None = None, *, raise_on_error: bool = False, usage_sink: list | None = None) -> str:
+def run_agent_in_subprocess(request: dict, scoped_credentials: dict | None, extra_env: dict | None = None, *, raise_on_error: bool = False, usage_sink: list | None = None, credential_mode: str) -> str:
     """
     Execute the agent code in an isolated subprocess.
 
-    Scoped credentials are passed only to the child process's environment,
-    never set on the parent's os.environ. This prevents:
-    - The agent code from reading the parent Lambda's ambient credentials
-    - Credential leakage between sequential agent executions
-    - Credentials persisting in /proc/self/environ of the parent
+    PR-4 (owner decision 5750aeec: FAIL CLOSED, no grandfathering) deletes
+    the former ambient-inherit branch entirely (finding 9ef192d1's
+    documented backward-compat path, "the agent runs using the Lambda's
+    ambient IAM role when no requiredPermissions are declared"). The child
+    env is now ALWAYS built by scrubbing every ambient AWS credential
+    env var and then injecting ONLY the narrow, explicitly-chosen
+    credential source — never both, never neither by accident:
+
+    * ``credential_mode='scoped'`` requires a non-empty *scoped_credentials*
+      dict; the child sees ONLY the narrowed role. Missing/empty credentials
+      raise ``credential_guard.CredentialRefusal`` and ``subprocess.run`` is
+      NEVER called — refusal happens before a subprocess is ever spawned.
+    * ``credential_mode='none'`` is the explicit no-cloud sentinel for
+      genuinely credential-less (pure-compute) agents: the child env carries
+      NO AWS credential material at all.
+
+    There is no third path. An agent that declares no ``requiredPermissions``
+    and has not opted into the ``'none'`` sentinel is refused by the DISPATCH
+    GATE before this function is ever called (see the two call sites in
+    ``_process_workflow_node`` / the supervisor task path) — this function
+    has no fallback of its own.
 
     ``raise_on_error`` controls the non-zero-exit behaviour. The default
     (False) preserves the supervisor task path: a failed subprocess returns a
@@ -849,48 +989,17 @@ def run_agent_in_subprocess(request: dict, scoped_credentials: dict | None, extr
     exactly as before, leaving ``usage_sink`` unchanged (empty). Malformed
     usage data never raises here — ``parse_usage_array`` degrades to ``[]``.
     """
-    # Build the child's environment: inherit parent env for Python path etc.,
-    # but override AWS credentials with scoped ones if available
-    child_env = os.environ.copy()
-
-    if scoped_credentials:
-        # Scoped STS credentials declared via requiredPermissions: OVERWRITE
-        # the three credential env vars so the child sees ONLY the narrowed
-        # role. boto3's provider chain reads AWS_ACCESS_KEY_ID first, so these
-        # take precedence over any ambient container/role source that remains
-        # in the inherited env — the child never sees the parent's broader
-        # permissions (docs/AGENT_PERMISSIONS.md §"Why Subprocess Isolation").
-        child_env['AWS_ACCESS_KEY_ID'] = scoped_credentials['accessKeyId']
-        child_env['AWS_SECRET_ACCESS_KEY'] = scoped_credentials['secretAccessKey']
-        child_env['AWS_SESSION_TOKEN'] = scoped_credentials['sessionToken']
+    # Build the child's environment: scrub every ambient AWS credential env
+    # var from the inherited parent env, then inject exactly the credential
+    # material ``credential_mode`` calls for (raises CredentialRefusal on a
+    # scoped-mode request with no usable credentials — see docstring above).
+    child_env = build_agent_credential_env(
+        os.environ.copy(), scoped_credentials, credential_mode=credential_mode,
+    )
+    if scoped_credentials and credential_mode == 'scoped':
         print("Subprocess will use scoped credentials")
-    else:
-        # No scoped vending for this agent (no requiredPermissions) — the
-        # DOCUMENTED backward-compat path (docs/AGENT_PERMISSIONS.md §5) is for
-        # the agent to run under the wrapper Lambda's ambient IAM role.
-        #
-        # FIX (finding 9ef192d1): the ambient role must be PROPAGATED into the
-        # child, not stripped. In AWS Lambda the execution role is delivered
-        # ONLY through the AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
-        # AWS_SESSION_TOKEN environment variables the runtime sets — there is
-        # NO IMDS/metadata service to "fall back" to (that only exists on EC2/
-        # ECS). The previous code popped exactly those three keys, so the child
-        # had no credential source at all and boto3 raised
-        # NoCredentialsError ("Unable to locate credentials"), which the
-        # governance ledger surfaced as a fenced-reserve transport error and
-        # refused the tool fail-closed (dev run 732013d3: 0 ledger rows, 0
-        # smoke rows). ``child_env = os.environ.copy()`` already carries the
-        # parent's credential env, so we simply leave it in place — no pop.
-        #
-        # LEAST-PRIVILEGE TRADEOFF: on this path the child inherits the
-        # wrapper's full role (broader than a scoped vend). This is exactly the
-        # behaviour the design intends for agents without requiredPermissions
-        # ("runs using the Lambda's ambient IAM role"); narrowing still applies
-        # whenever an agent declares requiredPermissions (the branch above).
-        # We are fixing the broken mechanism, not widening privilege beyond the
-        # documented design. AWS_CONTAINER_CREDENTIALS_* (if the deployment
-        # substrate ever sets them) are likewise inherited untouched.
-        pass
+    elif credential_mode == 'none':
+        print("Subprocess will run credential-less (explicit no-cloud sentinel)")
 
     # Apply governance and config overrides (stepConstraints, appConfig, modelOverride)
     if extra_env:
@@ -1656,7 +1765,15 @@ def _process_workflow_node(event, message_attributes=None):
                 )
 
             required_permissions = config.get('requiredPermissions')
-            scoped_credentials = get_scoped_credentials(
+            credential_mode = _resolve_credential_mode(config, required_permissions)
+            if credential_mode != 'none' and _is_absent_or_empty_permissions(required_permissions):
+                _refuse_dispatch_fail_closed(
+                    agent_id=msg.agent_id,
+                    reason=NO_REQUIRED_PERMISSIONS,
+                    workflow_id=msg.workflow_id,
+                    org_id=_resolve_execution_org_id(msg.execution_id),
+                )
+            scoped_credentials = None if credential_mode == 'none' else get_scoped_credentials(
                 msg.agent_id, required_permissions,
                 org_id=_resolve_execution_org_id(msg.execution_id),
             )
@@ -1716,7 +1833,7 @@ def _process_workflow_node(event, message_attributes=None):
             usage_sink: list = []
             response = run_agent_in_subprocess(
                 msg.input, scoped_credentials, extra_env, raise_on_error=True,
-                usage_sink=usage_sink,
+                usage_sink=usage_sink, credential_mode=credential_mode,
             )
         except Exception as exc:  # noqa: BLE001 — any failure becomes node.failed
             # finding 56d763d4: carry the exception CLASS as the node-result error
@@ -1984,10 +2101,47 @@ def process_event(event, context, message_attributes=None):
                   f"{len(tool_bindings.get('integrations', []))} integrations, "
                   f"{len(tool_bindings.get('dataStores', []))} dataStores")
 
+    # PR-4 dispatch-time fail-closed credential gate (owner decision
+    # 5750aeec: FAIL CLOSED, no grandfathering). Mirrors the workflow-node
+    # gate exactly: an agent whose merged requiredPermissions declares no
+    # resource access is refused BEFORE any credential vend attempt or
+    # subprocess spawn, unless it opted into the explicit no-cloud sentinel.
+    credential_mode = _resolve_credential_mode(config, required_permissions)
+    if credential_mode != 'none' and _is_absent_or_empty_permissions(required_permissions):
+        try:
+            _refuse_dispatch_fail_closed(
+                agent_id=agent_name,
+                reason=NO_REQUIRED_PERMISSIONS,
+                workflow_id=orchestration_id,
+                org_id=org_id,
+            )
+        except CredentialRefusal as refusal:
+            # Notify the orchestration of the terminal failure (same
+            # task.completion event mechanism the success path uses) before
+            # propagating the non-retryable exception to lambda_handler — a
+            # subprocess is NEVER spawned on this path.
+            post_task_complete(
+                f"Task refused: {refusal.message}", agent_use_id, agent_name,
+                orchestration_id,
+            )
+            raise
+
     # Vend scoped credentials based on merged permissions
     # When appId is present, use app-scoped IAM role (Req 4 AC 5)
     # Eventual consistency: binding updates are picked up on next invocation (Req 10.8)
-    scoped_credentials = get_scoped_credentials(agent_name, required_permissions, app_id=app_id, org_id=org_id)
+    try:
+        scoped_credentials = None if credential_mode == 'none' else get_scoped_credentials(
+            agent_name, required_permissions, app_id=app_id, org_id=org_id,
+        )
+    except CredentialRefusal as refusal:
+        # get_scoped_credentials itself raised (vend fail/refuse/no-org,
+        # finding b) — same notify-then-propagate contract as the gate
+        # above; no subprocess is spawned.
+        post_task_complete(
+            f"Task refused: {refusal.message}", agent_use_id, agent_name,
+            orchestration_id,
+        )
+        raise
 
     fileName = config['filename']
     print("loading file from s3...")
@@ -2043,7 +2197,10 @@ def process_event(event, context, message_attributes=None):
 
     print("running agent in isolated subprocess...")
     usage_sink: list = []
-    response = run_agent_in_subprocess(request, scoped_credentials, extra_env if extra_env else None, usage_sink=usage_sink)
+    response = run_agent_in_subprocess(
+        request, scoped_credentials, extra_env if extra_env else None,
+        usage_sink=usage_sink, credential_mode=credential_mode,
+    )
     print(f"agent response: {response}")
 
     post_task_complete(response, agent_use_id, agent_name, orchestration_id, usage=usage_sink)
@@ -2075,6 +2232,20 @@ def lambda_handler(event, context):
             # _process_workflow_node's own except-block never re-raises for a
             # classified node failure.
             print(f"Invalid agent config for message {record['messageId']}: {e}")
+        except CredentialRefusal as e:
+            # PR-4 (owner decision 5750aeec: FAIL CLOSED, no grandfathering):
+            # non-retryable, mirroring the InvalidAgentConfigError handling
+            # immediately above — a credential refusal fails identically on
+            # every redelivery (the agent's declared permissions don't
+            # change), so the message is acked (NOT added to
+            # batchItemFailures) rather than retried into a DLQ loop. The
+            # workflow-node path's own except-block (inside
+            # _process_workflow_node) already converts the SAME exception
+            # into a structured STATUS_FAILED node result before this
+            # handler ever sees it; this branch covers the supervisor
+            # (legacy task) path, where process_event has no node-result
+            # sink and the refusal propagates here instead.
+            print(f"Credential refusal for message {record['messageId']}: {e}")
         except Exception as e:
             print(f"Error processing message {record['messageId']}: {e}")
             batch_item_failures.append({"itemIdentifier": record['messageId']})
