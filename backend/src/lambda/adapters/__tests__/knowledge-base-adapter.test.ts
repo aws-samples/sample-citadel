@@ -33,6 +33,8 @@ describe("KnowledgeBaseAdapter", () => {
   const baseConfig = {
     roleArn: "arn:aws:iam::123456789012:role/test-role",
     collectionArn: "arn:aws:aoss:us-east-1:123456789012:collection/test-col",
+    dataStoreId: "ds-test",
+    orgId: "org-test",
   };
 
   beforeEach(() => {

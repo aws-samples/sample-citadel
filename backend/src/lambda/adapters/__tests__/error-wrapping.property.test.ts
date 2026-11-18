@@ -390,6 +390,8 @@ describe("Property 1: Adapter SDK error wrapping", () => {
     })();
     const config = {
       name: "kb",
+      dataStoreId: "ds-kb-err",
+      orgId: "org-kb-err",
       roleArn: "arn:aws:iam::123456789012:role/test-role",
     };
     await fc.assert(

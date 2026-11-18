@@ -3,6 +3,7 @@ import {
   CreateKnowledgeBaseCommand,
   GetKnowledgeBaseCommand,
   DeleteKnowledgeBaseCommand,
+  ListTagsForResourceCommand as BedrockListTagsForResourceCommand,
   type KnowledgeBaseConfiguration,
   type StorageConfiguration,
 } from "@aws-sdk/client-bedrock-agent";
@@ -13,6 +14,7 @@ import {
   CreateCollectionCommand,
   DeleteCollectionCommand,
   BatchGetCollectionCommand,
+  ListTagsForResourceCommand as OssListTagsForResourceCommand,
 } from "@aws-sdk/client-opensearchserverless";
 import {
   IAMClient,
@@ -20,8 +22,11 @@ import {
   PutRolePolicyCommand,
   DeleteRolePolicyCommand,
   DeleteRoleCommand,
+  GetRoleCommand,
+  ListRoleTagsCommand,
 } from "@aws-sdk/client-iam";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
+import { createHash } from "crypto";
 import {
   ConnectorAdapter,
   ConnectorCategory,
@@ -128,6 +133,55 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
     return new STSClient({});
   }
 
+  /**
+   * Deterministic, collision-resistant, AOSS-legal (3-32 chars, starts with a
+   * letter, lowercase alphanumeric + hyphen) collection name derived ONLY
+   * from immutable ids. NEVER from the tenant display name (C1) — a display
+   * name is mutable and attacker-influenced, so deriving a shared resource
+   * name from it lets two tenants collide on the same AOSS collection.
+   */
+  private deriveCollectionName(orgId: string, dataStoreId: string): string {
+    const hash = createHash("sha256")
+      .update(`${orgId}:${dataStoreId}`)
+      .digest("hex");
+    return `aifkb-${hash.slice(0, 26)}`; // 6 + 26 = 32 chars, starts with 'a'
+  }
+
+  /**
+   * IAM role name (<=64 chars). dataStoreId is a UUID, already globally
+   * unique, so no additional hashing is needed. NEVER derived from the
+   * tenant display name (C1).
+   */
+  private deriveServiceRoleName(dataStoreId: string): string {
+    return `citadel-ds-kb-svc-${dataStoreId}`; // 18 + 36 = 54 chars
+  }
+
+  /** Emit a CloudWatch EMF metric for a refused KB/collection ownership check. */
+  private emitKnowledgeBaseOwnershipRefused(): void {
+    try {
+      console.log(
+        JSON.stringify({
+          _aws: {
+            Timestamp: Date.now(),
+            CloudWatchMetrics: [
+              {
+                Namespace: "Citadel/Adapters",
+                Dimensions: [["Adapter"]],
+                Metrics: [
+                  { Name: "KnowledgeBaseOwnershipRefused", Unit: "Count" },
+                ],
+              },
+            ],
+          },
+          Adapter: "KnowledgeBase",
+          KnowledgeBaseOwnershipRefused: 1,
+        }),
+      );
+    } catch {
+      // metrics must never break the caller
+    }
+  }
+
   requiredPolicies(
     _config: Record<string, unknown>,
     _accountId: string,
@@ -192,14 +246,21 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
   /**
    * Create a Bedrock service role that Bedrock can assume to access resources,
    * including permissions for OpenSearch Serverless API access.
+   *
+   * C1: the role name is derived ONLY from `dataStoreId` (never the display
+   * name), and the role is tagged with citadel:orgId + citadel:dataStoreId.
+   * On EntityAlreadyExistsException, the existing role's tags are read and
+   * MUST match this org/dataStoreId — a mismatch or absence throws rather
+   * than silently adopting another tenant's (or an untagged legacy) role.
    */
   private async createServiceRole(
-    name: string,
+    dataStoreId: string,
+    orgId: string,
     collectionArn: string,
   ): Promise<string> {
     const iamClient = this.platformIamClient();
     const { accountId } = await this.getAccountContext();
-    const roleName = `citadel-ds-kb-svc-${name.replace(/[^a-zA-Z0-9-]/g, "-").substring(0, 30)}`;
+    const roleName = this.deriveServiceRoleName(dataStoreId);
 
     const trustPolicy = {
       Version: "2012-10-17",
@@ -220,12 +281,21 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
           Tags: [
             { Key: "ManagedBy", Value: "citadel" },
             { Key: "Purpose", Value: "bedrock-knowledge-base-service-role" },
+            { Key: "citadel:orgId", Value: orgId },
+            { Key: "citadel:dataStoreId", Value: dataStoreId },
           ],
         }),
       );
     } catch (error) {
       const err = error as SdkError;
-      if (err.name !== "EntityAlreadyExistsException") {
+      if (err.name === "EntityAlreadyExistsException") {
+        await this.verifyServiceRoleOwnership(
+          iamClient,
+          roleName,
+          dataStoreId,
+          orgId,
+        );
+      } else {
         throw new ProvisioningError(
           `Failed to create Bedrock service role: ${err.message}`,
           err,
@@ -273,6 +343,90 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
   }
 
   /**
+   * C1: verify an existing IAM role carries citadel:orgId and
+   * citadel:dataStoreId tags matching the caller's. Throws
+   * ProvisioningError (never adopts) on any mismatch, absence, or lookup
+   * failure (decision 44a2bfc1 — on conflict, reuse ONLY if tags match;
+   * otherwise throw).
+   */
+  private async verifyServiceRoleOwnership(
+    iamClient: IAMClient,
+    roleName: string,
+    dataStoreId: string,
+    orgId: string,
+  ): Promise<void> {
+    try {
+      await iamClient.send(new GetRoleCommand({ RoleName: roleName }));
+      const tagResult = await iamClient.send(
+        new ListRoleTagsCommand({ RoleName: roleName }),
+      );
+      const tags = tagResult.Tags ?? [];
+      const hasOrg = tags.some(
+        (t) => t.Key === "citadel:orgId" && t.Value === orgId,
+      );
+      const hasDs = tags.some(
+        (t) => t.Key === "citadel:dataStoreId" && t.Value === dataStoreId,
+      );
+      if (!hasOrg || !hasDs) {
+        console.warn("KB service role ownership tag mismatch", {
+          roleName,
+          expectedDataStoreId: dataStoreId,
+          expectedOrgId: orgId,
+        });
+        this.emitKnowledgeBaseOwnershipRefused();
+        throw new ProvisioningError("Knowledge base service role conflict");
+      }
+    } catch (error) {
+      if (error instanceof ProvisioningError) throw error;
+      this.emitKnowledgeBaseOwnershipRefused();
+      throw new ProvisioningError("Knowledge base service role conflict");
+    }
+  }
+
+  /**
+   * C1: verify an existing AOSS collection carries citadel:orgId and
+   * citadel:dataStoreId tags matching the caller's. Throws
+   * ProvisioningError (never adopts) on any mismatch, absence, or lookup
+   * failure (decision 44a2bfc1).
+   */
+  private async verifyCollectionOwnership(
+    ossClient: OpenSearchServerlessClient,
+    collectionArn: string,
+    dataStoreId: string,
+    orgId: string,
+  ): Promise<void> {
+    try {
+      const tagResult = await ossClient.send(
+        new OssListTagsForResourceCommand({ resourceArn: collectionArn }),
+      );
+      const tags = tagResult.tags ?? [];
+      const hasOrg = tags.some(
+        (t) => t.key === "citadel:orgId" && t.value === orgId,
+      );
+      const hasDs = tags.some(
+        (t) => t.key === "citadel:dataStoreId" && t.value === dataStoreId,
+      );
+      if (!hasOrg || !hasDs) {
+        console.warn("AOSS collection ownership tag mismatch", {
+          collectionArn,
+          expectedDataStoreId: dataStoreId,
+          expectedOrgId: orgId,
+        });
+        this.emitKnowledgeBaseOwnershipRefused();
+        throw new ProvisioningError(
+          "Knowledge base collection ownership verification failed",
+        );
+      }
+    } catch (error) {
+      if (error instanceof ProvisioningError) throw error;
+      this.emitKnowledgeBaseOwnershipRefused();
+      throw new ProvisioningError(
+        "Knowledge base collection ownership verification failed",
+      );
+    }
+  }
+
+  /**
    * Delete a Bedrock service role created during provisioning.
    */
   private async deleteServiceRole(roleName: string): Promise<void> {
@@ -303,19 +457,22 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
   /**
    * Provision an OpenSearch Serverless VECTORSEARCH collection with the
    * required encryption, network, and data access policies.
+   *
+   * C1: the collection name is derived ONLY from orgId+dataStoreId (never
+   * the display name), tagged with citadel:orgId + citadel:dataStoreId on
+   * create, and a ConflictException is resolved via a tag-verified
+   * reuse-or-throw check rather than unconditional adoption.
    */
   private async provisionVectorStore(
-    name: string,
+    dataStoreId: string,
+    orgId: string,
     serviceRoleArn: string,
     accountId: string,
     vendedRoleArn?: string,
   ): Promise<{ collectionArn: string; collectionId: string }> {
     const ossClient = this.platformOssClient();
-    const collectionName = `aifkb-${name
-      .replace(/[^a-z0-9-]/gi, "-")
-      .substring(0, 25)
-      .toLowerCase()}`;
-    const policyName = `aifkb-${collectionName}`;
+    const collectionName = this.deriveCollectionName(orgId, dataStoreId);
+    const policyName = collectionName;
 
     // 1. Create encryption policy (required before collection creation)
     try {
@@ -438,7 +595,12 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
         new CreateCollectionCommand({
           name: collectionName,
           type: "VECTORSEARCH",
-          description: `Vector store for Bedrock Knowledge Base: ${name}`,
+          description: `Vector store for Bedrock Knowledge Base (dataStoreId=${dataStoreId})`,
+          tags: [
+            { key: "ManagedBy", value: "citadel" },
+            { key: "citadel:orgId", value: orgId },
+            { key: "citadel:dataStoreId", value: dataStoreId },
+          ],
         }),
       );
       collectionId = result.createCollectionDetail?.id;
@@ -446,13 +608,27 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
     } catch (error) {
       const err = error as SdkError;
       if (err.name === "ConflictException") {
-        // Collection already exists — look it up
+        // Collection already exists — resolve its identity, then verify
+        // ownership tags before reusing it (decision 44a2bfc1: reuse ONLY
+        // if citadel:orgId + citadel:dataStoreId match; otherwise throw).
         const existing = await ossClient.send(
           new BatchGetCollectionCommand({ names: [collectionName] }),
         );
         const detail = existing.collectionDetails?.[0];
         collectionId = detail?.id;
         collectionArn = detail?.arn;
+        if (!collectionArn || !collectionId) {
+          this.emitKnowledgeBaseOwnershipRefused();
+          throw new ProvisioningError(
+            `AOSS collection conflict but existing collection could not be resolved for ${collectionName}`,
+          );
+        }
+        await this.verifyCollectionOwnership(
+          ossClient,
+          collectionArn,
+          dataStoreId,
+          orgId,
+        );
       } else {
         throw new ProvisioningError(
           `Failed to create AOSS collection: ${err.message}`,
@@ -618,6 +794,19 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
       (config.name as string | undefined) ??
       (config.resourceName as string | undefined) ??
       `citadel-kb-${Date.now()}`;
+
+    // C1: dataStoreId + orgId are REQUIRED. Fail closed rather than falling
+    // back to display-name-derived naming — the display name is mutable
+    // and tenant-controlled, so deriving a shared AWS resource name from it
+    // is the root cause of the cross-org collision this PR fixes.
+    const dataStoreId = config.dataStoreId as string | undefined;
+    const orgId = config.orgId as string | undefined;
+    if (!dataStoreId || !orgId) {
+      throw new ProvisioningError(
+        "knowledge base provisioning requires dataStoreId and orgId",
+      );
+    }
+
     const { region, accountId } = await this.getAccountContext();
 
     // Determine embedding model ARN
@@ -663,25 +852,33 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
 
       let roleArn = config.roleArn as string | undefined;
       if (!roleArn) {
-        roleArn = await this.createServiceRole(name, tempCollectionArn);
+        roleArn = await this.createServiceRole(
+          dataStoreId,
+          orgId,
+          tempCollectionArn,
+        );
         await new Promise((resolve) =>
           setTimeout(resolve, this.roleCreationDelayMs),
         );
       }
 
       const vectorStore = await this.provisionVectorStore(
-        name,
+        dataStoreId,
+        orgId,
         roleArn,
         accountId,
-        config.dataStoreId
-          ? `arn:aws:iam::${accountId}:role/citadel-ds-${config.dataStoreId as string}`
-          : undefined,
+        `arn:aws:iam::${accountId}:role/citadel-ds-${dataStoreId}`,
       );
       collectionArn = vectorStore.collectionArn;
 
       // CIT-299: record collectionId into config so subsequent connect
       // operations can scope policies to this specific collection.
       config.collectionId = vectorStore.collectionId;
+      // C1: record resolved identifiers for the migration script / preflight.
+      config.serviceRoleArn = roleArn;
+      config.serviceRoleName = this.deriveServiceRoleName(dataStoreId);
+      config.collectionName = this.deriveCollectionName(orgId, dataStoreId);
+      config.collectionArn = collectionArn;
 
       storageConfiguration = {
         type: "OPENSEARCH_SERVERLESS",
@@ -708,6 +905,11 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
               vectorKnowledgeBaseConfiguration: { embeddingModelArn },
             },
             storageConfiguration,
+            tags: {
+              "citadel:orgId": orgId,
+              "citadel:dataStoreId": dataStoreId,
+              ManagedBy: "citadel",
+            },
           }),
         );
 
@@ -724,9 +926,13 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
       } catch (error) {
         const err = error as SdkError;
         if (err.name === "ConflictException") {
-          return {
-            resourceArn: `arn:aws:bedrock:${region}:${accountId}:knowledge-base/${name}`,
-          };
+          return await this.resolveConflictingKnowledgeBase(
+            client,
+            config,
+            name,
+            dataStoreId,
+            orgId,
+          );
         }
         if (
           err.name === "AccessDenied" ||
@@ -747,7 +953,7 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
     // Path for caller-provided storage config or collectionArn
     let roleArn = config.roleArn as string | undefined;
     if (!roleArn) {
-      roleArn = await this.createServiceRole(name, collectionArn);
+      roleArn = await this.createServiceRole(dataStoreId, orgId, collectionArn);
       await new Promise((resolve) =>
         setTimeout(resolve, this.roleCreationDelayMs),
       );
@@ -764,6 +970,11 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
             vectorKnowledgeBaseConfiguration: { embeddingModelArn },
           },
           storageConfiguration,
+          tags: {
+            "citadel:orgId": orgId,
+            "citadel:dataStoreId": dataStoreId,
+            ManagedBy: "citadel",
+          },
         }),
       );
 
@@ -775,9 +986,13 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
     } catch (error) {
       const err = error as SdkError;
       if (err.name === "ConflictException") {
-        return {
-          resourceArn: `arn:aws:bedrock:${region}:${accountId}:knowledge-base/${name}`,
-        };
+        return await this.resolveConflictingKnowledgeBase(
+          client,
+          config,
+          name,
+          dataStoreId,
+          orgId,
+        );
       }
       if (err.name === "AccessDenied" || err.name === "AccessDeniedException") {
         throw new PermissionError(
@@ -790,6 +1005,62 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
         err,
       );
     }
+  }
+
+  /**
+   * C1: resolve a ConflictException from CreateKnowledgeBaseCommand.
+   *
+   * Idempotent retry (decision 44a2bfc1 — reuse ONLY on tag match): if
+   * `config.knowledgeBaseId` was already recorded by a prior successful
+   * provision of THIS data store, look it up and verify its
+   * citadel:orgId/citadel:dataStoreId tags match before reusing it.
+   *
+   * There is no other safe path: the Bedrock Agent API has no "get KB by
+   * name" call, and ConflictException does not return the existing KB's
+   * id/arn, so without a previously-recorded id there is nothing to
+   * tag-verify against — fail closed rather than guess.
+   */
+  private async resolveConflictingKnowledgeBase(
+    client: BedrockAgentClient,
+    config: Record<string, unknown>,
+    name: string,
+    dataStoreId: string,
+    orgId: string,
+  ): Promise<ProvisionResult> {
+    const existingKnowledgeBaseId = config.knowledgeBaseId as
+      string | undefined;
+    if (existingKnowledgeBaseId) {
+      try {
+        const getResult = await client.send(
+          new GetKnowledgeBaseCommand({
+            knowledgeBaseId: existingKnowledgeBaseId,
+          }),
+        );
+        const kbArn = getResult.knowledgeBase?.knowledgeBaseArn;
+        if (kbArn) {
+          const tagResult = await client.send(
+            new BedrockListTagsForResourceCommand({ resourceArn: kbArn }),
+          );
+          const tags = tagResult.tags ?? {};
+          if (
+            tags["citadel:orgId"] === orgId &&
+            tags["citadel:dataStoreId"] === dataStoreId
+          ) {
+            return { resourceArn: kbArn };
+          }
+        }
+      } catch {
+        // fall through to the fail-closed throw below
+      }
+    }
+
+    console.warn("Knowledge base ownership conflict on create", {
+      name,
+      dataStoreId,
+      orgId,
+    });
+    this.emitKnowledgeBaseOwnershipRefused();
+    throw new ProvisioningError("Knowledge base ownership verification failed");
   }
 
   async connect(

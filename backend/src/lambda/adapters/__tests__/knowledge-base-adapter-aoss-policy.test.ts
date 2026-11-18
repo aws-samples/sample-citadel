@@ -134,7 +134,7 @@ describe("KnowledgeBaseAdapter AOSS policy scoping (C7)", () => {
   describe("data access policy principals", () => {
     test("policy document has NO :root principal", async () => {
       await adapter.provision(
-        { name: "test-kb", dataStoreId: "ds-abc" },
+        { name: "test-kb", dataStoreId: "ds-abc", orgId: "org-abc" },
         MOCK_SCOPED_CREDENTIALS,
       );
 
@@ -151,7 +151,7 @@ describe("KnowledgeBaseAdapter AOSS policy scoping (C7)", () => {
 
     test("principals include the KB service role ARN", async () => {
       await adapter.provision(
-        { name: "test-kb", dataStoreId: "ds-abc" },
+        { name: "test-kb", dataStoreId: "ds-abc", orgId: "org-abc" },
         MOCK_SCOPED_CREDENTIALS,
       );
 
@@ -168,7 +168,7 @@ describe("KnowledgeBaseAdapter AOSS policy scoping (C7)", () => {
 
     test("principals include the vended datastore role ARN when dataStoreId is provided", async () => {
       await adapter.provision(
-        { name: "test-kb", dataStoreId: "ds-abc" },
+        { name: "test-kb", dataStoreId: "ds-abc", orgId: "org-abc" },
         MOCK_SCOPED_CREDENTIALS,
       );
 
@@ -184,7 +184,7 @@ describe("KnowledgeBaseAdapter AOSS policy scoping (C7)", () => {
 
     test("principals are exactly two roles when dataStoreId is provided", async () => {
       await adapter.provision(
-        { name: "test-kb", dataStoreId: "ds-abc" },
+        { name: "test-kb", dataStoreId: "ds-abc", orgId: "org-abc" },
         MOCK_SCOPED_CREDENTIALS,
       );
 
@@ -201,23 +201,35 @@ describe("KnowledgeBaseAdapter AOSS policy scoping (C7)", () => {
       );
     });
 
-    test("only service role principal when dataStoreId is absent", async () => {
-      await adapter.provision({ name: "test-kb" }, MOCK_SCOPED_CREDENTIALS);
+    test("C1: dataStoreId/orgId are mandatory, so the vended role principal is always present", async () => {
+      // Post-C1, provision() throws before reaching this code path if
+      // dataStoreId/orgId are absent (see knowledge-base-adapter-ownership
+      // test's "provision fail-closed on missing ids"). The two-principal
+      // shape (service role + vended datastore role) is therefore the ONLY
+      // reachable shape — there is no longer a code path with just one
+      // principal.
+      await adapter.provision(
+        { name: "test-kb", dataStoreId: "ds-noorg", orgId: "org-noorg" },
+        MOCK_SCOPED_CREDENTIALS,
+      );
 
       const accessPolicyCalls = jest.mocked(CreateAccessPolicyCommand).mock
         .calls;
       const policyDoc = JSON.parse(accessPolicyCalls[0][0].policy as string);
       const principals: string[] = policyDoc[0].Principal;
 
-      expect(principals).toHaveLength(1);
+      expect(principals).toHaveLength(2);
       expect(principals[0]).toMatch(/citadel-ds-kb-svc-/);
+      expect(principals[1]).toBe(
+        "arn:aws:iam::123456789012:role/citadel-ds-ds-noorg",
+      );
     });
   });
 
   describe("data access policy rules scoping", () => {
     test("rules are scoped to the collection and indexes only", async () => {
       await adapter.provision(
-        { name: "test-kb", dataStoreId: "ds-abc" },
+        { name: "test-kb", dataStoreId: "ds-abc", orgId: "org-abc" },
         MOCK_SCOPED_CREDENTIALS,
       );
 
