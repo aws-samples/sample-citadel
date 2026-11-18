@@ -697,18 +697,23 @@ async function createDataStore(
     config.dataStoreId = dataStoreId;
     config.orgId = callerOrgId;
 
+    // C2: preflight ownership check BEFORE creating any IAM role, run
+    // UNCONDITIONALLY — not only when requiredPolicies(...) returns a
+    // non-empty policy list. An adapter whose connect/provision policies
+    // are empty when scoping identifiers are absent (e.g.
+    // KnowledgeBaseAdapter, CIT-299) must still be preflighted; gating this
+    // on policies.length silently skipped the ownership check on exactly
+    // that path. Uses platform Lambda credentials, not scoped creds.
+    if (adapter.preflight) {
+      await adapter.preflight(config, {
+        dataStoreId,
+        orgId: callerOrgId,
+        provisionMode: input.provisionMode,
+      });
+    }
+
     let scopedCredentials: ScopedCredentials | undefined;
     if (policies.length > 0) {
-      // CIT-298: preflight ownership check BEFORE creating any IAM role.
-      // Uses platform Lambda credentials, not scoped creds.
-      if (adapter.preflight) {
-        await adapter.preflight(config, {
-          dataStoreId,
-          orgId: callerOrgId,
-          provisionMode: input.provisionMode,
-        });
-      }
-
       // CIT-254 C12: validate crossAccountRoleArn at write time + trust-path probe
       const crossAccountExternalId = await validateCrossAccountConfig(
         config,
@@ -1076,17 +1081,20 @@ async function connectDataStore(dataStoreId: string, event: unknown) {
     ).connect;
     let scopedCredentials: ScopedCredentials | undefined;
 
-    if (policies.length > 0) {
-      // CIT-298: preflight ownership check BEFORE creating any IAM role.
-      // Uses platform Lambda credentials, not scoped creds.
-      if (adapter.preflight) {
-        await adapter.preflight(config, {
-          dataStoreId,
-          orgId: existing.orgId as string,
-          provisionMode: "CONNECT_EXISTING",
-        });
-      }
+    // C2: preflight ownership check BEFORE creating any IAM role, run
+    // UNCONDITIONALLY — see the matching comment in createDataStore for why
+    // gating this on policies.length silently skips the ownership check on
+    // adapters whose connect policies are empty when scoping identifiers
+    // are absent. Uses platform Lambda credentials, not scoped creds.
+    if (adapter.preflight) {
+      await adapter.preflight(config, {
+        dataStoreId,
+        orgId: existing.orgId as string,
+        provisionMode: "CONNECT_EXISTING",
+      });
+    }
 
+    if (policies.length > 0) {
       // CIT-254 C12: validate crossAccountRoleArn at connect time + trust-path probe
       const crossAccountExternalId = await validateCrossAccountConfig(
         config,

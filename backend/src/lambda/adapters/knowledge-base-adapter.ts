@@ -134,6 +134,15 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
   }
 
   /**
+   * Create a Bedrock Agent client using the Lambda execution role (platform
+   * credentials). ONLY for control-plane preflight ownership checks (C2):
+   * reading KB tags BEFORE any scoped role is vended.
+   */
+  private platformBedrockClient(): BedrockAgentClient {
+    return new BedrockAgentClient({});
+  }
+
+  /**
    * Deterministic, collision-resistant, AOSS-legal (3-32 chars, starts with a
    * letter, lowercase alphanumeric + hyphen) collection name derived ONLY
    * from immutable ids. NEVER from the tenant display name (C1) — a display
@@ -1061,6 +1070,127 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
     });
     this.emitKnowledgeBaseOwnershipRefused();
     throw new ProvisioningError("Knowledge base ownership verification failed");
+  }
+
+  /**
+   * C2: preflight ownership check run BEFORE any IAM role is vended. Uses
+   * PLATFORM clients (ambient Lambda execution-role credentials), never
+   * scoped credentials — this must be able to run before a scoped role
+   * exists.
+   *
+   * - CREATE_NEW with no caller-supplied target (no knowledgeBaseId,
+   *   collectionId, collectionArn, or storageConfiguration): a no-op — the
+   *   resource doesn't exist yet, so there is nothing to verify.
+   * - CREATE_NEW with a caller-injected target: the caller is asking to
+   *   reuse an existing resource, which is exactly the foreign-ARN
+   *   injection vector this check closes — verify ownership.
+   * - CONNECT_EXISTING: knowledgeBaseId + collectionId are REQUIRED and
+   *   must both carry matching citadel:orgId + citadel:dataStoreId tags.
+   */
+  async preflight(
+    config: Record<string, unknown>,
+    ctx: { dataStoreId: string; orgId: string; provisionMode?: string },
+  ): Promise<void> {
+    const knowledgeBaseId = config.knowledgeBaseId as string | undefined;
+    const collectionId = config.collectionId as string | undefined;
+
+    if (ctx.provisionMode === "CREATE_NEW") {
+      const hasInjectedTarget =
+        !!knowledgeBaseId ||
+        !!collectionId ||
+        !!config.collectionArn ||
+        !!config.storageConfiguration;
+      if (!hasInjectedTarget) return;
+      await this.verifyKbOwnership(knowledgeBaseId, collectionId, ctx);
+    } else {
+      if (!knowledgeBaseId || !collectionId) {
+        throw new ConnectionError(
+          "Knowledge base connection requires knowledgeBaseId and collectionId",
+          false,
+        );
+      }
+      await this.verifyKbOwnership(knowledgeBaseId, collectionId, ctx);
+    }
+  }
+
+  /**
+   * C2: verify that the KB AND collection both carry citadel:orgId +
+   * citadel:dataStoreId tags matching ctx. Fail closed (opaque
+   * ProvisioningError, no leaked details) on any mismatch, absence, or SDK
+   * error. Uses platform clients only.
+   */
+  private async verifyKbOwnership(
+    knowledgeBaseId: string | undefined,
+    collectionId: string | undefined,
+    ctx: { dataStoreId: string; orgId: string },
+  ): Promise<void> {
+    if (!knowledgeBaseId || !collectionId) {
+      this.emitKnowledgeBaseOwnershipRefused();
+      throw new ProvisioningError(
+        "Knowledge base ownership verification failed",
+      );
+    }
+
+    try {
+      const bedrockClient = this.platformBedrockClient();
+      const kbResult = await bedrockClient.send(
+        new GetKnowledgeBaseCommand({ knowledgeBaseId }),
+      );
+      const kbArn = kbResult.knowledgeBase?.knowledgeBaseArn;
+      if (!kbArn) {
+        throw new ProvisioningError(
+          "Knowledge base ownership verification failed",
+        );
+      }
+      const kbTagResult = await bedrockClient.send(
+        new BedrockListTagsForResourceCommand({ resourceArn: kbArn }),
+      );
+      const kbTags = kbTagResult.tags ?? {};
+      const kbOwnershipOk =
+        kbTags["citadel:orgId"] === ctx.orgId &&
+        kbTags["citadel:dataStoreId"] === ctx.dataStoreId;
+
+      const ossClient = this.platformOssClient();
+      const collResult = await ossClient.send(
+        new BatchGetCollectionCommand({ ids: [collectionId] }),
+      );
+      const collArn = collResult.collectionDetails?.[0]?.arn;
+      if (!collArn) {
+        throw new ProvisioningError(
+          "Knowledge base ownership verification failed",
+        );
+      }
+      const collTagResult = await ossClient.send(
+        new OssListTagsForResourceCommand({ resourceArn: collArn }),
+      );
+      const collTags = collTagResult.tags ?? [];
+      const collOwnershipOk =
+        collTags.some(
+          (t) => t.key === "citadel:orgId" && t.value === ctx.orgId,
+        ) &&
+        collTags.some(
+          (t) => t.key === "citadel:dataStoreId" && t.value === ctx.dataStoreId,
+        );
+
+      if (!kbOwnershipOk || !collOwnershipOk) {
+        console.warn("KB/collection ownership tag mismatch", {
+          knowledgeBaseId,
+          collectionId,
+          expectedDataStoreId: ctx.dataStoreId,
+          expectedOrgId: ctx.orgId,
+        });
+        this.emitKnowledgeBaseOwnershipRefused();
+        throw new ProvisioningError(
+          "Knowledge base ownership verification failed",
+        );
+      }
+    } catch (error) {
+      if (error instanceof ProvisioningError) throw error;
+      this.emitKnowledgeBaseOwnershipRefused();
+      throw new ProvisioningError(
+        "Knowledge base ownership verification failed",
+      );
+    }
   }
 
   async connect(
