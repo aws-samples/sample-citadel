@@ -86,7 +86,8 @@ def audit_missing_required_permissions(registry_id: str) -> list[dict]:
         if full_record is None:
             continue
         descriptor = _parse_custom_descriptor(full_record.get("customDescriptorContent"))
-        config = descriptor.get("config") if isinstance(descriptor.get("config"), dict) else {}
+        raw_config = descriptor.get("config")
+        config: dict = raw_config if isinstance(raw_config, dict) else {}
         # Permission data may be stamped at either the top-level descriptor
         # (PR-4's custom_metadata["requiredPermissions"]) or nested under
         # config — check both, same as the worker's config.get(...) read.
