@@ -9,6 +9,7 @@ import {
 import { LakeFormationClient } from "@aws-sdk/client-lakeformation";
 import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
 
+import { markScopedCredentials } from "../credential-guard";
 const mockSend = jest.fn();
 jest.mock("@aws-sdk/client-lakeformation", () => {
   return {
@@ -249,11 +250,14 @@ describe("LakeFormationAdapter", () => {
           TrustedResourceOwners: [],
         },
       });
-      await adapter.connect(config, {
-        accessKeyId: "AKIA...",
-        secretAccessKey: "secret",
-        sessionToken: "token",
-      });
+      await adapter.connect(
+        config,
+        markScopedCredentials({
+          accessKeyId: "AKIA...",
+          secretAccessKey: "secret",
+          sessionToken: "token",
+        }),
+      );
       expect(LakeFormationClient).toHaveBeenCalledWith({
         credentials: {
           accessKeyId: "AKIA...",

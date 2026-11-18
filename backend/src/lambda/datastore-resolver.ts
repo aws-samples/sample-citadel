@@ -16,6 +16,7 @@ import {
 } from "@aws-sdk/client-secrets-manager";
 import { v4 as uuidv4 } from "uuid";
 import { getAdapter } from "./adapters/registry";
+import { AuthenticationMethod, type ConnectorAdapter } from "../adapters/base";
 import { PolicyManager, type ScopedCredentials } from "../utils/policy-manager";
 import type { RoleTagInput } from "../utils/policy-manager";
 import { getDataStoreOperations } from "../utils/operations-registry";
@@ -323,6 +324,32 @@ async function retryOptimisticLock<T>(
     "Version conflict: data store was modified concurrently",
     lastError,
   );
+}
+
+/**
+ * H4: dispatch credentials for an adapter call. Replaces the
+ * `scopedCredentials || credentials` idiom, which fell back to the
+ * CALLER-SUPPLIED `credentials` (parsed from `input.credentials`, an
+ * attacker-controlled GraphQL argument) whenever no scoped role was
+ * vended for that adapter — exactly the KnowledgeBaseAdapter's
+ * CREATE_NEW connect path before this fix, since its provision policies
+ * were empty (CIT-299) so `scopedCredentials` stayed `undefined`.
+ *
+ * All AWS datastore adapters use IAM_ROLE authentication: for those,
+ * ONLY the platform-vended scoped credentials are ever dispatched —
+ * caller-supplied `credentials` can never reach an IAM_ROLE adapter's
+ * data-plane call. Non-AWS (external/SaaS) adapters keep their existing
+ * caller-credential model, since they have no scoped-role concept.
+ */
+function dispatchCreds(
+  adapter: ConnectorAdapter,
+  scopedCredentials: ScopedCredentials | undefined,
+  credentials: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (adapter.spec.authentication.method === AuthenticationMethod.IAM_ROLE) {
+    return scopedCredentials;
+  }
+  return scopedCredentials ?? credentials;
 }
 
 // --- Queries ---
@@ -788,7 +815,7 @@ async function createDataStore(
 
       const provisionResult = await adapter.provision!(
         config,
-        scopedCredentials || credentials,
+        dispatchCreds(adapter, scopedCredentials, credentials),
       );
       resourceArn = provisionResult.resourceArn;
       size = provisionResult.size;
@@ -808,7 +835,10 @@ async function createDataStore(
         }),
       );
     } else {
-      await adapter.connect(config, scopedCredentials || credentials);
+      await adapter.connect(
+        config,
+        dispatchCreds(adapter, scopedCredentials, credentials),
+      );
     }
 
     // Get metrics (use scoped credentials if available)
@@ -816,7 +846,7 @@ async function createDataStore(
       const metrics = await adapter.getMetrics!(
         config,
         resourceArn,
-        scopedCredentials || credentials,
+        dispatchCreds(adapter, scopedCredentials, credentials),
       );
       size = size || metrics.size;
       records = records ?? metrics.records;
@@ -1146,7 +1176,10 @@ async function connectDataStore(dataStoreId: string, event: unknown) {
     }
 
     try {
-      await adapter.connect(config, scopedCredentials || credentials);
+      await adapter.connect(
+        config,
+        dispatchCreds(adapter, scopedCredentials, credentials),
+      );
     } catch (error) {
       // CIT-298: roll back the IAM role on failed connect so it doesn't persist
       if (policies.length > 0) {
@@ -1318,7 +1351,7 @@ async function testDataStoreConnection(dataStoreId: string, event: unknown) {
 
   const testResult = await adapter.testConnection(
     config,
-    scopedCredentials || credentials,
+    dispatchCreds(adapter, scopedCredentials, credentials),
   );
 
   return {

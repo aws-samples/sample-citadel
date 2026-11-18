@@ -78,6 +78,7 @@ jest.mock("@aws-sdk/client-secrets-manager", () => ({
 }));
 
 const mockAdapter = {
+  spec: { authentication: { method: "IAM_ROLE" } },
   requiredPolicies: jest.fn().mockReturnValue({ provision: [], connect: [] }),
   provision: jest
     .fn()

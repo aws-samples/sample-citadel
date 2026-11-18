@@ -9,6 +9,7 @@ import {
 import { KeyspacesClient } from "@aws-sdk/client-keyspaces";
 import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
 
+import { markScopedCredentials } from "../credential-guard";
 const mockSend = jest.fn();
 jest.mock("@aws-sdk/client-keyspaces", () => {
   return {
@@ -242,11 +243,14 @@ describe("KeyspacesAdapter", () => {
         resourceArn:
           "arn:aws:cassandra:us-east-1:123:/keyspace/my_test_keyspace",
       });
-      await adapter.connect(config, {
-        accessKeyId: "AKIA...",
-        secretAccessKey: "secret",
-        sessionToken: "token",
-      });
+      await adapter.connect(
+        config,
+        markScopedCredentials({
+          accessKeyId: "AKIA...",
+          secretAccessKey: "secret",
+          sessionToken: "token",
+        }),
+      );
       expect(KeyspacesClient).toHaveBeenCalledWith({
         credentials: {
           accessKeyId: "AKIA...",

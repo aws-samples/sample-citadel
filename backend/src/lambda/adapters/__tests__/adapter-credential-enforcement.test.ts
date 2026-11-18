@@ -79,11 +79,13 @@ import { S3Client } from "@aws-sdk/client-s3";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { RDSClient } from "@aws-sdk/client-rds";
 
-const VALID_CREDS = {
+import { markScopedCredentials } from "../credential-guard";
+
+const VALID_CREDS = markScopedCredentials({
   accessKeyId: "AKIAIOSFODNN7EXAMPLE",
   secretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
   sessionToken: "FwoGZXIvYXdzEBY…",
-};
+});
 
 describe("adapter data-plane credential enforcement", () => {
   beforeEach(() => {

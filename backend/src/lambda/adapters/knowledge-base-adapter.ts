@@ -196,6 +196,47 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
     _accountId: string,
     _region: string,
   ): RequiredPolicies {
+    // H4 (§3d): scope provision policies to THIS datastore's id-derived
+    // service role and collection, so the resolver always mints and vends
+    // a scoped role on the KB create path (previously `provision: []`
+    // left `scopedCredentials` undefined, which was the root enabler of
+    // the caller-credential fallback this PR removes). Absent ids ->
+    // empty (nothing safe to scope yet; provision() itself fails closed
+    // on absent ids regardless).
+    const dataStoreId =
+      typeof _config.dataStoreId === "string" ? _config.dataStoreId : undefined;
+    const orgId = typeof _config.orgId === "string" ? _config.orgId : undefined;
+
+    const provision = [];
+    if (dataStoreId && orgId) {
+      const collectionName = this.deriveCollectionName(orgId, dataStoreId);
+      provision.push(
+        {
+          // Create-verb wildcard: the KB doesn't exist yet. Identical in
+          // shape to the accepted s3:CreateBucket wildcard in S3Adapter.
+          // Narrowing this further is tracked as C3, out of scope here.
+          actions: [
+            "bedrock:CreateKnowledgeBase",
+            "bedrock:GetKnowledgeBase",
+            "bedrock:TagResource",
+          ],
+          resources: ["*"],
+        },
+        {
+          actions: ["iam:PassRole"],
+          resources: [
+            `arn:aws:iam::${_accountId}:role/${this.deriveServiceRoleName(dataStoreId)}`,
+          ],
+        },
+        {
+          actions: ["aoss:APIAccessAll"],
+          resources: [
+            `arn:aws:aoss:${_region}:${_accountId}:collection/${collectionName}`,
+          ],
+        },
+      );
+    }
+
     // CIT-299: scope connect policies to the datastore's own knowledge base
     // and collection. Both knowledgeBaseId and collectionId are REQUIRED at
     // connect time — the caller must have set them during provision or manual
@@ -210,18 +251,17 @@ export class KnowledgeBaseAdapter implements ConnectorAdapter {
         : undefined;
 
     if (!knowledgeBaseId || !collectionId) {
-      // Return empty connect policies — connect() will reject with an opaque
-      // error before any role grant. We cannot throw here because
-      // requiredPolicies is a pure synchronous method and the resolver calls
-      // it speculatively.
-      return { provision: [], connect: [] };
+      // connect() will reject with an opaque error before any role grant.
+      // We cannot throw here because requiredPolicies is a pure
+      // synchronous method and the resolver calls it speculatively.
+      return { provision, connect: [] };
     }
 
     const knowledgeBaseArn = `arn:aws:bedrock:${_region}:${_accountId}:knowledge-base/${knowledgeBaseId}`;
     const collectionArn = `arn:aws:aoss:${_region}:${_accountId}:collection/${collectionId}`;
 
     return {
-      provision: [],
+      provision,
       connect: [
         {
           actions: ["bedrock:GetKnowledgeBase", "bedrock:Retrieve"],

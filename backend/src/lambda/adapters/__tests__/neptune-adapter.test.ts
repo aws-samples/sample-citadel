@@ -9,6 +9,7 @@ import {
 import { NeptuneClient, CreateDBClusterCommand } from "@aws-sdk/client-neptune";
 import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
 
+import { markScopedCredentials } from "../credential-guard";
 const mockSend = jest.fn();
 jest.mock("@aws-sdk/client-neptune", () => {
   return {
@@ -253,11 +254,14 @@ describe("NeptuneAdapter", () => {
       mockSend.mockResolvedValueOnce({
         DBClusters: [{ Status: "available" }],
       });
-      await adapter.connect(config, {
-        accessKeyId: "AKIA...",
-        secretAccessKey: "secret",
-        sessionToken: "token",
-      });
+      await adapter.connect(
+        config,
+        markScopedCredentials({
+          accessKeyId: "AKIA...",
+          secretAccessKey: "secret",
+          sessionToken: "token",
+        }),
+      );
       expect(NeptuneClient).toHaveBeenCalledWith({
         credentials: {
           accessKeyId: "AKIA...",

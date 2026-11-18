@@ -12,6 +12,7 @@ const rdsMock = mockClient(RDSClient);
 
 import { RdsAdapter } from "../rds-adapter";
 
+import { markScopedCredentials } from "../credential-guard";
 describe("RdsAdapter.deprovision", () => {
   const adapter = new RdsAdapter("postgres");
 
@@ -56,11 +57,11 @@ describe("RdsAdapter.deprovision", () => {
 
     await adapter.deprovision!(
       { dbInstanceIdentifier: "my-rds-instance" },
-      {
+      markScopedCredentials({
         accessKeyId: "AKIA...",
         secretAccessKey: "secret",
         sessionToken: "token",
-      },
+      }),
     );
 
     const calls = rdsMock.commandCalls(DeleteDBInstanceCommand);

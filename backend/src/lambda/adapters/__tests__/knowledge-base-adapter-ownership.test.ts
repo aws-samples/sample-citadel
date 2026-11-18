@@ -48,6 +48,7 @@ const ossMock = mockClient(OpenSearchServerlessClient);
 import { KnowledgeBaseAdapter } from "../knowledge-base-adapter";
 import { ProvisioningError } from "../errors";
 
+import { markScopedCredentials } from "../credential-guard";
 describe("KnowledgeBaseAdapter ownership (C1)", () => {
   const adapter = new KnowledgeBaseAdapter();
   adapter.roleCreationDelayMs = 0;
@@ -118,7 +119,11 @@ describe("KnowledgeBaseAdapter ownership (C1)", () => {
       await expect(
         adapter.provision(
           { name: "my-kb", orgId: "org-1" },
-          { accessKeyId: "AK", secretAccessKey: "SK", sessionToken: "ST" },
+          markScopedCredentials({
+            accessKeyId: "AK",
+            secretAccessKey: "SK",
+            sessionToken: "ST",
+          }),
         ),
       ).rejects.toThrow(ProvisioningError);
     });
@@ -127,7 +132,11 @@ describe("KnowledgeBaseAdapter ownership (C1)", () => {
       await expect(
         adapter.provision(
           { name: "my-kb", dataStoreId: "ds-1" },
-          { accessKeyId: "AK", secretAccessKey: "SK", sessionToken: "ST" },
+          markScopedCredentials({
+            accessKeyId: "AK",
+            secretAccessKey: "SK",
+            sessionToken: "ST",
+          }),
         ),
       ).rejects.toThrow(ProvisioningError);
     });

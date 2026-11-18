@@ -19,6 +19,7 @@ import { KnowledgeBaseAdapter } from "../knowledge-base-adapter";
 import { NotImplementedError } from "../../../adapters/errors";
 import type { ConnectorAdapter } from "../../../adapters/base";
 import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
+import { markScopedCredentials } from "../credential-guard";
 
 /** Adapter with a concrete provision method (all datastore adapters under test). */
 type ProvisioningAdapter = ConnectorAdapter &
@@ -447,10 +448,13 @@ describe("Property 16: Adapter idempotent provisioning on already-exists", () =>
               mockOssSend.mockRejectedValue(ossErr);
             }
 
-            const result = await adapter.provision(config, {
-              ...MOCK_SCOPED_CREDENTIALS,
-              ...creds,
-            });
+            const result = await adapter.provision(
+              config,
+              markScopedCredentials({
+                ...MOCK_SCOPED_CREDENTIALS,
+                ...creds,
+              }),
+            );
             expect(result).toBeDefined();
             expect(result.resourceArn).toBeTruthy();
             expect(result.resourceArn.length).toBeGreaterThan(0);

@@ -9,6 +9,7 @@ import {
 import { RDSClient, CreateDBClusterCommand } from "@aws-sdk/client-rds";
 import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
 
+import { markScopedCredentials } from "../credential-guard";
 const mockSend = jest.fn();
 jest.mock("@aws-sdk/client-rds", () => {
   return {
@@ -26,11 +27,11 @@ describe("AuroraAdapter", () => {
   let postgresAdapter: AuroraAdapter;
   let mysqlAdapter: AuroraAdapter;
   const config = { dbClusterIdentifier: "my-test-cluster" };
-  const creds = {
+  const creds = markScopedCredentials({
     masterUsername: "dbadmin",
     masterPassword: "secret123",
     ...MOCK_SCOPED_CREDENTIALS,
-  };
+  });
 
   beforeEach(() => {
     postgresAdapter = new AuroraAdapter("postgres");
@@ -274,11 +275,14 @@ describe("AuroraAdapter", () => {
       mockSend.mockResolvedValueOnce({
         DBClusters: [{ Status: "available" }],
       });
-      await postgresAdapter.connect(config, {
-        accessKeyId: "AKIA...",
-        secretAccessKey: "secret",
-        sessionToken: "token",
-      });
+      await postgresAdapter.connect(
+        config,
+        markScopedCredentials({
+          accessKeyId: "AKIA...",
+          secretAccessKey: "secret",
+          sessionToken: "token",
+        }),
+      );
       expect(RDSClient).toHaveBeenCalledWith({
         credentials: {
           accessKeyId: "AKIA...",

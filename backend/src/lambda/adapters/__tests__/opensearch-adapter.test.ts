@@ -13,6 +13,7 @@ import {
 } from "@aws-sdk/client-opensearchserverless";
 import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
 
+import { markScopedCredentials } from "../credential-guard";
 const mockSend = jest.fn();
 jest.mock("@aws-sdk/client-opensearchserverless", () => {
   return {
@@ -22,12 +23,10 @@ jest.mock("@aws-sdk/client-opensearchserverless", () => {
     CreateCollectionCommand: jest
       .fn()
       .mockImplementation((input) => ({ _type: "CreateCollection", input })),
-    CreateSecurityPolicyCommand: jest
-      .fn()
-      .mockImplementation((input) => ({
-        _type: "CreateSecurityPolicy",
-        input,
-      })),
+    CreateSecurityPolicyCommand: jest.fn().mockImplementation((input) => ({
+      _type: "CreateSecurityPolicy",
+      input,
+    })),
     BatchGetCollectionCommand: jest
       .fn()
       .mockImplementation((input) => ({ _type: "BatchGetCollection", input })),
@@ -318,11 +317,14 @@ describe("OpenSearchAdapter", () => {
       mockSend.mockResolvedValueOnce({
         collectionDetails: [{ name: "test", status: "ACTIVE" }],
       });
-      await adapter.connect(config, {
-        accessKeyId: "AKIA...",
-        secretAccessKey: "secret",
-        sessionToken: "token",
-      });
+      await adapter.connect(
+        config,
+        markScopedCredentials({
+          accessKeyId: "AKIA...",
+          secretAccessKey: "secret",
+          sessionToken: "token",
+        }),
+      );
       expect(OpenSearchServerlessClient).toHaveBeenCalledWith({
         credentials: {
           accessKeyId: "AKIA...",

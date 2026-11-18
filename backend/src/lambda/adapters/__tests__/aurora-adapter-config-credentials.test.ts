@@ -10,6 +10,7 @@ const rdsMock = mockClient(RDSClient);
 
 import { AuroraAdapter } from "../aurora-adapter";
 
+import { markScopedCredentials } from "../credential-guard";
 describe("AuroraAdapter.provision - credential resolution", () => {
   const adapter = new AuroraAdapter("postgres");
 
@@ -47,7 +48,11 @@ describe("AuroraAdapter.provision - credential resolution", () => {
         masterUsername: "dbadmin",
         masterPassword: "secret123",
       },
-      { accessKeyId: "AK", secretAccessKey: "SK", sessionToken: "ST" },
+      markScopedCredentials({
+        accessKeyId: "AK",
+        secretAccessKey: "SK",
+        sessionToken: "ST",
+      }),
     );
 
     expect(result.resourceArn).toContain("test-cluster");
@@ -63,13 +68,13 @@ describe("AuroraAdapter.provision - credential resolution", () => {
         masterUsername: "config-user",
         masterPassword: "config-pass",
       },
-      {
+      markScopedCredentials({
         accessKeyId: "AK",
         secretAccessKey: "SK",
         sessionToken: "ST",
         masterUsername: "cred-user",
         masterPassword: "cred-pass",
-      },
+      }),
     );
 
     expect(result.resourceArn).toContain("test-cluster");

@@ -7,7 +7,10 @@
  * 3. Valid credentials return the expected shape
  * 4. CredentialMissingError emits structured metric log
  */
-import { requireScopedCredentials } from "../credential-guard";
+import {
+  requireScopedCredentials,
+  markScopedCredentials,
+} from "../credential-guard";
 import { CredentialMissingError } from "../../../adapters/errors";
 
 describe("requireScopedCredentials", () => {
@@ -55,7 +58,11 @@ describe("requireScopedCredentials", () => {
 
   it("returns typed credentials when all fields are present", () => {
     const result = requireScopedCredentials(
-      { accessKeyId: "AKIA…", secretAccessKey: "secret", sessionToken: "tok" },
+      markScopedCredentials({
+        accessKeyId: "AKIA…",
+        secretAccessKey: "secret",
+        sessionToken: "tok",
+      }),
       { adapter: "S3Adapter", op: "provision" },
     );
     expect(result).toEqual({

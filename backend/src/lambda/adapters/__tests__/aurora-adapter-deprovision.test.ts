@@ -12,6 +12,7 @@ const rdsMock = mockClient(RDSClient);
 
 import { AuroraAdapter } from "../aurora-adapter";
 
+import { markScopedCredentials } from "../credential-guard";
 describe("AuroraAdapter.deprovision", () => {
   const adapter = new AuroraAdapter("postgres");
 
@@ -58,11 +59,11 @@ describe("AuroraAdapter.deprovision", () => {
 
     await adapter.deprovision!(
       { dbClusterIdentifier: "my-aurora-cluster" },
-      {
+      markScopedCredentials({
         accessKeyId: "AKIA...",
         secretAccessKey: "secret",
         sessionToken: "token",
-      },
+      }),
     );
 
     const calls = rdsMock.commandCalls(DeleteDBClusterCommand);

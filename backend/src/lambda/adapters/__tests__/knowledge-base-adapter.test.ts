@@ -25,6 +25,7 @@ const bedrockMock = mockClient(BedrockAgentClient);
 
 import { KnowledgeBaseAdapter } from "../knowledge-base-adapter";
 
+import { markScopedCredentials } from "../credential-guard";
 describe("KnowledgeBaseAdapter", () => {
   const adapter = new KnowledgeBaseAdapter();
   adapter.roleCreationDelayMs = 0; // Skip delay in tests
@@ -57,7 +58,11 @@ describe("KnowledgeBaseAdapter", () => {
 
       const result = await adapter.provision(
         { ...baseConfig, resourceName: "og-test-kb" },
-        { accessKeyId: "AK", secretAccessKey: "SK", sessionToken: "ST" },
+        markScopedCredentials({
+          accessKeyId: "AK",
+          secretAccessKey: "SK",
+          sessionToken: "ST",
+        }),
       );
 
       expect(result.resourceArn).toContain("knowledge-base");
@@ -81,7 +86,11 @@ describe("KnowledgeBaseAdapter", () => {
 
       await adapter.provision(
         { ...baseConfig, name: "explicit-name", resourceName: "fallback-name" },
-        { accessKeyId: "AK", secretAccessKey: "SK", sessionToken: "ST" },
+        markScopedCredentials({
+          accessKeyId: "AK",
+          secretAccessKey: "SK",
+          sessionToken: "ST",
+        }),
       );
 
       const calls = bedrockMock.commandCalls(CreateKnowledgeBaseCommand);
@@ -100,7 +109,11 @@ describe("KnowledgeBaseAdapter", () => {
 
       await adapter.deprovision!(
         { knowledgeBaseId: "KB123" },
-        { accessKeyId: "AK", secretAccessKey: "SK", sessionToken: "ST" },
+        markScopedCredentials({
+          accessKeyId: "AK",
+          secretAccessKey: "SK",
+          sessionToken: "ST",
+        }),
       );
 
       const calls = bedrockMock.commandCalls(DeleteKnowledgeBaseCommand);
@@ -116,7 +129,11 @@ describe("KnowledgeBaseAdapter", () => {
       await expect(
         adapter.deprovision!(
           { knowledgeBaseId: "KB-GONE" },
-          { accessKeyId: "AK", secretAccessKey: "SK", sessionToken: "ST" },
+          markScopedCredentials({
+            accessKeyId: "AK",
+            secretAccessKey: "SK",
+            sessionToken: "ST",
+          }),
         ),
       ).resolves.toBeUndefined();
     });
@@ -129,7 +146,11 @@ describe("KnowledgeBaseAdapter", () => {
       await expect(
         adapter.deprovision!(
           { knowledgeBaseId: "KB-DENIED" },
-          { accessKeyId: "AK", secretAccessKey: "SK", sessionToken: "ST" },
+          markScopedCredentials({
+            accessKeyId: "AK",
+            secretAccessKey: "SK",
+            sessionToken: "ST",
+          }),
         ),
       ).rejects.toThrow(/[Pp]ermission denied/);
     });
@@ -151,7 +172,11 @@ describe("KnowledgeBaseAdapter", () => {
 
       const result = await adapter.provision(
         { ...baseConfig, resourceName: "test-kb" },
-        { accessKeyId: "AK", secretAccessKey: "SK", sessionToken: "ST" },
+        markScopedCredentials({
+          accessKeyId: "AK",
+          secretAccessKey: "SK",
+          sessionToken: "ST",
+        }),
       );
 
       expect(result.resourceArn).toContain("KBXYZ");

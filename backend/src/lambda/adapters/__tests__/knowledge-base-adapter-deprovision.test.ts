@@ -27,6 +27,7 @@ jest.mock("@aws-sdk/client-bedrock-agent", () => {
 
 import { KnowledgeBaseAdapter } from "../knowledge-base-adapter";
 import { PermissionError } from "../errors";
+import { markScopedCredentials } from "../credential-guard";
 import {
   BedrockAgentClient,
   DeleteKnowledgeBaseCommand,
@@ -90,11 +91,11 @@ describe("KnowledgeBaseAdapter.deprovision", () => {
 
     await adapter.deprovision!(
       { knowledgeBaseId: "kb-12345" },
-      {
+      markScopedCredentials({
         accessKeyId: "AKIA...",
         secretAccessKey: "secret",
         sessionToken: "token",
-      },
+      }),
     );
 
     expect(BedrockAgentClient).toHaveBeenCalledWith({

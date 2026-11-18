@@ -26,6 +26,7 @@ import {
   ArnRejectedError,
   emitArnRefused,
 } from "./arn-safety";
+import { markScopedCredentials } from "../lambda/adapters/credential-guard";
 
 export type PolicyScope = "datastore" | "integration" | "agent" | "eval";
 
@@ -455,14 +456,14 @@ export class PolicyManager {
       2000,
     );
 
-    return {
+    return markScopedCredentials({
       accessKeyId: credentials.AccessKeyId!,
       secretAccessKey: credentials.SecretAccessKey!,
       sessionToken: credentials.SessionToken!,
       expiresAt: credentials.Expiration
         ? credentials.Expiration.toISOString()
         : undefined,
-    };
+    });
   }
 
   async deleteRole(
