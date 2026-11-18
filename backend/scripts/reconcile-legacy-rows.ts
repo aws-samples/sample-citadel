@@ -17,6 +17,8 @@
  *
  * --dry-run (default): scans and reports orphan rows; no deletes.
  * --delete-orphans:    deletes identified orphan rows. Idempotent — safe to re-run.
+ * --backfill-source-project-id: backfills sourceProjectId AND config (when
+ *                                absent or empty {}) from the registry descriptor.
  */
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
@@ -28,6 +30,9 @@ import {
   type NativeAttributeValue,
 } from "@aws-sdk/lib-dynamodb";
 import { resolveRegionOrExit } from "./lib/resolve-region";
+import {
+  coerceAgentConfig,
+} from "../src/lambda/registry-sync";
 
 // ---------------------------------------------------------------------------
 // Types (exported for tests)
@@ -207,7 +212,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
   } else if (backfillSourceProjectId) {
     if (!tableAgents) {
       console.error(
-        "Usage: --backfill-source-project-id --table-agents <table> [--apply]",
+        "Usage: --backfill-source-project-id --table-agents <table> [--apply]\n" +
+          "  Backfills sourceProjectId AND config (when absent or empty) from the registry descriptor.",
       );
       process.exit(1);
     }
@@ -1243,6 +1249,10 @@ export interface ReconcileSourceProjectIdSummary {
   skippedAlreadySet: number;
   skippedNoProjectId: number;
   errors: number;
+  /** Number of rows where sourceProjectId was set during this run. */
+  sourceProjectIdSet: number;
+  /** Number of rows where config was backfilled from the descriptor. */
+  configSet: number;
 }
 
 export interface ReconcileSourceProjectIdOptions {
@@ -1254,11 +1264,26 @@ export interface ReconcileSourceProjectIdOptions {
   };
 }
 
+/** Returns true when the row's config attribute is absent, undefined, or an empty map `{}`. */
+function isConfigAbsentOrEmpty(config: unknown): boolean {
+  if (config == null) return true;
+  if (
+    typeof config === "object" &&
+    !Array.isArray(config) &&
+    Object.keys(config as Record<string, unknown>).length === 0
+  ) {
+    return true;
+  }
+  return false;
+}
+
 /**
- * Scans AgentConfigTable for rows that have a registryRecordId but no
- * sourceProjectId, fetches the Registry record to extract sourceProjectId,
- * and patches the cache row. Idempotent: rows already carrying
- * sourceProjectId are skipped. A second dry-run after --apply is empty.
+ * Scans AgentConfigTable for rows that have a registryRecordId but are missing
+ * sourceProjectId OR have an absent/empty config, fetches the Registry record
+ * once per candidate, and patches the cache row with both fields as needed.
+ *
+ * Idempotent: rows already carrying sourceProjectId AND a non-empty config are
+ * skipped. A second dry-run after --apply reports 0 candidates.
  */
 export async function runReconcileSourceProjectId(
   opts: ReconcileSourceProjectIdOptions,
@@ -1271,6 +1296,8 @@ export async function runReconcileSourceProjectId(
     skippedAlreadySet: 0,
     skippedNoProjectId: 0,
     errors: 0,
+    sourceProjectIdSet: 0,
+    configSet: 0,
   };
 
   // Resolve registry service — from opts (tests) or env (production).
@@ -1314,10 +1341,13 @@ export async function runReconcileSourceProjectId(
 
   summary.scanned = allItems.length;
 
-  // Partition: already-set vs candidates (missing sourceProjectId + has registryRecordId).
+  // Partition: candidates need sourceProjectId OR have absent/empty config.
   const candidates: Record<string, unknown>[] = [];
   for (const item of allItems) {
-    if (item.sourceProjectId) {
+    const needsSourceProjectId = !item.sourceProjectId;
+    const needsConfig = isConfigAbsentOrEmpty(item.config);
+
+    if (!needsSourceProjectId && !needsConfig) {
       summary.skippedAlreadySet++;
       continue;
     }
@@ -1339,7 +1369,7 @@ export async function runReconcileSourceProjectId(
     `[reconcile-legacy-rows] sourceProjectId backfill: ${candidates.length} candidate(s), dryRun=${dryRun}`,
   );
 
-  // Step 2: For each candidate, fetch from registry and extract sourceProjectId.
+  // Step 2: For each candidate, fetch from registry and compute desired state.
   for (const item of candidates) {
     const agentId = item.agentId as string;
     const registryRecordId = item.registryRecordId as string;
@@ -1360,43 +1390,95 @@ export async function runReconcileSourceProjectId(
         continue;
       }
 
-      let sourceProjectId: string | undefined;
+      let parsed: Record<string, unknown>;
       try {
-        const parsed = JSON.parse(record.customDescriptorContent);
-        sourceProjectId =
-          typeof parsed?.sourceProjectId === "string"
-            ? parsed.sourceProjectId
-            : undefined;
+        const raw = JSON.parse(record.customDescriptorContent);
+        if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+          summary.skippedNoProjectId++;
+          console.log(`  [skip] ${agentId}: malformed customDescriptorContent`);
+          continue;
+        }
+        parsed = raw as Record<string, unknown>;
       } catch {
         summary.skippedNoProjectId++;
         console.log(`  [skip] ${agentId}: malformed customDescriptorContent`);
         continue;
       }
 
-      if (!sourceProjectId) {
+      // ── Compute desired state from the single descriptor fetch ──
+      const needsSourceProjectId = !item.sourceProjectId;
+      const sourceProjectId =
+        typeof parsed.sourceProjectId === "string"
+          ? parsed.sourceProjectId
+          : undefined;
+
+      const needsConfig = isConfigAbsentOrEmpty(item.config);
+      const descriptorConfig = coerceAgentConfig(registryRecordId, parsed.config);
+
+      // Skip entirely if the descriptor can't satisfy either need.
+      if (needsSourceProjectId && !sourceProjectId && !needsConfig) {
         summary.skippedNoProjectId++;
         console.log(
           `  [skip] ${agentId}: registry record has no sourceProjectId`,
         );
         continue;
       }
+      if (needsSourceProjectId && !sourceProjectId && needsConfig && !descriptorConfig) {
+        summary.skippedNoProjectId++;
+        console.log(
+          `  [skip] ${agentId}: registry record has neither sourceProjectId nor config`,
+        );
+        continue;
+      }
+
+      // Build the update expression dynamically.
+      const setExprs: string[] = [];
+      const exprValues: Record<string, unknown> = {};
+      let willSetSourceProjectId = false;
+      let willSetConfig = false;
+
+      if (needsSourceProjectId && sourceProjectId) {
+        setExprs.push("sourceProjectId = :pid");
+        exprValues[":pid"] = sourceProjectId;
+        willSetSourceProjectId = true;
+      }
+      if (needsConfig && descriptorConfig) {
+        setExprs.push("config = :cfg");
+        exprValues[":cfg"] = descriptorConfig;
+        willSetConfig = true;
+      }
+
+      if (setExprs.length === 0) {
+        // Descriptor didn't have what we needed — skip.
+        if (needsSourceProjectId) {
+          summary.skippedNoProjectId++;
+          console.log(
+            `  [skip] ${agentId}: registry record has no sourceProjectId`,
+          );
+        }
+        continue;
+      }
+
+      const parts: string[] = [];
+      if (willSetSourceProjectId) parts.push(`sourceProjectId=${sourceProjectId}`);
+      if (willSetConfig) parts.push("config=<from descriptor>");
 
       if (dryRun) {
-        console.log(
-          `  [dry-run] ${agentId} → sourceProjectId=${sourceProjectId}`,
-        );
+        console.log(`  [dry-run] ${agentId} → ${parts.join(", ")}`);
       } else {
         await docClient.send(
           new UpdateCommand({
             TableName: tableAgents,
             Key: { agentId },
-            UpdateExpression: "SET sourceProjectId = :pid",
-            ExpressionAttributeValues: { ":pid": sourceProjectId },
+            UpdateExpression: `SET ${setExprs.join(", ")}`,
+            ExpressionAttributeValues: exprValues,
           }),
         );
         summary.updated++;
+        if (willSetSourceProjectId) summary.sourceProjectIdSet++;
+        if (willSetConfig) summary.configSet++;
         console.log(
-          `  [updated] ${agentId} → sourceProjectId=${sourceProjectId}`,
+          `  [updated] ${agentId} → ${parts.join(", ")}`,
         );
       }
     } catch (err) {

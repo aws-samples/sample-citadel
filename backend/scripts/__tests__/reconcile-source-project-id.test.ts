@@ -48,6 +48,7 @@ function cacheRow(
   agentId: string,
   registryRecordId: string | undefined,
   sourceProjectId?: string,
+  config?: Record<string, unknown>,
 ) {
   return {
     agentId,
@@ -56,6 +57,7 @@ function cacheRow(
     orgId: "org-a",
     registryStatus: "APPROVED",
     ...(sourceProjectId !== undefined ? { sourceProjectId } : {}),
+    ...(config !== undefined ? { config } : {}),
   };
 }
 
@@ -78,7 +80,7 @@ describe("reconcileSourceProjectId", () => {
     dynamoMock.on(ScanCommand).resolves({
       Items: [
         cacheRow("a1", "rec-1"), // missing sourceProjectId — candidate
-        cacheRow("a2", "rec-2", "proj-99"), // already has it — skip
+        cacheRow("a2", "rec-2", "proj-99", { model: "gpt-4" }), // already has both — skip
         cacheRow("a3", undefined), // no registryRecordId — skip
       ],
     });
@@ -107,7 +109,7 @@ describe("reconcileSourceProjectId", () => {
       Items: [
         cacheRow("a1", "rec-1"), // missing — candidate
         cacheRow("a2", "rec-2"), // missing — candidate
-        cacheRow("a3", "rec-3", "proj-99"), // already set — skip
+        cacheRow("a3", "rec-3", "proj-99", { model: "gpt-4" }), // already set — skip
       ],
     });
     dynamoMock.on(UpdateCommand).resolves({});
@@ -134,12 +136,12 @@ describe("reconcileSourceProjectId", () => {
   });
 
   test("convergence: second dry-run after apply shows zero candidates", async () => {
-    // After apply, all rows now have sourceProjectId
+    // After apply, all rows now have sourceProjectId AND config
     dynamoMock.on(ScanCommand).resolves({
       Items: [
-        cacheRow("a1", "rec-1", "proj-123"),
-        cacheRow("a2", "rec-2", "proj-456"),
-        cacheRow("a3", "rec-3", "proj-99"),
+        cacheRow("a1", "rec-1", "proj-123", { model: "gpt-4" }),
+        cacheRow("a2", "rec-2", "proj-456", { model: "claude" }),
+        cacheRow("a3", "rec-3", "proj-99", { model: "llama" }),
       ],
     });
 
@@ -198,5 +200,167 @@ describe("reconcileSourceProjectId", () => {
     expect(result.candidatesFound).toBe(1);
     expect(result.updated).toBe(0);
     expect(result.skippedNoProjectId).toBe(1);
+  });
+});
+
+// ── Config backfill tests (sourceProjectId mode also fills empty config) ──
+
+describe("reconcileSourceProjectId – config backfill", () => {
+  /** Helper: cache row with explicit config (empty map or populated). */
+  function cacheRowWithConfig(
+    agentId: string,
+    registryRecordId: string,
+    opts: {
+      sourceProjectId?: string;
+      config?: Record<string, unknown>;
+    } = {},
+  ) {
+    return {
+      agentId,
+      registryRecordId,
+      name: `Agent ${agentId}`,
+      orgId: "org-a",
+      registryStatus: "APPROVED",
+      ...(opts.sourceProjectId !== undefined
+        ? { sourceProjectId: opts.sourceProjectId }
+        : {}),
+      ...(opts.config !== undefined ? { config: opts.config } : {}),
+    };
+  }
+
+  /** Registry record that includes config in its descriptor. */
+  function registryRecordWithConfig(
+    recordId: string,
+    sourceProjectId: string,
+    config: Record<string, unknown>,
+  ) {
+    return {
+      recordId,
+      name: `Agent ${recordId}`,
+      status: "APPROVED",
+      customDescriptorContent: JSON.stringify({
+        sourceProjectId,
+        orgId: "org-a",
+        config,
+      }),
+    };
+  }
+
+  test("apply: sets config when row has empty-map config and descriptor carries one", async () => {
+    const descriptorConfig = { model: "gpt-4", temperature: 0.7 };
+    dynamoMock.on(ScanCommand).resolves({
+      Items: [
+        cacheRowWithConfig("a1", "rec-1", { config: {} }), // empty config → candidate
+      ],
+    });
+    dynamoMock.on(UpdateCommand).resolves({});
+
+    mockGetResource.mockResolvedValueOnce(
+      registryRecordWithConfig("rec-1", "proj-123", descriptorConfig),
+    );
+
+    const result = await runReconcileSourceProjectId({
+      tableAgents: "test-agents",
+      dryRun: false,
+      docClient: DynamoDBDocumentClient.from(new DynamoDBClient({})),
+      registryService: fakeRegistryService,
+    });
+
+    expect(result.sourceProjectIdSet).toBeGreaterThanOrEqual(1);
+    expect(result.configSet).toBe(1);
+    expect(result.errors).toBe(0);
+
+    // UpdateCommand should include config in the update expression
+    const updates = dynamoMock.commandCalls(UpdateCommand);
+    expect(updates.length).toBeGreaterThanOrEqual(1);
+    const lastUpdate = updates[updates.length - 1];
+    const exprValues = lastUpdate.args[0].input.ExpressionAttributeValues;
+    expect(exprValues).toHaveProperty(":cfg");
+    expect(exprValues![":cfg"]).toEqual(descriptorConfig);
+  });
+
+  test("apply: does NOT overwrite non-empty config", async () => {
+    const existingConfig = { model: "claude-3", maxTokens: 1000 };
+    const descriptorConfig = { model: "gpt-4", temperature: 0.7 };
+    dynamoMock.on(ScanCommand).resolves({
+      Items: [
+        cacheRowWithConfig("a1", "rec-1", { config: existingConfig }), // non-empty → keep
+      ],
+    });
+    dynamoMock.on(UpdateCommand).resolves({});
+
+    mockGetResource.mockResolvedValueOnce(
+      registryRecordWithConfig("rec-1", "proj-123", descriptorConfig),
+    );
+
+    const result = await runReconcileSourceProjectId({
+      tableAgents: "test-agents",
+      dryRun: false,
+      docClient: DynamoDBDocumentClient.from(new DynamoDBClient({})),
+      registryService: fakeRegistryService,
+    });
+
+    expect(result.configSet).toBe(0);
+
+    // UpdateCommand should NOT include :cfg
+    const updates = dynamoMock.commandCalls(UpdateCommand);
+    // There should be an update (for sourceProjectId), but config should not be in it
+    for (const u of updates) {
+      const exprValues = u.args[0].input.ExpressionAttributeValues;
+      expect(exprValues).not.toHaveProperty(":cfg");
+    }
+  });
+
+  test("apply: sets config when row has no config attribute at all", async () => {
+    const descriptorConfig = { model: "gpt-4" };
+    dynamoMock.on(ScanCommand).resolves({
+      Items: [
+        // No config attribute at all
+        cacheRowWithConfig("a1", "rec-1", {}),
+      ],
+    });
+    dynamoMock.on(UpdateCommand).resolves({});
+
+    mockGetResource.mockResolvedValueOnce(
+      registryRecordWithConfig("rec-1", "proj-123", descriptorConfig),
+    );
+
+    const result = await runReconcileSourceProjectId({
+      tableAgents: "test-agents",
+      dryRun: false,
+      docClient: DynamoDBDocumentClient.from(new DynamoDBClient({})),
+      registryService: fakeRegistryService,
+    });
+
+    expect(result.sourceProjectIdSet).toBeGreaterThanOrEqual(1);
+    expect(result.configSet).toBe(1);
+  });
+
+  test("convergence: second dry-run after config+sourceProjectId apply shows 0 candidates", async () => {
+    // After apply, all rows now have sourceProjectId AND config
+    dynamoMock.on(ScanCommand).resolves({
+      Items: [
+        cacheRowWithConfig("a1", "rec-1", {
+          sourceProjectId: "proj-123",
+          config: { model: "gpt-4" },
+        }),
+        cacheRowWithConfig("a2", "rec-2", {
+          sourceProjectId: "proj-456",
+          config: { model: "claude-3" },
+        }),
+      ],
+    });
+
+    const result = await runReconcileSourceProjectId({
+      tableAgents: "test-agents",
+      dryRun: true,
+      docClient: DynamoDBDocumentClient.from(new DynamoDBClient({})),
+      registryService: fakeRegistryService,
+    });
+
+    expect(result.candidatesFound).toBe(0);
+    expect(result.configSet).toBe(0);
+    expect(result.sourceProjectIdSet).toBe(0);
+    expect(mockGetResource).not.toHaveBeenCalled();
   });
 });
