@@ -61,7 +61,14 @@ function isRegistryEnabled(): boolean {
 /** Minimal config slice the sandbox needs (superset kept for future callers). */
 export interface ResolvedToolConfig {
   toolId: string;
-  orgId: string;
+  /**
+   * Absent when the source record never stamped an orgId — PR-3 no longer
+   * collapses this to "". Callers doing org-scoping must treat an absent
+   * orgId (or `orgUnknown: true`) as fail-closed, never as shared.
+   */
+  orgId?: string;
+  /** Set when `orgId` is absent because the source record never stamped one. */
+  orgUnknown?: boolean;
   integrationBindings?: Array<{
     integrationId?: string;
     dataStoreId?: string;
@@ -125,7 +132,8 @@ export async function resolveToolConfig(
 
   return {
     toolId: result.Item.toolId ?? toolId,
-    orgId: result.Item.orgId ?? "",
+    orgId: result.Item.orgId,
+    ...(result.Item.orgId === undefined ? { orgUnknown: true } : {}),
     integrationBindings: result.Item.integrationBindings ?? null,
     dataStoreBindings: result.Item.dataStoreBindings ?? null,
   };
@@ -142,6 +150,7 @@ function toResolvedConfig(
   return {
     toolId: tc.toolId,
     orgId: tc.orgId,
+    ...(tc.orgUnknown ? { orgUnknown: true } : {}),
     integrationBindings: tc.integrationBindings ?? null,
     dataStoreBindings: tc.dataStoreBindings ?? null,
     ...(codeKey ? { codeKey } : {}),

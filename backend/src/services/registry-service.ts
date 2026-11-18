@@ -503,7 +503,18 @@ export interface AgentConfig {
   name?: string;
   /** Human-readable description surfaced from the Registry record. */
   description?: string;
-  orgId: string;
+  /**
+   * Absent when the source metadata never stamped an orgId — PR-3 no longer
+   * collapses this to "". See `orgUnknown`.
+   */
+  orgId?: string;
+  /**
+   * Set when `orgId` is absent because the source metadata never stamped
+   * one (unstamped/legacy record). PR-3 fail-closed fix: a record flagged
+   * `orgUnknown` is never treated as cross-org shared regardless of what
+   * (if anything) `orgId` holds.
+   */
+  orgUnknown?: boolean;
   config: string;
   state: string;
   categories?: string[];
@@ -549,7 +560,17 @@ export interface AgentConfig {
 
 export interface ToolConfig {
   toolId: string;
-  orgId: string;
+  /**
+   * Absent when the source metadata never stamped an orgId — PR-3 no longer
+   * collapses this to "". See `orgUnknown`.
+   */
+  orgId?: string;
+  /**
+   * Set when `orgId` is absent because the source metadata never stamped
+   * one. PR-3 fail-closed fix: a record flagged `orgUnknown` is never
+   * treated as cross-org shared.
+   */
+  orgUnknown?: boolean;
   config: string;
   state: string;
   /**
@@ -1866,6 +1887,7 @@ export class RegistryService {
           status: record.status,
           orgId: meta.orgId,
           createdBy: meta.createdBy,
+          orgUnknown: meta.orgUnknown,
         });
       });
       return {
@@ -1940,6 +1962,7 @@ export class RegistryService {
           status: record.status,
           orgId: meta.orgId,
           createdBy: meta.createdBy,
+          orgUnknown: meta.orgUnknown,
         });
       });
     }
@@ -2319,7 +2342,12 @@ export class RegistryService {
       agentId: record.recordId,
       name: record.name ?? "",
       description,
-      orgId: meta.orgId ?? "",
+      // PR-3 (Continuum CRITICAL): do NOT collapse an absent meta.orgId to
+      // "" — that previously made an unstamped record read as system-shared
+      // under the old orgMatch. Leave orgId undefined and flag orgUnknown
+      // so every read-path filter fails closed instead.
+      orgId: meta.orgId,
+      ...(meta.orgId === undefined ? { orgUnknown: true } : {}),
       // AWSJSON contract: config must be a JSON object — a plain-text
       // description falls back to '{}' (see toValidConfigJson).
       config: enrichedConfig,
@@ -2380,7 +2408,10 @@ export class RegistryService {
 
     return {
       toolId: record.recordId,
-      orgId: meta.orgId ?? "",
+      // PR-3 (Continuum CRITICAL): do NOT collapse an absent meta.orgId to
+      // "" — see mapToAgentConfig for the matching rationale.
+      orgId: meta.orgId,
+      ...(meta.orgId === undefined ? { orgUnknown: true } : {}),
       config,
       state: this.toInternalState(record.status),
       categories: meta.categories,

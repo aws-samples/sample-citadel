@@ -31,6 +31,7 @@ import {
 import { assertProjectOrgAccess } from "../utils/project-org-access";
 import { extractUserIdFromEvent } from "../utils/auth";
 import { isRecordVisible, viewerFromEvent } from "../utils/record-visibility";
+import { isSystemOrg } from "../utils/org-constants";
 import { getGovernanceEnforce } from "../utils/governance-flag";
 import { publishEvent } from "../utils/events";
 import { normaliseTags } from "../utils/tag-policy";
@@ -180,7 +181,17 @@ interface AgentConfig {
   agentId: string;
   /** Human-readable agent name (Registry top-level or legacy config.name). */
   name?: string;
-  orgId: string;
+  /**
+   * Absent when the source metadata never stamped an orgId — PR-3 no
+   * longer collapses this to "". See `orgUnknown`.
+   */
+  orgId?: string;
+  /**
+   * Set when the source metadata never stamped an orgId (unstamped/legacy
+   * record). Distinct from an explicit empty-string orgId — PR-3 fail-closed
+   * fix: a record flagged `orgUnknown` is never treated as cross-org shared.
+   */
+  orgUnknown?: boolean;
   config: string | Record<string, unknown>;
   /** Human-readable description surfaced from the Registry record. */
   description?: string;
@@ -462,6 +473,24 @@ function emitListSourceMetric(
  * to the AgentConfig API shape. Returns an empty array when no projection
  * rows exist.
  */
+/**
+ * Fail-closed pre-filter: whether a non-admin caller in `callerOrgId` is
+ * allowed to even consider `candidateOrgId` (before the finer-grained
+ * `isRecordVisible` status check runs). Shared by every list/search org
+ * pre-filter below (PR-3: previously each repeated an empty-string
+ * fail-open escape hatch, which treated a blank orgId as a cross-tenant
+ * wildcard — only the explicit `ALL_ORGS` sentinel is).
+ */
+function callerMayConsiderOrg(
+  candidateOrgId: string | undefined,
+  orgUnknown: boolean | undefined,
+  callerOrgId: string | null,
+): boolean {
+  if (orgUnknown === true) return false;
+  if (isSystemOrg(candidateOrgId)) return true;
+  return candidateOrgId !== undefined && candidateOrgId === callerOrgId;
+}
+
 async function listAgentConfigsFromProjection(
   callerOrgId: string | null,
   admin: boolean,
@@ -490,11 +519,14 @@ async function listAgentConfigsFromProjection(
     if (items.length === 0) return [];
 
     // Map DynamoDB items to AgentConfig shape and apply the same filters
-    // as the registry path.
+    // as the registry path. PR-3: do not collapse an absent orgId column to
+    // "" — carry orgUnknown so the fail-closed pre-filter below treats it
+    // correctly instead of as an explicit (if harmless) blank string.
     const configs: AgentConfig[] = items.map((item) => ({
       agentId: item.agentId,
       name: typeof item.name === "string" ? item.name : undefined,
-      orgId: item.orgId ?? "",
+      orgId: typeof item.orgId === "string" ? item.orgId : undefined,
+      ...(typeof item.orgId === "string" ? {} : { orgUnknown: true }),
       config: toAwsJsonConfig(item.config, item.agentId),
       description:
         typeof item.description === "string" ? item.description : undefined,
@@ -522,7 +554,8 @@ async function listAgentConfigsFromProjection(
     }));
 
     return configs.filter((a) => {
-      if (!admin && a.orgId !== callerOrgId && a.orgId !== "") return false;
+      if (!admin && !callerMayConsiderOrg(a.orgId, a.orgUnknown, callerOrgId))
+        return false;
       return isRecordVisible(viewer, {
         status: a.registryStatus ?? undefined,
         orgId: a.orgId,
@@ -585,7 +618,8 @@ export async function listAgentConfigsRegistry(
       // Merge legacy rows that have no registryRecordId (genuinely local-only)
       const allDynamoConfigs = await listAgentConfigs();
       const dynamoConfigs = allDynamoConfigs.filter((a) => {
-        if (!admin && a.orgId !== callerOrgId && a.orgId !== "") return false;
+        if (!admin && !callerMayConsiderOrg(a.orgId, a.orgUnknown, callerOrgId))
+          return false;
         return isRecordVisible(viewer, {
           status: a.registryStatus,
           orgId: a.orgId,
@@ -633,7 +667,8 @@ export async function listAgentConfigsRegistry(
   );
   // Org filter (existing) + status/ownership visibility (CIT-043).
   const registryConfigs = allRegistryConfigs.filter((a) => {
-    if (!admin && a.orgId !== callerOrgId && a.orgId !== "") return false;
+    if (!admin && !callerMayConsiderOrg(a.orgId, a.orgUnknown, callerOrgId))
+      return false;
     return isRecordVisible(viewer, {
       status: a.registryStatus ?? undefined,
       orgId: a.orgId,
@@ -646,7 +681,8 @@ export async function listAgentConfigsRegistry(
   //    per policy: legacy records predate governance).
   const allDynamoConfigs = await listAgentConfigs();
   const dynamoConfigs = allDynamoConfigs.filter((a) => {
-    if (!admin && a.orgId !== callerOrgId && a.orgId !== "") return false;
+    if (!admin && !callerMayConsiderOrg(a.orgId, a.orgUnknown, callerOrgId))
+      return false;
     return isRecordVisible(viewer, {
       status: a.registryStatus,
       orgId: a.orgId,
@@ -1520,7 +1556,8 @@ export async function searchAgentConfigsRegistry(
     registryService.mapToAgentConfig(record),
   );
   return configs.filter((a) => {
-    if (!admin && a.orgId !== callerOrgId && a.orgId !== "") return false;
+    if (!admin && !callerMayConsiderOrg(a.orgId, a.orgUnknown, callerOrgId))
+      return false;
     return isRecordVisible(viewer, {
       status: a.registryStatus ?? undefined,
       orgId: a.orgId,
@@ -1864,7 +1901,8 @@ async function listAgentConfigs(): Promise<AgentConfig[]> {
   return (result.Items || []).map((item) => ({
     agentId: item.agentId,
     name: typeof item.name === "string" ? item.name : undefined,
-    orgId: item.orgId || "",
+    orgId: typeof item.orgId === "string" ? item.orgId : undefined,
+    ...(typeof item.orgId === "string" ? {} : { orgUnknown: true }),
     config: toAwsJsonConfig(item.config, item.agentId),
     state: item.state || "active",
     categories: item.categories || [],
@@ -2208,7 +2246,8 @@ async function publishAgentManifest(
   const item = result.Attributes!;
   return {
     agentId: item.agentId,
-    orgId: item.orgId || "",
+    orgId: typeof item.orgId === "string" ? item.orgId : undefined,
+    ...(typeof item.orgId === "string" ? {} : { orgUnknown: true }),
     config: toAwsJsonConfig(item.config, item.agentId),
     state: item.state || "active",
     categories: item.categories || [],

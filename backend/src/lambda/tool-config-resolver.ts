@@ -26,6 +26,7 @@ import {
 import { getUserId } from "../utils/appsync";
 import { REGISTRY_TRANSITIONS } from "../adapters/lifecycle";
 import { isRecordVisible, viewerFromEvent } from "../utils/record-visibility";
+import { ALL_ORGS as ALL_ORGS_ORG_ID } from "../utils/org-constants";
 import { normaliseTags } from "../utils/tag-policy";
 import { enforceTagPolicy } from "./tag-policy-check";
 import {
@@ -47,8 +48,6 @@ const DATASTORES_TABLE = process.env.DATASTORES_TABLE;
 // ---------------------------------------------------------------------------
 // CIT-295/H17: Binding ownership verification
 // ---------------------------------------------------------------------------
-
-const ALL_ORGS_ORG_ID = "All Organizations";
 
 /**
  * Verify that every referenced integrationId exists and belongs to the
@@ -339,7 +338,17 @@ interface ToolConfigResolverEvent extends OrgScopedEvent {
 
 interface ToolConfig {
   toolId: string;
-  orgId: string;
+  /**
+   * Absent when the source metadata never stamped an orgId — PR-3 no
+   * longer collapses this to "". See `orgUnknown`.
+   */
+  orgId?: string;
+  /**
+   * Set when `orgId` is absent because the source metadata never stamped
+   * one. PR-3 fail-closed fix: a record flagged `orgUnknown` is never
+   * treated as cross-org shared.
+   */
+  orgUnknown?: boolean;
   config: string | Record<string, unknown>;
   state: "active" | "inactive" | "maintenance" | "pending" | string;
   categories?: string[];
@@ -759,7 +768,8 @@ async function listToolConfigsFromProjection(
 
     const configs: ToolConfig[] = items.map((item) => ({
       toolId: item.toolId,
-      orgId: item.orgId ?? "",
+      orgId: typeof item.orgId === "string" ? item.orgId : undefined,
+      ...(typeof item.orgId === "string" ? {} : { orgUnknown: true }),
       config:
         typeof item.config === "string"
           ? item.config
@@ -1681,7 +1691,8 @@ async function listToolConfigs(event?: OrgScopedEvent): Promise<ToolConfig[]> {
     }
     items.push({
       toolId: item.toolId,
-      orgId: item.orgId || "",
+      orgId: typeof item.orgId === "string" ? item.orgId : undefined,
+      ...(typeof item.orgId === "string" ? {} : { orgUnknown: true }),
       config: configStr,
       state: item.state || "active",
       categories: item.categories || [],
