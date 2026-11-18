@@ -336,8 +336,9 @@ def test_confirm_plan_emits_invisible_markers_with_blank_separation(monkeypatch)
     import tools.state as state
     monkeypatch.setattr(state, "_internal_update_progress", mock.MagicMock())
 
-    plan = json.dumps([{"name": "AgentA", "action": "build", "reason": "new", "spec": "spec"}])
-    fabricate.confirm_fabrication_plan(plan)
+    plan_data = [{"name": "AgentA", "action": "build", "reason": "new", "spec": "spec"}]
+    monkeypatch.setattr(fabricate, "_load_plan_from_session", lambda sid, pid: plan_data)
+    fabricate.confirm_fabrication_plan(plan_id="test-plan-id")
 
     doc = captured[KEY]
     assert "<!--" not in doc
@@ -529,8 +530,9 @@ def test_confirm_plan_wraps_status_table_in_markers(monkeypatch):
     import tools.state as state
     monkeypatch.setattr(state, "_internal_update_progress", mock.MagicMock())
 
-    plan = json.dumps([{"name": "AgentA", "action": "build", "reason": "new", "spec": "spec"}])
-    fabricate.confirm_fabrication_plan(plan)
+    plan_data = [{"name": "AgentA", "action": "build", "reason": "new", "spec": "spec"}]
+    monkeypatch.setattr(fabricate, "_load_plan_from_session", lambda sid, pid: plan_data)
+    fabricate.confirm_fabrication_plan(plan_id="test-plan-id")
 
     doc = captured[KEY]
     assert fabricate.PLAN_STATUS_BEGIN in doc

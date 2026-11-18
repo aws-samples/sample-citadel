@@ -93,12 +93,15 @@ class TestCrossTenantExclusion:
             {"name": "SharedName", "spec": "spec-a", "requires_external": False},
         ])
         monkeypatch.setattr(fab, "s3_get", lambda key: "fake td2 content")
+        monkeypatch.setattr(fab, "_store_plan_in_session", lambda sid, plan: "plan-123")
 
         result = json.loads(fab.plan_fabrication())
 
-        assert len(result) == 1
-        assert result[0]["action"] == "build"
-        assert result[0]["name"] == "SharedName"
+        assert result["ok"] is True
+        plan = result["plan"]
+        assert len(plan) == 1
+        assert plan[0]["action"] == "build"
+        assert plan[0]["name"] == "SharedName"
 
     def test_list_factory_agents_hides_other_org(self, monkeypatch):
         """list_factory_agents renders only own-org + system agents."""
