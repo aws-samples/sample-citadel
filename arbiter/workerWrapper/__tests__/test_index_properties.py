@@ -154,7 +154,7 @@ class TestRunAgentCredentialIsolation:
             mock_result.stderr = ""
             mock_subprocess.run.return_value = mock_result
 
-            run_agent_in_subprocess({}, creds)
+            run_agent_in_subprocess({}, creds, credential_mode='scoped')
 
             call_kwargs = mock_subprocess.run.call_args[1]
             child_env = call_kwargs["env"]
@@ -162,17 +162,17 @@ class TestRunAgentCredentialIsolation:
             assert child_env["AWS_SECRET_ACCESS_KEY"] == secret_key
             assert child_env["AWS_SESSION_TOKEN"] == session_token
 
-    def test_no_scoped_credentials_propagates_ambient_env(self):
-        """Without scoped creds, the wrapper's ambient credential env is
-        PROPAGATED into the child (finding 9ef192d1).
+    def test_no_scoped_credentials_mode_none_scrubs_ambient_env(self):
+        """PR-4 (owner decision 5750aeec: FAIL CLOSED, no grandfathering)
+        SUPERSEDES the prior ambient-inherit fix for finding 9ef192d1.
 
-        Previously this test asserted the vars were REMOVED "so the child uses
-        the Lambda's default IAM role via the metadata service" — but AWS
-        Lambda has no IMDS/metadata service; the execution role is delivered
-        ONLY through these env vars, so stripping them left the child with no
-        credentials at all (NoCredentialsError). The documented backward-compat
-        behavior (docs/AGENT_PERMISSIONS.md §5) — run under the Lambda's
-        ambient role — is only achievable by INHERITING them."""
+        The former behavior ("ambient credentials MUST survive into the
+        child env") was itself the fail-open gap PR-4 closes: a subprocess
+        with no declared ``requiredPermissions`` could read the wrapper
+        Lambda's full execution-role credentials. There is no ambient-role
+        fallback left — ``credential_mode='none'`` (the explicit no-cloud
+        sentinel for pure-compute agents) now SCRUBS every ambient AWS
+        credential env var and injects nothing."""
         with patch.dict(os.environ, {
             "AWS_ACCESS_KEY_ID": "AMBIENTPARENT",
             "AWS_SECRET_ACCESS_KEY": "ambient-secret",
@@ -185,14 +185,23 @@ class TestRunAgentCredentialIsolation:
                 mock_result.stderr = ""
                 mock_subprocess.run.return_value = mock_result
 
-                run_agent_in_subprocess({}, None)
+                run_agent_in_subprocess({}, None, credential_mode='none')
 
                 call_kwargs = mock_subprocess.run.call_args[1]
                 child_env = call_kwargs["env"]
-                # Ambient credentials MUST survive into the child env.
-                assert child_env["AWS_ACCESS_KEY_ID"] == "AMBIENTPARENT"
-                assert child_env["AWS_SECRET_ACCESS_KEY"] == "ambient-secret"
-                assert child_env["AWS_SESSION_TOKEN"] == "ambient-token"
+                # Ambient credentials must NEVER survive into the child env.
+                assert "AWS_ACCESS_KEY_ID" not in child_env
+                assert "AWS_SECRET_ACCESS_KEY" not in child_env
+                assert "AWS_SESSION_TOKEN" not in child_env
+
+    def test_scoped_mode_without_credentials_refuses_before_spawn(self):
+        """credential_mode='scoped' with no vended credentials raises
+        CredentialRefusal and NEVER calls subprocess.run."""
+        import credential_guard as cg
+        with patch("index.subprocess") as mock_subprocess:
+            with pytest.raises(cg.CredentialRefusal):
+                run_agent_in_subprocess({}, None, credential_mode='scoped')
+            mock_subprocess.run.assert_not_called()
 
     def test_subprocess_timeout_is_840_seconds(self):
         """Subprocess timeout is set to 840s (14 min, under Lambda 15 min)."""
@@ -203,7 +212,7 @@ class TestRunAgentCredentialIsolation:
             mock_result.stderr = ""
             mock_subprocess.run.return_value = mock_result
 
-            run_agent_in_subprocess({}, None)
+            run_agent_in_subprocess({}, None, credential_mode='none')
 
             call_kwargs = mock_subprocess.run.call_args[1]
             assert call_kwargs["timeout"] == 840
@@ -217,7 +226,7 @@ class TestRunAgentCredentialIsolation:
             mock_result.stderr = "segfault"
             mock_subprocess.run.return_value = mock_result
 
-            result = run_agent_in_subprocess({}, None)
+            result = run_agent_in_subprocess({}, None, credential_mode='none')
             assert "could not be completed" in result.lower() or "issues" in result.lower()
 
 

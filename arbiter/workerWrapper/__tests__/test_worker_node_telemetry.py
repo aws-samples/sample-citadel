@@ -69,7 +69,7 @@ class TestWorkerNodeCorrelationLogging:
             with patch('boto3.resource'), patch('boto3.client', return_value=mock_events):
                 index = _fresh_index()
                 with patch.object(index, 'load_config_from_dynamodb',
-                                  return_value={'config': {'filename': 'agent.py'}}), \
+                                  return_value={'config': {'filename': 'agent.py', 'credentialMode': 'none'}}), \
                      patch.object(index, 'get_scoped_credentials', return_value=None), \
                      patch.object(index, 'load_file_from_s3_into_tmp'), \
                      patch('subprocess.run', return_value=mock_result):
@@ -88,7 +88,7 @@ class TestWorkerNodeCorrelationLogging:
             with patch('boto3.resource'), patch('boto3.client', return_value=mock_events):
                 index = _fresh_index()
                 with patch.object(index, 'load_config_from_dynamodb',
-                                  return_value={'config': {'filename': 'agent.py'}}), \
+                                  return_value={'config': {'filename': 'agent.py', 'credentialMode': 'none'}}), \
                      patch.object(index, 'get_scoped_credentials', return_value=None), \
                      patch.object(index, 'load_file_from_s3_into_tmp'), \
                      patch('subprocess.run', return_value=mock_result):
@@ -130,7 +130,7 @@ class TestWorkerColdStartMetric:
                 index = _fresh_index()
                 getattr(index, '__reset_cold_start_for_test')()
                 with patch.object(index, 'load_config_from_dynamodb',
-                                  return_value={'config': {'filename': 'agent.py'}}), \
+                                  return_value={'config': {'filename': 'agent.py', 'credentialMode': 'none'}}), \
                      patch.object(index, 'get_scoped_credentials', return_value=None), \
                      patch.object(index, 'load_file_from_s3_into_tmp'), \
                      patch('subprocess.run', return_value=mock_result):
@@ -158,7 +158,7 @@ class TestWorkerColdStartMetric:
                 index = _fresh_index()
                 getattr(index, '__reset_cold_start_for_test')()
                 with patch.object(index, 'load_config_from_dynamodb',
-                                  return_value={'config': {'filename': 'agent.py'}}), \
+                                  return_value={'config': {'filename': 'agent.py', 'credentialMode': 'none'}}), \
                      patch.object(index, 'get_scoped_credentials', return_value=None), \
                      patch.object(index, 'load_file_from_s3_into_tmp'), \
                      patch('subprocess.run', return_value=mock_result):
@@ -184,7 +184,7 @@ class TestWorkerColdStartMetric:
                 index = _fresh_index()
                 getattr(index, '__reset_cold_start_for_test')()
                 with patch.object(index, 'load_config_from_dynamodb',
-                                  return_value={'config': {'filename': 'agent.py'}}), \
+                                  return_value={'config': {'filename': 'agent.py', 'credentialMode': 'none'}}), \
                      patch.object(index, 'get_scoped_credentials', return_value=None), \
                      patch.object(index, 'load_file_from_s3_into_tmp'), \
                      patch('subprocess.run', return_value=mock_result):
@@ -213,7 +213,7 @@ class TestWorkerQueueWaitTimestampForwarding:
                 index = _fresh_index()
                 getattr(index, '__reset_cold_start_for_test')()
                 with patch.object(index, 'load_config_from_dynamodb',
-                                  return_value={'config': {'filename': 'agent.py'}}), \
+                                  return_value={'config': {'filename': 'agent.py', 'credentialMode': 'none'}}), \
                      patch.object(index, 'get_scoped_credentials', return_value=None), \
                      patch.object(index, 'load_file_from_s3_into_tmp'), \
                      patch('subprocess.run', return_value=mock_result):
@@ -237,7 +237,7 @@ class TestWorkerQueueWaitTimestampForwarding:
                 index = _fresh_index()
                 getattr(index, '__reset_cold_start_for_test')()
                 with patch.object(index, 'load_config_from_dynamodb',
-                                  return_value={'config': {'filename': 'agent.py'}}), \
+                                  return_value={'config': {'filename': 'agent.py', 'credentialMode': 'none'}}), \
                      patch.object(index, 'get_scoped_credentials', return_value=None), \
                      patch.object(index, 'load_file_from_s3_into_tmp'), \
                      patch('subprocess.run', return_value=mock_result):
@@ -262,7 +262,7 @@ class TestWorkerQueueWaitTimestampForwarding:
                 index = _fresh_index()
                 getattr(index, '__reset_cold_start_for_test')()
                 with patch.object(index, 'load_config_from_dynamodb',
-                                  return_value={'config': {'filename': 'agent.py'}}), \
+                                  return_value={'config': {'filename': 'agent.py', 'credentialMode': 'none'}}), \
                      patch.object(index, 'get_scoped_credentials', return_value=None), \
                      patch.object(index, 'load_file_from_s3_into_tmp'), \
                      patch('subprocess.run', return_value=mock_result):
@@ -353,7 +353,7 @@ class TestUsageCaptureAdditive:
             with patch('boto3.resource'), patch('boto3.client', return_value=mock_events):
                 index = _fresh_index()
                 with patch.object(index, 'load_config_from_dynamodb',
-                                  return_value={'config': {'filename': 'agent.py'}}), \
+                                  return_value={'config': {'filename': 'agent.py', 'credentialMode': 'none'}}), \
                      patch.object(index, 'get_scoped_credentials', return_value=None), \
                      patch.object(index, 'load_file_from_s3_into_tmp'), \
                      patch('subprocess.run', return_value=mock_result):
@@ -378,7 +378,7 @@ class TestUsageCaptureAdditive:
             with patch('boto3.resource'), patch('boto3.client', return_value=mock_events):
                 index = _fresh_index()
                 with patch.object(index, 'load_config_from_dynamodb',
-                                  return_value={'config': {'filename': 'agent.py'}}), \
+                                  return_value={'config': {'filename': 'agent.py', 'credentialMode': 'none'}}), \
                      patch.object(index, 'get_scoped_credentials', return_value=None), \
                      patch.object(index, 'load_file_from_s3_into_tmp'), \
                      patch('subprocess.run', return_value=mock_result):

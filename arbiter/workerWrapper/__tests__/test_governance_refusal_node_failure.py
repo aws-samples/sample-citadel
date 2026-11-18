@@ -250,7 +250,7 @@ class TestWorkerEmitsNodeFailedOnRefusal:
             with patch('boto3.resource', return_value=resource_mock), \
                  patch('boto3.client', return_value=events):
                 with patch.object(index, 'load_config_from_dynamodb',
-                                  return_value={'config': {'filename': 'agent.py'}}), \
+                                  return_value={'config': {'filename': 'agent.py', 'credentialMode': 'none'}}), \
                      patch.object(index, 'get_scoped_credentials', return_value=None), \
                      patch.object(index, 'load_file_from_s3_into_tmp'), \
                      patch('subprocess.run', return_value=mock_result):

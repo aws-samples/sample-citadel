@@ -75,7 +75,7 @@ def _run_node(configuration, agent_cfg=None):
     """Drive process_event with a workflow-node message; return
     (mock_run, mock_events, agent_cfg)."""
     if agent_cfg is None:
-        agent_cfg = {'config': {'filename': 'agent.py', 'description': 'Base agent.'}}
+        agent_cfg = {'config': {'filename': 'agent.py', 'description': 'Base agent.', 'credentialMode': 'none'}}
     mock_events = MagicMock()
     mock_events.put_events.return_value = {'FailedEntryCount': 0}
 

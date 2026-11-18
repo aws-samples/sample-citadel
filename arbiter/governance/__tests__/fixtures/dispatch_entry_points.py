@@ -126,4 +126,10 @@ EXEMPT: dict[tuple[str, str], str] = {
         "any agent work on the worker side still passes through the gated "
         "_process_workflow_node / process_event paths."
     ),
+    ("workerWrapper/index.py", "_refuse_dispatch_fail_closed"): (
+        "PR-4 fail-closed credential gate helper: logs + ledgers a refusal "
+        "and RAISES CredentialRefusal. It is what PREVENTS dispatch (never "
+        "spawns a subprocess) -- the inverse of a dispatch entry point, so "
+        "there is no gate-before-anchor ordering to check."
+    ),
 }

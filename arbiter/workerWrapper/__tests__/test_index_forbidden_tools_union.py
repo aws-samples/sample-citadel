@@ -31,6 +31,7 @@ def _base_agent_config():
             "tools": ["safe_tool"],
             "filename": "agent.zip",
             "description": "test agent",
+            "credentialMode": "none",
         })
     }
 
