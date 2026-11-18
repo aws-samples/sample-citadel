@@ -51,9 +51,9 @@ export function useFabricationQueue(projectId: string): UseFabricationQueueRetur
       if (mountedRef.current) {
         setItems(queue);
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       if (mountedRef.current) {
-        setError(err.message || 'Failed to load fabrication queue');
+        setError(err instanceof Error ? err.message : 'Failed to load fabrication queue');
       }
     } finally {
       if (mountedRef.current) {

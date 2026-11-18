@@ -84,8 +84,8 @@ export function FabricationStatusCard({ items, projectId, allBuilt }: Fabricatio
       } else {
         setActivation({ kind: 'result', result });
       }
-    } catch (err: any) {
-      const msg = err?.message || '';
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : '';
       if (msg.includes('No agents found') || msg.includes('ValidationError')) {
         setActivation({ kind: 'error', message: 'No agents found for this project yet' });
       } else {

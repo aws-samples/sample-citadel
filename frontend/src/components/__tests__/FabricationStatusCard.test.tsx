@@ -17,7 +17,7 @@ import '@testing-library/jest-dom';
 // Must mock react-router-dom for the Link to /approvals
 jest.mock('react-router-dom', () => ({
   ...jest.requireActual('react-router-dom'),
-  Link: ({ to, children, ...props }: any) => <a href={to} {...props}>{children}</a>,
+  Link: ({ to, children, ...props }: { to: string; children: React.ReactNode; [k: string]: unknown }) => <a href={to} {...props}>{children}</a>,
 }));
 
 jest.mock('../../services/agentConfigService', () => ({
