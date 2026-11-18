@@ -44,7 +44,7 @@ export function PhaseProgressBar({ progress }: PhaseProgressBarProps) {
   return (
     <div className="flex gap-1">
       {PHASES.map(({ key, label }, idx) => {
-        const storedPct = Number((progress as Record<string, unknown>)[key] ?? 0);
+        const storedPct = Number((progress as unknown as Record<string, unknown>)[key] ?? 0);
 
         // Derive visual state from phase ordering, not stored pct.
         let state: 'complete' | 'active' | 'pending';

@@ -1,5 +1,5 @@
 # Dependencies
-node_modules/
+node_modules
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -28,7 +28,7 @@ scripts/*
 !scripts/__tests__/**
 !scripts/smoke/
 !scripts/smoke/**
-scripts/smoke/**/node_modules/
+scripts/smoke/**/node_modules
 scripts/smoke/**/dist/
 
 # Build outputs
