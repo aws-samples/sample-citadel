@@ -50,6 +50,7 @@ _BUNDLE_MODULES = [
     "governance_tool_hook.py",
     "governed_tool_handler.py",
     "worker_governance.py",
+    "credential_guard.py",
 ]
 # Shared packages the ArbiterCatalogLayer stages at /opt/python.
 _LAYER_PACKAGES = ["common", "governance", "catalog"]
@@ -114,7 +115,8 @@ class TestDeployedBundleImportability:
             layer_python,
             "import agent_runner\n"
             "import tool_idempotency_hook\n"
-            "import governed_tool_handler\n",
+            "import governed_tool_handler\n"
+            "import credential_guard\n",
         )
         assert result.returncode == 0, (
             "deployed-layout import FAILED (bundle regression?):\n"

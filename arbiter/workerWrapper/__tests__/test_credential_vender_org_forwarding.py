@@ -71,7 +71,10 @@ class TestOrgIdForwardedToVender:
     def test_missing_org_id_fails_closed_no_vender_call(self):
         """No orgId on the dispatch payload -> get_scoped_credentials must
         refuse to invoke the vender at all (fail closed), not silently vend
-        org-less credentials."""
+        org-less credentials. PR-4 (owner decision 5750aeec): this refusal
+        now RAISES CredentialRefusal rather than returning None."""
+        import credential_guard as cg
+        import pytest
         event = {
             "orchestration_id": "orch-2",
             "agent_use_id": "use-2",
@@ -80,11 +83,14 @@ class TestOrgIdForwardedToVender:
         }
         mock_lambda_client = MagicMock()
         with patch.object(index, "_get_lambda_client", return_value=mock_lambda_client):
-            _run_process_event(event)
-
+            with pytest.raises(cg.CredentialRefusal) as excinfo:
+                _run_process_event(event)
+        assert excinfo.value.reason == cg.NO_ORG
         assert not mock_lambda_client.invoke.called
 
     def test_empty_string_org_id_fails_closed(self):
+        import credential_guard as cg
+        import pytest
         event = {
             "orchestration_id": "orch-3",
             "agent_use_id": "use-3",
@@ -94,6 +100,6 @@ class TestOrgIdForwardedToVender:
         }
         mock_lambda_client = MagicMock()
         with patch.object(index, "_get_lambda_client", return_value=mock_lambda_client):
-            _run_process_event(event)
-
+            with pytest.raises(cg.CredentialRefusal):
+                _run_process_event(event)
         assert not mock_lambda_client.invoke.called
