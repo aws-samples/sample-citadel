@@ -41,6 +41,7 @@ from fabrication_context import (
     record_tool_key,
 )
 from permission_deriver import derive_required_permissions
+from fence import fence_untrusted
 from registry_recovery import (
     OrphanedRegistryRecordError,
     is_creating_conflict,
@@ -3013,8 +3014,14 @@ def process_event(event, context, request_type=None):
 
             # Create and invoke the Tool Fabricator
             tool_fabricator = create_tool_fabricator(store_tool_tool=store_tool_config_registry_bound)
+            # PR-4 (owner decision 5750aeec) §2b: fence the untrusted TASK
+            # text BEFORE it enters the code-gen prompt. The BINDING CONTEXT
+            # below is SERVER-DERIVED (from the validated event's bindings,
+            # not LLM output) and is deliberately appended OUTSIDE the fence
+            # so it still reads as trusted instructions to the model.
+            fenced_task = fence_untrusted(TASK, source="fabrication_task")
             # Enrich the task description with binding context for the LLM
-            enriched_task = TASK
+            enriched_task = fenced_task
             if integration_bindings or datastore_bindings:
                 binding_context_parts = []
                 if integration_bindings:
@@ -3033,7 +3040,7 @@ def process_event(event, context, request_type=None):
                         binding_context_parts.append('; '.join(parts))
                 binding_context = "\n".join(binding_context_parts)
                 enriched_task = (
-                    f"{TASK}\n\n"
+                    f"{fenced_task}\n\n"
                     f"BINDING CONTEXT (use scoped credentials from environment variables):\n"
                     f"{binding_context}\n\n"
                     f"When calling store_tool_config_registry, pass these bindings:\n"
@@ -3096,8 +3103,12 @@ def process_event(event, context, request_type=None):
             # exponential backoff + full jitter; everything else fails fast.
             # The deadline stops attempts/backoffs that cannot fit before
             # (deadline - safety margin).
+            # PR-4 (owner decision 5750aeec) §2b: fence the untrusted TASK
+            # text before it enters the code-gen prompt — same seam as the
+            # tool-creation path above.
             call_with_transient_retry(
-                lambda: agent_fabricator(TASK), deadline=deadline
+                lambda: agent_fabricator(fence_untrusted(TASK, source="fabrication_task")),
+                deadline=deadline,
             )
 
         # Belt-and-braces: if a checkpoint tripped but the BaseException was
