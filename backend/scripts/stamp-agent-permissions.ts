@@ -5,6 +5,14 @@
  * Dry-run by default; pass --apply to write.
  * Exits non-zero if errors > 0.
  *
+ * Flags:
+ *   --apply              Write mode (default: dry-run)
+ *   --record-id <id>     Process only the specified record (canary mode)
+ *   --limit N            Process at most N records (canary mode)
+ *
+ * Canary usage: run with --record-id on a single APPROVED record first to
+ * confirm it ends APPROVED, then widen to --limit N, then full --apply.
+ *
  * Required env: REGISTRY_ID, AWS_REGION (optional, defaults to us-west-2).
  */
 import {
@@ -111,12 +119,26 @@ export async function main(): Promise<void> {
   const apply = args.includes("--apply");
   const dryRun = !apply;
 
+  // Canary flags
+  const recordIdIdx = args.indexOf("--record-id");
+  const targetRecordId =
+    recordIdIdx >= 0 && args[recordIdIdx + 1]
+      ? args[recordIdIdx + 1]
+      : undefined;
+  const limitIdx = args.indexOf("--limit");
+  const limitN =
+    limitIdx >= 0 && args[limitIdx + 1]
+      ? parseInt(args[limitIdx + 1], 10)
+      : undefined;
+
   const registryId = process.env.REGISTRY_ID;
   const region = process.env.AWS_REGION || "us-west-2";
 
   if (!registryId) throw new Error("REGISTRY_ID env var required");
 
   log(`Mode: ${dryRun ? "DRY-RUN" : "APPLY"}`);
+  if (targetRecordId) log(`Canary: --record-id ${targetRecordId}`);
+  if (limitN !== undefined && !isNaN(limitN)) log(`Canary: --limit ${limitN}`);
   log(`REGISTRY_ID=${registryId} REGION=${region}`);
 
   const registry = new RegistryService({ registryId, region });
@@ -134,6 +156,20 @@ export async function main(): Promise<void> {
   } catch (err) {
     log(`ERROR: Failed to list agent records: ${String(err)}`);
     process.exit(1);
+  }
+
+  // Canary: filter to --record-id if specified
+  if (targetRecordId) {
+    records = records.filter((r) => r.recordId === targetRecordId);
+    if (records.length === 0) {
+      log(`ERROR: --record-id ${targetRecordId} not found in registry`);
+      process.exit(1);
+    }
+  }
+
+  // Canary: cap to --limit N if specified
+  if (limitN !== undefined && !isNaN(limitN) && limitN > 0) {
+    records = records.slice(0, limitN);
   }
 
   const options: MarkerEditOptions = {

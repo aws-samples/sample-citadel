@@ -96,4 +96,45 @@ describe("stamp-agent-permissions script (unit)", () => {
 
     expect(mockUpdateResource).not.toHaveBeenCalled();
   });
+
+  test("--record-id canary: processes only the specified record", async () => {
+    const rec1 = makeRecord({ name: "agent-a", recordId: "rec-a" });
+    const rec2 = makeRecord({ name: "agent-b", recordId: "rec-b" });
+    mockListResources.mockResolvedValue([rec1, rec2]);
+    mockGetResource.mockImplementation((_type: string, id: string) => {
+      if (id === "rec-a") return Promise.resolve(rec1);
+      if (id === "rec-b") return Promise.resolve(rec2);
+      return Promise.resolve(null);
+    });
+
+    process.env.REGISTRY_ID = "test-registry";
+    process.argv = ["node", "script", "--apply", "--record-id", "rec-a"];
+
+    await main().catch(() => {});
+
+    // Only the target record's data should be written
+    expect(mockUpdateResource).toHaveBeenCalledTimes(1);
+    const writeCall = mockUpdateResource.mock.calls[0];
+    expect(writeCall[1]).toBe("rec-a");
+  });
+
+  test("--limit N: processes only first N records", async () => {
+    const records = Array.from({ length: 5 }, (_, i) =>
+      makeRecord({ name: `agent-${i}`, recordId: `rec-${i}` }),
+    );
+    mockListResources.mockResolvedValue(records);
+    mockGetResource.mockImplementation((_type: string, id: string) => {
+      const found = records.find((r) => r.recordId === id);
+      return Promise.resolve(found ?? null);
+    });
+
+    process.env.REGISTRY_ID = "test-registry";
+    process.argv = ["node", "script", "--apply", "--limit", "2"];
+
+    await main().catch(() => {});
+
+    // At most 2 records processed (they have no requiredPermissions so
+    // they each get stamped with credentialMode:scoped + models:[])
+    expect(mockUpdateResource.mock.calls.length).toBeLessThanOrEqual(2);
+  });
 });
