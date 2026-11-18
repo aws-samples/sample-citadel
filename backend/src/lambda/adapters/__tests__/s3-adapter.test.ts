@@ -9,6 +9,7 @@ import {
 } from "../errors";
 import { S3Client } from "@aws-sdk/client-s3";
 import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
+import { markScopedCredentials } from "../credential-guard";
 
 // Mock the entire @aws-sdk/client-s3 module
 const mockSend = jest.fn();
@@ -563,11 +564,11 @@ describe("S3Adapter", () => {
         ],
       });
       mockSend.mockResolvedValueOnce({});
-      const creds = {
+      const creds = markScopedCredentials({
         accessKeyId: "AKIA...",
         secretAccessKey: "secret",
         sessionToken: "token",
-      };
+      });
       await adapter.connect(config, creds);
       expect(S3Client).toHaveBeenCalledWith({
         credentials: {

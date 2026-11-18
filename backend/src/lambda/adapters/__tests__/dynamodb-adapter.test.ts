@@ -8,6 +8,7 @@ import {
 } from "../errors";
 import { DynamoDBClient, CreateTableCommand } from "@aws-sdk/client-dynamodb";
 import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
+import { markScopedCredentials } from "../credential-guard";
 
 // Mock the entire @aws-sdk/client-dynamodb module
 const mockSend = jest.fn();
@@ -331,11 +332,11 @@ describe("DynamoDBAdapter", () => {
       mockSend.mockResolvedValueOnce({
         Table: { TableStatus: "ACTIVE" },
       });
-      const creds = {
+      const creds = markScopedCredentials({
         accessKeyId: "AKIA...",
         secretAccessKey: "secret",
         sessionToken: "token",
-      };
+      });
       await adapter.connect(config, creds);
       expect(DynamoDBClient).toHaveBeenCalledWith({
         credentials: {

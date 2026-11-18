@@ -3134,6 +3134,7 @@ export class BackendStack extends cdk.Stack {
           "iam:PutRolePolicy",
           "iam:DeleteRolePolicy",
           "iam:TagRole",
+          "iam:ListRoleTags",
           "iam:PassRole",
         ],
         resources: [`arn:aws:iam::${this.account}:role/citadel-ds-*`],
@@ -3177,6 +3178,10 @@ export class BackendStack extends cdk.Stack {
           "bedrock:GetKnowledgeBase",
           "bedrock:Retrieve",
           "bedrock:AssociateThirdPartyKnowledgeBase",
+          // Citadel PR-1 (C1+C2): tag the KB at create, and read its tags
+          // during conflict resolution / ownership preflight.
+          "bedrock:TagResource",
+          "bedrock:ListTagsForResource",
         ],
         resources: ["*"],
       }),
@@ -3224,6 +3229,10 @@ export class BackendStack extends cdk.Stack {
           "aoss:CreateAccessPolicy",
           "aoss:GetAccessPolicy",
           "aoss:APIAccessAll",
+          // Citadel PR-1 (C1+C2): tag collections at create, and read their
+          // tags during conflict resolution / ownership preflight.
+          "aoss:TagResource",
+          "aoss:ListTagsForResource",
         ],
         resources: ["*"],
       }),

@@ -16,6 +16,7 @@ import {
 } from "@aws-sdk/client-secrets-manager";
 import { v4 as uuidv4 } from "uuid";
 import { getAdapter } from "./adapters/registry";
+import { AuthenticationMethod, type ConnectorAdapter } from "../adapters/base";
 import { PolicyManager, type ScopedCredentials } from "../utils/policy-manager";
 import type { RoleTagInput } from "../utils/policy-manager";
 import { getDataStoreOperations } from "../utils/operations-registry";
@@ -323,6 +324,32 @@ async function retryOptimisticLock<T>(
     "Version conflict: data store was modified concurrently",
     lastError,
   );
+}
+
+/**
+ * H4: dispatch credentials for an adapter call. Replaces the
+ * `scopedCredentials || credentials` idiom, which fell back to the
+ * CALLER-SUPPLIED `credentials` (parsed from `input.credentials`, an
+ * attacker-controlled GraphQL argument) whenever no scoped role was
+ * vended for that adapter — exactly the KnowledgeBaseAdapter's
+ * CREATE_NEW connect path before this fix, since its provision policies
+ * were empty (CIT-299) so `scopedCredentials` stayed `undefined`.
+ *
+ * All AWS datastore adapters use IAM_ROLE authentication: for those,
+ * ONLY the platform-vended scoped credentials are ever dispatched —
+ * caller-supplied `credentials` can never reach an IAM_ROLE adapter's
+ * data-plane call. Non-AWS (external/SaaS) adapters keep their existing
+ * caller-credential model, since they have no scoped-role concept.
+ */
+function dispatchCreds(
+  adapter: ConnectorAdapter,
+  scopedCredentials: ScopedCredentials | undefined,
+  credentials: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (adapter.spec.authentication.method === AuthenticationMethod.IAM_ROLE) {
+    return scopedCredentials;
+  }
+  return scopedCredentials ?? credentials;
 }
 
 // --- Queries ---
@@ -685,6 +712,16 @@ async function createDataStore(
       secretArn = createSecretResponse.ARN;
     }
 
+    // Inject dataStoreId + orgId BEFORE requiredPolicies/preflight so both
+    // the policy derivation and the ownership check see the real ids.
+    // KnowledgeBaseAdapter.requiredPolicies derives its provision policy
+    // from these ids and returns `provision: []` when they are absent —
+    // injecting them after this call left KB CREATE_NEW with no role to
+    // mint and no scoped credentials to provision with (fail-closed, but
+    // broken). See design §3d.
+    config.dataStoreId = dataStoreId;
+    config.orgId = callerOrgId;
+
     // Get account context and set up IAM role
     const { accountId, region } = await policyManager.getAccountContext();
     const policies =
@@ -692,23 +729,23 @@ async function createDataStore(
         ? adapter.requiredPolicies(config, accountId, region).provision
         : adapter.requiredPolicies(config, accountId, region).connect;
 
-    // CIT-298: inject dataStoreId + orgId so preflight and adapters can
-    // verify resource ownership.
-    config.dataStoreId = dataStoreId;
-    config.orgId = callerOrgId;
+    // C2: preflight ownership check BEFORE creating any IAM role, run
+    // UNCONDITIONALLY — not only when requiredPolicies(...) returns a
+    // non-empty policy list. An adapter whose connect/provision policies
+    // are empty when scoping identifiers are absent (e.g.
+    // KnowledgeBaseAdapter, CIT-299) must still be preflighted; gating this
+    // on policies.length silently skipped the ownership check on exactly
+    // that path. Uses platform Lambda credentials, not scoped creds.
+    if (adapter.preflight) {
+      await adapter.preflight(config, {
+        dataStoreId,
+        orgId: callerOrgId,
+        provisionMode: input.provisionMode,
+      });
+    }
 
     let scopedCredentials: ScopedCredentials | undefined;
     if (policies.length > 0) {
-      // CIT-298: preflight ownership check BEFORE creating any IAM role.
-      // Uses platform Lambda credentials, not scoped creds.
-      if (adapter.preflight) {
-        await adapter.preflight(config, {
-          dataStoreId,
-          orgId: callerOrgId,
-          provisionMode: input.provisionMode,
-        });
-      }
-
       // CIT-254 C12: validate crossAccountRoleArn at write time + trust-path probe
       const crossAccountExternalId = await validateCrossAccountConfig(
         config,
@@ -783,7 +820,7 @@ async function createDataStore(
 
       const provisionResult = await adapter.provision!(
         config,
-        scopedCredentials || credentials,
+        dispatchCreds(adapter, scopedCredentials, credentials),
       );
       resourceArn = provisionResult.resourceArn;
       size = provisionResult.size;
@@ -803,7 +840,10 @@ async function createDataStore(
         }),
       );
     } else {
-      await adapter.connect(config, scopedCredentials || credentials);
+      await adapter.connect(
+        config,
+        dispatchCreds(adapter, scopedCredentials, credentials),
+      );
     }
 
     // Get metrics (use scoped credentials if available)
@@ -811,7 +851,7 @@ async function createDataStore(
       const metrics = await adapter.getMetrics!(
         config,
         resourceArn,
-        scopedCredentials || credentials,
+        dispatchCreds(adapter, scopedCredentials, credentials),
       );
       size = size || metrics.size;
       records = records ?? metrics.records;
@@ -1076,17 +1116,20 @@ async function connectDataStore(dataStoreId: string, event: unknown) {
     ).connect;
     let scopedCredentials: ScopedCredentials | undefined;
 
-    if (policies.length > 0) {
-      // CIT-298: preflight ownership check BEFORE creating any IAM role.
-      // Uses platform Lambda credentials, not scoped creds.
-      if (adapter.preflight) {
-        await adapter.preflight(config, {
-          dataStoreId,
-          orgId: existing.orgId as string,
-          provisionMode: "CONNECT_EXISTING",
-        });
-      }
+    // C2: preflight ownership check BEFORE creating any IAM role, run
+    // UNCONDITIONALLY — see the matching comment in createDataStore for why
+    // gating this on policies.length silently skips the ownership check on
+    // adapters whose connect policies are empty when scoping identifiers
+    // are absent. Uses platform Lambda credentials, not scoped creds.
+    if (adapter.preflight) {
+      await adapter.preflight(config, {
+        dataStoreId,
+        orgId: existing.orgId as string,
+        provisionMode: "CONNECT_EXISTING",
+      });
+    }
 
+    if (policies.length > 0) {
       // CIT-254 C12: validate crossAccountRoleArn at connect time + trust-path probe
       const crossAccountExternalId = await validateCrossAccountConfig(
         config,
@@ -1138,7 +1181,10 @@ async function connectDataStore(dataStoreId: string, event: unknown) {
     }
 
     try {
-      await adapter.connect(config, scopedCredentials || credentials);
+      await adapter.connect(
+        config,
+        dispatchCreds(adapter, scopedCredentials, credentials),
+      );
     } catch (error) {
       // CIT-298: roll back the IAM role on failed connect so it doesn't persist
       if (policies.length > 0) {
@@ -1310,7 +1356,7 @@ async function testDataStoreConnection(dataStoreId: string, event: unknown) {
 
   const testResult = await adapter.testConnection(
     config,
-    scopedCredentials || credentials,
+    dispatchCreds(adapter, scopedCredentials, credentials),
   );
 
   return {

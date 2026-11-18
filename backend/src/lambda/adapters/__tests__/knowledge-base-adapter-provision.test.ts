@@ -154,7 +154,10 @@ describe("KnowledgeBaseAdapter.provision - service role and defaults", () => {
       },
     });
 
-    await adapter.provision({ name: "test-kb" }, MOCK_SCOPED_CREDENTIALS);
+    await adapter.provision(
+      { name: "test-kb", dataStoreId: "ds-test", orgId: "org-test" },
+      MOCK_SCOPED_CREDENTIALS,
+    );
 
     expect(CreateRoleCommand).toHaveBeenCalled();
     const createRoleInput = jest.mocked(CreateRoleCommand).mock.calls[0][0];
@@ -176,7 +179,10 @@ describe("KnowledgeBaseAdapter.provision - service role and defaults", () => {
       },
     });
 
-    await adapter.provision({ name: "test-kb" }, MOCK_SCOPED_CREDENTIALS);
+    await adapter.provision(
+      { name: "test-kb", dataStoreId: "ds-test", orgId: "org-test" },
+      MOCK_SCOPED_CREDENTIALS,
+    );
 
     expect(CreateCollectionCommand).toHaveBeenCalled();
     const collInput = jest.mocked(CreateCollectionCommand).mock.calls[0][0];
@@ -193,7 +199,10 @@ describe("KnowledgeBaseAdapter.provision - service role and defaults", () => {
       },
     });
 
-    await adapter.provision({ name: "test-kb" }, MOCK_SCOPED_CREDENTIALS);
+    await adapter.provision(
+      { name: "test-kb", dataStoreId: "ds-test", orgId: "org-test" },
+      MOCK_SCOPED_CREDENTIALS,
+    );
 
     // Should have created both encryption and network policies
     const secPolicyCalls = jest.mocked(CreateSecurityPolicyCommand).mock.calls;
@@ -212,7 +221,10 @@ describe("KnowledgeBaseAdapter.provision - service role and defaults", () => {
       },
     });
 
-    await adapter.provision({ name: "test-kb" }, MOCK_SCOPED_CREDENTIALS);
+    await adapter.provision(
+      { name: "test-kb", dataStoreId: "ds-test", orgId: "org-test" },
+      MOCK_SCOPED_CREDENTIALS,
+    );
 
     expect(CreateKnowledgeBaseCommand).toHaveBeenCalled();
     const kbInput = jest.mocked(CreateKnowledgeBaseCommand).mock.calls[0][0];
@@ -240,6 +252,8 @@ describe("KnowledgeBaseAdapter.provision - service role and defaults", () => {
     await adapter.provision(
       {
         name: "test-kb",
+        dataStoreId: "ds-test",
+        orgId: "org-test",
         roleArn: "arn:aws:iam::123456789012:role/my-custom-role",
         collectionArn:
           "arn:aws:aoss:us-west-2:123456789012:collection/real-col",
@@ -266,7 +280,10 @@ describe("KnowledgeBaseAdapter.provision - service role and defaults", () => {
       },
     });
 
-    await adapter.provision({ name: "test-kb" }, MOCK_SCOPED_CREDENTIALS);
+    await adapter.provision(
+      { name: "test-kb", dataStoreId: "ds-test", orgId: "org-test" },
+      MOCK_SCOPED_CREDENTIALS,
+    );
 
     const kbInput = jest.mocked(CreateKnowledgeBaseCommand).mock.calls[0][0];
     expect(

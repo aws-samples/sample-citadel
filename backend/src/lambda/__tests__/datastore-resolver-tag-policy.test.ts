@@ -38,6 +38,7 @@ const mockGetMetrics = jest.fn().mockResolvedValue({
 });
 jest.mock("../adapters/registry", () => ({
   getAdapter: jest.fn().mockReturnValue({
+    spec: { authentication: { method: "IAM_ROLE" } },
     provision: mockProvision,
     connect: mockConnect,
     disconnect: jest.fn(),

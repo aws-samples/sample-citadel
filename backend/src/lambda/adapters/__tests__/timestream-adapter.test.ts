@@ -12,6 +12,7 @@ import {
 } from "@aws-sdk/client-timestream-write";
 import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
 
+import { markScopedCredentials } from "../credential-guard";
 const mockSend = jest.fn();
 jest.mock("@aws-sdk/client-timestream-write", () => {
   return {
@@ -320,11 +321,14 @@ describe("TimestreamAdapter", () => {
           DatabaseName: "my-test-db",
         },
       });
-      await adapter.connect(config, {
-        accessKeyId: "AKIA...",
-        secretAccessKey: "secret",
-        sessionToken: "token",
-      });
+      await adapter.connect(
+        config,
+        markScopedCredentials({
+          accessKeyId: "AKIA...",
+          secretAccessKey: "secret",
+          sessionToken: "token",
+        }),
+      );
       expect(TimestreamWriteClient).toHaveBeenCalledWith({
         credentials: {
           accessKeyId: "AKIA...",

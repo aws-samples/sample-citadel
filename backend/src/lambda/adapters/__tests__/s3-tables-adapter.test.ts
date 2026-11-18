@@ -9,6 +9,7 @@ import {
 import { S3TablesClient } from "@aws-sdk/client-s3tables";
 import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
 
+import { markScopedCredentials } from "../credential-guard";
 const mockSend = jest.fn();
 jest.mock("@aws-sdk/client-s3tables", () => {
   return {
@@ -253,11 +254,14 @@ describe("S3TablesAdapter", () => {
         arn: "arn:aws:s3tables:us-east-1:123:bucket/my-test-bucket",
         name: "my-test-bucket",
       });
-      await adapter.connect(config, {
-        accessKeyId: "AKIA...",
-        secretAccessKey: "secret",
-        sessionToken: "token",
-      });
+      await adapter.connect(
+        config,
+        markScopedCredentials({
+          accessKeyId: "AKIA...",
+          secretAccessKey: "secret",
+          sessionToken: "token",
+        }),
+      );
       expect(S3TablesClient).toHaveBeenCalledWith({
         credentials: {
           accessKeyId: "AKIA...",

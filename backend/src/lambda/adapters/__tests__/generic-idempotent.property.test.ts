@@ -19,6 +19,7 @@ import { KnowledgeBaseAdapter } from "../knowledge-base-adapter";
 import { NotImplementedError } from "../../../adapters/errors";
 import type { ConnectorAdapter } from "../../../adapters/base";
 import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
+import { markScopedCredentials } from "../credential-guard";
 
 /** Adapter with a concrete provision method (all datastore adapters under test). */
 type ProvisioningAdapter = ConnectorAdapter &
@@ -156,6 +157,7 @@ jest.mock("@aws-sdk/client-bedrock-agent", () => ({
     .mockImplementation(() => ({ send: mockBedrockAgentSend })),
   CreateKnowledgeBaseCommand: jest.fn().mockImplementation((i) => i),
   GetKnowledgeBaseCommand: jest.fn().mockImplementation((i) => i),
+  ListTagsForResourceCommand: jest.fn().mockImplementation((i) => i),
 }));
 
 // STS mock for KnowledgeBaseAdapter.getAccountContext()
@@ -401,22 +403,14 @@ describe("Property 16: Adapter idempotent provisioning on already-exists", () =>
       config: { featureGroupName: "test-fg" },
       errorName: "ResourceInUse",
     },
-    {
-      name: "KnowledgeBaseAdapter",
-      create: () => {
-        const a = new KnowledgeBaseAdapter();
-        a.roleCreationDelayMs = 0;
-        return a;
-      },
-      mock: mockBedrockAgentSend,
-      config: {
-        name: "test-kb",
-        roleArn: "arn:aws:iam::123456789012:role/test-role",
-        collectionArn:
-          "arn:aws:aoss:us-east-1:123456789012:collection/test-col",
-      },
-      errorName: "ConflictException",
-    },
+    // NOTE: KnowledgeBaseAdapter is intentionally excluded from this table.
+    // Citadel PR-1 (C1) replaced its unconditional ConflictException adoption
+    // with a tag-verified reuse-or-throw rule (decision 44a2bfc1): a bare
+    // ConflictException with no previously-recorded knowledgeBaseId now
+    // throws ProvisioningError rather than returning success, because there
+    // is no safe way to verify ownership of an unknown conflicting resource.
+    // See the dedicated "KnowledgeBaseAdapter conflict handling (C1)" block
+    // below for its actual (tag-verified) idempotency contract.
   ];
 
   // For each adapter, generate random error messages and verify idempotent success
@@ -454,10 +448,13 @@ describe("Property 16: Adapter idempotent provisioning on already-exists", () =>
               mockOssSend.mockRejectedValue(ossErr);
             }
 
-            const result = await adapter.provision(config, {
-              ...MOCK_SCOPED_CREDENTIALS,
-              ...creds,
-            });
+            const result = await adapter.provision(
+              config,
+              markScopedCredentials({
+                ...MOCK_SCOPED_CREDENTIALS,
+                ...creds,
+              }),
+            );
             expect(result).toBeDefined();
             expect(result.resourceArn).toBeTruthy();
             expect(result.resourceArn.length).toBeGreaterThan(0);
@@ -466,5 +463,110 @@ describe("Property 16: Adapter idempotent provisioning on already-exists", () =>
         { numRuns: 100 },
       );
     });
+  });
+});
+
+// Citadel PR-1 (C1): KnowledgeBaseAdapter's actual conflict contract.
+// Replaces the unconditional-adoption assumption the generic table above
+// used to encode for this adapter (decision 44a2bfc1: reuse ONLY on a
+// verified tag match; otherwise throw).
+describe("KnowledgeBaseAdapter conflict handling (C1)", () => {
+  beforeEach(() => {
+    allMocks.forEach((m) => m.mockReset());
+  });
+
+  const baseConfig = {
+    name: "test-kb",
+    dataStoreId: "ds-kb-001",
+    orgId: "org-kb-001",
+    roleArn: "arn:aws:iam::123456789012:role/test-role",
+    collectionArn: "arn:aws:aoss:us-east-1:123456789012:collection/test-col",
+  };
+
+  function makeAdapter(): KnowledgeBaseAdapter {
+    const a = new KnowledgeBaseAdapter();
+    a.roleCreationDelayMs = 0;
+    return a;
+  }
+
+  it("throws on ConflictException with no previously-recorded knowledgeBaseId (no safe adoption path)", async () => {
+    const conflict = new Error("ConflictException");
+    conflict.name = "ConflictException";
+    mockBedrockAgentSend.mockRejectedValue(conflict);
+
+    await expect(
+      makeAdapter().provision(baseConfig, MOCK_SCOPED_CREDENTIALS),
+    ).rejects.toThrow(/ownership verification failed/);
+  });
+
+  it("reuses the existing KB on retry when a recorded knowledgeBaseId's tags match this org/dataStoreId", async () => {
+    const conflict = new Error("ConflictException");
+    conflict.name = "ConflictException";
+    mockBedrockAgentSend.mockImplementation(
+      (cmd: { knowledgeBaseId?: string; resourceArn?: string }) => {
+        if (cmd?.knowledgeBaseId === "KB-RETRY") {
+          return Promise.resolve({
+            knowledgeBase: {
+              knowledgeBaseId: "KB-RETRY",
+              knowledgeBaseArn:
+                "arn:aws:bedrock:us-east-1:123456789012:knowledge-base/KB-RETRY",
+              status: "ACTIVE",
+            },
+          });
+        }
+        if (cmd?.resourceArn) {
+          return Promise.resolve({
+            tags: {
+              "citadel:orgId": "org-kb-001",
+              "citadel:dataStoreId": "ds-kb-001",
+            },
+          });
+        }
+        return Promise.reject(conflict);
+      },
+    );
+
+    const result = await makeAdapter().provision(
+      { ...baseConfig, knowledgeBaseId: "KB-RETRY" },
+      MOCK_SCOPED_CREDENTIALS,
+    );
+    expect(result.resourceArn).toBe(
+      "arn:aws:bedrock:us-east-1:123456789012:knowledge-base/KB-RETRY",
+    );
+  });
+
+  it("throws when the recorded knowledgeBaseId's tags belong to a different org", async () => {
+    const conflict = new Error("ConflictException");
+    conflict.name = "ConflictException";
+    mockBedrockAgentSend.mockImplementation(
+      (cmd: { knowledgeBaseId?: string; resourceArn?: string }) => {
+        if (cmd?.knowledgeBaseId === "KB-FOREIGN") {
+          return Promise.resolve({
+            knowledgeBase: {
+              knowledgeBaseId: "KB-FOREIGN",
+              knowledgeBaseArn:
+                "arn:aws:bedrock:us-east-1:123456789012:knowledge-base/KB-FOREIGN",
+              status: "ACTIVE",
+            },
+          });
+        }
+        if (cmd?.resourceArn) {
+          return Promise.resolve({
+            tags: {
+              "citadel:orgId": "org-ATTACKER",
+              "citadel:dataStoreId": "ds-OTHER",
+            },
+          });
+        }
+        return Promise.reject(conflict);
+      },
+    );
+
+    await expect(
+      makeAdapter().provision(
+        { ...baseConfig, knowledgeBaseId: "KB-FOREIGN" },
+        MOCK_SCOPED_CREDENTIALS,
+      ),
+    ).rejects.toThrow(/ownership verification failed/);
   });
 });

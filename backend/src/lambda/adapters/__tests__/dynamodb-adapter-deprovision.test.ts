@@ -12,6 +12,7 @@ const dynamoMock = mockClient(DynamoDBClient);
 
 import { DynamoDBAdapter } from "../dynamodb-adapter";
 
+import { markScopedCredentials } from "../credential-guard";
 describe("DynamoDBAdapter.deprovision", () => {
   const adapter = new DynamoDBAdapter();
 
@@ -55,11 +56,11 @@ describe("DynamoDBAdapter.deprovision", () => {
 
     await adapter.deprovision!(
       { tableName: "my-table" },
-      {
+      markScopedCredentials({
         accessKeyId: "AKIA...",
         secretAccessKey: "secret",
         sessionToken: "token",
-      },
+      }),
     );
 
     const calls = dynamoMock.commandCalls(DeleteTableCommand);

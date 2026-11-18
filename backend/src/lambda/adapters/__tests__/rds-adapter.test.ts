@@ -9,6 +9,7 @@ import {
 import { RDSClient, CreateDBInstanceCommand } from "@aws-sdk/client-rds";
 import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
 
+import { markScopedCredentials } from "../credential-guard";
 const mockSend = jest.fn();
 jest.mock("@aws-sdk/client-rds", () => {
   return {
@@ -29,11 +30,11 @@ describe("RdsAdapter", () => {
   let postgresAdapter: RdsAdapter;
   let mysqlAdapter: RdsAdapter;
   const config = { dbInstanceIdentifier: "my-test-db" };
-  const creds = {
+  const creds = markScopedCredentials({
     masterUsername: "dbadmin",
     masterPassword: "secret123",
     ...MOCK_SCOPED_CREDENTIALS,
-  };
+  });
 
   beforeEach(() => {
     postgresAdapter = new RdsAdapter("postgres");
@@ -261,11 +262,14 @@ describe("RdsAdapter", () => {
       mockSend.mockResolvedValueOnce({
         DBInstances: [{ DBInstanceStatus: "available" }],
       });
-      await postgresAdapter.connect(config, {
-        accessKeyId: "AKIA...",
-        secretAccessKey: "secret",
-        sessionToken: "token",
-      });
+      await postgresAdapter.connect(
+        config,
+        markScopedCredentials({
+          accessKeyId: "AKIA...",
+          secretAccessKey: "secret",
+          sessionToken: "token",
+        }),
+      );
       expect(RDSClient).toHaveBeenCalledWith({
         credentials: {
           accessKeyId: "AKIA...",

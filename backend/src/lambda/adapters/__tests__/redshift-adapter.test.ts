@@ -9,6 +9,7 @@ import {
 import { RedshiftClient, CreateClusterCommand } from "@aws-sdk/client-redshift";
 import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
 
+import { markScopedCredentials } from "../credential-guard";
 const mockSend = jest.fn();
 jest.mock("@aws-sdk/client-redshift", () => {
   return {
@@ -25,11 +26,11 @@ jest.mock("@aws-sdk/client-redshift", () => {
 describe("RedshiftAdapter", () => {
   let adapter: RedshiftAdapter;
   const config = { clusterIdentifier: "my-test-cluster" };
-  const creds = {
+  const creds = markScopedCredentials({
     masterUsername: "admin",
     masterPassword: "Secret123",
     ...MOCK_SCOPED_CREDENTIALS,
-  };
+  });
 
   beforeEach(() => {
     adapter = new RedshiftAdapter();
@@ -271,11 +272,14 @@ describe("RedshiftAdapter", () => {
       mockSend.mockResolvedValueOnce({
         Clusters: [{ ClusterStatus: "available" }],
       });
-      await adapter.connect(config, {
-        accessKeyId: "AKIA...",
-        secretAccessKey: "secret",
-        sessionToken: "token",
-      });
+      await adapter.connect(
+        config,
+        markScopedCredentials({
+          accessKeyId: "AKIA...",
+          secretAccessKey: "secret",
+          sessionToken: "token",
+        }),
+      );
       expect(RedshiftClient).toHaveBeenCalledWith({
         credentials: {
           accessKeyId: "AKIA...",

@@ -12,6 +12,7 @@ import {
 } from "@aws-sdk/client-sagemaker";
 import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
 
+import { markScopedCredentials } from "../credential-guard";
 const mockSend = jest.fn();
 jest.mock("@aws-sdk/client-sagemaker", () => {
   return {
@@ -19,12 +20,10 @@ jest.mock("@aws-sdk/client-sagemaker", () => {
     CreateFeatureGroupCommand: jest
       .fn()
       .mockImplementation((input) => ({ _type: "CreateFeatureGroup", input })),
-    DescribeFeatureGroupCommand: jest
-      .fn()
-      .mockImplementation((input) => ({
-        _type: "DescribeFeatureGroup",
-        input,
-      })),
+    DescribeFeatureGroupCommand: jest.fn().mockImplementation((input) => ({
+      _type: "DescribeFeatureGroup",
+      input,
+    })),
   };
 });
 
@@ -263,11 +262,14 @@ describe("SageMakerFeatureStoreAdapter", () => {
         FeatureGroupArn:
           "arn:aws:sagemaker:us-east-1:123:feature-group/my-feature-group",
       });
-      await adapter.connect(config, {
-        accessKeyId: "AKIA...",
-        secretAccessKey: "secret",
-        sessionToken: "token",
-      });
+      await adapter.connect(
+        config,
+        markScopedCredentials({
+          accessKeyId: "AKIA...",
+          secretAccessKey: "secret",
+          sessionToken: "token",
+        }),
+      );
       expect(SageMakerClient).toHaveBeenCalledWith({
         credentials: {
           accessKeyId: "AKIA...",

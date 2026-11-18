@@ -10,6 +10,7 @@ const rsMock = mockClient(RedshiftClient);
 
 import { RedshiftAdapter } from "../redshift-adapter";
 
+import { markScopedCredentials } from "../credential-guard";
 describe("RedshiftAdapter.provision - credential resolution", () => {
   const adapter = new RedshiftAdapter();
 
@@ -43,7 +44,11 @@ describe("RedshiftAdapter.provision - credential resolution", () => {
         masterUsername: "admin",
         masterPassword: "Secret123!",
       },
-      { accessKeyId: "AK", secretAccessKey: "SK", sessionToken: "ST" },
+      markScopedCredentials({
+        accessKeyId: "AK",
+        secretAccessKey: "SK",
+        sessionToken: "ST",
+      }),
     );
 
     expect(result.resourceArn).toBeDefined();

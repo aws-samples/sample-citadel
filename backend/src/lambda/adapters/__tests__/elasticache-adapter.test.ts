@@ -12,6 +12,7 @@ import {
 } from "@aws-sdk/client-elasticache";
 import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
 
+import { markScopedCredentials } from "../credential-guard";
 const mockSend = jest.fn();
 jest.mock("@aws-sdk/client-elasticache", () => {
   return {
@@ -19,12 +20,10 @@ jest.mock("@aws-sdk/client-elasticache", () => {
     CreateCacheClusterCommand: jest
       .fn()
       .mockImplementation((input) => ({ _type: "CreateCacheCluster", input })),
-    DescribeCacheClustersCommand: jest
-      .fn()
-      .mockImplementation((input) => ({
-        _type: "DescribeCacheClusters",
-        input,
-      })),
+    DescribeCacheClustersCommand: jest.fn().mockImplementation((input) => ({
+      _type: "DescribeCacheClusters",
+      input,
+    })),
   };
 });
 
@@ -263,11 +262,14 @@ describe("ElastiCacheAdapter", () => {
       mockSend.mockResolvedValueOnce({
         CacheClusters: [{ CacheClusterStatus: "available" }],
       });
-      await adapter.connect(config, {
-        accessKeyId: "AKIA...",
-        secretAccessKey: "secret",
-        sessionToken: "token",
-      });
+      await adapter.connect(
+        config,
+        markScopedCredentials({
+          accessKeyId: "AKIA...",
+          secretAccessKey: "secret",
+          sessionToken: "token",
+        }),
+      );
       expect(ElastiCacheClient).toHaveBeenCalledWith({
         credentials: {
           accessKeyId: "AKIA...",

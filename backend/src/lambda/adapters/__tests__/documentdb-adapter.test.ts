@@ -9,6 +9,7 @@ import {
 import { DocDBClient, CreateDBClusterCommand } from "@aws-sdk/client-docdb";
 import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
 
+import { markScopedCredentials } from "../credential-guard";
 const mockSend = jest.fn();
 jest.mock("@aws-sdk/client-docdb", () => {
   return {
@@ -25,11 +26,11 @@ jest.mock("@aws-sdk/client-docdb", () => {
 describe("DocumentDBAdapter", () => {
   let adapter: DocumentDBAdapter;
   const config = { dbClusterIdentifier: "my-docdb-cluster" };
-  const creds = {
+  const creds = markScopedCredentials({
     masterUsername: "admin",
     masterPassword: "secret123",
     ...MOCK_SCOPED_CREDENTIALS,
-  };
+  });
 
   beforeEach(() => {
     adapter = new DocumentDBAdapter();
@@ -284,11 +285,14 @@ describe("DocumentDBAdapter", () => {
       mockSend.mockResolvedValueOnce({
         DBClusters: [{ Status: "available" }],
       });
-      await adapter.connect(config, {
-        accessKeyId: "AKIA...",
-        secretAccessKey: "secret",
-        sessionToken: "token",
-      });
+      await adapter.connect(
+        config,
+        markScopedCredentials({
+          accessKeyId: "AKIA...",
+          secretAccessKey: "secret",
+          sessionToken: "token",
+        }),
+      );
       expect(DocDBClient).toHaveBeenCalledWith({
         credentials: {
           accessKeyId: "AKIA...",

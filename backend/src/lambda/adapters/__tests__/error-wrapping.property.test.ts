@@ -21,6 +21,7 @@ import { DataStoreError } from "../errors";
 import type { ConnectorAdapter } from "../../../adapters/base";
 import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
 
+import { markScopedCredentials } from "../credential-guard";
 /** Adapter with a concrete provision method (all datastore adapters under test). */
 type ProvisioningAdapter = ConnectorAdapter &
   Required<Pick<ConnectorAdapter, "provision">>;
@@ -290,25 +291,33 @@ describe("Property 1: Adapter SDK error wrapping", () => {
     () => new RdsAdapter("postgres"),
     mockRdsSend,
     { dbInstanceIdentifier: "db" },
-    { masterUsername: "u", masterPassword: "p", ...MOCK_SCOPED_CREDENTIALS },
+    markScopedCredentials({
+      masterUsername: "u",
+      masterPassword: "p",
+      ...MOCK_SCOPED_CREDENTIALS,
+    }),
   );
   testProvisionWrapping(
     "AuroraAdapter",
     () => new AuroraAdapter("postgres"),
     mockRdsSend,
     { dbClusterIdentifier: "cl" },
-    { masterUsername: "u", masterPassword: "p", ...MOCK_SCOPED_CREDENTIALS },
+    markScopedCredentials({
+      masterUsername: "u",
+      masterPassword: "p",
+      ...MOCK_SCOPED_CREDENTIALS,
+    }),
   );
   testProvisionWrapping(
     "RedshiftAdapter",
     () => new RedshiftAdapter(),
     mockRedshiftSend,
     { clusterIdentifier: "cl" },
-    {
+    markScopedCredentials({
       masterUsername: "admin",
       masterPassword: "Test1pass",
       ...MOCK_SCOPED_CREDENTIALS,
-    },
+    }),
   );
   testProvisionWrapping(
     "OpenSearchAdapter",
@@ -350,7 +359,11 @@ describe("Property 1: Adapter SDK error wrapping", () => {
     () => new DocumentDBAdapter(),
     mockDocDbSend,
     { dbClusterIdentifier: "doc" },
-    { masterUsername: "u", masterPassword: "p", ...MOCK_SCOPED_CREDENTIALS },
+    markScopedCredentials({
+      masterUsername: "u",
+      masterPassword: "p",
+      ...MOCK_SCOPED_CREDENTIALS,
+    }),
   );
   testProvisionWrapping(
     "LakeFormationAdapter",
@@ -390,6 +403,8 @@ describe("Property 1: Adapter SDK error wrapping", () => {
     })();
     const config = {
       name: "kb",
+      dataStoreId: "ds-kb-err",
+      orgId: "org-kb-err",
       roleArn: "arn:aws:iam::123456789012:role/test-role",
     };
     await fc.assert(
