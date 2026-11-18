@@ -49,37 +49,37 @@ export interface ConsentCatalogueEntry {
  */
 export const CONSENT_CATALOGUE: Record<IntakeConsentAction, ConsentCatalogueEntry> = {
   activate_agents: {
-    label: 'Activate the agents',
+    label: '✅ Activate the agents',
     confirmMessage: 'Yes, activate the agents',
     description: 'Activate fabricated agents so they are ready to use',
   },
   create_agent_app: {
-    label: 'Create the app',
+    label: '✅ Create the app',
     confirmMessage: 'Yes, create the app',
     description: 'Create a new Agent App to bring the agents together',
   },
   generate_process_blueprint: {
-    label: 'Generate blueprint',
+    label: '✅ Generate the blueprint',
     confirmMessage: 'Yes, generate the blueprint',
     description: 'Generate and publish the process blueprint',
   },
   import_blueprint_to_app: {
-    label: 'Add blueprint to app',
+    label: '✅ Add blueprint to the app',
     confirmMessage: 'Yes, add the blueprint to the app',
     description: 'Import the published blueprint into the app as a workflow',
   },
   plan_fabrication: {
-    label: 'Plan fabrication',
+    label: '✅ Plan the fabrication',
     confirmMessage: 'Yes, plan the fabrication',
     description: 'Analyse the design and produce a fabrication plan',
   },
   confirm_fabrication_plan: {
-    label: 'Confirm fabrication plan',
+    label: '✅ Confirm the fabrication plan',
     confirmMessage: 'Yes, confirm the fabrication plan',
     description: 'Save the confirmed plan and queue agents for build',
   },
   retry_failed_fabrication: {
-    label: 'Retry failed builds',
+    label: '✅ Retry the failed builds',
     confirmMessage: 'Yes, retry the failed builds',
     description: 'Re-queue fabrication for agents whose build failed or stalled',
   },

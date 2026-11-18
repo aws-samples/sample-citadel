@@ -41,7 +41,7 @@ describe('consentActionForId', () => {
   it('returns the catalogue entry for a known id', () => {
     const entry = consentActionForId('activate_agents');
     expect(entry).not.toBeNull();
-    expect(entry!.label).toBe('Activate the agents');
+    expect(entry!.label).toBe('✅ Activate the agents');
     expect(entry!.confirmMessage).toBe('Yes, activate the agents');
   });
 
