@@ -40,6 +40,7 @@ from fabrication_context import (
     lookup_tool_key,
     record_tool_key,
 )
+from permission_deriver import derive_required_permissions
 from registry_recovery import (
     OrphanedRegistryRecordError,
     is_creating_conflict,
@@ -1631,6 +1632,7 @@ def store_agent_config_registry(
     requested_by: str = "fabricator",
     org_id: str = "",
     source_project_id: str | None = None,
+    required_permissions: dict | None = None,
 ) -> bool:
     """Store agent configuration in AgentCore Registry.
 
@@ -1667,6 +1669,14 @@ def store_agent_config_registry(
             ``orgId`` (Phase 2b). Defaults to ``""`` to mirror the resolver's
             defensive null fallback; callers should pass the value threaded
             from the SQS event's ``org_id`` field.
+        required_permissions: PR-4 (owner decision 5750aeec) — the SERVER-
+            DERIVED least-privilege permission set (see
+            ``permission_deriver.derive_required_permissions``), stamped into
+            both ``config['requiredPermissions']`` and
+            ``custom_metadata['requiredPermissions']`` so the registry mapper
+            and the worker's dispatch gate both see it. Defaults to ``None``
+            for legacy callers; ``process_event`` always passes the derived
+            dict (never ``None``) on the live fabrication path.
 
     Returns:
         bool: True if configuration was successfully stored.
@@ -1747,6 +1757,14 @@ def store_agent_config_registry(
                 "target": os.environ.get("WORKER_QUEUE_URL", "MISSING"),
             },
         }
+        # PR-4 (owner decision 5750aeec: FAIL CLOSED, no grandfathering):
+        # stamp the server-derived least-privilege permission set into
+        # config so the worker's dispatch gate can read it off
+        # ``config['requiredPermissions']``. None (legacy caller) leaves the
+        # key absent rather than writing a null — the worker gate treats
+        # absent and empty identically (deny-default).
+        if required_permissions is not None:
+            config["requiredPermissions"] = required_permissions
 
         # Auto-generate agent manifest.
         manifest = {
@@ -1778,6 +1796,12 @@ def store_agent_config_registry(
             custom_metadata["appId"] = app_id
         if normalized_project_id:
             custom_metadata["sourceProjectId"] = normalized_project_id
+        if required_permissions is not None:
+            # Also stamped at the top level of custom_metadata (PR-4): the
+            # registry mapper reads requiredPermissions from here, mirroring
+            # how codeKey/integrationBindings are exposed to resolvers
+            # without requiring a parse of the nested config blob.
+            custom_metadata["requiredPermissions"] = required_permissions
 
         print(
             f"[store_agent_config_registry] Creating Registry record for agent: "
@@ -1958,6 +1982,7 @@ def store_tool_config_registry(
     requested_by: str = "fabricator",
     org_id: str = "",
     spec_id: str | None = None,
+    required_permissions: dict | None = None,
 ) -> bool:
     """Store tool configuration in AgentCore Registry.
 
@@ -2017,6 +2042,13 @@ def store_tool_config_registry(
             gate is enforced (CIT-256 H2). ``None`` skips the gate — used
             for non-code-generating tools or legacy callers that predate
             spec threading.
+        required_permissions: PR-4 (owner decision 5750aeec) — the SERVER-
+            DERIVED least-privilege permission set (see
+            ``permission_deriver.derive_required_permissions``), stamped into
+            both ``config['requiredPermissions']`` and
+            ``custom_metadata['requiredPermissions']``. Defaults to ``None``
+            for legacy callers; ``process_event`` always passes the derived
+            dict on the live fabrication path.
 
     Returns:
         bool: True if configuration was successfully stored.
@@ -2104,6 +2136,11 @@ def store_tool_config_registry(
             "version": 1,
             "description": tool_description,
         }
+        # PR-4 (owner decision 5750aeec: FAIL CLOSED, no grandfathering):
+        # stamp the server-derived least-privilege permission set so the
+        # worker's dispatch gate can read it off config['requiredPermissions'].
+        if required_permissions is not None:
+            config["requiredPermissions"] = required_permissions
 
         # Custom metadata — serialized into the CUSTOM descriptor inlineContent.
         # state is recorded as "active" to match Requirement 8.4; status is
@@ -2123,6 +2160,8 @@ def store_tool_config_registry(
             "createdBy": requested_by,
             "orgId": org_id,
         }
+        if required_permissions is not None:
+            custom_metadata["requiredPermissions"] = required_permissions
         # Persist the scoped S3 key so resolve-tool-config.ts (backend) and
         # get_worker_tool can locate the tool code without LLM-supplied keys.
         # The key is read from the per-job map populated by upload_tool_to_s3.
@@ -2576,6 +2615,16 @@ def _make_create_custom_tool(
 
         # CIT-302: bind the outer run's org/requester/spec into the nested
         # fabricator so tool records are registered under the correct org.
+        # PR-4: derive requiredPermissions from these SAME bindings (the
+        # nested create_custom_tool's own arguments — LLM-facing, but
+        # derive_required_permissions only ever narrows what gets granted
+        # from them; it cannot widen access beyond the declared binding
+        # ids, and an empty/no-binding call still yields the deny-default
+        # empty set).
+        nested_required_permissions = derive_required_permissions(
+            integration_bindings, datastore_bindings,
+        )
+
         @tool
         def store_tool_config_registry_nested(
             file_name: str,
@@ -2598,6 +2647,7 @@ def _make_create_custom_tool(
                 requested_by=requested_by,
                 org_id=org_id,
                 spec_id=spec_id,
+                required_permissions=nested_required_permissions,
             )
 
         # Create the Tool Fabricator agent with the org-bound store tool
@@ -2765,6 +2815,18 @@ def process_event(event, context, request_type=None):
     # Extract binding metadata from the fabrication request
     integration_bindings = request.get("integrationBindings", None)
     datastore_bindings = request.get("dataStoreBindings", None)
+
+    # PR-4 (owner decision 5750aeec: FAIL CLOSED, no grandfathering):
+    # derive least-privilege requiredPermissions SERVER-SIDE from the SAME
+    # validated binding lists above — never from an LLM tool argument — and
+    # bind it into the registration closures below exactly the way org_id /
+    # spec_id are bound today. No bindings at all yields the explicit empty
+    # set (deny-default); the worker refuses to dispatch an agent/tool with
+    # an empty set unless it also carries the explicit
+    # credentialMode: "none" sentinel.
+    derived_required_permissions = derive_required_permissions(
+        integration_bindings, datastore_bindings,
+    )
 
     # CIT-256 H2: thread the ExecutionSpecification id so the registration-
     # time spec-approval gate can verify the tool is bound to an approved
@@ -2946,6 +3008,7 @@ def process_event(event, context, request_type=None):
                     requested_by=requested_by,
                     org_id=org_id,
                     spec_id=spec_id,
+                    required_permissions=derived_required_permissions,
                 )
 
             # Create and invoke the Tool Fabricator
@@ -3011,6 +3074,7 @@ def process_event(event, context, request_type=None):
                     requested_by=requested_by,
                     org_id=org_id,
                     source_project_id=orchestration_id,
+                    required_permissions=derived_required_permissions,
                 )
 
             # Create the Agent Fabricator with access to create_custom_tool
