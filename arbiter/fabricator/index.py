@@ -42,6 +42,7 @@ from fabrication_context import (
 )
 from permission_deriver import derive_required_permissions
 from fence import fence_untrusted
+from code_validation import validate_generated_code, GeneratedCodeRejected
 from registry_recovery import (
     OrphanedRegistryRecordError,
     is_creating_conflict,
@@ -2487,6 +2488,14 @@ _JOB_DIR = "/tmp"
 def write_job_file(file_name: str, content: str) -> str:
     """Write generated code to a file inside the job directory (/tmp).
 
+    PR-4 §2c (owner decision 5750aeec): before any write, the content is
+    statically validated by ``code_validation.validate_generated_code`` —
+    a syntax error, a forbidden import, a process/OS-escape call, or a
+    dunder/reflection abuse raises ``GeneratedCodeRejected`` and NO file is
+    written. This is additive to (does not duplicate) CIT-256's spec-
+    binding gate: that gate governs whether a code-generating TOOL may be
+    registered at all; this validates the CONTENT of what was generated.
+
     Args:
         file_name: Basename of the file to create (e.g. "validate_email.py").
                    Must not contain path separators or traversal sequences.
@@ -2494,6 +2503,10 @@ def write_job_file(file_name: str, content: str) -> str:
 
     Returns:
         The absolute path of the written file.
+
+    Raises:
+        code_validation.GeneratedCodeRejected: If *content* fails static
+            validation. No file is written.
     """
     import pathlib
 
@@ -2510,6 +2523,10 @@ def write_job_file(file_name: str, content: str) -> str:
             f"Path traversal is not allowed: {file_name!r}. "
             "Provide a plain filename like 'my_tool.py'."
         )
+
+    # PR-4 §2c: validate BEFORE any write, so a rejected payload never
+    # touches disk.
+    validate_generated_code(content)
 
     resolved = pathlib.Path(_JOB_DIR, file_name).resolve()
     job_root = pathlib.Path(_JOB_DIR).resolve()
