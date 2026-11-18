@@ -36,6 +36,14 @@ interface FabricationStatusPanelProps {
    * panel only appears once at least one job exists.
    */
   phaseActive?: boolean;
+  /**
+   * When provided, the panel uses these items instead of fetching its own.
+   * This enables sharing a single poller (useFabricationQueue) between the
+   * panel and the in-chat FabricationStatusCard.
+   */
+  externalItems?: FabricationQueueItem[];
+  /** Whether the external items are loading. */
+  externalLoading?: boolean;
 }
 
 type FabricationStatus = FabricationQueueItem['status'];
@@ -85,11 +93,15 @@ function StatusBadge({ status, errorMessage }: { status: FabricationStatus; erro
   return badge;
 }
 
-export function FabricationStatusPanel({ projectId, phaseActive = false }: FabricationStatusPanelProps) {
-  const [items, setItems] = useState<FabricationQueueItem[]>([]);
-  const [loading, setLoading] = useState(true);
+export function FabricationStatusPanel({ projectId, phaseActive = false, externalItems, externalLoading }: FabricationStatusPanelProps) {
+  const [internalItems, setInternalItems] = useState<FabricationQueueItem[]>([]);
+  const [internalLoading, setInternalLoading] = useState(true);
   const [activating, setActivating] = useState(false);
   const [activated, setActivated] = useState(false);
+
+  // Use external items if provided, otherwise fall back to internal fetching.
+  const items = externalItems ?? internalItems;
+  const loading = externalItems ? (externalLoading ?? false) : internalLoading;
   // Collapsible body: open by default; auto-collapses once fabrication
   // completes, unless the user has ever toggled manually — their choice
   // wins forever after the first manual toggle.
@@ -103,16 +115,17 @@ export function FabricationStatusPanel({ projectId, phaseActive = false }: Fabri
   const callerOrgId = currentUser?.organization ?? null;
 
   const loadQueue = useCallback(async () => {
-    setLoading(true);
+    if (externalItems) return; // Skip when data is provided externally.
+    setInternalLoading(true);
     try {
       const queue = await getFabricatorQueue(projectId);
-      setItems(queue);
+      setInternalItems(queue);
     } catch (err) {
       console.error('Failed to load fabrication queue:', err);
     } finally {
-      setLoading(false);
+      setInternalLoading(false);
     }
-  }, [projectId]);
+  }, [projectId, externalItems]);
 
   // Initial load (and reload when the project changes)
   useEffect(() => {
@@ -121,7 +134,9 @@ export function FabricationStatusPanel({ projectId, phaseActive = false }: Fabri
 
   // Subscribe to real-time fabrication events; update the matching row in place.
   // No organisation available for this caller yet -> do not subscribe.
+  // Skip when external items are provided (the parent handles subscriptions).
   useEffect(() => {
+    if (externalItems) return;
     if (!callerOrgId) {
       if (subscriptionRef.current) {
         subscriptionRef.current();
@@ -131,7 +146,7 @@ export function FabricationStatusPanel({ projectId, phaseActive = false }: Fabri
     }
 
     const unsubscribe = subscribeToFabricationEvents((event) => {
-      setItems((prev) =>
+      setInternalItems((prev) =>
         prev.map((item) =>
           item.requestId === event.requestId
             ? { ...item, status: event.type, errorMessage: event.errorMessage ?? item.errorMessage }

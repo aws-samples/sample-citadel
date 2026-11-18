@@ -25,8 +25,11 @@ import {
 } from '../services/documentService';
 import { diffLines, type Change } from 'diff';
 import { FabricationStatusPanel } from './FabricationStatusPanel';
+import { FabricationStatusCard } from './FabricationStatusCard';
+import { PhaseProgressBar } from './PhaseProgressBar';
 import { consentActionForId, recordIntakeConsent } from '../services/intakeConsentService';
 import { useVersionCheck } from '../hooks/useVersionCheck';
+import { useFabricationQueue } from '../hooks/useFabricationQueue';
 
 // Strict set of affirmative phrases that count as typed consent.
 // Case-insensitive exact match only — no partial matches.
@@ -335,6 +338,7 @@ export function ProjectWorkspace({ project, onBack }: ProjectWorkspaceProps) {
   const [activeDocTab, setActiveDocTab] = useState('technical_design');
   const [pendingConsentId, setPendingConsentId] = useState<string | null>(null);
   const { stale: versionStale } = useVersionCheck();
+  const { items: fabItems, allBuilt: fabAllBuilt, allTerminal: fabAllTerminal } = useFabricationQueue(project.id);
   const autoSwitchedRef = useRef(false);
   const [historyNextToken, setHistoryNextToken] = useState<string | null>(null);
   const prevProgressRef = useRef<ProjectProgress | null>(null);
@@ -711,28 +715,7 @@ export function ProjectWorkspace({ project, onBack }: ProjectWorkspaceProps) {
                 <div className="flex items-center justify-between mb-1.5">
                   <span className="text-xs text-muted-foreground">Phase: <span className="text-foreground capitalize">{progress.currentPhase || 'assessment'}</span></span>
                 </div>
-                <div className="flex gap-1">
-                  {([
-                    { key: 'assessment', label: 'Assessment' },
-                    { key: 'design', label: 'Design' },
-                    { key: 'planning', label: 'Planning' },
-                    { key: 'implementation', label: 'Build' },
-                  ] as const).map(({ key, label }) => {
-                    const pct = (progress as any)[key] ?? 0;
-                    const isActive = pct > 0 && pct < 100;
-                    return (
-                      <div key={key} className="flex-1" title={`${label}: ${Math.round(pct)}%`}>
-                        <div className={`text-[10px] mb-0.5 text-center ${isActive ? 'text-primary animate-pulse font-medium' : pct >= 100 ? 'text-chart-2' : 'text-muted-foreground'}`}>{label}</div>
-                        <div className="h-1.5 rounded-full bg-accent overflow-hidden">
-                          <div
-                            className={`h-full rounded-full transition-all duration-500 ${pct >= 100 ? 'bg-chart-2' : pct > 0 ? 'bg-primary' : 'bg-accent'}`}
-                            style={{ width: `${Math.min(pct, 100)}%` }}
-                          />
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
+                <PhaseProgressBar progress={progress} />
               </div>
             )}
 
@@ -755,6 +738,8 @@ export function ProjectWorkspace({ project, onBack }: ProjectWorkspaceProps) {
                 (progress?.implementation ?? 0) > 0 ||
                 (progress?.currentPhase ?? '').toUpperCase().includes('IMPLEMENTATION')
               }
+              externalItems={fabItems}
+              externalLoading={false}
             />
 
             {/* Messages */}
@@ -870,6 +855,20 @@ export function ProjectWorkspace({ project, onBack }: ProjectWorkspaceProps) {
                     <Card className="bg-accent rounded-lg px-3 py-2 text-sm text-muted-foreground animate-pulse gap-0">
                       Thinking...
                     </Card>
+                  </div>
+                )}
+                {/* In-chat fabrication progress card — visible while fabrication
+                    jobs exist for this project, after the last message. */}
+                {fabItems.length > 0 && (
+                  <div className="flex justify-start">
+                    <div className="max-w-[85%]">
+                      <FabricationStatusCard
+                        items={fabItems}
+                        projectId={project.id}
+                        allBuilt={fabAllBuilt}
+                        allTerminal={fabAllTerminal}
+                      />
+                    </div>
                   </div>
                 )}
                 <div ref={messagesEndRef} />

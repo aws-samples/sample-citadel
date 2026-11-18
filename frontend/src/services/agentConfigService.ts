@@ -40,6 +40,8 @@ export interface ActivateAgentsResult {
   activated: string[];
   failed: string[];
   alreadyActive: string[];
+  /** Agents whose submit succeeded but landed in PENDING_APPROVAL (manual review mode). */
+  submitted?: string[];
 }
 
 const listAgentConfigsQuery = `
@@ -142,6 +144,7 @@ const activateProjectAgentsMutation = `
       activated
       failed
       alreadyActive
+      submitted
     }
   }
 `;
