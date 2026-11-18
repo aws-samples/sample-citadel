@@ -6,10 +6,16 @@
  * automatic approval restoration for records that were APPROVED before the
  * edit and governance ledger integration.
  *
- * Approval restoration uses `updateResourceStatus` directly (not
- * `submitForApproval`) — AgentCore auto-approves on submit, which bypasses
- * the human gate; the direct status-update path records the system
- * principal and reason explicitly.
+ * Approval restoration follows the full AgentCore registry lifecycle:
+ *   1. updateResource demotes APPROVED → DRAFT
+ *   2. submitForApproval advances DRAFT → PENDING_APPROVAL
+ *      (or auto-approves straight to APPROVED when the registry has
+ *       auto-approval configured)
+ *   3. If PENDING_APPROVAL after submit, decideRecord
+ *      (updateResourceStatus APPROVED) completes the restoration
+ *
+ * This respects REGISTRY_TRANSITIONS which forbids DRAFT → APPROVED
+ * directly — only PENDING_APPROVAL → APPROVED is valid.
  */
 import {
   RegistryService,
@@ -221,23 +227,48 @@ export async function applyMarkerEdit(
       };
     }
 
-    // 7. Restore approval if record was APPROVED before the edit
+    // 7. Restore approval if record was APPROVED before the edit.
+    //
+    // The full lifecycle is:
+    //   updateResource demoted → DRAFT
+    //   submitForApproval      → PENDING_APPROVAL (or APPROVED if auto-approval)
+    //   decideRecord (APPROVED)→ APPROVED          (only when still PENDING_APPROVAL)
+    //
+    // DRAFT → APPROVED directly is forbidden by REGISTRY_TRANSITIONS.
     let postStatus = "DRAFT"; // updateResource demotes to DRAFT
     let reapproved = false;
 
     if (priorStatus === "APPROVED") {
       try {
-        // Direct status-update (not submitForApproval) — records the
-        // system principal and reason explicitly, does not auto-approve
-        // via AgentCore's implicit approval pathway.
-        const restored = await registryService.updateResourceStatus(
-          type,
-          recordId,
-          RegistryRecordStatusValues.APPROVED,
-          `${operationLabel}: marker-only edit of [${changedFields.join(", ")}]; restoring prior APPROVED status`,
-        );
-        postStatus = restored.status ?? "APPROVED";
-        reapproved = postStatus === "APPROVED";
+        // Step 1: Submit for approval (DRAFT → PENDING_APPROVAL, or
+        // auto-approve to APPROVED when the registry is configured for it)
+        const submitted = await registryService.submitForApproval(recordId);
+        const submittedStatus = submitted.status ?? "PENDING_APPROVAL";
+
+        if (submittedStatus === "APPROVED") {
+          // Registry auto-approved — we're done
+          postStatus = "APPROVED";
+          reapproved = true;
+        } else if (submittedStatus === "PENDING_APPROVAL") {
+          // Step 2: Decide the record (PENDING_APPROVAL → APPROVED)
+          const reason =
+            `${operationLabel}: marker-only edit of [${changedFields.join(", ")}]; ` +
+            `restoring prior APPROVED status`;
+          const decided = await registryService.updateResourceStatus(
+            type,
+            recordId,
+            RegistryRecordStatusValues.APPROVED,
+            reason,
+          );
+          postStatus = decided.status ?? "APPROVED";
+          reapproved = postStatus === "APPROVED";
+        } else {
+          // Unexpected post-submit status — log and leave as-is
+          console.warn(
+            `Marker edit: unexpected status after submitForApproval for ${recordId}: ${submittedStatus}`,
+          );
+          postStatus = submittedStatus;
+        }
       } catch (err) {
         console.warn(
           `Marker edit: failed to restore APPROVED status for ${recordId}: ${String(err)}`,

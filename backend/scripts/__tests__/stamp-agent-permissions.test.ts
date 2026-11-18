@@ -26,6 +26,7 @@ describe("stamp-agent-permissions script (unit)", () => {
   let mockGetResource: jest.Mock;
   let mockUpdateResource: jest.Mock;
   let mockUpdateResourceStatus: jest.Mock;
+  let mockSubmitForApproval: jest.Mock;
 
   beforeEach(() => {
     mockListResources = jest.fn().mockResolvedValue([]);
@@ -34,12 +35,16 @@ describe("stamp-agent-permissions script (unit)", () => {
     mockUpdateResourceStatus = jest
       .fn()
       .mockResolvedValue({ status: "APPROVED" });
+    mockSubmitForApproval = jest
+      .fn()
+      .mockResolvedValue({ recordId: "rec-1", status: "PENDING_APPROVAL" });
 
     (RegistryService as jest.Mock).mockImplementation(() => ({
       listResources: mockListResources,
       getResource: mockGetResource,
       updateResource: mockUpdateResource,
       updateResourceStatus: mockUpdateResourceStatus,
+      submitForApproval: mockSubmitForApproval,
     }));
   });
 

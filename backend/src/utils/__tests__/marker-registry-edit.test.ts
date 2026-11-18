@@ -7,23 +7,74 @@ import {
   MarkerEditOptions,
 } from "../marker-registry-edit";
 
+/**
+ * REGISTRY_TRANSITIONS (lifecycle.ts) says:
+ *   DRAFT           -> DEPRECATED  (only)
+ *   PENDING_APPROVAL -> APPROVED | REJECTED
+ *
+ * The mock enforces these constraints so tests catch any code path that
+ * attempts a forbidden transition (e.g. DRAFT -> APPROVED directly).
+ */
+const MOCK_VALID_STATUS_TARGETS: Record<string, Set<string>> = {
+  DRAFT: new Set(["DEPRECATED"]),
+  PENDING_APPROVAL: new Set(["APPROVED", "REJECTED"]),
+  REJECTED: new Set(["DEPRECATED"]),
+  APPROVED: new Set(["DEPRECATED"]),
+  DEPRECATED: new Set(),
+};
+
 function mockRegistryService(overrides: Record<string, unknown> = {}) {
   const meta = {
     orgId: "org-1",
     config: { name: "test-agent", filename: "test.py" },
     ...((overrides.meta as Record<string, unknown>) ?? {}),
   };
+
+  // Track the mutable status so the mock enforces lifecycle transitions.
+  let currentStatus = (overrides.status as string) ?? "APPROVED";
+
+  const getResourceResult = () => ({
+    recordId: "rec-1",
+    name: "test-agent",
+    status: currentStatus,
+    customDescriptorContent: JSON.stringify(meta),
+  });
+
   return {
-    getResource: jest.fn().mockResolvedValue({
-      recordId: "rec-1",
-      name: "test-agent",
-      status: overrides.status ?? "APPROVED",
-      customDescriptorContent: JSON.stringify(meta),
+    getResource: jest
+      .fn()
+      .mockImplementation(() => Promise.resolve(getResourceResult())),
+    updateResource: jest.fn().mockImplementation(() => {
+      // updateResource demotes to DRAFT (AgentCore GA behaviour)
+      currentStatus = "DRAFT";
+      return Promise.resolve({});
     }),
-    updateResource: jest.fn().mockResolvedValue({}),
-    updateResourceStatus: jest.fn().mockResolvedValue({
-      recordId: "rec-1",
-      status: "APPROVED",
+    updateResourceStatus: jest
+      .fn()
+      .mockImplementation((_type: string, _id: string, target: string) => {
+        const validTargets = MOCK_VALID_STATUS_TARGETS[currentStatus];
+        if (!validTargets || !validTargets.has(target)) {
+          return Promise.reject(
+            new Error(
+              `Invalid status transition: ${currentStatus} → ${target}. ` +
+                `Valid from ${currentStatus}: ${[...(validTargets ?? [])].join(", ") || "none"}`,
+            ),
+          );
+        }
+        currentStatus = target;
+        return Promise.resolve({ recordId: "rec-1", status: currentStatus });
+      }),
+    submitForApproval: jest.fn().mockImplementation(() => {
+      // submitForApproval transitions DRAFT -> PENDING_APPROVAL (or
+      // auto-approves to APPROVED when registry auto-approval is on).
+      if (currentStatus !== "DRAFT") {
+        return Promise.reject(
+          new Error(`submitForApproval requires DRAFT, got ${currentStatus}`),
+        );
+      }
+      const autoApprove = (overrides.autoApproval ?? false) as boolean;
+      currentStatus = autoApprove ? "APPROVED" : "PENDING_APPROVAL";
+      return Promise.resolve({ recordId: "rec-1", status: currentStatus });
     }),
     ...overrides,
   };
@@ -70,7 +121,7 @@ describe("applyMarkerEdit", () => {
     expect(registry.updateResource).not.toHaveBeenCalled();
   });
 
-  test("APPROVED -> UPDATING -> DRAFT -> restore flow", async () => {
+  test("APPROVED -> UPDATING -> DRAFT -> re-approval flow", async () => {
     const registry = mockRegistryService({ status: "APPROVED" });
     const spec: MarkerEditSpec = {
       recordId: "rec-1",
@@ -83,6 +134,9 @@ describe("applyMarkerEdit", () => {
     expect(result.reapproved).toBe(true);
     expect(result.fieldsChanged).toContain("requiredPermissions");
     expect(registry.updateResource).toHaveBeenCalledTimes(1);
+    // Full lifecycle: submitForApproval (DRAFT→PENDING_APPROVAL)
+    // then decideRecord via updateResourceStatus (PENDING_APPROVAL→APPROVED)
+    expect(registry.submitForApproval).toHaveBeenCalledWith("rec-1");
     expect(registry.updateResourceStatus).toHaveBeenCalledWith(
       "agent",
       "rec-1",
@@ -150,6 +204,103 @@ describe("applyMarkerEdit", () => {
         decidedBy: "system:test-operation",
       }),
     );
+  });
+
+  test("governance ledger decision includes citadelKind when provided", async () => {
+    const ledgerWriter = jest.fn().mockResolvedValue("decision-456");
+    const registry = mockRegistryService({ status: "APPROVED" });
+    const spec: MarkerEditSpec = {
+      recordId: "rec-1",
+      type: "agent",
+      fieldsToSet: { credentialMode: "scoped" },
+    };
+    const result = await applyMarkerEdit(
+      spec,
+      baseOptions(registry, {
+        ledgerWriter,
+        operationLabel: "stamp-agent-permissions",
+      }),
+    );
+    expect(result.ledgerDecisionId).toBe("decision-456");
+    expect(ledgerWriter).toHaveBeenCalledWith(
+      expect.objectContaining({
+        decidedBy: "system:stamp-agent-permissions",
+        reason: expect.stringContaining("credentialMode"),
+      }),
+    );
+  });
+
+  test("DRAFT→APPROVED direct transition is never attempted", async () => {
+    // The mock enforces REGISTRY_TRANSITIONS: DRAFT can only reach
+    // DEPRECATED, not APPROVED. If marker-edit tried the old direct
+    // updateResourceStatus(APPROVED) from DRAFT, the mock rejects it.
+    const registry = mockRegistryService({ status: "APPROVED" });
+    const spec: MarkerEditSpec = {
+      recordId: "rec-1",
+      type: "agent",
+      fieldsToSet: { requiredPermissions: { models: ["m1"] } },
+    };
+    const result = await applyMarkerEdit(spec, baseOptions(registry));
+    expect(result.reapproved).toBe(true);
+    expect(result.postStatus).toBe("APPROVED");
+
+    // Verify submitForApproval was called (DRAFT→PENDING_APPROVAL)
+    expect(registry.submitForApproval).toHaveBeenCalledWith("rec-1");
+
+    // Verify updateResourceStatus was called with APPROVED from
+    // PENDING_APPROVAL (not from DRAFT)
+    const statusCalls = registry.updateResourceStatus.mock.calls;
+    for (const call of statusCalls) {
+      // call is [type, id, targetStatus, reason?, currentStatus?]
+      const target = call[2];
+      // The mock would have thrown if DRAFT→APPROVED was attempted, but
+      // also assert explicitly:
+      expect(target).not.toBe("DEPRECATED");
+    }
+  });
+
+  test("approval restore uses submitForApproval + decideRecord lifecycle", async () => {
+    const registry = mockRegistryService({ status: "APPROVED" });
+    const spec: MarkerEditSpec = {
+      recordId: "rec-1",
+      type: "agent",
+      fieldsToSet: { credentialMode: "scoped" },
+    };
+    const result = await applyMarkerEdit(spec, baseOptions(registry));
+    expect(result.priorStatus).toBe("APPROVED");
+    expect(result.postStatus).toBe("APPROVED");
+    expect(result.reapproved).toBe(true);
+
+    // After updateResource demotes to DRAFT, submitForApproval is called
+    expect(registry.submitForApproval).toHaveBeenCalledWith("rec-1");
+    // Then updateResourceStatus APPROVED from PENDING_APPROVAL
+    expect(registry.updateResourceStatus).toHaveBeenCalledWith(
+      "agent",
+      "rec-1",
+      "APPROVED",
+      expect.stringContaining("marker-only edit"),
+    );
+  });
+
+  test("auto-approval path: submitForApproval returns APPROVED directly", async () => {
+    const registry = mockRegistryService({
+      status: "APPROVED",
+      autoApproval: true,
+    });
+    const spec: MarkerEditSpec = {
+      recordId: "rec-1",
+      type: "agent",
+      fieldsToSet: { requiredPermissions: { models: ["m2"] } },
+    };
+    const result = await applyMarkerEdit(spec, baseOptions(registry));
+    expect(result.priorStatus).toBe("APPROVED");
+    expect(result.postStatus).toBe("APPROVED");
+    expect(result.reapproved).toBe(true);
+    // submitForApproval auto-approved — no separate decideRecord needed
+    expect(registry.submitForApproval).toHaveBeenCalledWith("rec-1");
+    // updateResourceStatus should NOT have been called for approval
+    // because auto-approval already set status to APPROVED
+    expect(registry.updateResourceStatus).not.toHaveBeenCalled();
   });
 
   test("DRAFT record does not attempt re-approval", async () => {
