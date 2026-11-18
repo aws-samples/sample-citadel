@@ -68,6 +68,7 @@ import {
   RegistryRecord,
 } from "../src/services/registry-service";
 import { ALL_ORGS } from "../src/utils/org-constants";
+import { applyMarkerEdit } from "../src/utils/marker-registry-edit";
 
 // ---------------------------------------------------------------------------
 // Allowlists — the ONLY positive signals for "legitimately shared"
@@ -290,10 +291,21 @@ async function processRegistryRecord(
       );
       if (!apply) return;
       try {
-        const updatedMeta = { ...meta, orgId: ALL_ORGS };
-        await registry.updateResource(type, recordId, {
-          customMetadata: JSON.stringify(updatedMeta),
-        });
+        const editResult = await applyMarkerEdit(
+          { recordId, type, fieldsToSet: { orgId: ALL_ORGS } },
+          {
+            registryService: registry,
+            dryRun: false,
+            operationLabel: "backfill-shared-org-marker",
+          },
+        );
+        if (editResult.error) {
+          log(
+            "error",
+            `[${type}] recordId=${recordId} marker edit failed: ${editResult.error}`,
+          );
+          summary.errors++;
+        }
       } catch (err) {
         log(
           "error",
@@ -311,14 +323,26 @@ async function processRegistryRecord(
       );
       if (!apply) return;
       try {
-        const updatedMeta: Record<string, unknown> = {
-          ...meta,
-          orgUnknown: true,
-        };
-        delete updatedMeta.orgId;
-        await registry.updateResource(type, recordId, {
-          customMetadata: JSON.stringify(updatedMeta),
-        });
+        const editResult = await applyMarkerEdit(
+          {
+            recordId,
+            type,
+            fieldsToSet: { orgUnknown: true },
+            fieldsToRemove: ["orgId"],
+          },
+          {
+            registryService: registry,
+            dryRun: false,
+            operationLabel: "backfill-shared-org-marker",
+          },
+        );
+        if (editResult.error) {
+          log(
+            "error",
+            `[${type}] recordId=${recordId} marker edit failed: ${editResult.error}`,
+          );
+          summary.errors++;
+        }
       } catch (err) {
         log(
           "error",
@@ -553,6 +577,10 @@ export async function main(): Promise<void> {
       "warn",
       `${totals.ambiguousReported} ambiguous record(s) require an owner decision — re-run after resolving them manually.`,
     );
+  }
+
+  if (totals.errors > 0) {
+    process.exit(1);
   }
 }
 
