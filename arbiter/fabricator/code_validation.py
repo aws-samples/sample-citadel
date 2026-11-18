@@ -33,6 +33,8 @@ FORBIDDEN_MODULES = frozenset({
     "resource",
     "mmap",
     "fcntl",
+    "posix",
+    "_posixsubprocess",
 })
 
 # Curated safe set a generated boto3 tool is expected to need. Used only
@@ -88,6 +90,27 @@ def _check_imports(tree: ast.AST) -> None:
                 raise GeneratedCodeRejected(
                     f"forbidden import: from {module!r} import ... (root module {root!r})"
                 )
+            # ``from os import system`` / ``from posix import system`` (and
+            # aliased/star forms) import the SAME process/OS-escape surface
+            # as ``os.system(...)`` but as a bare Name, so the attribute-call
+            # check in _check_os_escape_calls never sees it. root os/posix is
+            # not itself forbidden (os.path, os.environ reads are fine), so
+            # gate on the imported NAMES instead: reject any name in
+            # _FORBIDDEN_OS_ATTRS, and reject a bare ``*`` outright (it can
+            # only be resolved at runtime, so static analysis cannot prove
+            # it is safe).
+            if root in ("os", "posix"):
+                for alias in node.names:
+                    if alias.name == "*":
+                        raise GeneratedCodeRejected(
+                            f"forbidden import: from {module!r} import * "
+                            f"(star import of os/posix cannot be statically verified safe)"
+                        )
+                    if alias.name in _FORBIDDEN_OS_ATTRS:
+                        raise GeneratedCodeRejected(
+                            f"forbidden import: from {module!r} import {alias.name!r} "
+                            f"(process/OS-escape surface)"
+                        )
 
 
 def _check_os_escape_calls(tree: ast.AST) -> None:
