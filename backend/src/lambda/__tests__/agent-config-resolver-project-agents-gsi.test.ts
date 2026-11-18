@@ -246,28 +246,51 @@ describe("findProjectAgentRecords — GSI path", () => {
     expect(result).toHaveLength(2);
   });
 
-  test("filters by orgId when provided", async () => {
+  test("filters by orgId when provided; blank/absent rows are fail-closed (PR-3)", async () => {
     dynamoMock.on(QueryCommand).resolves({
       Items: [
         gsiRow("a1", "rec-1", { orgId: "org-a" }),
         gsiRow("a2", "rec-2", { orgId: "org-b" }),
-        gsiRow("a3", "rec-3", { orgId: "" }), // system-shared
+        gsiRow("a3", "rec-3", { orgId: "" }), // PR-3: blank is NOT system-shared
         gsiRow("a4", "rec-4", { orgId: "All Organizations" }),
       ],
     });
     mockGetResource
       .mockResolvedValueOnce(registryRecord("rec-1", "proj-123", "org-a"))
-      .mockResolvedValueOnce(registryRecord("rec-3", "proj-123", ""))
       .mockResolvedValueOnce(
         registryRecord("rec-4", "proj-123", "All Organizations"),
       );
 
     const result = await findProjectAgentRecords("proj-123", "org-a");
 
-    // rec-2 (org-b) must be excluded
-    expect(result).toHaveLength(3);
-    // getResource called only for rows that pass org filter
-    expect(mockGetResource).toHaveBeenCalledTimes(3);
+    // rec-2 (org-b) and rec-3 (blank orgId) must both be excluded; only the
+    // same-org row and the explicit ALL_ORGS row survive the GSI filter.
+    expect(result).toHaveLength(2);
+    expect(mockGetResource).toHaveBeenCalledTimes(2);
+    expect(mockGetResource).toHaveBeenCalledWith("agent", "rec-1");
+    expect(mockGetResource).toHaveBeenCalledWith("agent", "rec-4");
+  });
+
+  test("drops a GSI row with absent orgId entirely (not just blank string) when orgId filter is active (PR-3)", async () => {
+    dynamoMock.on(QueryCommand).resolves({
+      Items: [
+        gsiRow("a1", "rec-1", { orgId: "org-a" }),
+        (() => {
+          const row = gsiRow("a2", "rec-2");
+          delete (row as Record<string, unknown>).orgId;
+          return row;
+        })(),
+      ],
+    });
+    mockGetResource.mockResolvedValueOnce(
+      registryRecord("rec-1", "proj-123", "org-a"),
+    );
+
+    const result = await findProjectAgentRecords("proj-123", "org-a");
+
+    expect(result).toHaveLength(1);
+    expect(mockGetResource).toHaveBeenCalledTimes(1);
+    expect(mockGetResource).toHaveBeenCalledWith("agent", "rec-1");
   });
 
   test("drops individual records that fail getResource (non-throttle)", async () => {
