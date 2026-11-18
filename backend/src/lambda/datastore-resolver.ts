@@ -712,17 +712,22 @@ async function createDataStore(
       secretArn = createSecretResponse.ARN;
     }
 
+    // Inject dataStoreId + orgId BEFORE requiredPolicies/preflight so both
+    // the policy derivation and the ownership check see the real ids.
+    // KnowledgeBaseAdapter.requiredPolicies derives its provision policy
+    // from these ids and returns `provision: []` when they are absent —
+    // injecting them after this call left KB CREATE_NEW with no role to
+    // mint and no scoped credentials to provision with (fail-closed, but
+    // broken). See design §3d.
+    config.dataStoreId = dataStoreId;
+    config.orgId = callerOrgId;
+
     // Get account context and set up IAM role
     const { accountId, region } = await policyManager.getAccountContext();
     const policies =
       input.provisionMode === "CREATE_NEW"
         ? adapter.requiredPolicies(config, accountId, region).provision
         : adapter.requiredPolicies(config, accountId, region).connect;
-
-    // CIT-298: inject dataStoreId + orgId so preflight and adapters can
-    // verify resource ownership.
-    config.dataStoreId = dataStoreId;
-    config.orgId = callerOrgId;
 
     // C2: preflight ownership check BEFORE creating any IAM role, run
     // UNCONDITIONALLY — not only when requiredPolicies(...) returns a
