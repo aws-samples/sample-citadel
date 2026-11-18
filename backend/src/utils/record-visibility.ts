@@ -2,8 +2,8 @@
  * Record-visibility policy for catalog registry records.
  *
  * Pure, dependency-free module that encodes the visibility matrix defined in
- * decision fa3f8363.  Every list/search call site filters its result set
- * through `isRecordVisible` before returning to the caller.
+ * decision fa3f8363, as updated by PR-3 (Continuum CRITICAL: blank orgId
+ * was being treated as a cross-tenant wildcard).
  *
  * Statuses governed by the registry lifecycle:
  *   DRAFT, PENDING_APPROVAL, APPROVED, REJECTED, DEPRECATED
@@ -17,6 +17,8 @@
 // Types
 // ---------------------------------------------------------------------------
 
+import { ALL_ORGS } from "./org-constants";
+
 export interface Viewer {
   isAdmin: boolean;
   roles: string[];
@@ -28,6 +30,13 @@ export interface VisibleRecord {
   status?: string;
   orgId?: string;
   createdBy?: string;
+  /**
+   * Explicit "this record's org could not be resolved" flag, carried by
+   * mappers/projections when the underlying metadata never stamped an
+   * orgId. When set, the record is NEVER shared and NEVER org-matched,
+   * regardless of what (if anything) `orgId` happens to hold.
+   */
+  orgUnknown?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -52,17 +61,36 @@ function isArchitect(viewer: Viewer): boolean {
 }
 
 /**
- * Whether the record's org matches the viewer's org.
- * An empty-string orgId on the record means "system-shared" — visible to all orgs.
+ * Whether the record is the explicit system-shared marker. Only the
+ * `ALL_ORGS` sentinel qualifies — there is no empty-string alias. A record
+ * flagged `orgUnknown` is never shared even if its `orgId` happens to equal
+ * `ALL_ORGS` (defensive: a contradictory/corrupt record fails closed).
+ */
+function isSystemShared(record: VisibleRecord): boolean {
+  if (record.orgUnknown === true) return false;
+  return record.orgId === ALL_ORGS;
+}
+
+/**
+ * Whether the record's org matches the viewer's org. Fail-closed: a blank,
+ * absent, or `orgUnknown` orgId on the record NEVER matches any viewer —
+ * it is not treated as a wildcard. The only wildcard is the explicit
+ * `ALL_ORGS` marker (see {@link isSystemShared}).
  */
 function orgMatch(viewer: Viewer, record: VisibleRecord): boolean {
-  return record.orgId === "" || record.orgId === viewer.orgId;
+  if (record.orgUnknown === true) return false;
+  if (isSystemShared(record)) return true;
+  if (record.orgId === undefined || record.orgId === "") return false;
+  if (viewer.orgId === null || viewer.orgId === "") return false;
+  return record.orgId === viewer.orgId;
 }
 
 /**
  * Whether the viewer owns the record.
  * Fallback: when `createdBy` is undefined (agent records that don't yet carry
- * the field), org-match is used as a proxy until the backfill lands.
+ * the field), org-match is used as a proxy until the backfill lands. This
+ * fallback is fail-closed exactly like `orgMatch` — it never treats a
+ * blank/absent/orgUnknown org as a match.
  */
 function ownerMatch(viewer: Viewer, record: VisibleRecord): boolean {
   if (record.createdBy === undefined) {
@@ -78,16 +106,20 @@ function ownerMatch(viewer: Viewer, record: VisibleRecord): boolean {
 /**
  * Returns `true` when `viewer` is allowed to see `record`.
  *
- * Matrix (decision fa3f8363):
+ * Matrix (decision fa3f8363, PR-3 update):
  *
- * | Status            | admin | architect (same-org / owner) | everyone else |
- * |-------------------|-------|------------------------------|---------------|
- * | (none / legacy)   | ✓     | ✓                            | ✓             |
- * | APPROVED          | ✓     | ✓                            | ✓             |
- * | PENDING_APPROVAL  | ✓     | same-org or system-shared    | ✗             |
- * | DRAFT             | ✓     | owner (or org fallback)      | ✗             |
- * | REJECTED          | ✓     | ✗                            | ✗             |
- * | DEPRECATED        | ✓     | ✗                            | ✗             |
+ * | Status            | admin | architect (same-org / owner / ALL_ORGS) | everyone else |
+ * |-------------------|-------|-------------------------------------------|---------------|
+ * | (none / legacy)   | ✓     | ✓                                         | ✓             |
+ * | APPROVED          | ✓     | ✓                                         | ✓             |
+ * | PENDING_APPROVAL  | ✓     | same-org or ALL_ORGS                      | ✗             |
+ * | DRAFT             | ✓     | owner (or org fallback)                   | ✗             |
+ * | REJECTED          | ✓     | ✗                                         | ✗             |
+ * | DEPRECATED        | ✓     | ✗                                         | ✗             |
+ *
+ * A record with a blank, absent, or `orgUnknown` orgId is NEVER treated as
+ * shared or org-matching — it fails closed immediately, for every status
+ * and every non-admin persona.
  */
 export function isRecordVisible(
   viewer: Viewer,
