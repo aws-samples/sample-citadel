@@ -26,6 +26,13 @@ import {
 import { diffLines, type Change } from 'diff';
 import { FabricationStatusPanel } from './FabricationStatusPanel';
 import { consentActionForId, recordIntakeConsent } from '../services/intakeConsentService';
+import { useVersionCheck } from '../hooks/useVersionCheck';
+
+// Strict set of affirmative phrases that count as typed consent.
+// Case-insensitive exact match only — no partial matches.
+const AFFIRMATIVE_SET = new Set([
+  'confirm', 'yes', 'proceed', 'go ahead', 'approve', 'ok', 'okay', 'do it',
+]);
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -326,6 +333,8 @@ export function ProjectWorkspace({ project, onBack }: ProjectWorkspaceProps) {
   const [docPanelCollapsed, setDocPanelCollapsed] = useState(false);
   const [progress, setProgress] = useState<ProjectProgress | null>(project.progress ?? null);
   const [activeDocTab, setActiveDocTab] = useState('technical_design');
+  const [pendingConsentId, setPendingConsentId] = useState<string | null>(null);
+  const { stale: versionStale } = useVersionCheck();
   const autoSwitchedRef = useRef(false);
   const [historyNextToken, setHistoryNextToken] = useState<string | null>(null);
   const prevProgressRef = useRef<ProjectProgress | null>(null);
@@ -436,6 +445,16 @@ export function ProjectWorkspace({ project, onBack }: ProjectWorkspaceProps) {
         if (sendingTimerRef.current) { clearTimeout(sendingTimerRef.current); sendingTimerRef.current = null; }
         // Force document panel refresh on agent response (design/planning may have generated docs)
         docTabRefreshRef.current += 1;
+
+        // Track the consent id from the last assistant message's actions
+        const { actions } = parseContent(msg.message);
+        if (actions) {
+          const lastConsent = [...actions].reverse().find((a): a is { consent: string } => 'consent' in a);
+          setPendingConsentId(lastConsent ? lastConsent.consent : null);
+        } else {
+          // Newer assistant message with no actions clears pending
+          setPendingConsentId(null);
+        }
       }
       setMessages((prev) => {
         if (msg.id && prev.some((m) => m.id === msg.id)) return prev;
@@ -526,6 +545,16 @@ export function ProjectWorkspace({ project, onBack }: ProjectWorkspaceProps) {
       timestamp: new Date(),
     }]);
     try {
+      // If there's a pending consent id and the user typed a strict affirmative,
+      // record consent BEFORE sending the message.
+      if (pendingConsentId && AFFIRMATIVE_SET.has(text.toLowerCase())) {
+        const consentEntry = consentActionForId(pendingConsentId);
+        if (consentEntry) {
+          await recordIntakeConsent(project.id, pendingConsentId as Parameters<typeof recordIntakeConsent>[1]);
+        }
+        // Clear pending — single use
+        setPendingConsentId(null);
+      }
       await sendMessageToAgent(project.id, 'agent_intake_single', text);
     } catch {
       toast.error('Failed to send message.');
@@ -707,6 +736,16 @@ export function ProjectWorkspace({ project, onBack }: ProjectWorkspaceProps) {
               </div>
             )}
 
+            {/* Version skew banner */}
+            {versionStale && (
+              <div className="px-4 py-2 border-b border-border/50 bg-amber-950/50 text-amber-200 text-xs flex items-center justify-between">
+                <span>A new version is available — reload to get the latest features.</span>
+                <Button variant="ghost" size="sm" className="h-6 text-xs text-amber-200 hover:text-amber-100" onClick={() => window.location.reload()}>
+                  Reload
+                </Button>
+              </div>
+            )}
+
             {/* Fabrication status — visible during/after the build phase or
                 whenever fabrication jobs exist for this project. The panel
                 self-hides when neither condition holds. */}
@@ -753,17 +792,31 @@ export function ProjectWorkspace({ project, onBack }: ProjectWorkspaceProps) {
                               const consentId = isConsent ? (action as { consent: string }).consent : null;
                               const catalogueEntry = consentId ? consentActionForId(consentId) : null;
 
+                              // Unknown consent id — show raw id with warning style
                               if (isConsent && !catalogueEntry) {
                                 console.warn(`Unknown consent id: ${consentId}`);
                                 return (
-                                  <Button key={ai} variant="outline" size="sm" className="h-7 text-xs" disabled>
+                                  <Button key={ai} variant="outline" size="sm" className="h-7 text-xs border-destructive text-destructive" disabled title={`Unknown consent action: ${consentId}`}>
                                     {consentId}
                                   </Button>
                                 );
                               }
 
-                              const buttonLabel = isConsent ? catalogueEntry!.label : (action as { label: string }).label;
+                              const buttonLabel = isConsent
+                                ? catalogueEntry!.label
+                                : typeof (action as { label?: unknown }).label === 'string' && (action as { label: string }).label
+                                  ? (action as { label: string }).label
+                                  : null;
                               const buttonTitle = isConsent ? catalogueEntry!.description : undefined;
+
+                              // No usable label and not a known consent action — unavailable
+                              if (!buttonLabel) {
+                                return (
+                                  <Button key={ai} variant="outline" size="sm" className="h-7 text-xs" disabled title="This action cannot be displayed — the button data is missing or malformed">
+                                    Unavailable action
+                                  </Button>
+                                );
+                              }
 
                               return (
                                 <Button
