@@ -1773,10 +1773,32 @@ def _process_workflow_node(event, message_attributes=None):
                     workflow_id=msg.workflow_id,
                     org_id=_resolve_execution_org_id(msg.execution_id),
                 )
-            scoped_credentials = None if credential_mode == 'none' else get_scoped_credentials(
-                msg.agent_id, required_permissions,
-                org_id=_resolve_execution_org_id(msg.execution_id),
-            )
+            try:
+                scoped_credentials = None if credential_mode == 'none' else get_scoped_credentials(
+                    msg.agent_id, required_permissions,
+                    org_id=_resolve_execution_org_id(msg.execution_id),
+                )
+            except CredentialRefusal as refusal:
+                # get_scoped_credentials itself raised (vend fail/refuse/
+                # no-org, finding b). Design §1d requires a structured log +
+                # governance ledger finding for EVERY CredentialRefusal
+                # outcome, not only the NO_REQUIRED_PERMISSIONS gate — write
+                # both here, then re-raise so the existing except-Exception
+                # block below still emits workflow.node.failed.
+                print(json.dumps({
+                    'level': 'ERROR',
+                    'component': 'WorkerWrapper',
+                    'action': 'agent_dispatch_refused_fail_closed',
+                    'reason': refusal.reason,
+                    'agentId': msg.agent_id,
+                    'workflowId': msg.workflow_id,
+                }))
+                _write_credential_refusal_finding(
+                    agent_id=msg.agent_id, reason=refusal.reason,
+                    workflow_id=msg.workflow_id,
+                    org_id=_resolve_execution_org_id(msg.execution_id),
+                )
+                raise
 
             fileName = config['filename']
             load_file_from_s3_into_tmp(
@@ -2136,7 +2158,22 @@ def process_event(event, context, message_attributes=None):
     except CredentialRefusal as refusal:
         # get_scoped_credentials itself raised (vend fail/refuse/no-org,
         # finding b) — same notify-then-propagate contract as the gate
-        # above; no subprocess is spawned.
+        # above; no subprocess is spawned. Design §1d requires a structured
+        # log + governance ledger finding for EVERY CredentialRefusal
+        # outcome, not only the NO_REQUIRED_PERMISSIONS gate — log+ledger
+        # here before notifying/propagating.
+        print(json.dumps({
+            'level': 'ERROR',
+            'component': 'WorkerWrapper',
+            'action': 'agent_dispatch_refused_fail_closed',
+            'reason': refusal.reason,
+            'agentId': agent_name,
+            'workflowId': orchestration_id,
+        }))
+        _write_credential_refusal_finding(
+            agent_id=agent_name, reason=refusal.reason,
+            workflow_id=orchestration_id, org_id=org_id,
+        )
         post_task_complete(
             f"Task refused: {refusal.message}", agent_use_id, agent_name,
             orchestration_id,
