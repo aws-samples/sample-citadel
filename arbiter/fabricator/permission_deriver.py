@@ -27,7 +27,7 @@ from typing import Any
 _READ_DIRECTIONS = frozenset({"input", "bidirectional"})
 _WRITE_DIRECTIONS = frozenset({"output", "bidirectional"})
 
-EMPTY_PERMISSIONS: dict[str, list] = {"integrations": [], "dataStores": []}
+EMPTY_PERMISSIONS: dict[str, list] = {"integrations": [], "dataStores": [], "models": []}
 
 
 def _binding_id(binding: dict, id_key: str) -> str | None:
@@ -38,6 +38,7 @@ def _binding_id(binding: dict, id_key: str) -> str | None:
 def derive_required_permissions(
     integration_bindings: list[dict[str, Any]] | None,
     datastore_bindings: list[dict[str, Any]] | None,
+    resolved_model_id: str | None = None,
 ) -> dict[str, list]:
     """Derive a least-privilege ``requiredPermissions`` dict from declared
     bindings.
@@ -72,4 +73,5 @@ def derive_required_permissions(
             continue
         data_stores.append(binding_id)
 
-    return {"integrations": integrations, "dataStores": data_stores}
+    return {"integrations": integrations, "dataStores": data_stores,
+            "models": [resolved_model_id] if resolved_model_id else []}

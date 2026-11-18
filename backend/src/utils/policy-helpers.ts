@@ -5,10 +5,10 @@
  * Used with PolicyManager to vend scoped IAM roles at runtime.
  */
 
-import { PolicyStatement } from '../adapters/base';
-import { PolicyManager } from './policy-manager';
+import { PolicyStatement } from "../adapters/base";
+import { PolicyManager } from "./policy-manager";
 
-const AGENTCORE_TYPES = ['AWS_LAMBDA', 'AWS_SMITHY', 'MCP_SERVER'];
+const AGENTCORE_TYPES = ["AWS_LAMBDA", "AWS_SMITHY", "MCP_SERVER"];
 
 /**
  * Compute scoped IAM policies for an integration connector.
@@ -29,7 +29,7 @@ export function computeIntegrationPolicies(
     config?: Record<string, unknown>;
   },
   accountId: string,
-  region: string
+  region: string,
 ): PolicyStatement[] {
   const policies: PolicyStatement[] = [];
 
@@ -38,7 +38,7 @@ export function computeIntegrationPolicies(
   // 1. Scoped secret read access
   if (context.secretArn) {
     policies.push({
-      actions: ['secretsmanager:GetSecretValue'],
+      actions: ["secretsmanager:GetSecretValue"],
       resources: [context.secretArn],
     });
   }
@@ -46,7 +46,7 @@ export function computeIntegrationPolicies(
   // 2. Scoped SSM parameter read access
   if (context.ssmParameterPrefix) {
     policies.push({
-      actions: ['ssm:GetParameter'],
+      actions: ["ssm:GetParameter"],
       resources: [
         `arn:aws:ssm:${region}:${accountId}:parameter${context.ssmParameterPrefix}/*`,
       ],
@@ -56,7 +56,7 @@ export function computeIntegrationPolicies(
   // 3. AgentCore gateway target invocation
   if (AGENTCORE_TYPES.includes(integrationType) && context.gatewayTargetId) {
     policies.push({
-      actions: ['bedrock-agentcore:InvokeGatewayTarget'],
+      actions: ["bedrock-agentcore:InvokeGatewayTarget"],
       resources: [
         `arn:aws:bedrock-agentcore:${region}:${accountId}:gateway/*/target/${context.gatewayTargetId}`,
       ],
@@ -64,9 +64,9 @@ export function computeIntegrationPolicies(
   }
 
   // 4. Lambda invocation for AWS_LAMBDA type
-  if (integrationType === 'AWS_LAMBDA' && context.config?.lambdaArn) {
+  if (integrationType === "AWS_LAMBDA" && context.config?.lambdaArn) {
     policies.push({
-      actions: ['lambda:InvokeFunction'],
+      actions: ["lambda:InvokeFunction"],
       resources: [context.config.lambdaArn as string],
     });
   }
@@ -77,6 +77,9 @@ export function computeIntegrationPolicies(
 export interface AgentPermissions {
   /** Bedrock model IDs the agent is allowed to invoke */
   models?: string[];
+  /** Pre-computed IAM resource ARNs (foundation-model + inference-profile).
+   *  When provided, used directly instead of deriving from `models`. */
+  modelResources?: string[];
   /** DataStore IDs the agent can access (will get sts:AssumeRole on the ds role) */
   dataStores?: string[];
   /** Integration IDs the agent can access (will get sts:AssumeRole on the int role) */
@@ -95,26 +98,32 @@ export function computeAgentPolicies(
   agentId: string,
   permissions: AgentPermissions,
   accountId: string,
-  region: string
+  region: string,
 ): PolicyStatement[] {
   const policies: PolicyStatement[] = [];
 
   // 1. Bedrock model invocation scoped to declared models
   if (permissions.models && permissions.models.length > 0) {
+    const resources =
+      permissions.modelResources && permissions.modelResources.length > 0
+        ? permissions.modelResources
+        : permissions.models.map(
+            (modelId) =>
+              `arn:aws:bedrock:${region}::foundation-model/${modelId}`,
+          );
     policies.push({
-      actions: ['bedrock:InvokeModel'],
-      resources: permissions.models.map(
-        (modelId) => `arn:aws:bedrock:${region}::foundation-model/${modelId}`
-      ),
+      actions: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+      resources,
     });
   }
 
   // 2. AssumeRole on datastore scoped roles
   if (permissions.dataStores && permissions.dataStores.length > 0) {
     policies.push({
-      actions: ['sts:AssumeRole'],
+      actions: ["sts:AssumeRole"],
       resources: permissions.dataStores.map(
-        (dsId) => `arn:aws:iam::${accountId}:role/${PolicyManager.getRoleName(dsId, 'datastore')}`
+        (dsId) =>
+          `arn:aws:iam::${accountId}:role/${PolicyManager.getRoleName(dsId, "datastore")}`,
       ),
     });
   }
@@ -122,9 +131,10 @@ export function computeAgentPolicies(
   // 3. AssumeRole on integration scoped roles
   if (permissions.integrations && permissions.integrations.length > 0) {
     policies.push({
-      actions: ['sts:AssumeRole'],
+      actions: ["sts:AssumeRole"],
       resources: permissions.integrations.map(
-        (intId) => `arn:aws:iam::${accountId}:role/${PolicyManager.getRoleName(intId, 'integration')}`
+        (intId) =>
+          `arn:aws:iam::${accountId}:role/${PolicyManager.getRoleName(intId, "integration")}`,
       ),
     });
   }

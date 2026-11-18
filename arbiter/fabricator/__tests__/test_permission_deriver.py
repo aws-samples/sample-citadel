@@ -81,6 +81,31 @@ class TestDeriveRequiredPermissionsDataStores:
         assert result["dataStores"] == []
 
 
+
+class TestDeriveRequiredPermissionsModels:
+    def test_resolved_model_id_populates_models_key(self):
+        result = derive_required_permissions(None, None, resolved_model_id="anthropic.claude-v2")
+        assert result["models"] == ["anthropic.claude-v2"]
+
+    def test_no_resolved_model_yields_empty_models_list(self):
+        result = derive_required_permissions(None, None)
+        assert result["models"] == []
+
+    def test_models_key_always_present_in_result(self):
+        result = derive_required_permissions([], [])
+        assert "models" in result
+        assert isinstance(result["models"], list)
+
+    def test_models_combined_with_integrations_and_datastores(self):
+        result = derive_required_permissions(
+            [{"integrationId": "int-1"}],
+            [{"dataStoreId": "ds-1"}],
+            resolved_model_id="anthropic.claude-v2",
+        )
+        assert result["integrations"] == ["int-1"]
+        assert result["dataStores"] == ["ds-1"]
+        assert result["models"] == ["anthropic.claude-v2"]
+
 class TestDeriveRequiredPermissionsBoth:
     def test_integrations_and_datastores_both_present(self):
         result = derive_required_permissions(
