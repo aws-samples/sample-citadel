@@ -13,8 +13,25 @@
  * Canary usage: run with --record-id on a single APPROVED record first to
  * confirm it ends APPROVED, then widen to --limit N, then full --apply.
  *
- * Required env: REGISTRY_ID, AWS_REGION (optional, defaults to us-west-2).
+ * Required env:
+ *   REGISTRY_ID           — AgentCore Registry id
+ *   MODEL_CONFIG_TABLE    — DynamoDB table for model-selection config
+ *                           (citadel-model-config-{env})
+ *   MODEL_CATALOG_TABLE   — DynamoDB table for model catalog
+ *                           (citadel-model-catalog-{env})
+ *   AWS_REGION            — optional, defaults to us-west-2
+ *
+ * The script resolves each non-pure-compute agent's foundation model id
+ * from the model-selection configuration: per-agent modelOverride from
+ * bindings → fabricated_agent_default slot default → global default.
+ * Refuses to stamp (error, non-zero exit) if no model can be resolved.
  */
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  GetCommand,
+  ScanCommand,
+} from "@aws-sdk/lib-dynamodb";
 import {
   RegistryService,
   RegistryRecord,
@@ -59,24 +76,13 @@ function parseDescriptor(record: RegistryRecord): ParsedDescriptor | null {
 
 function isPureCompute(
   name: string | undefined,
-  meta: ParsedDescriptor,
+  _meta: ParsedDescriptor,
 ): boolean {
-  if (KNOWN_PURE_COMPUTE_NAMES.has(name ?? "")) return true;
-  const hasBindings =
-    (Array.isArray(meta.integrationBindings) &&
-      meta.integrationBindings.length > 0) ||
-    (Array.isArray(meta.dataStoreBindings) &&
-      meta.dataStoreBindings.length > 0);
-  if (hasBindings) return false;
-  // Agents with a config.filename but no bindings are pure-compute
-  if (
-    meta.config &&
-    typeof meta.config === "object" &&
-    "filename" in meta.config
-  ) {
-    return true;
-  }
-  return false;
+  // Only known pure-compute agents (no model calls) get credentialMode:none.
+  // All other agents are treated as model-calling — safer to stamp
+  // requiredPermissions.models (vends scoped credentials) than to stamp
+  // credentialMode:none (zero credentials).
+  return KNOWN_PURE_COMPUTE_NAMES.has(name ?? "");
 }
 
 function alreadyStamped(meta: ParsedDescriptor): boolean {
@@ -91,6 +97,111 @@ function alreadyStamped(meta: ParsedDescriptor): boolean {
   const hasCM =
     typeof meta.credentialMode === "string" && meta.credentialMode !== "";
   return !!(hasRP || hasCM);
+}
+
+// ---------------------------------------------------------------------------
+// Model resolution: resolve the foundation model id for a non-pure-compute
+// agent from the model-selection configuration tables.
+//
+// Precedence: agent's per-binding modelOverride (descriptor.config.modelOverride)
+//   → fabricated_agent_default slot default → global default.
+//
+// Uses foundation model ids (baseModelId, e.g. "anthropic.claude-sonnet-5"),
+// not inference-profile ids — matching the vender's convention.
+// ---------------------------------------------------------------------------
+
+interface ModelConfigRow {
+  globalDefaultKey?: string | null;
+  slotDefaults?: Record<string, string>;
+  agentOverrides?: Record<string, string>;
+}
+
+interface CatalogRow {
+  modelKey: string;
+  baseModelId: string;
+  status: string;
+  regionProfiles?: Record<string, string>;
+}
+
+/** Loaded once and reused across all records. */
+interface ModelContext {
+  config: ModelConfigRow | null;
+  catalog: Map<string, CatalogRow>;
+}
+
+async function loadModelContext(
+  docClient: DynamoDBDocumentClient,
+  configTable: string,
+  catalogTable: string,
+): Promise<ModelContext> {
+  let config: ModelConfigRow | null = null;
+  try {
+    const result = await docClient.send(
+      new GetCommand({ TableName: configTable, Key: { scope: "platform" } }),
+    );
+    config = (result.Item as ModelConfigRow) ?? null;
+  } catch (err) {
+    log(`WARN: failed to read model config: ${String(err)}`);
+  }
+
+  const catalog = new Map<string, CatalogRow>();
+  try {
+    const result = await docClient.send(
+      new ScanCommand({ TableName: catalogTable }),
+    );
+    for (const item of result.Items ?? []) {
+      const row = item as CatalogRow;
+      if (row.modelKey) catalog.set(row.modelKey, row);
+    }
+  } catch (err) {
+    log(`WARN: failed to scan model catalog: ${String(err)}`);
+  }
+
+  return { config, catalog };
+}
+
+/**
+ * Resolve the foundation model id for an agent.
+ *
+ * Returns the baseModelId or null if no model can be resolved.
+ */
+export function resolveAgentModel(
+  meta: ParsedDescriptor,
+  modelCtx: ModelContext,
+): string | null {
+  // 1. Per-agent modelOverride from descriptor
+  const agentModelOverride =
+    meta.config && typeof meta.config === "object"
+      ? (meta.config as Record<string, unknown>).modelOverride
+      : undefined;
+  if (typeof agentModelOverride === "string" && agentModelOverride) {
+    const entry = modelCtx.catalog.get(agentModelOverride);
+    if (entry && entry.status === "enabled" && entry.baseModelId) {
+      return entry.baseModelId;
+    }
+  }
+
+  if (!modelCtx.config) return null;
+
+  // 2. fabricated_agent_default slot default
+  const slotKey = modelCtx.config.slotDefaults?.fabricated_agent_default;
+  if (slotKey) {
+    const entry = modelCtx.catalog.get(slotKey);
+    if (entry && entry.status === "enabled" && entry.baseModelId) {
+      return entry.baseModelId;
+    }
+  }
+
+  // 3. Global default
+  const globalKey = modelCtx.config.globalDefaultKey;
+  if (globalKey) {
+    const entry = modelCtx.catalog.get(globalKey);
+    if (entry && entry.status === "enabled" && entry.baseModelId) {
+      return entry.baseModelId;
+    }
+  }
+
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -133,15 +244,37 @@ export async function main(): Promise<void> {
 
   const registryId = process.env.REGISTRY_ID;
   const region = process.env.AWS_REGION || "us-west-2";
+  const modelConfigTable = process.env.MODEL_CONFIG_TABLE;
+  const modelCatalogTable = process.env.MODEL_CATALOG_TABLE;
 
   if (!registryId) throw new Error("REGISTRY_ID env var required");
+  if (!modelConfigTable) throw new Error("MODEL_CONFIG_TABLE env var required");
+  if (!modelCatalogTable)
+    throw new Error("MODEL_CATALOG_TABLE env var required");
 
   log(`Mode: ${dryRun ? "DRY-RUN" : "APPLY"}`);
   if (targetRecordId) log(`Canary: --record-id ${targetRecordId}`);
   if (limitN !== undefined && !isNaN(limitN)) log(`Canary: --limit ${limitN}`);
   log(`REGISTRY_ID=${registryId} REGION=${region}`);
+  log(`MODEL_CONFIG_TABLE=${modelConfigTable}`);
+  log(`MODEL_CATALOG_TABLE=${modelCatalogTable}`);
 
   const registry = new RegistryService({ registryId, region });
+  const dynamodb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+  const modelCtx = await loadModelContext(
+    dynamodb,
+    modelConfigTable,
+    modelCatalogTable,
+  );
+  if (!modelCtx.config) {
+    log("ERROR: no model config found — cannot resolve models");
+    process.exit(1);
+  }
+  if (modelCtx.catalog.size === 0) {
+    log("ERROR: model catalog is empty — cannot resolve models");
+    process.exit(1);
+  }
+
   const summary: StampSummary = {
     scanned: 0,
     stamped: 0,
@@ -197,15 +330,51 @@ export async function main(): Promise<void> {
     if (isPureCompute(record.name, meta)) {
       fieldsToSet.credentialMode = "none";
     } else {
-      // Default: treat as model-calling. The stamp script does not attempt
-      // to resolve the exact model — that would require catalog access. It
-      // stamps an empty requiredPermissions dict so the worker knows to
-      // use the fail-closed credential path (the vender reads the model from
-      // the agent's runtime config instead).
+      // Resolve the foundation model id for this agent
+      const modelId = resolveAgentModel(meta, modelCtx);
+      if (!modelId) {
+        log(
+          `ERROR: recordId=${record.recordId} name=${record.name} — ` +
+            "cannot resolve model from config; refusing to stamp",
+        );
+        summary.errors++;
+        continue;
+      }
+
+      // Derive integrations/dataStores from the agent's bindings
+      const integrations: string[] = [];
+      const dataStores: string[] = [];
+      if (Array.isArray(meta.integrationBindings)) {
+        for (const b of meta.integrationBindings) {
+          if (
+            b &&
+            typeof b === "object" &&
+            "integrationId" in (b as Record<string, unknown>)
+          ) {
+            integrations.push(
+              (b as Record<string, unknown>).integrationId as string,
+            );
+          }
+        }
+      }
+      if (Array.isArray(meta.dataStoreBindings)) {
+        for (const b of meta.dataStoreBindings) {
+          if (
+            b &&
+            typeof b === "object" &&
+            "dataStoreId" in (b as Record<string, unknown>)
+          ) {
+            dataStores.push(
+              (b as Record<string, unknown>).dataStoreId as string,
+            );
+          }
+        }
+      }
+
       fieldsToSet.requiredPermissions = {
-        models: [],
-        dataStores: [],
-        integrations: [],
+        models: [modelId],
+        dataStores,
+        integrations,
       };
       fieldsToSet.credentialMode = "scoped";
     }
