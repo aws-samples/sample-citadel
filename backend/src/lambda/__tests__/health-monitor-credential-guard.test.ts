@@ -28,7 +28,11 @@ import {
 // ---------------------------------------------------------------------------
 const stsMock = mockClient(STSClient);
 
+let savedAwsRegion: string | undefined;
+
 beforeEach(() => {
+  savedAwsRegion = process.env.AWS_REGION;
+  process.env.AWS_REGION = "us-west-2";
   stsMock.reset();
   stsMock.on(GetCallerIdentityCommand).resolves({
     Account: "123456789012",
@@ -42,6 +46,14 @@ beforeEach(() => {
       Expiration: new Date("2099-01-01"),
     },
   });
+});
+
+afterEach(() => {
+  if (savedAwsRegion !== undefined) {
+    process.env.AWS_REGION = savedAwsRegion;
+  } else {
+    delete process.env.AWS_REGION;
+  }
 });
 
 // ---------------------------------------------------------------------------
