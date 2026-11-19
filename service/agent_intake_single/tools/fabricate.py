@@ -11,6 +11,7 @@ from tools.kb import s3_get, s3_put
 from tools.converse_utils import extract_text, capture_converse_usage
 from tools.consent import require_consent, consume_consent, ConsentRequired
 from config import bedrock, get_agent_model_id
+from tools.fence import fence_untrusted
 import request_context
 
 logger = logging.getLogger(__name__)
@@ -338,6 +339,7 @@ def _load_plan_from_session(session_id: str, plan_id: str) -> list[dict] | None:
 
 def _extract_agents(td2_content: str, session_id: str = "") -> list[dict]:
     """Extract agents from td_2.md. Returns list of {name, spec, requires_external}."""
+    fenced_td2 = fence_untrusted(td2_content, source="s3_document")
     raw = _llm(
         "You extract structured data from technical design documents. Return only valid JSON.",
         f"""From this Agent Definitions section, extract each agent as a JSON array.
@@ -351,7 +353,7 @@ IMPORTANT: Most agents should be "requires_external": false. An agent that calls
 
 Return ONLY a JSON array, no markdown.
 
-{td2_content}""",
+{fenced_td2}""",
         session_id,
     )
     return json.loads(raw)

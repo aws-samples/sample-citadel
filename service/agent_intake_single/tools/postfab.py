@@ -29,6 +29,7 @@ from strands.tools import tool
 from tools import appsync_client
 from tools.appsync_client import AppSyncError
 from tools.fabricate import PLAN_KEY, SECTION_KEY, _get_existing_agents, _is_stale_active, _llm
+from tools.fence import fence_untrusted
 from tools.kb import s3_get
 from tools.plan_doc import refresh_plan_document
 from tools.state import get_postfab_marker, set_postfab_marker, _internal_update_progress
@@ -1191,6 +1192,8 @@ def create_agent_app(confirmed_name: str = "") -> str:
 
 def _compose_steps(session_id: str, td2: str, plan: str, available: list[str]) -> list[dict]:
     """LLM-compose the ordered process steps from the design documents."""
+    fenced_td2 = fence_untrusted(td2, source="s3_document")
+    fenced_plan = fence_untrusted(plan, source="fabrication_plan")
     raw = _llm(
         "You turn technical design documents into an ordered agent workflow. "
         "Return only valid JSON.",
@@ -1203,10 +1206,10 @@ Order the array by process sequence. Use every relevant agent from the list at
 most once. Return ONLY the JSON array, no markdown.
 
 ## Agent Definitions
-{td2}
+{fenced_td2}
 
 ## Fabrication Plan
-{plan}""",
+{fenced_plan}""",
     )
     steps = json.loads(raw)
     if not isinstance(steps, list):
