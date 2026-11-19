@@ -1,19 +1,13 @@
 /**
- * TDD: RDS adapter reads masterUsername/masterPassword from config (the
- * wizard sends them in config; the resolver never dispatches a caller-
- * supplied credentials payload to an IAM_ROLE adapter — see
- * dispatchCreds() in datastore-resolver.ts).
+ * TDD: RDS adapter reads masterUsername/masterPassword from credentials
+ * only — config fallback is removed (secret-field migration).
  *
- * Continuum C3 (PR-2): provision() now ignores its `credentials` argument
- * entirely and runs under platformProvisionClient() (ambient Lambda
- * execution role), so the "prefers credentials over config" case from the
- * pre-PR-2 contract no longer applies — there is no credentials-sourced
- * masterUsername/masterPassword path in production, and keeping that
- * fallback alive would have been dead code reachable only from a test.
+ * RDS uses platformProvisionClient() so scoped-credential provenance
+ * (WeakSet marker) is not required for provision. Plain credentials
+ * carrying the secret fields suffice.
  */
 import { RDSClient, CreateDBInstanceCommand } from "@aws-sdk/client-rds";
 import { mockClient } from "aws-sdk-client-mock";
-import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
 
 const rdsMock = mockClient(RDSClient);
 
@@ -25,73 +19,58 @@ describe("RdsAdapter.provision - credential resolution", () => {
   beforeEach(() => {
     rdsMock.reset();
     rdsMock.on(CreateDBInstanceCommand).resolves({
-      DBInstance: {
-        DBInstanceArn: "arn:aws:rds:us-east-1:123456789012:db:test-db",
-        DBInstanceIdentifier: "test-db",
-      },
+      DBInstance: { DBInstanceArn: "arn:aws:rds:us-east-1:123:db:test" },
     });
   });
 
-  test("reads masterUsername and masterPassword from config when credentials are undefined", async () => {
+  test("reads masterUsername and masterPassword from credentials", async () => {
     const result = await adapter.provision(
-      {
-        dbInstanceIdentifier: "test-db",
-        masterUsername: "dbadmin",
-        masterPassword: "secret123",
-        dataStoreId: "ds-1",
-        orgId: "org-1",
-      },
-      undefined,
+      { dataStoreId: "ds-1", orgId: "org-1" },
+      { masterUsername: "dbadmin", masterPassword: "pass123" },
     );
-
-    expect(result.resourceArn).toContain("test-db");
-    const calls = rdsMock.commandCalls(CreateDBInstanceCommand);
-    expect(calls).toHaveLength(1);
-    expect(calls[0].args[0].input.MasterUsername).toBe("dbadmin");
-    expect(calls[0].args[0].input.MasterUserPassword).toBe("secret123");
-  });
-
-  test("reads masterUsername and masterPassword from config when credentials argument is also present (ignored)", async () => {
-    const result = await adapter.provision(
-      {
-        dbInstanceIdentifier: "test-db",
-        masterUsername: "dbadmin",
-        masterPassword: "secret123",
-        dataStoreId: "ds-1",
-        orgId: "org-1",
-      },
-      MOCK_SCOPED_CREDENTIALS,
-    );
-
-    expect(result.resourceArn).toContain("test-db");
+    expect(result.resourceArn).toBeDefined();
     const calls = rdsMock.commandCalls(CreateDBInstanceCommand);
     expect(calls[0].args[0].input.MasterUsername).toBe("dbadmin");
-    expect(calls[0].args[0].input.MasterUserPassword).toBe("secret123");
+    expect(calls[0].args[0].input.MasterUserPassword).toBe("pass123");
   });
 
-  test("throws when config has no masterUsername", async () => {
+  test("throws when credentials are undefined", async () => {
     await expect(
-      adapter.provision(
-        {
-          dbInstanceIdentifier: "test-db",
-          dataStoreId: "ds-1",
-          orgId: "org-1",
-        },
-        undefined,
-      ),
+      adapter.provision({ dataStoreId: "ds-1", orgId: "org-1" }, undefined),
     ).rejects.toThrow(/masterUsername/);
   });
 
-  test("throws when dataStoreId/orgId are absent even if credentials are valid", async () => {
+  test("throws when credentials lack masterPassword", async () => {
     await expect(
       adapter.provision(
-        {
-          dbInstanceIdentifier: "test-db",
-          masterUsername: "dbadmin",
-          masterPassword: "secret123",
-        },
-        undefined,
+        { dataStoreId: "ds-1", orgId: "org-1" },
+        { masterUsername: "admin" },
       ),
-    ).rejects.toThrow(/dataStoreId and orgId/);
+    ).rejects.toThrow(/masterPassword/);
+  });
+
+  test("ignores masterUsername/masterPassword in config — reads only from credentials", async () => {
+    await adapter.provision(
+      {
+        dataStoreId: "ds-1",
+        orgId: "org-1",
+        masterUsername: "config-user",
+        masterPassword: "config-pass",
+      },
+      { masterUsername: "cred-user", masterPassword: "cred-pass" },
+    );
+
+    const calls = rdsMock.commandCalls(CreateDBInstanceCommand);
+    expect(calls[0].args[0].input.MasterUsername).toBe("cred-user");
+    expect(calls[0].args[0].input.MasterUserPassword).toBe("cred-pass");
+  });
+
+  test("does not require scoped credentials — RDS provision uses the platform path", async () => {
+    // Plain object (no WeakSet marker) with just the secret fields
+    const result = await adapter.provision(
+      { dataStoreId: "ds-1", orgId: "org-1" },
+      { masterUsername: "dbadmin", masterPassword: "pass123" },
+    );
+    expect(result.resourceArn).toBeDefined();
   });
 });

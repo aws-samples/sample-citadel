@@ -1,16 +1,16 @@
 /**
- * TDD: Aurora adapter should read masterUsername/masterPassword from config
- * when credentials don't contain them (wizard sends them in config).
+ * TDD: Aurora adapter reads masterUsername/masterPassword from credentials
+ * only — config fallback is removed (secret-field migration).
  */
 import { RDSClient, CreateDBClusterCommand } from "@aws-sdk/client-rds";
 import { mockClient } from "aws-sdk-client-mock";
 import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
+import { markScopedCredentials } from "../credential-guard";
 
 const rdsMock = mockClient(RDSClient);
 
 import { AuroraAdapter } from "../aurora-adapter";
 
-import { markScopedCredentials } from "../credential-guard";
 describe("AuroraAdapter.provision - credential resolution", () => {
   const adapter = new AuroraAdapter("postgres");
 
@@ -24,14 +24,14 @@ describe("AuroraAdapter.provision - credential resolution", () => {
     });
   });
 
-  test("reads masterUsername and masterPassword from config when credentials are undefined", async () => {
+  test("reads masterUsername and masterPassword from credentials", async () => {
     const result = await adapter.provision(
-      {
-        dbClusterIdentifier: "test-cluster",
+      { dbClusterIdentifier: "test-cluster" },
+      markScopedCredentials({
+        ...MOCK_SCOPED_CREDENTIALS,
         masterUsername: "dbadmin",
         masterPassword: "secret123",
-      },
-      MOCK_SCOPED_CREDENTIALS,
+      }),
     );
 
     expect(result.resourceArn).toContain("test-cluster");
@@ -41,54 +41,31 @@ describe("AuroraAdapter.provision - credential resolution", () => {
     expect(calls[0].args[0].input.MasterUserPassword).toBe("secret123");
   });
 
-  test("reads masterUsername and masterPassword from config when credentials lack them", async () => {
-    const result = await adapter.provision(
-      {
-        dbClusterIdentifier: "test-cluster",
-        masterUsername: "dbadmin",
-        masterPassword: "secret123",
-      },
-      markScopedCredentials({
-        accessKeyId: "AK",
-        secretAccessKey: "SK",
-        sessionToken: "ST",
-      }),
-    );
-
-    expect(result.resourceArn).toContain("test-cluster");
-    const calls = rdsMock.commandCalls(CreateDBClusterCommand);
-    expect(calls[0].args[0].input.MasterUsername).toBe("dbadmin");
-    expect(calls[0].args[0].input.MasterUserPassword).toBe("secret123");
-  });
-
-  test("prefers credentials over config for masterUsername/masterPassword", async () => {
-    const result = await adapter.provision(
-      {
-        dbClusterIdentifier: "test-cluster",
-        masterUsername: "config-user",
-        masterPassword: "config-pass",
-      },
-      markScopedCredentials({
-        accessKeyId: "AK",
-        secretAccessKey: "SK",
-        sessionToken: "ST",
-        masterUsername: "cred-user",
-        masterPassword: "cred-pass",
-      }),
-    );
-
-    expect(result.resourceArn).toContain("test-cluster");
-    const calls = rdsMock.commandCalls(CreateDBClusterCommand);
-    expect(calls[0].args[0].input.MasterUsername).toBe("cred-user");
-    expect(calls[0].args[0].input.MasterUserPassword).toBe("cred-pass");
-  });
-
-  test("throws when neither config nor credentials have masterUsername", async () => {
+  test("throws when credentials lack masterUsername/masterPassword", async () => {
     await expect(
       adapter.provision(
         { dbClusterIdentifier: "test-cluster" },
         MOCK_SCOPED_CREDENTIALS,
       ),
     ).rejects.toThrow(/masterUsername/);
+  });
+
+  test("ignores masterUsername/masterPassword in config — reads only from credentials", async () => {
+    await adapter.provision(
+      {
+        dbClusterIdentifier: "test-cluster",
+        masterUsername: "config-user",
+        masterPassword: "config-pass",
+      },
+      markScopedCredentials({
+        ...MOCK_SCOPED_CREDENTIALS,
+        masterUsername: "cred-user",
+        masterPassword: "cred-pass",
+      }),
+    );
+
+    const calls = rdsMock.commandCalls(CreateDBClusterCommand);
+    expect(calls[0].args[0].input.MasterUsername).toBe("cred-user");
+    expect(calls[0].args[0].input.MasterUserPassword).toBe("cred-pass");
   });
 });

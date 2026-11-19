@@ -1,34 +1,34 @@
 /**
- * TDD: Redshift adapter should read masterUsername/masterPassword from config
- * when credentials don't contain them (wizard sends them in config).
+ * TDD: Redshift adapter reads masterUsername/masterPassword from credentials
+ * only — config fallback is removed (secret-field migration).
  */
 import { RedshiftClient, CreateClusterCommand } from "@aws-sdk/client-redshift";
 import { mockClient } from "aws-sdk-client-mock";
 import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
+import { markScopedCredentials } from "../credential-guard";
 
 const rsMock = mockClient(RedshiftClient);
 
 import { RedshiftAdapter } from "../redshift-adapter";
 
-import { markScopedCredentials } from "../credential-guard";
 describe("RedshiftAdapter.provision - credential resolution", () => {
   const adapter = new RedshiftAdapter();
 
   beforeEach(() => {
     rsMock.reset();
-    rsMock.on(CreateClusterCommand).resolves({
-      Cluster: { ClusterIdentifier: "test-cluster" },
-    });
+    rsMock
+      .on(CreateClusterCommand)
+      .resolves({ Cluster: { ClusterIdentifier: "test" } });
   });
 
-  test("reads masterUsername/masterPassword from config when credentials are undefined", async () => {
+  test("reads masterUsername/masterPassword from credentials", async () => {
     const result = await adapter.provision(
-      {
-        clusterIdentifier: "test-cluster",
+      { clusterIdentifier: "test" },
+      markScopedCredentials({
+        ...MOCK_SCOPED_CREDENTIALS,
         masterUsername: "admin",
         masterPassword: "Secret123!",
-      },
-      MOCK_SCOPED_CREDENTIALS,
+      }),
     );
 
     expect(result.resourceArn).toBeDefined();
@@ -37,31 +37,28 @@ describe("RedshiftAdapter.provision - credential resolution", () => {
     expect(calls[0].args[0].input.MasterUserPassword).toBe("Secret123!");
   });
 
-  test("reads from config when credentials lack masterUsername", async () => {
-    const result = await adapter.provision(
+  test("throws when credentials lack masterUsername", async () => {
+    await expect(
+      adapter.provision({ clusterIdentifier: "test" }, MOCK_SCOPED_CREDENTIALS),
+    ).rejects.toThrow(/masterUsername/);
+  });
+
+  test("ignores masterUsername/masterPassword in config", async () => {
+    await adapter.provision(
       {
-        clusterIdentifier: "test-cluster",
-        masterUsername: "admin",
-        masterPassword: "Secret123!",
+        clusterIdentifier: "test",
+        masterUsername: "config-user",
+        masterPassword: "Config1pass",
       },
       markScopedCredentials({
-        accessKeyId: "AK",
-        secretAccessKey: "SK",
-        sessionToken: "ST",
+        ...MOCK_SCOPED_CREDENTIALS,
+        masterUsername: "cred-admin",
+        masterPassword: "Cred1pass!",
       }),
     );
 
-    expect(result.resourceArn).toBeDefined();
     const calls = rsMock.commandCalls(CreateClusterCommand);
-    expect(calls[0].args[0].input.MasterUsername).toBe("admin");
-  });
-
-  test("throws when neither config nor credentials have masterUsername", async () => {
-    await expect(
-      adapter.provision(
-        { clusterIdentifier: "test-cluster" },
-        MOCK_SCOPED_CREDENTIALS,
-      ),
-    ).rejects.toThrow(/masterUsername/);
+    expect(calls[0].args[0].input.MasterUsername).toBe("cred-admin");
+    expect(calls[0].args[0].input.MasterUserPassword).toBe("Cred1pass!");
   });
 });
