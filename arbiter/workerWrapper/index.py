@@ -2205,47 +2205,62 @@ def process_event(event, context, message_attributes=None):
                     'action': 'skipped',
                 }))
 
-        # QT3-6: dispatch-time defence-in-depth check.
-        # Before aggregating bindings or vending credentials, reject any
-        # code-generating tool that lacks a spec_id binding. Accept either
-        # snake_case ``spec_id`` (direct worker callers) or camelCase
-        # ``specId`` (AppSync-originated events).
+        # QT3-6 + H2 hardening: dispatch-time spec-binding gate.
+        # Resolve the spec_id from the SERVER-SIDE tool config record,
+        # NEVER from the agent-supplied event.  Each code-generating tool's
+        # spec binding was persisted at registration time (H2 hardening).
+        # An event-supplied spec_id is deliberately ignored: it is an
+        # untrusted surface (finding 01a1ebbc4847 site 1).
         #
-        # Two-tier enforcement:
-        # 1) Pure binding check (always on): raises SpecificationNotBoundError
-        # if a code-generating tool has no spec_id. This mirrors the
-        # fabricator's validate_code_tool_binding using the SAME predicate
-        # (is_code_generating) to guarantee consistency.
-        # 2) DDB-backed status check (opt-in, EXECUTION_SPECS_TABLE set):
-        # when a spec_id is present, call assert_spec_approved to verify
-        # the spec exists and is in the APPROVED terminal state. This is
-        # best-effort and degrades gracefully in environments where the
-        # env var is not plumbed (e.g. unit tests). AC 2 of.
-        bound_spec_id = event.get('spec_id') or event.get('specId') \
-            or request.get('spec_id') or request.get('specId')
+        # Three enforcement layers:
+        # 1) Per-tool stored binding check: a code-generating tool without
+        #    a stored specId is refused (fail closed, decision 5750aeec).
+        # 2) DDB-backed status + org + tool scope check (mandatory):
+        #    when EXECUTION_SPECS_TABLE is unset, code-generating tools
+        #    with a stored spec are refused (fail closed).
+        # 3) Cross-org / cross-tool linkage: the spec's orgId must match
+        #    the dispatch org, and its toolId (if set) must match the tool.
         for tool_cfg in tool_configs:
-            assert_tool_spec_binding(tool_cfg, bound_spec_id)
+            stored_spec = (
+                tool_cfg.get('specId')
+                or (tool_cfg.get('config') or {}).get('specId')
+            )
+            tool_name = tool_cfg.get('name') or tool_cfg.get('toolId') or '<unknown>'
 
-        if bound_spec_id and EXECUTION_SPECS_TABLE:
-            # Lazy import: avoid coupling every worker caller to the
-            # fabricator's DDB-dependent assert_spec_approved unless we
-            # actually need it at this dispatch.
-            try:
-                from tools_config import assert_spec_approved # noqa: WPS433
-                assert_spec_approved(
-                    bound_spec_id, table_name=EXECUTION_SPECS_TABLE
-                )
-            except SpecificationNotBoundError:
-                # Already the correct surface — re-raise.
-                raise
-            except Exception as spec_err:
-                # Normalize any FabricationError / boto3 / validation error
-                # into the worker's dispatch-side exception so callers see a
-                # consistent failure mode (Req 5.8).
-                raise SpecificationNotBoundError(
-                    f"ExecutionSpecification '{bound_spec_id}' is not APPROVED "
-                    f"or cannot be resolved: {spec_err}"
-                ) from spec_err
+            # Layer 1: binding check (mirrors fabricator's validate_code_tool_binding)
+            assert_tool_spec_binding(tool_cfg, stored_spec)
+
+            # Layer 2+3: mandatory DDB-backed approval + scope check
+            if stored_spec:
+                if not EXECUTION_SPECS_TABLE:
+                    # FAIL CLOSED: code-generating tool with a spec binding
+                    # but no table configured (decision 5750aeec).
+                    _refuse_dispatch_fail_closed(
+                        agent_id=agent_name,
+                        reason=(
+                            f"spec_gate_missing_table:{tool_name} — "
+                            "EXECUTION_SPECS_TABLE not configured; cannot "
+                            f"verify spec '{stored_spec}'"
+                        ),
+                        workflow_id=orchestration_id,
+                        org_id=org_id,
+                    )
+                try:
+                    from tools_config import assert_spec_approved  # noqa: WPS433
+                    assert_spec_approved(
+                        stored_spec,
+                        table_name=EXECUTION_SPECS_TABLE,
+                        org_id=org_id,
+                        tool_id=tool_cfg.get('toolId') or tool_name,
+                    )
+                except SpecificationNotBoundError:
+                    raise
+                except Exception as spec_err:
+                    raise SpecificationNotBoundError(
+                        f"ExecutionSpecification '{stored_spec}' for tool "
+                        f"'{tool_name}' is not APPROVED or cannot be "
+                        f"resolved: {spec_err}"
+                    ) from spec_err
 
         tool_bindings = aggregate_tool_bindings(tool_configs)
 
