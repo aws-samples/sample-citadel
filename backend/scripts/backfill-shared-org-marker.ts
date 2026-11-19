@@ -66,6 +66,7 @@ import {
   RegistryService,
   ResourceType,
   RegistryRecord,
+  ListResourcesResult,
 } from "../src/services/registry-service";
 import { ALL_ORGS } from "../src/utils/org-constants";
 import { applyMarkerEdit } from "../src/utils/marker-registry-edit";
@@ -681,7 +682,7 @@ export function planCorrectiveEntry(
  * concurrent write. Ambiguous and unresolvable entries are never written —
  * only planned/reported.
  */
-async function applyCorrectiveEntry(
+export async function applyCorrectiveEntry(
   entry: CorrectivePlanEntry,
   type: ResourceType,
   registry: RegistryService,
@@ -767,12 +768,62 @@ async function applyCorrectiveEntry(
 }
 
 /**
+ * Default bounded re-list attempts for a throttled/partial registry list,
+ * before refusing to act. Exponential backoff with full jitter, matching
+ * the shape of {@link RegistryService}'s own internal `withRetry`.
+ */
+const CORRECTIVE_LIST_MAX_ATTEMPTS = 4;
+const CORRECTIVE_LIST_BASE_DELAY_MS = 500;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Calls {@link RegistryService.listResourcesChecked} up to
+ * `maxAttempts` times with exponential backoff, retrying only while the
+ * result is partial/throttled. Returns the first non-partial result, or
+ * the LAST (still-partial) result once attempts are exhausted — the caller
+ * is responsible for refusing to act on a result that is still partial.
+ * `RegistryService.listResourcesChecked` already retries individual SDK
+ * calls internally (list + per-record detail GETs); this adds a coarser
+ * re-list loop on top for the case where an entire pass still ends up
+ * partial after those inner retries (e.g. sustained throttling across the
+ * whole scan).
+ */
+export async function listResourcesCheckedWithBackoff(
+  registry: RegistryService,
+  type: ResourceType,
+  maxAttempts: number = CORRECTIVE_LIST_MAX_ATTEMPTS,
+  baseDelayMs: number = CORRECTIVE_LIST_BASE_DELAY_MS,
+): Promise<ListResourcesResult> {
+  let last: ListResourcesResult | undefined;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    last = await registry.listResourcesChecked(type);
+    if (!last.partial && !last.throttled) {
+      return last;
+    }
+    if (attempt < maxAttempts) {
+      const ceiling = baseDelayMs * Math.pow(2, attempt - 1);
+      const delayMs = Math.floor(Math.random() * ceiling) + 1;
+      log(
+        "warn",
+        `[correct-fabricator:${type}] list partial/throttled (attempt ${attempt}/${maxAttempts}, droppedCount=${last.droppedCount}) — retrying in ${delayMs}ms`,
+      );
+      await sleep(delayMs);
+    }
+  }
+  // last is guaranteed set: maxAttempts >= 1
+  return last as ListResourcesResult;
+}
+
+/**
  * Scans one registry resource type for corrective-mode targets, logging the
  * previous value of every planned entry. Refuses (returns an error summary)
  * if the underlying list is partial/throttled — per spec, a throttled or
  * failed read is an error, never a silent partial apply.
  */
-async function runCorrectiveForRegistryType(
+export async function runCorrectiveForRegistryType(
   type: ResourceType,
   registry: RegistryService,
   orgResolver: OrgResolver,
@@ -781,17 +832,18 @@ async function runCorrectiveForRegistryType(
   summary: BackfillSummary,
   tableName: string,
   docClient: DynamoDBDocumentClient,
+  recordId: string | undefined,
 ): Promise<CorrectivePlanEntry[]> {
   const plan: CorrectivePlanEntry[] = [];
   const kind = type === "agent" ? "agent" : "tool";
 
-  const listed = await registry.listResourcesChecked(type);
+  const listed = await listResourcesCheckedWithBackoff(registry, type);
   summary.scanned += listed.items.length;
 
   if (listed.partial || listed.throttled) {
     log(
       "error",
-      `[correct-fabricator:${type}] registry list is partial/throttled (droppedCount=${listed.droppedCount}) — refusing to act on a known-partial list`,
+      `[correct-fabricator:${type}] registry list is still partial/throttled after ${CORRECTIVE_LIST_MAX_ATTEMPTS} attempts (droppedCount=${listed.droppedCount}) — refusing to act on a known-partial list`,
     );
     summary.errors++;
     return plan;
@@ -840,7 +892,12 @@ async function runCorrectiveForRegistryType(
       continue;
     }
 
-    if (apply) {
+    // `--record-id` scopes WRITES to a single canary record. Every target
+    // is still planned/printed (the operator needs to see the full set),
+    // but only the matching record is ever mutated.
+    const inCanaryScope = recordId === undefined || entry.id === recordId;
+
+    if (apply && inCanaryScope) {
       if (
         limit !== undefined &&
         summary.markedTenant + summary.markedUnknown >= limit
@@ -936,10 +993,16 @@ export async function main(): Promise<void> {
       ? args[recordIdIdx + 1]
       : undefined;
   const limitIdx = args.indexOf("--limit");
-  const limit =
+  const limitRaw =
     limitIdx !== -1 && args[limitIdx + 1] !== undefined
-      ? Number(args[limitIdx + 1])
+      ? args[limitIdx + 1]
       : undefined;
+  if (limitRaw !== undefined && !/^\d+$/.test(limitRaw)) {
+    throw new Error(
+      `--limit must be a non-negative integer, got "${limitRaw}"`,
+    );
+  }
+  const limit = limitRaw !== undefined ? Number(limitRaw) : undefined;
 
   const registryId = process.env.REGISTRY_ID;
   const region = process.env.AWS_REGION || "us-west-2";
@@ -1119,6 +1182,7 @@ async function runCorrectiveMode(
     summary,
     agentTable,
     docClient,
+    recordId,
   );
   const toolPlan = await runCorrectiveForRegistryType(
     "tool",
@@ -1129,6 +1193,7 @@ async function runCorrectiveMode(
     summary,
     toolTable,
     docClient,
+    recordId,
   );
 
   fullPlan.push(

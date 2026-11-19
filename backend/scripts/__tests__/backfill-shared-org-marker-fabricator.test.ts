@@ -17,9 +17,17 @@ import {
   main,
   emptySummary,
   addSummary,
+  isCorrectiveTarget,
+  planCorrectiveEntry,
+  buildOrgResolverFromMaps,
+  applyCorrectiveEntry,
+  runCorrectiveForRegistryType,
+  listResourcesCheckedWithBackoff,
   type RecordShape,
   type OrgResolver,
 } from "../backfill-shared-org-marker";
+import type { RegistryService } from "../../src/services/registry-service";
+import { ALL_ORGS } from "../../src/utils/org-constants";
 
 // ---------------------------------------------------------------------------
 // 1. Fabricator removed from SEED_ALLOWLIST_CREATED_BY
@@ -263,18 +271,824 @@ describe("throttled registry read → error tracking", () => {
 // 8. mark-tenant outcome in summary
 // ---------------------------------------------------------------------------
 
-describe("summary tracks mark-tenant separately", () => {
-  it("emptySummary includes markedTenant = 0", () => {
-    const s = emptySummary();
-    expect(s.markedTenant).toBe(0);
+// ---------------------------------------------------------------------------
+// 9. isCorrectiveTarget — selection predicate
+// ---------------------------------------------------------------------------
+
+describe("isCorrectiveTarget", () => {
+  it("selects a record that is ALL_ORGS, createdBy fabricator, and not a seed name", () => {
+    const rec: RecordShape = {
+      id: "a1",
+      name: "custom-agent",
+      orgId: ALL_ORGS,
+      createdBy: "fabricator",
+    };
+    expect(isCorrectiveTarget(rec)).toBe(true);
   });
 
-  it("addSummary accumulates markedTenant", () => {
-    const a = { ...emptySummary(), markedTenant: 5 };
-    const b = { ...emptySummary(), markedTenant: 3 };
-    const total = emptySummary();
-    addSummary(total, a);
-    addSummary(total, b);
-    expect(total.markedTenant).toBe(8);
+  it("excludes a record that is not ALL_ORGS", () => {
+    const rec: RecordShape = {
+      id: "a2",
+      name: "custom-agent",
+      orgId: "Default",
+      createdBy: "fabricator",
+    };
+    expect(isCorrectiveTarget(rec)).toBe(false);
+  });
+
+  it("excludes a record whose createdBy is not fabricator", () => {
+    const rec: RecordShape = {
+      id: "a3",
+      name: "custom-agent",
+      orgId: ALL_ORGS,
+      createdBy: "seedConfig",
+    };
+    expect(isCorrectiveTarget(rec)).toBe(false);
+  });
+
+  it("excludes a record whose name is in the seed NAME allowlist (the fabricator agent itself)", () => {
+    const rec: RecordShape = {
+      id: "a4",
+      name: "fabricator",
+      orgId: ALL_ORGS,
+      createdBy: "fabricator",
+    };
+    expect(isCorrectiveTarget(rec)).toBe(false);
+  });
+
+  it("selects a record with no name at all (name undefined is not a seed name)", () => {
+    const rec: RecordShape = {
+      id: "a5",
+      orgId: ALL_ORGS,
+      createdBy: "fabricator",
+    };
+    expect(isCorrectiveTarget(rec)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 10. planCorrectiveEntry — pure planning function
+// ---------------------------------------------------------------------------
+
+describe("planCorrectiveEntry", () => {
+  const orgResolver: OrgResolver = {
+    resolveAgentOrg: (rec: RecordShape) =>
+      rec.sourceProjectId === "proj-1" ? "Default" : undefined,
+    resolveToolOrg: (rec: RecordShape) => {
+      if (rec.appId === "app-1") return "Default";
+      if (rec.appId === "app-multi") return "AMBIGUOUS";
+      return undefined;
+    },
+  };
+
+  it("returns undefined for a record outside corrective scope", () => {
+    const rec: RecordShape = {
+      id: "a1",
+      orgId: "Default",
+      createdBy: "fabricator",
+    };
+    expect(planCorrectiveEntry(rec, "agent", orgResolver)).toBeUndefined();
+  });
+
+  it("plans a resolvable agent with previousOrgId = ALL_ORGS and the resolved org", () => {
+    const rec: RecordShape = {
+      id: "a1",
+      name: "fabricated-agent",
+      orgId: ALL_ORGS,
+      createdBy: "fabricator",
+      sourceProjectId: "proj-1",
+    };
+    const entry = planCorrectiveEntry(rec, "agent", orgResolver);
+    expect(entry).toEqual({
+      id: "a1",
+      name: "fabricated-agent",
+      kind: "agent",
+      previousOrgId: ALL_ORGS,
+      resolvedOrgId: "Default",
+      reason: "fabricator-agent-sourceProjectId",
+    });
+  });
+
+  it("plans a resolvable tool via appId with reason fabricator-tool-appId", () => {
+    const rec: RecordShape = {
+      id: "t1",
+      name: "fabricated-tool",
+      orgId: ALL_ORGS,
+      createdBy: "fabricator",
+      appId: "app-1",
+    };
+    const entry = planCorrectiveEntry(rec, "tool", orgResolver);
+    expect(entry).toEqual({
+      id: "t1",
+      name: "fabricated-tool",
+      kind: "tool",
+      previousOrgId: ALL_ORGS,
+      resolvedOrgId: "Default",
+      reason: "fabricator-tool-appId",
+    });
+  });
+
+  it("plans an unresolvable record with resolvedOrgId undefined and reason unresolvable-orgUnknown", () => {
+    const rec: RecordShape = {
+      id: "t2",
+      name: "orphan-tool",
+      orgId: ALL_ORGS,
+      createdBy: "fabricator",
+      appId: "app-unknown",
+    };
+    const entry = planCorrectiveEntry(rec, "tool", orgResolver);
+    expect(entry).toEqual({
+      id: "t2",
+      name: "orphan-tool",
+      kind: "tool",
+      previousOrgId: ALL_ORGS,
+      resolvedOrgId: undefined,
+      reason: "unresolvable-orgUnknown",
+    });
+  });
+
+  it("plans a multi-org tool with resolvedOrgId undefined and reason ambiguous-multi-org", () => {
+    const rec: RecordShape = {
+      id: "t3",
+      name: "multi-org-tool",
+      orgId: ALL_ORGS,
+      createdBy: "fabricator",
+      appId: "app-multi",
+    };
+    const entry = planCorrectiveEntry(rec, "tool", orgResolver);
+    expect(entry).toEqual({
+      id: "t3",
+      name: "multi-org-tool",
+      kind: "tool",
+      previousOrgId: ALL_ORGS,
+      resolvedOrgId: undefined,
+      reason: "ambiguous-multi-org",
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 11. buildOrgResolverFromMaps — single/multi/none org resolution
+// ---------------------------------------------------------------------------
+
+describe("buildOrgResolverFromMaps", () => {
+  it("resolveAgentOrg returns the mapped org for a known sourceProjectId", () => {
+    const resolver = buildOrgResolverFromMaps(
+      new Map([["proj-1", "Default"]]),
+      new Map(),
+    );
+    expect(
+      resolver.resolveAgentOrg({ id: "a1", sourceProjectId: "proj-1" }),
+    ).toBe("Default");
+  });
+
+  it("resolveAgentOrg returns undefined when sourceProjectId is absent", () => {
+    const resolver = buildOrgResolverFromMaps(new Map(), new Map());
+    expect(resolver.resolveAgentOrg({ id: "a1" })).toBeUndefined();
+  });
+
+  it("resolveAgentOrg returns undefined when the projectId is not in the map", () => {
+    const resolver = buildOrgResolverFromMaps(
+      new Map([["proj-1", "Default"]]),
+      new Map(),
+    );
+    expect(
+      resolver.resolveAgentOrg({ id: "a1", sourceProjectId: "proj-missing" }),
+    ).toBeUndefined();
+  });
+
+  it("resolveToolOrg returns the single org when all binding agents share one org", () => {
+    const resolver = buildOrgResolverFromMaps(
+      new Map([
+        ["proj-1", "Default"],
+        ["proj-2", "Default"],
+      ]),
+      new Map([
+        [
+          "app-1",
+          [{ sourceProjectId: "proj-1" }, { sourceProjectId: "proj-2" }],
+        ],
+      ]),
+    );
+    expect(resolver.resolveToolOrg({ id: "t1", appId: "app-1" })).toBe(
+      "Default",
+    );
+  });
+
+  it("resolveToolOrg returns AMBIGUOUS when binding agents resolve to multiple distinct orgs", () => {
+    const resolver = buildOrgResolverFromMaps(
+      new Map([
+        ["proj-1", "Default"],
+        ["proj-2", "Acme Corp"],
+      ]),
+      new Map([
+        [
+          "app-multi",
+          [{ sourceProjectId: "proj-1" }, { sourceProjectId: "proj-2" }],
+        ],
+      ]),
+    );
+    expect(resolver.resolveToolOrg({ id: "t1", appId: "app-multi" })).toBe(
+      "AMBIGUOUS",
+    );
+  });
+
+  it("resolveToolOrg returns undefined when appId has no binding agents", () => {
+    const resolver = buildOrgResolverFromMaps(new Map(), new Map());
+    expect(
+      resolver.resolveToolOrg({ id: "t1", appId: "app-none" }),
+    ).toBeUndefined();
+  });
+
+  it("resolveToolOrg returns undefined when appId is absent on the record", () => {
+    const resolver = buildOrgResolverFromMaps(new Map(), new Map());
+    expect(resolver.resolveToolOrg({ id: "t1" })).toBeUndefined();
+  });
+
+  it("resolveToolOrg ignores binding agents with no resolvable sourceProjectId", () => {
+    const resolver = buildOrgResolverFromMaps(
+      new Map([["proj-1", "Default"]]),
+      new Map([
+        [
+          "app-1",
+          [{ sourceProjectId: undefined }, { sourceProjectId: "proj-1" }],
+        ],
+      ]),
+    );
+    expect(resolver.resolveToolOrg({ id: "t1", appId: "app-1" })).toBe(
+      "Default",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 12. applyCorrectiveEntry — both-store write with ConditionExpression
+// ---------------------------------------------------------------------------
+
+jest.mock("../../src/utils/marker-registry-edit", () => ({
+  applyMarkerEdit: jest.fn(),
+}));
+
+describe("applyCorrectiveEntry — both-store write", () => {
+  const { applyMarkerEdit } = jest.requireMock(
+    "../../src/utils/marker-registry-edit",
+  ) as { applyMarkerEdit: jest.Mock };
+
+  beforeEach(() => {
+    applyMarkerEdit.mockReset();
+  });
+
+  function fakeRegistry(): RegistryService {
+    return {} as unknown as RegistryService;
+  }
+
+  function fakeDocClient(sendImpl: jest.Mock) {
+    return {
+      send: sendImpl,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+  }
+
+  it("writes the resolved org to both the registry (via applyMarkerEdit) and the DDB row with a ConditionExpression on the previous value", async () => {
+    applyMarkerEdit.mockResolvedValue({ recordId: "a1" });
+    const send = jest.fn().mockResolvedValue({});
+    const entry = {
+      id: "a1",
+      name: "fabricated-agent",
+      kind: "agent" as const,
+      previousOrgId: ALL_ORGS,
+      resolvedOrgId: "Default",
+      reason: "fabricator-agent-sourceProjectId",
+    };
+
+    const result = await applyCorrectiveEntry(
+      entry,
+      "agent",
+      fakeRegistry(),
+      "agent-table",
+      fakeDocClient(send),
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(applyMarkerEdit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recordId: "a1",
+        type: "agent",
+        fieldsToSet: { orgId: "Default" },
+      }),
+      expect.objectContaining({ dryRun: false }),
+    );
+    expect(send).toHaveBeenCalledTimes(1);
+    const [command] = send.mock.calls[0];
+    expect(command.input.TableName).toBe("agent-table");
+    expect(command.input.Key).toEqual({ agentId: "a1" });
+    expect(command.input.ConditionExpression).toBe("#orgId = :previousOrgId");
+    expect(command.input.ExpressionAttributeValues[":previousOrgId"]).toBe(
+      ALL_ORGS,
+    );
+    expect(command.input.ExpressionAttributeValues[":orgId"]).toBe("Default");
+  });
+
+  it("writes orgUnknown=true and removes orgId for an unresolvable entry, conditioned on the previous value", async () => {
+    applyMarkerEdit.mockResolvedValue({ recordId: "t2" });
+    const send = jest.fn().mockResolvedValue({});
+    const entry = {
+      id: "t2",
+      name: "orphan-tool",
+      kind: "tool" as const,
+      previousOrgId: ALL_ORGS,
+      resolvedOrgId: undefined,
+      reason: "unresolvable-orgUnknown",
+    };
+
+    const result = await applyCorrectiveEntry(
+      entry,
+      "tool",
+      fakeRegistry(),
+      "tool-table",
+      fakeDocClient(send),
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(applyMarkerEdit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recordId: "t2",
+        type: "tool",
+        fieldsToSet: { orgUnknown: true },
+        fieldsToRemove: ["orgId"],
+      }),
+      expect.anything(),
+    );
+    const [command] = send.mock.calls[0];
+    expect(command.input.TableName).toBe("tool-table");
+    expect(command.input.Key).toEqual({ toolId: "t2" });
+    expect(command.input.ConditionExpression).toBe("#orgId = :previousOrgId");
+  });
+
+  it("never writes to DDB for an ambiguous entry", async () => {
+    const send = jest.fn();
+    const entry = {
+      id: "t3",
+      name: "multi-org-tool",
+      kind: "tool" as const,
+      previousOrgId: ALL_ORGS,
+      resolvedOrgId: undefined,
+      reason: "ambiguous-multi-org",
+    };
+
+    const result = await applyCorrectiveEntry(
+      entry,
+      "tool",
+      fakeRegistry(),
+      "tool-table",
+      fakeDocClient(send),
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(applyMarkerEdit).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("propagates a registry marker-edit failure as an error and skips the DDB write", async () => {
+    applyMarkerEdit.mockResolvedValue({
+      recordId: "a1",
+      error: "updateResource failed: ConditionalCheckFailed",
+    });
+    const send = jest.fn();
+    const entry = {
+      id: "a1",
+      name: "fabricated-agent",
+      kind: "agent" as const,
+      previousOrgId: ALL_ORGS,
+      resolvedOrgId: "Default",
+      reason: "fabricator-agent-sourceProjectId",
+    };
+
+    const result = await applyCorrectiveEntry(
+      entry,
+      "agent",
+      fakeRegistry(),
+      "agent-table",
+      fakeDocClient(send),
+    );
+
+    expect(result.error).toBe("updateResource failed: ConditionalCheckFailed");
+    expect(send).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 13. runCorrectiveForRegistryType — recordId write-scoping (the canary bug)
+// ---------------------------------------------------------------------------
+
+describe("runCorrectiveForRegistryType — --record-id scopes WRITES, not just the printed plan", () => {
+  const { applyMarkerEdit } = jest.requireMock(
+    "../../src/utils/marker-registry-edit",
+  ) as { applyMarkerEdit: jest.Mock };
+
+  beforeEach(() => {
+    applyMarkerEdit.mockReset();
+    applyMarkerEdit.mockResolvedValue({ recordId: "unused" });
+  });
+
+  const orgResolver: OrgResolver = {
+    resolveAgentOrg: (rec: RecordShape) =>
+      rec.sourceProjectId === "proj-1" ? "Default" : undefined,
+    resolveToolOrg: () => undefined,
+  };
+
+  function makeListedRegistry(
+    items: Array<{
+      recordId: string;
+      name: string;
+      orgId: string;
+      createdBy: string;
+      sourceProjectId?: string;
+    }>,
+  ): RegistryService {
+    const listResourcesChecked = jest.fn().mockResolvedValue({
+      items: items.map((i) => ({
+        recordId: i.recordId,
+        name: i.name,
+        status: "APPROVED",
+        customDescriptorContent: JSON.stringify({
+          orgId: i.orgId,
+          createdBy: i.createdBy,
+          sourceProjectId: i.sourceProjectId,
+        }),
+      })),
+      partial: false,
+      droppedCount: 0,
+      throttled: false,
+    });
+    return { listResourcesChecked } as unknown as RegistryService;
+  }
+
+  it("plans BOTH matching records but writes ONLY the one matching --record-id", async () => {
+    const registry = makeListedRegistry([
+      {
+        recordId: "rec-1",
+        name: "fab-agent-1",
+        orgId: ALL_ORGS,
+        createdBy: "fabricator",
+        sourceProjectId: "proj-1",
+      },
+      {
+        recordId: "rec-2",
+        name: "fab-agent-2",
+        orgId: ALL_ORGS,
+        createdBy: "fabricator",
+        sourceProjectId: "proj-1",
+      },
+    ]);
+    const send = jest.fn().mockResolvedValue({});
+    const docClient = {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+    const summary = emptySummary();
+
+    const plan = await runCorrectiveForRegistryType(
+      "agent",
+      registry,
+      orgResolver,
+      /* apply */ true,
+      /* limit */ undefined,
+      summary,
+      "agent-table",
+      docClient,
+      /* recordId canary */ "rec-1",
+    );
+
+    // Both records are planned (printed) ...
+    expect(plan.map((e) => e.id).sort()).toEqual(["rec-1", "rec-2"]);
+    // ... but only rec-1 was actually written to either store.
+    expect(applyMarkerEdit).toHaveBeenCalledTimes(1);
+    expect(applyMarkerEdit).toHaveBeenCalledWith(
+      expect.objectContaining({ recordId: "rec-1" }),
+      expect.anything(),
+    );
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0][0].input.Key).toEqual({ agentId: "rec-1" });
+    expect(summary.markedTenant).toBe(1);
+  });
+
+  it("writes nothing when --record-id does not match any planned entry", async () => {
+    const registry = makeListedRegistry([
+      {
+        recordId: "rec-1",
+        name: "fab-agent-1",
+        orgId: ALL_ORGS,
+        createdBy: "fabricator",
+        sourceProjectId: "proj-1",
+      },
+    ]);
+    const send = jest.fn();
+    const docClient = {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+    const summary = emptySummary();
+
+    const plan = await runCorrectiveForRegistryType(
+      "agent",
+      registry,
+      orgResolver,
+      true,
+      undefined,
+      summary,
+      "agent-table",
+      docClient,
+      "rec-does-not-exist",
+    );
+
+    expect(plan).toHaveLength(1);
+    expect(applyMarkerEdit).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    expect(summary.markedTenant).toBe(0);
+  });
+
+  it("with no --record-id, writes every planned entry (unscoped default)", async () => {
+    const registry = makeListedRegistry([
+      {
+        recordId: "rec-1",
+        name: "fab-agent-1",
+        orgId: ALL_ORGS,
+        createdBy: "fabricator",
+        sourceProjectId: "proj-1",
+      },
+      {
+        recordId: "rec-2",
+        name: "fab-agent-2",
+        orgId: ALL_ORGS,
+        createdBy: "fabricator",
+        sourceProjectId: "proj-1",
+      },
+    ]);
+    const send = jest.fn().mockResolvedValue({});
+    const docClient = {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+    const summary = emptySummary();
+
+    await runCorrectiveForRegistryType(
+      "agent",
+      registry,
+      orgResolver,
+      true,
+      undefined,
+      summary,
+      "agent-table",
+      docClient,
+      undefined,
+    );
+
+    expect(applyMarkerEdit).toHaveBeenCalledTimes(2);
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 14. runCorrectiveForRegistryType — throttled list -> error, never a write
+// ---------------------------------------------------------------------------
+
+describe("runCorrectiveForRegistryType — throttled/partial list refuses to act", () => {
+  const orgResolver: OrgResolver = {
+    resolveAgentOrg: () => "Default",
+    resolveToolOrg: () => undefined,
+  };
+
+  it("sets an error and plans nothing when every re-list attempt stays partial/throttled", async () => {
+    const listResourcesChecked = jest.fn().mockResolvedValue({
+      items: [],
+      partial: true,
+      droppedCount: 58,
+      throttled: true,
+    });
+    const registry = {
+      listResourcesChecked,
+    } as unknown as RegistryService;
+    const send = jest.fn();
+    const docClient = {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+    const summary = emptySummary();
+
+    const plan = await runCorrectiveForRegistryType(
+      "tool",
+      registry,
+      orgResolver,
+      false,
+      undefined,
+      summary,
+      "tool-table",
+      docClient,
+      undefined,
+    );
+
+    expect(plan).toEqual([]);
+    expect(summary.errors).toBe(1);
+    expect(send).not.toHaveBeenCalled();
+    // Re-list was retried, not just attempted once.
+    expect(listResourcesChecked.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it("recovers and proceeds once a later re-list attempt comes back non-partial", async () => {
+    const listResourcesChecked = jest
+      .fn()
+      .mockResolvedValueOnce({
+        items: [],
+        partial: true,
+        droppedCount: 5,
+        throttled: true,
+      })
+      .mockResolvedValueOnce({
+        items: [
+          {
+            recordId: "rec-1",
+            name: "fab-tool-1",
+            status: "APPROVED",
+            customDescriptorContent: JSON.stringify({
+              orgId: ALL_ORGS,
+              createdBy: "fabricator",
+              appId: "app-1",
+            }),
+          },
+        ],
+        partial: false,
+        droppedCount: 0,
+        throttled: false,
+      });
+    const registry = {
+      listResourcesChecked,
+    } as unknown as RegistryService;
+    const docClient = {
+      send: jest.fn(),
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+    const summary = emptySummary();
+
+    const plan = await runCorrectiveForRegistryType(
+      "tool",
+      registry,
+      { resolveAgentOrg: () => undefined, resolveToolOrg: () => "Default" },
+      false,
+      undefined,
+      summary,
+      "tool-table",
+      docClient,
+      undefined,
+    );
+
+    expect(summary.errors).toBe(0);
+    expect(plan).toHaveLength(1);
+    expect(plan[0].id).toBe("rec-1");
+    expect(listResourcesChecked).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 15. listResourcesCheckedWithBackoff — bounded retries
+// ---------------------------------------------------------------------------
+
+describe("listResourcesCheckedWithBackoff", () => {
+  it("stops retrying and returns the first non-partial result", async () => {
+    const listResourcesChecked = jest
+      .fn()
+      .mockResolvedValueOnce({
+        items: [],
+        partial: true,
+        droppedCount: 1,
+        throttled: true,
+      })
+      .mockResolvedValueOnce({
+        items: [],
+        partial: false,
+        droppedCount: 0,
+        throttled: false,
+      });
+    const registry = {
+      listResourcesChecked,
+    } as unknown as RegistryService;
+
+    const result = await listResourcesCheckedWithBackoff(
+      registry,
+      "agent",
+      3,
+      1, // tiny base delay to keep the test fast
+    );
+
+    expect(result.partial).toBe(false);
+    expect(listResourcesChecked).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns the last (still-partial) result after exhausting maxAttempts, without exceeding it", async () => {
+    const listResourcesChecked = jest.fn().mockResolvedValue({
+      items: [],
+      partial: true,
+      droppedCount: 9,
+      throttled: true,
+    });
+    const registry = {
+      listResourcesChecked,
+    } as unknown as RegistryService;
+
+    const result = await listResourcesCheckedWithBackoff(
+      registry,
+      "tool",
+      3,
+      1,
+    );
+
+    expect(result.partial).toBe(true);
+    expect(listResourcesChecked).toHaveBeenCalledTimes(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 16. Convergence — a second dry run after a (mocked) apply plans zero changes
+// ---------------------------------------------------------------------------
+
+describe("convergence: after corrective apply, a second dry run plans zero changes", () => {
+  const { applyMarkerEdit } = jest.requireMock(
+    "../../src/utils/marker-registry-edit",
+  ) as { applyMarkerEdit: jest.Mock };
+
+  beforeEach(() => {
+    applyMarkerEdit.mockReset();
+    applyMarkerEdit.mockResolvedValue({ recordId: "unused" });
+  });
+
+  it("a record re-stamped to its resolved org no longer matches isCorrectiveTarget on the next pass", async () => {
+    const orgResolver: OrgResolver = {
+      resolveAgentOrg: (rec: RecordShape) =>
+        rec.sourceProjectId === "proj-1" ? "Default" : undefined,
+      resolveToolOrg: () => undefined,
+    };
+
+    // First pass: record is ALL_ORGS + fabricator -> in scope, plans + applies.
+    const store = {
+      recordId: "rec-1",
+      name: "fab-agent-1",
+      orgId: ALL_ORGS,
+      createdBy: "fabricator",
+      sourceProjectId: "proj-1",
+    };
+
+    function registryFor(current: typeof store): RegistryService {
+      const listResourcesChecked = jest.fn().mockResolvedValue({
+        items: [
+          {
+            recordId: current.recordId,
+            name: current.name,
+            status: "APPROVED",
+            customDescriptorContent: JSON.stringify({
+              orgId: current.orgId,
+              createdBy: current.createdBy,
+              sourceProjectId: current.sourceProjectId,
+            }),
+          },
+        ],
+        partial: false,
+        droppedCount: 0,
+        throttled: false,
+      });
+      return { listResourcesChecked } as unknown as RegistryService;
+    }
+
+    const send = jest.fn().mockResolvedValue({});
+    const docClient = {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+    const summary1 = emptySummary();
+
+    const firstPlan = await runCorrectiveForRegistryType(
+      "agent",
+      registryFor(store),
+      orgResolver,
+      true,
+      undefined,
+      summary1,
+      "agent-table",
+      docClient,
+      undefined,
+    );
+    expect(firstPlan).toHaveLength(1);
+    expect(summary1.markedTenant).toBe(1);
+
+    // Simulate the write having applied: the record's orgId is now "Default".
+    const converged = { ...store, orgId: "Default" };
+    const summary2 = emptySummary();
+
+    const secondPlan = await runCorrectiveForRegistryType(
+      "agent",
+      registryFor(converged),
+      orgResolver,
+      false,
+      undefined,
+      summary2,
+      "agent-table",
+      docClient,
+      undefined,
+    );
+
+    expect(secondPlan).toHaveLength(0);
+    expect(summary2.markedTenant).toBe(0);
   });
 });
