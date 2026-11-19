@@ -1,26 +1,28 @@
 #!/usr/bin/env python3
 """audit_missing_required_permissions.py — DRY-RUN report of registry
-records (agents/tools) whose ``requiredPermissions`` is absent or empty
+AGENT records whose ``requiredPermissions`` is absent or empty
 (PR-4 §3, owner decision 5750aeec: FAIL CLOSED, no grandfathering).
 
-This script performs NO WRITES and NO AUTO-STAMPING — it is read-only
-reconnaissance (per the practices doc's "Read-only reconnaissance before
-destructive DB ops" rule, applied here even though nothing destructive is
-planned: this script exists specifically to let an operator see the blast
-radius of the fail-closed worker gate BEFORE it is deployed, so quantifying
-first is the entire point).
+Audits AGENT records only, matching the type filter that
+backend/scripts/stamp-agent-permissions.ts applies via listResources('agent').
+Records whose kind infers to 'tool' or 'app' are skipped.
 
-Every record reported here will be REFUSED at worker dispatch under PR-4
-unless it is either re-fabricated (which auto-stamps permissions going
-forward) or explicitly granted a non-empty requiredPermissions set by an
-operator, or re-stamped with the explicit credentialMode: "none" sentinel
-for genuinely credential-less (pure-compute) agents.
+A record is **satisfied** when:
+  - ``requiredPermissions`` has non-empty ``models`` OR ``integrations``
+    OR ``dataStores``  (same semantics as the worker's
+    ``_is_absent_or_empty_permissions`` in arbiter/workerWrapper/index.py), OR
+  - ``credentialMode`` is ``"none"`` (explicit no-cloud sentinel).
+
+This script performs NO WRITES and NO AUTO-STAMPING — it is read-only
+reconnaissance.
+
+Exit codes:
+  0 — clean estate (no findings)
+  1 — one or more AGENT records are missing permissions (CI gate failure)
+  2 — registry call failed (infrastructure error)
 
 Usage:
     python3 scripts/audit_missing_required_permissions.py --registry-id <id>
-
-Exit code is always 0 (dry-run / report tool — never fails CI on its own;
-the printed count is for a human or a SEPARATE gate to act on).
 """
 from __future__ import annotations
 
@@ -39,13 +41,19 @@ sys.path.insert(0, os.path.join(_REPO_ROOT, "arbiter"))
 from catalog.registry_client import get_agent_record, list_agent_records  # noqa: E402
 
 
-def _is_absent_or_empty_permissions(required_permissions) -> bool:
-    """Mirrors the worker dispatch gate's deny-default check
-    (arbiter/workerWrapper/index.py's _is_absent_or_empty_permissions)."""
+def _is_absent_or_empty_permissions(required_permissions: object) -> bool:
+    """True when *required_permissions* declares no resource access at all.
+
+    Mirrors the worker dispatch gate's deny-default check
+    (arbiter/workerWrapper/index.py ``_is_absent_or_empty_permissions``)
+    exactly — checks ``models``, ``integrations``, AND ``dataStores``.
+    """
     if not required_permissions or not isinstance(required_permissions, dict):
         return True
     return not (
-        required_permissions.get("integrations") or required_permissions.get("dataStores")
+        required_permissions.get("models")
+        or required_permissions.get("integrations")
+        or required_permissions.get("dataStores")
     )
 
 
@@ -58,23 +66,53 @@ def _has_no_cloud_sentinel(config: dict) -> bool:
     return False
 
 
-def _parse_custom_descriptor(content: str | None) -> dict:
+def _parse_custom_descriptor(content: str | None) -> dict | None:
+    """Parse customDescriptorContent JSON.  Returns None on failure."""
     if not content:
-        return {}
+        return None
     try:
         parsed = json.loads(content)
     except (json.JSONDecodeError, TypeError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _infer_kind(descriptor: dict) -> str:
+    """Infer record kind from descriptor shape.
+
+    Mirrors backend/src/utils/citadel-kind.ts ``inferKindFromParsed``:
+      1. manifest.agentBindings OR appId OR manifest.access → 'app'
+      2. manifest present (non-null object)                  → 'agent'
+      3. Otherwise                                           → 'tool'
+    """
+    manifest = descriptor.get("manifest")
+    if not isinstance(manifest, dict):
+        manifest = None
+
+    if (
+        (manifest is not None and manifest.get("agentBindings") is not None)
+        or "appId" in descriptor
+        or (manifest is not None and manifest.get("access") is not None)
+    ):
+        return "app"
+
+    if manifest is not None:
+        return "agent"
+
+    return "tool"
 
 
 def audit_missing_required_permissions(registry_id: str) -> list[dict]:
     """Return a list of {recordId, name, orgId, createdBy, status} dicts for
-    every registry record whose requiredPermissions is absent/empty and
+    every AGENT registry record whose requiredPermissions is absent/empty and
     which has NOT opted into the explicit credentialMode: "none" sentinel.
 
-    Never raises — registry_client's own read operations already degrade
-    to [] / None on any failure; this function propagates that contract.
+    Only AGENT records are audited (same type filter as
+    backend/scripts/stamp-agent-permissions.ts via listResources('agent')).
+    Tool and app records are excluded.
+
+    Raises on registry call failure so the caller can distinguish
+    infrastructure errors from an empty estate.
     """
     findings: list[dict] = []
     summaries = list_agent_records(registry_id)
@@ -86,6 +124,14 @@ def audit_missing_required_permissions(registry_id: str) -> list[dict]:
         if full_record is None:
             continue
         descriptor = _parse_custom_descriptor(full_record.get("customDescriptorContent"))
+        if descriptor is None:
+            continue
+
+        # Type filter: agents only (exclude tools and apps)
+        kind = _infer_kind(descriptor)
+        if kind != "agent":
+            continue
+
         raw_config = descriptor.get("config")
         config: dict = raw_config if isinstance(raw_config, dict) else {}
         # Permission data may be stamped at either the top-level descriptor
@@ -111,7 +157,7 @@ def audit_missing_required_permissions(registry_id: str) -> list[dict]:
 
 
 def _print_report(findings: list[dict]) -> None:
-    print(f"audit_missing_required_permissions: {len(findings)} record(s) "
+    print(f"audit_missing_required_permissions: {len(findings)} AGENT record(s) "
           f"would be REFUSED at dispatch under PR-4's fail-closed gate "
           f"(no requiredPermissions and no credentialMode: 'none' sentinel):")
     if not findings:
@@ -123,7 +169,7 @@ def _print_report(findings: list[dict]) -> None:
             f"  {str(f['recordId']):<40} {str(f['name']):<30} "
             f"{str(f['orgId']):<20} {str(f['createdBy']):<20} {f['status']}"
         )
-    print(f"\nDRY-RUN ONLY — no writes performed. {len(findings)} record(s) found.")
+    print(f"\nDRY-RUN ONLY — no writes performed. {len(findings)} AGENT record(s) found.")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -143,9 +189,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    findings = audit_missing_required_permissions(args.registry_id)
+    try:
+        findings = audit_missing_required_permissions(args.registry_id)
+    except Exception as exc:
+        print(
+            f"audit_missing_required_permissions: registry call failed: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+
     _print_report(findings)
-    return 0
+    return 1 if findings else 0
 
 
 if __name__ == "__main__":
