@@ -128,7 +128,7 @@ class TestMakeCreateCustomToolOrgBinding:
         def fake_validate(manifest, sid):
             gate_calls.append(("validate", sid))
 
-        def fake_assert(sid):
+        def fake_assert(sid, **kwargs):
             gate_calls.append(("assert", sid))
 
         with (

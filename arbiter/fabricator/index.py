@@ -2177,6 +2177,14 @@ def store_tool_config_registry(
         if app_id:
             custom_metadata["appId"] = app_id
 
+        # --- H2 hardening: persist spec binding on the tool record ---
+        # The specId is stored server-side so the dispatch gate can resolve
+        # it from the STORED record rather than the untrusted event payload.
+        # This mirrors org_id: closure-bound at registration time.
+        if spec_id:
+            custom_metadata["specId"] = spec_id
+            config["specId"] = spec_id
+
         # --- Registration-time spec-binding gate (CIT-256 H2) ---
         # Mirror the worker's dispatch-time check: code-generating tools MUST
         # be bound to an APPROVED ExecutionSpecification.  Fail closed at
@@ -2198,7 +2206,9 @@ def store_tool_config_registry(
         if spec_id is not None:
             try:
                 validate_code_tool_binding(tool_manifest, spec_id)
-                assert_spec_approved(spec_id)
+                assert_spec_approved(
+                    spec_id, org_id=org_id, tool_id=tool_id,
+                )
             except (FabricationError, ValueError) as gate_err:
                 _emit_tool_registration_denied_metric(tool_id)
                 print(

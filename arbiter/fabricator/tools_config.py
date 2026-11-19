@@ -351,19 +351,28 @@ def assert_spec_approved(
     *,
     table_name: str | None = None,
     ddb_resource=None,
+    org_id: str | None = None,
+    tool_id: str | None = None,
 ) -> None:
     """Verify that `spec_id` resolves to an APPROVED row in the
-    ExecutionSpecifications DynamoDB table.
+    ExecutionSpecifications DynamoDB table, scoped by org and tool.
 
     Args:
         spec_id: The specification identifier.
         table_name: Override for the EXECUTION_SPECS_TABLE env var.
         ddb_resource: Injected boto3 resource for test stubbing; defaults to
             the lazily-constructed module-level resource only if None.
+        org_id: When supplied, the spec row's ``orgId`` must match. A
+            mismatch raises ``FabricationError`` (cross-org spec denied).
+            A spec row missing ``orgId`` is also refused (fail closed).
+        tool_id: When supplied, the spec row's ``toolId`` (if present) must
+            match. A mismatch raises ``FabricationError`` (cross-tool spec
+            denied). Spec rows without a ``toolId`` are accepted for
+            backward compatibility with pre-H2 rows.
 
     Raises:
-        FabricationError: row missing, or `status!= 'APPROVED'`, or the
-            table name cannot be resolved.
+        FabricationError: row missing, status != 'APPROVED', org mismatch,
+            tool mismatch, or the table name cannot be resolved.
     """
     resolved_table = table_name or os.environ.get("EXECUTION_SPECS_TABLE")
     if not resolved_table:
@@ -380,10 +389,32 @@ def assert_spec_approved(
         raise FabricationError("spec not found")
 
     status = item.get("status")
-    if status!= "APPROVED":
+    if status != "APPROVED":
         raise FabricationError(
             f"spec {spec_id} is not APPROVED (status={status})"
         )
+
+    # H2 hardening: org-scope check (finding 01a1ebbc4847).
+    # A spec from org-A must never satisfy the gate for org-B.
+    if org_id:
+        spec_org = item.get("orgId", "")
+        if not spec_org or spec_org != org_id:
+            raise FabricationError(
+                f"spec {spec_id} belongs to org '{spec_org}', "
+                f"dispatch org is '{org_id}' — cross-org spec denied"
+            )
+
+    # H2 hardening: tool↔spec linkage check.
+    # A spec approved for tool-X must never satisfy unrelated tool-Y.
+    # Spec rows without a toolId are accepted (backward-compat with
+    # pre-H2 registrations); rows WITH a toolId must match exactly.
+    if tool_id:
+        spec_tool = item.get("toolId", "")
+        if spec_tool and spec_tool != tool_id:
+            raise FabricationError(
+                f"spec {spec_id} is bound to tool '{spec_tool}', "
+                f"not '{tool_id}' — cross-tool spec denied"
+            )
 
 def audit_tool_manifests(manifests: list[dict], *, output_path: str) -> str:
     """Emit a CSV audit of tool manifests' `outputs` declarations.
