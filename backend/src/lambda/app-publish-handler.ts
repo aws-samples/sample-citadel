@@ -175,6 +175,13 @@ export function validatePublishPreconditions(
   const configSchema = componentItems.find((i) => i.sortId === "CONFIG#schema");
   const configValues = componentItems.find((i) => i.sortId === "CONFIG#values");
 
+  // Check 0 (finding 01a1ed59): fail closed when no agent bindings exist.
+  // Previously, zero bindings caused all agent gates (readiness, approval,
+  // tag-policy) to pass vacuously via empty-array iteration.
+  if (agentBindings.length === 0) {
+    errors.push("At least one agent binding is required to publish an app");
+  }
+
   // Check 1: All agent bindings must have status=READY
   const notReadyAgents = agentBindings.filter((b) => b.status !== "READY");
   if (notReadyAgents.length > 0) {
@@ -543,11 +550,45 @@ export async function publishApp(
     };
   }
 
-  // 3. Validate preconditions
-  const errors = validatePublishPreconditions(
-    metadata,
-    items as ComponentItem[],
-  );
+  // 3. Validate preconditions — derive agent bindings from the AUTHORITATIVE
+  // source: the registry manifest (customDescriptorContent). The legacy
+  // AppsTable AGENT# rows are never written by the canonical mutation paths
+  // (addAppComponent, updateAgentBinding) — only the fabrication EventBridge
+  // handler writes them, and it never transitions status to READY. Reading
+  // them caused: (a) UI-created apps: zero AGENT# rows → all agent gates
+  // passed vacuously; (b) Fabricated apps: AGENT# rows stuck at DESIGN →
+  // publish blocked. Fix (finding 01a1ed59): derive component items from
+  // the manifest already fetched for the owner gate.
+  interface ManifestBinding {
+    agentId: string;
+    status?: string;
+    [key: string]: unknown;
+  }
+  let manifestDescriptor: Record<string, unknown> = {};
+  try {
+    if (registryRecord.customDescriptorContent) {
+      manifestDescriptor = JSON.parse(registryRecord.customDescriptorContent);
+    }
+  } catch {
+    // Malformed customDescriptorContent — treat as empty manifest.
+  }
+  const manifest =
+    manifestDescriptor.manifest &&
+    typeof manifestDescriptor.manifest === "object" &&
+    !Array.isArray(manifestDescriptor.manifest)
+      ? (manifestDescriptor.manifest as Record<string, unknown>)
+      : {};
+  const manifestAgentBindings: ComponentItem[] = (
+    (Array.isArray(manifest.agentBindings)
+      ? manifest.agentBindings
+      : []) as ManifestBinding[]
+  ).map((b) => ({
+    sortId: `AGENT#${b.agentId}`,
+    agentId: b.agentId,
+    status: b.status ?? "DESIGN",
+  }));
+
+  const errors = validatePublishPreconditions(metadata, manifestAgentBindings);
   if (errors.length > 0) {
     throw new Error(`Publish preconditions not met: ${errors.join("; ")}`);
   }
@@ -557,9 +598,7 @@ export async function publishApp(
   // already fetched above for the owner gate). New checkpoint — not
   // grandfathered for in-flight bindings; see record-approval-check.ts.
   const enforcementMode = await getGovernanceEnforce(deps.environment);
-  const agentBindingItems = (items as ComponentItem[]).filter((i) =>
-    i.sortId?.startsWith("AGENT#"),
-  );
+  const agentBindingItems = manifestAgentBindings;
   for (const binding of agentBindingItems) {
     const boundAgentId = binding.agentId as string | undefined;
     if (!boundAgentId) continue;

@@ -132,7 +132,7 @@ function seedApp(
     version: 1,
     status: opts.status ?? "ACTIVE",
     workflowIds: ["wf-1"],
-    agentBindings: [],
+    agentBindings: [{ agentId: "agent-gate-1", status: "READY" }],
     permissions: [],
     configSchema: null,
     configValues: null,
@@ -176,9 +176,7 @@ function makeEvent(
     info: { fieldName },
     arguments: { appId: APP_ID },
     identity:
-      opts.userId !== undefined
-        ? { sub: opts.userId, claims }
-        : { claims: {} },
+      opts.userId !== undefined ? { sub: opts.userId, claims } : { claims: {} },
   };
 }
 
@@ -287,9 +285,7 @@ describe("app-publish-handler — owner gate (finding 13a58234)", () => {
         orgId: OTHER_ORG,
       });
 
-      await expect(handler(event)).rejects.toThrow(
-        /Access denied/i,
-      );
+      await expect(handler(event)).rejects.toThrow(/Access denied/i);
       expectZeroSideEffects();
     });
 
@@ -300,9 +296,7 @@ describe("app-publish-handler — owner gate (finding 13a58234)", () => {
         orgId: APP_ORG,
       });
 
-      await expect(handler(event)).rejects.toThrow(
-        /Access denied/i,
-      );
+      await expect(handler(event)).rejects.toThrow(/Access denied/i);
       expectZeroSideEffects();
     });
 
@@ -310,9 +304,7 @@ describe("app-publish-handler — owner gate (finding 13a58234)", () => {
       seedApp({ status: "ACTIVE" });
       const event = makeEvent("publishApp", {});
 
-      await expect(handler(event)).rejects.toThrow(
-        /Access denied/i,
-      );
+      await expect(handler(event)).rejects.toThrow(/Access denied/i);
       expectZeroSideEffects();
     });
 
@@ -320,9 +312,7 @@ describe("app-publish-handler — owner gate (finding 13a58234)", () => {
       seedApp({ status: "ACTIVE" });
       const event = makeEvent("publishApp", { userId: ATTACKER_ID });
 
-      await expect(handler(event)).rejects.toThrow(
-        /Access denied/i,
-      );
+      await expect(handler(event)).rejects.toThrow(/Access denied/i);
       expectZeroSideEffects();
     });
 
@@ -344,9 +334,7 @@ describe("app-publish-handler — owner gate (finding 13a58234)", () => {
         orgId: APP_ORG,
       });
 
-      await expect(handler(event)).rejects.toThrow(
-        /Access denied/i,
-      );
+      await expect(handler(event)).rejects.toThrow(/Access denied/i);
       expectZeroSideEffects();
     });
 
@@ -421,7 +409,8 @@ describe("app-publish-handler — owner gate (finding 13a58234)", () => {
             workflowIds: ["wf-1"],
             orgId: APP_ORG,
             apiId: "api-victim",
-            endpointUrl: "https://api-victim.execute-api.us-east-1.amazonaws.com",
+            endpointUrl:
+              "https://api-victim.execute-api.us-east-1.amazonaws.com",
             version: 1,
           },
         ],
@@ -432,9 +421,7 @@ describe("app-publish-handler — owner gate (finding 13a58234)", () => {
         orgId: OTHER_ORG,
       });
 
-      await expect(handler(event)).rejects.toThrow(
-        /Access denied/i,
-      );
+      await expect(handler(event)).rejects.toThrow(/Access denied/i);
       expect(apiGwDeleteCallCount()).toBe(0);
       expect(statusUpdateCallCount()).toBe(0);
       expect(eventBridgePublishCount()).toBe(0);
@@ -453,7 +440,8 @@ describe("app-publish-handler — owner gate (finding 13a58234)", () => {
             workflowIds: ["wf-1"],
             orgId: APP_ORG,
             apiId: "api-victim",
-            endpointUrl: "https://api-victim.execute-api.us-east-1.amazonaws.com",
+            endpointUrl:
+              "https://api-victim.execute-api.us-east-1.amazonaws.com",
             version: 1,
           },
         ],
@@ -464,9 +452,7 @@ describe("app-publish-handler — owner gate (finding 13a58234)", () => {
         orgId: APP_ORG,
       });
 
-      await expect(handler(event)).rejects.toThrow(
-        /Access denied/i,
-      );
+      await expect(handler(event)).rejects.toThrow(/Access denied/i);
       expect(apiGwDeleteCallCount()).toBe(0);
       expect(statusUpdateCallCount()).toBe(0);
       expect(eventBridgePublishCount()).toBe(0);
@@ -477,9 +463,7 @@ describe("app-publish-handler — owner gate (finding 13a58234)", () => {
       seedApp({ status: "PUBLISHED" });
       const event = makeEvent("unpublishApp", {});
 
-      await expect(handler(event)).rejects.toThrow(
-        /Access denied/i,
-      );
+      await expect(handler(event)).rejects.toThrow(/Access denied/i);
       expect(apiGwDeleteCallCount()).toBe(0);
       expect(deleteRoleSpy).not.toHaveBeenCalled();
     });
@@ -501,9 +485,7 @@ describe("app-publish-handler — owner gate (finding 13a58234)", () => {
         orgId: APP_ORG,
       });
 
-      await expect(handler(event)).rejects.toThrow(
-        /Access denied/i,
-      );
+      await expect(handler(event)).rejects.toThrow(/Access denied/i);
       expect(apiGwDeleteCallCount()).toBe(0);
       expect(deleteRoleSpy).not.toHaveBeenCalled();
     });

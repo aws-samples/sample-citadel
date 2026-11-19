@@ -98,8 +98,16 @@ const OWNER_EVENT = {
  * satisfies assertManifestAccess's implicit-creator-owner fallback. Call
  * once per appId used in a test (default "app-1", matching this file's
  * existing fixtures).
+ *
+ * After finding 01a1ed59, `publishApp` reads agent bindings from the
+ * manifest — not from AppsTable AGENT# rows. `manifestOverrides` lets
+ * callers seed agentBindings and other manifest fields to exercise the
+ * publish precondition gates against the authoritative source of truth.
  */
-function seedOwnerApp(appId: string = "app-1") {
+function seedOwnerApp(
+  appId: string = "app-1",
+  manifestOverrides: Record<string, unknown> = {},
+) {
   seedMockRegistry("agent", appId, {
     name: "Test App",
     status: "ACTIVE",
@@ -109,6 +117,8 @@ function seedOwnerApp(appId: string = "app-1") {
         orgId: PUBLISH_APP_ORG,
         createdBy: PUBLISH_OWNER_ID,
         access: {},
+        agentBindings: [{ agentId: "agent-1", status: "READY" }],
+        ...manifestOverrides,
       },
     }),
   });
@@ -430,24 +440,27 @@ describe("validatePublishPreconditions (extended)", () => {
     expect(metadata.appId).toBe(metadataCopy.appId);
   });
 
-  test("passes with no agents, one workflow, and admin email (no schema)", () => {
+  test("rejects with no agents, even when workflow and config are present", () => {
+    // Finding 01a1ed59: zero agent bindings must fail closed.
     const metadata = makeMetadata({ workflowIds: ["wf-1"] });
     const components: ComponentItem[] = [
       makeConfigValues({ adminEmail: "admin@example.com" }),
     ];
     const errors = validatePublishPreconditions(metadata, components);
-    expect(errors).toEqual([]);
+    expect(errors).toContainEqual(
+      expect.stringContaining("At least one agent binding is required"),
+    );
   });
 
-  test("empty component items array is acceptable (no agents, no config)", () => {
-    // Empty components: no agent bindings (so no 'agents not ready'),
-    // no config schema (so no 'config values required'), single-agent
-    // workflow rule not triggered. With admin-email dropped this is now
-    // a clean publish state.
+  test("empty component items array is rejected (zero-agent fail-closed)", () => {
+    // Finding 01a1ed59: empty components previously passed vacuously;
+    // now it is an explicit precondition failure.
     const metadata = makeMetadata({ workflowIds: ["wf-1"] });
     const components: ComponentItem[] = [];
     const errors = validatePublishPreconditions(metadata, components);
-    expect(errors).toEqual([]);
+    expect(errors).toContainEqual(
+      expect.stringContaining("At least one agent binding is required"),
+    );
   });
 });
 
@@ -795,7 +808,12 @@ describe("publishApp", () => {
       ],
     });
 
-    const result = await publishApp("app-1", "user-1", OWNER_EVENT, defaultDeps);
+    const result = await publishApp(
+      "app-1",
+      "user-1",
+      OWNER_EVENT,
+      defaultDeps,
+    );
 
     expect(result.app.status).toBe("PUBLISHED");
     expect(result.endpointUrl).toBe(
@@ -819,20 +837,19 @@ describe("publishApp", () => {
   });
 
   test("throws structured error when preconditions fail", async () => {
-    // Trigger a precondition failure with an agent that is not READY.
-    // (We can no longer rely on empty workflowIds alone — workflows are
-    // only required for multi-agent apps, and an empty-agents metadata
-    // now passes the validator.)
+    // Trigger a precondition failure via a manifest agent that is not READY.
+    // After finding 01a1ed59, publishApp reads bindings from the registry
+    // manifest — not AppsTable AGENT# rows.
+    seedOwnerApp("app-1", {
+      agentBindings: [{ agentId: "agent-1", status: "DESIGN" }],
+    });
     ddbMock.on(QueryCommand).resolves({
-      Items: [
-        makeMetadata(),
-        { sortId: "AGENT#agent-1", agentId: "agent-1", status: "DESIGN" },
-      ],
+      Items: [makeMetadata()],
     });
 
-    await expect(publishApp("app-1", "user-1", OWNER_EVENT, defaultDeps)).rejects.toThrow(
-      "Publish preconditions not met",
-    );
+    await expect(
+      publishApp("app-1", "user-1", OWNER_EVENT, defaultDeps),
+    ).rejects.toThrow("Publish preconditions not met");
   });
 
   test("full publish flow: provisions API GW, creates key, updates status, emits event", async () => {
@@ -855,7 +872,12 @@ describe("publishApp", () => {
     ddbMock.on(PutCommand).resolves({});
     ddbMock.on(UpdateCommand).resolves({});
 
-    const result = await publishApp("app-1", "user-1", OWNER_EVENT, defaultDeps);
+    const result = await publishApp(
+      "app-1",
+      "user-1",
+      OWNER_EVENT,
+      defaultDeps,
+    );
 
     // Verify result
     expect(result.app.status).toBe("PUBLISHED");
@@ -901,8 +923,7 @@ describe("publishApp", () => {
           undefined &&
         (
           c.args[0].input.ExpressionAttributeValues as
-            | Record<string, unknown>
-            | undefined
+            Record<string, unknown> | undefined
         )?.[":v_status"] === "PUBLISHED",
     );
     expect(metaUpdate).toBeDefined();
@@ -942,9 +963,9 @@ describe("publishApp", () => {
 
     apiGwMock.on(CreateStageCommand).rejects(new Error("Provisioning failed"));
 
-    await expect(publishApp("app-1", "user-1", OWNER_EVENT, defaultDeps)).rejects.toThrow(
-      "Provisioning failed",
-    );
+    await expect(
+      publishApp("app-1", "user-1", OWNER_EVENT, defaultDeps),
+    ).rejects.toThrow("Provisioning failed");
 
     // Should NOT have updated app status
     expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
@@ -1185,7 +1206,12 @@ describe("publishApp intake progress-on-publish", () => {
         return Promise.resolve({});
       });
 
-    const result = await publishApp("app-1", "user-1", OWNER_EVENT, defaultDeps);
+    const result = await publishApp(
+      "app-1",
+      "user-1",
+      OWNER_EVENT,
+      defaultDeps,
+    );
 
     expect(result.app.status).toBe("PUBLISHED");
     expect(result.endpointUrl).toBeTruthy();
