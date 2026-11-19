@@ -987,19 +987,85 @@ describe("reconcileResourceTags", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Non-CONNECTED status: skipped
+// Status-aware migration: ERROR stores with roles are migrated
 // ---------------------------------------------------------------------------
 
-describe("non-CONNECTED rows", () => {
-  it("skips PROVISIONING rows", async () => {
+describe("status-aware migration", () => {
+  const DS_ID = "ds-err-001";
+  const TABLE_NAME = "error-table";
+  const TABLE_ARN = `arn:aws:dynamodb:${REGION}:${ACCOUNT}:table/${TABLE_NAME}`;
+  const ROLE_NAME = `citadel-ds-${DS_ID}`;
+
+  it("migrates ERROR-status store that has a citadel-ds-* role", async () => {
+    const pm = createFakePm();
+    const iam = createFakeIam({
+      [ROLE_NAME]: {
+        policyDocument: {
+          Statement: [
+            {
+              Action: [
+                "dynamodb:CreateTable",
+                "dynamodb:DeleteTable",
+                "dynamodb:DescribeTable",
+              ],
+              Resource: ["*"],
+            },
+          ],
+        },
+        tags: [
+          { Key: "citadel:dataStoreId", Value: DS_ID },
+          { Key: "citadel:orgId", Value: "org-acme" },
+        ],
+      },
+    });
+    const dynamodbResource = createFakeDynamoDBResource({
+      [TABLE_ARN]: {
+        tags: [
+          { Key: "citadel:dataStoreId", Value: DS_ID },
+          { Key: "citadel:orgId", Value: "org-acme" },
+        ],
+      },
+    });
     const row = {
-      dataStoreId: "ds-prov",
+      dataStoreId: DS_ID,
       type: "DYNAMODB",
-      status: "PROVISIONING",
+      status: "ERROR",
+      orgId: "org-acme",
+      config: JSON.stringify({ tableName: TABLE_NAME, dataStoreId: DS_ID }),
+    };
+    const ddb = createFakeDdb([row]);
+
+    const summary = await runMigration("test-table", true, undefined, {
+      ...makeDeps(),
+      ddb: ddb as never,
+      iam: iam as never,
+      dynamodbResource: dynamodbResource as never,
+      pm: pm as never,
+    });
+
+    expect(summary.total).toBe(1);
+    expect(summary.policyChanged).toBe(1);
+    expect(pm.ensureRole).toHaveBeenCalledWith(
+      DS_ID,
+      expect.arrayContaining([
+        expect.objectContaining({
+          actions: expect.arrayContaining(["dynamodb:DescribeTable"]),
+        }),
+      ]),
+      ACCOUNT,
+      "datastore",
+    );
+  });
+
+  it("skips DELETING store", async () => {
+    const row = {
+      dataStoreId: "ds-deleting",
+      type: "DYNAMODB",
+      status: "DELETING",
       orgId: "org-acme",
       config: JSON.stringify({
-        tableName: "t",
-        dataStoreId: "ds-prov",
+        tableName: "del-table",
+        dataStoreId: "ds-deleting",
       }),
     };
     const ddb = createFakeDdb([row]);
@@ -1011,7 +1077,81 @@ describe("non-CONNECTED rows", () => {
       pm: pm as never,
     });
 
-    // The scan filter should exclude non-CONNECTED, so total=0
     expect(summary.total).toBe(0);
+    expect(pm.ensureRole).not.toHaveBeenCalled();
+  });
+
+  it("skips DELETED store", async () => {
+    const row = {
+      dataStoreId: "ds-deleted",
+      type: "S3",
+      status: "DELETED",
+      orgId: "org-acme",
+      config: JSON.stringify({
+        bucketName: "del-bucket",
+        dataStoreId: "ds-deleted",
+      }),
+    };
+    const ddb = createFakeDdb([row]);
+    const pm = createFakePm();
+
+    const summary = await runMigration("test-table", true, undefined, {
+      ...makeDeps(),
+      ddb: ddb as never,
+      pm: pm as never,
+    });
+
+    expect(summary.total).toBe(0);
+    expect(pm.ensureRole).not.toHaveBeenCalled();
+  });
+
+  it("logs the status per store in console output", async () => {
+    const consoleSpy = jest.spyOn(console, "log").mockImplementation(() => {});
+    const pm = createFakePm();
+    const iam = createFakeIam({
+      [ROLE_NAME]: {
+        policyDocument: {
+          Statement: [
+            {
+              Action: ["dynamodb:DescribeTable"],
+              Resource: [TABLE_ARN],
+            },
+          ],
+        },
+        tags: [
+          { Key: "citadel:dataStoreId", Value: DS_ID },
+          { Key: "citadel:orgId", Value: "org-acme" },
+        ],
+      },
+    });
+    const dynamodbResource = createFakeDynamoDBResource({
+      [TABLE_ARN]: {
+        tags: [
+          { Key: "citadel:dataStoreId", Value: DS_ID },
+          { Key: "citadel:orgId", Value: "org-acme" },
+        ],
+      },
+    });
+    const row = {
+      dataStoreId: DS_ID,
+      type: "DYNAMODB",
+      status: "ERROR",
+      orgId: "org-acme",
+      config: JSON.stringify({ tableName: TABLE_NAME, dataStoreId: DS_ID }),
+    };
+    const ddb = createFakeDdb([row]);
+
+    await runMigration("test-table", true, undefined, {
+      ...makeDeps(),
+      ddb: ddb as never,
+      iam: iam as never,
+      dynamodbResource: dynamodbResource as never,
+      pm: pm as never,
+    });
+
+    const logged = consoleSpy.mock.calls.map((c) => c[0]).join("\n");
+    expect(logged).toContain("status: ERROR");
+
+    consoleSpy.mockRestore();
   });
 });
