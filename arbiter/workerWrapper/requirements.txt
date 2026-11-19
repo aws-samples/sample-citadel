@@ -1,4 +1,4 @@
-strands-agents==1.64.0
+strands-agents==1.65.0
 # Security floor: strands-agents requires mcp>=1.23.0 but CVE-2026-59951 was patched in 1.30.0.
 mcp==2.3.0
 # boto3 and aws-xray-sdk are intentionally NOT listed here — they are provided
