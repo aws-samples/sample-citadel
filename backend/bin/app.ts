@@ -17,6 +17,7 @@ import * as cdk from "aws-cdk-lib";
 // (Aspects accessed via cdk.Aspects)
 import { AwsSolutionsChecks, NagSuppressions } from "cdk-nag";
 import { EnableLambdaTracing } from "../lib/tracing-aspect";
+import { SuppressNodejsL1Nag } from "../lib/nag-l1-suppression-aspect";
 import { ServicesStack } from "../lib/services-stack";
 import { BackendStack } from "../lib/backend-stack";
 import { ArbiterStack } from "../lib/arbiter-stack";
@@ -524,6 +525,10 @@ for (const lambdaBearingStack of [
 }
 
 // O-06: Tagging strategy — apply consistent tags across all stacks
+// Suppress AwsSolutions-L1 for Node.js Lambdas pinned to NODE_RUNTIME
+// while Lambda's Node 26 runtime is not yet LTS/GA (decision a9068699).
+cdk.Aspects.of(app).add(new SuppressNodejsL1Nag());
+
 cdk.Tags.of(app).add("Project", "Citadel");
 cdk.Tags.of(app).add("Environment", environment);
 cdk.Tags.of(app).add("Team", "platform");
