@@ -69,7 +69,11 @@ def _make_ddb_mock(spec_status: str = "APPROVED"):
     """DynamoDB resource mock for assert_spec_approved."""
     table = MagicMock()
     table.get_item.return_value = {
-        "Item": {"specId": "spec-123", "status": spec_status}
+        "Item": {
+            "specId": "spec-123",
+            "status": spec_status,
+            "orgId": "test-org",
+        }
     }
     resource = MagicMock()
     resource.Table.return_value = table
