@@ -798,7 +798,9 @@ def _is_absent_or_empty_permissions(required_permissions: dict | None) -> bool:
     if not required_permissions:
         return True
     return not (
-        required_permissions.get('integrations') or required_permissions.get('dataStores')
+        required_permissions.get('models')
+        or required_permissions.get('integrations')
+        or required_permissions.get('dataStores')
     )
 
 
