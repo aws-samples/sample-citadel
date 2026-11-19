@@ -95,10 +95,8 @@ export class AuroraAdapter implements ConnectorAdapter {
     const engineName =
       this.engine === "postgres" ? "aurora-postgresql" : "aurora-mysql";
 
-    const masterUsername = (credentials?.masterUsername ??
-      config.masterUsername) as string | undefined;
-    const masterPassword = (credentials?.masterPassword ??
-      config.masterPassword) as string | undefined;
+    const masterUsername = credentials?.masterUsername as string | undefined;
+    const masterPassword = credentials?.masterPassword as string | undefined;
 
     if (!masterUsername || !masterPassword) {
       throw new ProvisioningError(

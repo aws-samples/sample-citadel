@@ -102,7 +102,7 @@ export class DatabricksAdapter implements ConnectorAdapter {
       );
     }
 
-    const token = (credentials?.token ?? config.token) as string | undefined;
+    const token = credentials?.token as string | undefined;
     if (!token) {
       throw new ValidationError(
         "Missing required Databricks credential: token",

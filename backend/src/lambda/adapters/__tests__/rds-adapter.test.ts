@@ -31,16 +31,20 @@ describe("RdsAdapter", () => {
   let mysqlAdapter: RdsAdapter;
   const config = {
     dbInstanceIdentifier: "my-test-db",
-    masterUsername: "dbadmin",
-    masterPassword: "secret123",
     dataStoreId: "ds-1",
     orgId: "org-1",
   };
+  /** Credentials carrying the secret fields. */
   const creds = markScopedCredentials({
     masterUsername: "dbadmin",
     masterPassword: "secret123",
     ...MOCK_SCOPED_CREDENTIALS,
   });
+  /** Plain (unmarked) credentials — no WeakSet provenance marker. */
+  const plainCreds = {
+    masterUsername: "dbadmin",
+    masterPassword: "secret123",
+  };
 
   beforeEach(() => {
     postgresAdapter = new RdsAdapter("postgres");
@@ -111,7 +115,7 @@ describe("RdsAdapter", () => {
           DBInstanceArn: "arn:aws:rds:us-east-1:123:db:my-test-db",
         },
       });
-      const result = await postgresAdapter.provision(config, undefined);
+      const result = await postgresAdapter.provision(config, plainCreds);
       expect(result.resourceArn).toBe(
         "arn:aws:rds:us-east-1:123:db:my-test-db",
       );

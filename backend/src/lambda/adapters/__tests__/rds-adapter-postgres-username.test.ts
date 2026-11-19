@@ -4,7 +4,6 @@
  */
 import { RDSClient, CreateDBInstanceCommand } from "@aws-sdk/client-rds";
 import { mockClient } from "aws-sdk-client-mock";
-import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
 
 const rdsMock = mockClient(RDSClient);
 
@@ -23,21 +22,16 @@ describe("RdsAdapter.provision - PostgreSQL reserved username validation", () =>
   test('rejects "admin" as masterUsername for postgres engine', async () => {
     await expect(
       adapter.provision(
+        {},
         { masterUsername: "admin", masterPassword: "pass123" },
-        MOCK_SCOPED_CREDENTIALS,
       ),
     ).rejects.toThrow(/reserved/i);
   });
 
   test('allows "dbadmin" as masterUsername for postgres engine', async () => {
     const result = await adapter.provision(
-      {
-        masterUsername: "dbadmin",
-        masterPassword: "pass123",
-        dataStoreId: "ds-1",
-        orgId: "org-1",
-      },
-      MOCK_SCOPED_CREDENTIALS,
+      { dataStoreId: "ds-1", orgId: "org-1" },
+      { masterUsername: "dbadmin", masterPassword: "pass123" },
     );
     expect(result.resourceArn).toBeDefined();
   });
@@ -55,13 +49,8 @@ describe("RdsAdapter.provision - MySQL allows admin username", () => {
 
   test('allows "admin" as masterUsername for mysql engine', async () => {
     const result = await adapter.provision(
-      {
-        masterUsername: "admin",
-        masterPassword: "pass123",
-        dataStoreId: "ds-1",
-        orgId: "org-1",
-      },
-      MOCK_SCOPED_CREDENTIALS,
+      { dataStoreId: "ds-1", orgId: "org-1" },
+      { masterUsername: "admin", masterPassword: "pass123" },
     );
     expect(result.resourceArn).toBeDefined();
   });

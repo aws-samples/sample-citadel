@@ -27,6 +27,7 @@ import {
   CreateDataStoreInput,
   datastoreService,
 } from '../services/datastoreService';
+import { CREDENTIAL_KEYS } from '../utils/secret-field-keys';
 import {
   Database,
   Cloud,
@@ -243,6 +244,19 @@ export function CreateDataStoreWizard({
       }
 
       const meta = DATA_STORE_TYPE_META[selectedType];
+      // Split config into non-secret config and credentials bag.
+      // Any key in CREDENTIAL_KEYS is a secret or credential-adjacent field
+      // that must travel in the `credentials` bag, not `config`.
+      const cleanConfig: Record<string, string> = {};
+      const credentialsBag: Record<string, string> = {};
+      for (const [key, value] of Object.entries(finalConfig)) {
+        if (CREDENTIAL_KEYS.has(key)) {
+          credentialsBag[key] = value;
+        } else {
+          cleanConfig[key] = value;
+        }
+      }
+
       const input: CreateDataStoreInput = {
         name: name.trim(),
         description: description.trim() || undefined,
@@ -250,7 +264,10 @@ export function CreateDataStoreWizard({
         category: meta.category,
         provisionMode,
         orgId,
-        config: JSON.stringify(finalConfig),
+        config: JSON.stringify(cleanConfig),
+        credentials: Object.keys(credentialsBag).length > 0
+          ? JSON.stringify(credentialsBag)
+          : undefined,
         clientRequestToken: crypto.randomUUID(),
       };
 

@@ -38,6 +38,7 @@ import {
   emitArnRefused,
 } from "../utils/arn-safety";
 import { computeTrustPath } from "../utils/trust-path";
+import { SECRET_FIELD_KEYS } from "../utils/secret-field-keys";
 
 // --- Clients ---
 
@@ -129,6 +130,60 @@ interface AppSyncEvent extends Omit<
   identity?: AppSyncEventIdentity;
 }
 
+// --- Secret-field utilities ---
+
+/**
+ * Deep-redact any key that appears in SECRET_FIELD_KEYS (or is exactly
+ * "credentials") anywhere in a nested payload, including JSON-encoded
+ * string values. Used for sanitising log output.
+ */
+export function deepRedactSecrets(obj: unknown): unknown {
+  if (obj === null || obj === undefined) return obj;
+  if (typeof obj === "string") {
+    try {
+      const parsed: unknown = JSON.parse(obj);
+      if (typeof parsed === "object" && parsed !== null) {
+        return JSON.stringify(deepRedactSecrets(parsed));
+      }
+    } catch {
+      /* not JSON — return as-is */
+    }
+    return obj;
+  }
+  if (Array.isArray(obj)) return obj.map(deepRedactSecrets);
+  if (typeof obj === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+      if (SECRET_FIELD_KEYS.has(key) || key === "credentials") {
+        result[key] = "[REDACTED]";
+      } else {
+        result[key] = deepRedactSecrets(value);
+      }
+    }
+    return result;
+  }
+  return obj;
+}
+
+/**
+ * Boundary rule: reject any SECRET_FIELD_KEYS found inside a config object.
+ * Throws a clear ValidationError directing the caller to use the credentials
+ * bag instead.
+ */
+function rejectSecretsInConfig(
+  config: Record<string, unknown>,
+  context: string,
+): void {
+  const leaked = Object.keys(config).filter((k) => SECRET_FIELD_KEYS.has(k));
+  if (leaked.length > 0) {
+    throw new ValidationError(
+      `Secret-like fields must be submitted in 'credentials', not 'config' ` +
+        `(${context}): ${leaked.join(", ")}. ` +
+        `Update your client to route these fields into the credentials bag.`,
+    );
+  }
+}
+
 // --- Handler ---
 
 /**
@@ -167,22 +222,7 @@ async function requireEffectiveOrgId(event: AppSyncEvent): Promise<string> {
 }
 
 export async function handler(event: AppSyncEvent) {
-  const sanitizedEvent = {
-    ...event,
-    arguments: event.arguments
-      ? {
-          ...event.arguments,
-          input: event.arguments.input
-            ? {
-                ...event.arguments.input,
-                credentials: event.arguments.input.credentials
-                  ? "[REDACTED]"
-                  : undefined,
-              }
-            : undefined,
-        }
-      : undefined,
-  };
+  const sanitizedEvent = deepRedactSecrets(event);
   console.log(
     "DataStore resolver event:",
     JSON.stringify(sanitizedEvent, null, 2),
@@ -641,6 +681,9 @@ async function createDataStore(
       : input.credentials
     : undefined;
 
+  // Boundary rule: reject secret-like keys in config
+  rejectSecretsInConfig(config, "createDataStore");
+
   // Determine icon and provider from type metadata
   const icon = "Database";
   const provider = input.type.startsWith("EXTERNAL_")
@@ -931,6 +974,12 @@ async function updateDataStore(input: UpdateDataStoreInput, event: unknown) {
   if (input.name !== undefined) updates.name = input.name;
   if (input.description !== undefined) updates.description = input.description;
   if (input.config !== undefined) {
+    // Boundary rule: reject secret-like keys in config on update too
+    const parsedConfig =
+      typeof input.config === "string"
+        ? JSON.parse(input.config)
+        : input.config;
+    rejectSecretsInConfig(parsedConfig, "updateDataStore");
     updates.config =
       typeof input.config === "string"
         ? input.config

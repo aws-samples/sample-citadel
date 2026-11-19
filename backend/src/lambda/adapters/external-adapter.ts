@@ -133,13 +133,13 @@ export class ExternalDatabaseAdapter implements ConnectorAdapter {
 
   async testConnection(
     config: Record<string, unknown>,
-    _credentials?: Record<string, unknown>,
+    credentials?: Record<string, unknown>,
   ): Promise<ConnectionTestResult> {
     switch (this.kind) {
       case "mongodb":
-        return this.testMongoConnection(config);
+        return this.testMongoConnection(config, credentials);
       case "api":
-        return this.testApiConnection(config);
+        return this.testApiConnection(config, credentials);
       case "postgresql":
       case "mysql":
       case "elasticsearch":
@@ -184,9 +184,12 @@ export class ExternalDatabaseAdapter implements ConnectorAdapter {
 
   private async testMongoConnection(
     config: Record<string, unknown>,
+    credentials?: Record<string, unknown>,
   ): Promise<ConnectionTestResult> {
     try {
-      const url = new URL(config.connectionString as string);
+      const connStr = (credentials?.connectionString ??
+        config.connectionString) as string;
+      const url = new URL(connStr);
       const host = url.hostname;
       const port = url.port ? parseInt(url.port, 10) : 27017;
       const reachable = await this.safeTcpCheck(host, port, 5000);
@@ -212,6 +215,7 @@ export class ExternalDatabaseAdapter implements ConnectorAdapter {
 
   private async testApiConnection(
     config: Record<string, unknown>,
+    _credentials?: Record<string, unknown>,
   ): Promise<ConnectionTestResult> {
     try {
       // CIT-300: validate the URL through the full url-safety pipeline.

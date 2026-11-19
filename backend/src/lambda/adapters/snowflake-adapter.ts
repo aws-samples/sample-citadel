@@ -96,10 +96,8 @@ export class SnowflakeAdapter implements ConnectorAdapter {
       );
     }
 
-    const username = (credentials?.username ?? config.username) as
-      string | undefined;
-    const password = (credentials?.password ?? config.password) as
-      string | undefined;
+    const username = credentials?.username as string | undefined;
+    const password = credentials?.password as string | undefined;
 
     if (!username || !password) {
       throw new ValidationError(
