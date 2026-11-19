@@ -434,7 +434,7 @@ export async function runMigration(
     errors: 0,
   };
 
-  // Build filter expression for CONNECTED rows of supported types
+  // Build filter expression: supported types, excluding deleted/DELETING
   const typeValues: Record<string, string> = {};
   let idx = 0;
   for (const t of MIGRATED_TYPES) {
@@ -446,11 +446,12 @@ export async function runMigration(
     const scan = await ddb.send(
       new ScanCommand({
         TableName: table,
-        FilterExpression: `#t IN (${typeCondition}) AND #st = :connected`,
+        FilterExpression: `#t IN (${typeCondition}) AND NOT #st IN (:deleted, :deleting)`,
         ExpressionAttributeNames: { "#t": "type", "#st": "status" },
         ExpressionAttributeValues: {
           ...typeValues,
-          ":connected": "CONNECTED",
+          ":deleted": "DELETED",
+          ":deleting": "DELETING",
         },
         ExclusiveStartKey: lastKey,
       }),
@@ -464,7 +465,8 @@ export async function runMigration(
 
       // Defensive client-side re-check (server-side FilterExpression
       // is the primary filter but mocks may not enforce it)
-      if (!MIGRATED_TYPES.has(dsType) || status !== "CONNECTED") {
+      const EXCLUDED_STATUSES = new Set(["DELETED", "DELETING"]);
+      if (!MIGRATED_TYPES.has(dsType) || EXCLUDED_STATUSES.has(status)) {
         continue;
       }
 
@@ -509,7 +511,9 @@ export async function runMigration(
       }
 
       const roleName = PolicyManager.getRoleName(dsId);
-      console.log(`  ${dsId} (type: ${dsType}, role: ${roleName}):`);
+      console.log(
+        `  ${dsId} (type: ${dsType}, status: ${status}, role: ${roleName}):`,
+      );
 
       try {
         // ---------------------------------------------------------------
