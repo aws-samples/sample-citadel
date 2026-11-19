@@ -88,10 +88,8 @@ export class DocumentDBAdapter implements ConnectorAdapter {
       (config.dbClusterIdentifier as string | undefined) ??
       `citadel-docdb-${Date.now()}`;
 
-    const masterUsername = (credentials?.masterUsername ??
-      config.masterUsername) as string | undefined;
-    const masterPassword = (credentials?.masterPassword ??
-      config.masterPassword) as string | undefined;
+    const masterUsername = credentials?.masterUsername as string | undefined;
+    const masterPassword = credentials?.masterPassword as string | undefined;
 
     if (!masterUsername || !masterPassword) {
       throw new ProvisioningError(

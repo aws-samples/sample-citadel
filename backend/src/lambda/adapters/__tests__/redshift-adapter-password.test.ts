@@ -5,6 +5,7 @@
 import { RedshiftClient, CreateClusterCommand } from "@aws-sdk/client-redshift";
 import { mockClient } from "aws-sdk-client-mock";
 import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
+import { markScopedCredentials } from "../credential-guard";
 
 const rsMock = mockClient(RedshiftClient);
 
@@ -23,12 +24,12 @@ describe("RedshiftAdapter.provision - password validation", () => {
   test("rejects password without uppercase letter", async () => {
     await expect(
       adapter.provision(
-        {
-          clusterIdentifier: "test",
+        { clusterIdentifier: "test" },
+        markScopedCredentials({
+          ...MOCK_SCOPED_CREDENTIALS,
           masterUsername: "admin",
           masterPassword: "alllowercase1",
-        },
-        MOCK_SCOPED_CREDENTIALS,
+        }),
       ),
     ).rejects.toThrow(/uppercase/i);
   });
@@ -36,12 +37,12 @@ describe("RedshiftAdapter.provision - password validation", () => {
   test("rejects password without lowercase letter", async () => {
     await expect(
       adapter.provision(
-        {
-          clusterIdentifier: "test",
+        { clusterIdentifier: "test" },
+        markScopedCredentials({
+          ...MOCK_SCOPED_CREDENTIALS,
           masterUsername: "admin",
           masterPassword: "ALLUPPERCASE1",
-        },
-        MOCK_SCOPED_CREDENTIALS,
+        }),
       ),
     ).rejects.toThrow(/lowercase/i);
   });
@@ -49,24 +50,24 @@ describe("RedshiftAdapter.provision - password validation", () => {
   test("rejects password without digit", async () => {
     await expect(
       adapter.provision(
-        {
-          clusterIdentifier: "test",
+        { clusterIdentifier: "test" },
+        markScopedCredentials({
+          ...MOCK_SCOPED_CREDENTIALS,
           masterUsername: "admin",
           masterPassword: "NoDigitsHere",
-        },
-        MOCK_SCOPED_CREDENTIALS,
+        }),
       ),
     ).rejects.toThrow(/digit/i);
   });
 
   test("accepts valid password with uppercase, lowercase, and digit", async () => {
     const result = await adapter.provision(
-      {
-        clusterIdentifier: "test",
+      { clusterIdentifier: "test" },
+      markScopedCredentials({
+        ...MOCK_SCOPED_CREDENTIALS,
         masterUsername: "admin",
         masterPassword: "ValidPass1",
-      },
-      MOCK_SCOPED_CREDENTIALS,
+      }),
     );
     expect(result.resourceArn).toBeDefined();
   });

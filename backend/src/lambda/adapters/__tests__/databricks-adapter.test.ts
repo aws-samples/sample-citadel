@@ -23,6 +23,8 @@ describe("DatabricksAdapter", () => {
   const validConfig = {
     host: "myworkspace.cloud.databricks.com",
     httpPath: "/sql/1.0/warehouses/abc123",
+  };
+  const validCredentials = {
     token: "dapi-token-123",
   };
 
@@ -63,17 +65,14 @@ describe("DatabricksAdapter", () => {
       await expect(
         adapter.testConnection(
           { httpPath: "/path", token: "tok" },
-          MOCK_SCOPED_CREDENTIALS,
+          validCredentials,
         ),
       ).rejects.toThrow(ValidationError);
     });
 
     it("throws ValidationError when httpPath is missing", async () => {
       await expect(
-        adapter.testConnection(
-          { host: "h", token: "tok" },
-          MOCK_SCOPED_CREDENTIALS,
-        ),
+        adapter.testConnection({ host: "h", token: "tok" }, validCredentials),
       ).rejects.toThrow(ValidationError);
     });
 
@@ -92,7 +91,7 @@ describe("DatabricksAdapter", () => {
 
       const result = await adapter.testConnection(
         validConfig,
-        MOCK_SCOPED_CREDENTIALS,
+        validCredentials,
       );
       expect(result.success).toBe(true);
       expect(result.message).toContain("myworkspace.cloud.databricks.com");
@@ -104,7 +103,7 @@ describe("DatabricksAdapter", () => {
       mockConnect.mockResolvedValueOnce(undefined);
       mockClose.mockResolvedValueOnce(undefined);
 
-      await adapter.testConnection(validConfig, MOCK_SCOPED_CREDENTIALS);
+      await adapter.testConnection(validConfig, validCredentials);
       expect(mockConnect).toHaveBeenCalledWith({
         host: "myworkspace.cloud.databricks.com",
         path: "/sql/1.0/warehouses/abc123",
@@ -118,7 +117,7 @@ describe("DatabricksAdapter", () => {
       mockConnect.mockResolvedValueOnce(undefined);
       mockClose.mockResolvedValueOnce(undefined);
 
-      await adapter.testConnection(validConfig, MOCK_SCOPED_CREDENTIALS);
+      await adapter.testConnection(validConfig, validCredentials);
       expect(mockConnect).toHaveBeenCalledWith(
         expect.objectContaining({ telemetryEnabled: false }),
       );
@@ -130,7 +129,7 @@ describe("DatabricksAdapter", () => {
       mockClose.mockResolvedValueOnce(undefined);
 
       try {
-        await adapter.testConnection(validConfig, MOCK_SCOPED_CREDENTIALS);
+        await adapter.testConnection(validConfig, validCredentials);
         fail("Expected PermissionError");
       } catch (err) {
         expect(err).toBeInstanceOf(PermissionError);
@@ -144,7 +143,7 @@ describe("DatabricksAdapter", () => {
       mockClose.mockResolvedValueOnce(undefined);
 
       try {
-        await adapter.testConnection(validConfig, MOCK_SCOPED_CREDENTIALS);
+        await adapter.testConnection(validConfig, validCredentials);
         fail("Expected ConnectionError");
       } catch (err) {
         expect(err).toBeInstanceOf(ConnectionError);
@@ -158,7 +157,7 @@ describe("DatabricksAdapter", () => {
       mockClose.mockResolvedValueOnce(undefined);
 
       try {
-        await adapter.testConnection(validConfig, MOCK_SCOPED_CREDENTIALS);
+        await adapter.testConnection(validConfig, validCredentials);
         fail("Expected DataStoreError");
       } catch (err) {
         expect(err).toBeInstanceOf(DataStoreError);
@@ -185,7 +184,7 @@ describe("DatabricksAdapter", () => {
       mockClose.mockResolvedValueOnce(undefined);
 
       try {
-        await adapter.testConnection(validConfig, MOCK_SCOPED_CREDENTIALS);
+        await adapter.testConnection(validConfig, validCredentials);
       } catch {
         /* expected */
       }
@@ -200,7 +199,7 @@ describe("DatabricksAdapter", () => {
       mockClose.mockResolvedValueOnce(undefined);
 
       await expect(
-        adapter.connect(validConfig, MOCK_SCOPED_CREDENTIALS),
+        adapter.connect(validConfig, validCredentials),
       ).resolves.toBeUndefined();
     });
 
@@ -210,7 +209,7 @@ describe("DatabricksAdapter", () => {
       mockClose.mockResolvedValueOnce(undefined);
 
       await expect(
-        adapter.connect(validConfig, MOCK_SCOPED_CREDENTIALS),
+        adapter.connect(validConfig, validCredentials),
       ).rejects.toThrow(ConnectionError);
     });
 

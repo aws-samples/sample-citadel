@@ -26,6 +26,8 @@ describe("SnowflakeAdapter", () => {
     accountIdentifier: "myaccount",
     warehouse: "COMPUTE_WH",
     database: "MY_DB",
+  };
+  const validCredentials = {
     username: "user",
     password: "pass",
   };
@@ -67,8 +69,8 @@ describe("SnowflakeAdapter", () => {
     it("throws ValidationError when accountIdentifier is missing", async () => {
       await expect(
         adapter.testConnection(
-          { warehouse: "WH", database: "DB", username: "u", password: "p" },
-          MOCK_SCOPED_CREDENTIALS,
+          { warehouse: "WH", database: "DB" },
+          validCredentials,
         ),
       ).rejects.toThrow(ValidationError);
     });
@@ -79,10 +81,8 @@ describe("SnowflakeAdapter", () => {
           {
             accountIdentifier: "acct",
             database: "DB",
-            username: "u",
-            password: "p",
           },
-          MOCK_SCOPED_CREDENTIALS,
+          validCredentials,
         ),
       ).rejects.toThrow(ValidationError);
     });
@@ -93,10 +93,8 @@ describe("SnowflakeAdapter", () => {
           {
             accountIdentifier: "acct",
             warehouse: "WH",
-            username: "u",
-            password: "p",
           },
-          MOCK_SCOPED_CREDENTIALS,
+          validCredentials,
         ),
       ).rejects.toThrow(ValidationError);
     });
@@ -116,7 +114,7 @@ describe("SnowflakeAdapter", () => {
 
       const result = await adapter.testConnection(
         validConfig,
-        MOCK_SCOPED_CREDENTIALS,
+        validCredentials,
       );
       expect(result.success).toBe(true);
       expect(result.message).toContain("myaccount");
@@ -129,7 +127,7 @@ describe("SnowflakeAdapter", () => {
       mockConnect.mockImplementation((cb: (err: unknown) => void) => cb(null));
       mockDestroy.mockImplementation((cb: (err: unknown) => void) => cb(null));
 
-      await adapter.testConnection(validConfig, MOCK_SCOPED_CREDENTIALS);
+      await adapter.testConnection(validConfig, validCredentials);
       expect(mockCreateConnection).toHaveBeenCalledWith(
         expect.objectContaining({
           account: "myaccount",
@@ -149,7 +147,7 @@ describe("SnowflakeAdapter", () => {
       );
 
       try {
-        await adapter.testConnection(validConfig, MOCK_SCOPED_CREDENTIALS);
+        await adapter.testConnection(validConfig, validCredentials);
         fail("Expected PermissionError");
       } catch (err) {
         expect(err).toBeInstanceOf(PermissionError);
@@ -164,7 +162,7 @@ describe("SnowflakeAdapter", () => {
       );
 
       try {
-        await adapter.testConnection(validConfig, MOCK_SCOPED_CREDENTIALS);
+        await adapter.testConnection(validConfig, validCredentials);
         fail("Expected ConnectionError");
       } catch (err) {
         expect(err).toBeInstanceOf(ConnectionError);
@@ -179,7 +177,7 @@ describe("SnowflakeAdapter", () => {
       );
 
       try {
-        await adapter.testConnection(validConfig, MOCK_SCOPED_CREDENTIALS);
+        await adapter.testConnection(validConfig, validCredentials);
         fail("Expected DataStoreError");
       } catch (err) {
         expect(err).toBeInstanceOf(DataStoreError);
@@ -210,7 +208,7 @@ describe("SnowflakeAdapter", () => {
       mockDestroy.mockImplementation((cb: (err: unknown) => void) => cb(null));
 
       await expect(
-        adapter.connect(validConfig, MOCK_SCOPED_CREDENTIALS),
+        adapter.connect(validConfig, validCredentials),
       ).resolves.toBeUndefined();
     });
 
@@ -221,16 +219,13 @@ describe("SnowflakeAdapter", () => {
       );
 
       await expect(
-        adapter.connect(validConfig, MOCK_SCOPED_CREDENTIALS),
+        adapter.connect(validConfig, validCredentials),
       ).rejects.toThrow(ConnectionError);
     });
 
     it("propagates ValidationError from testConnection", async () => {
       await expect(
-        adapter.connect(
-          { warehouse: "WH", database: "DB" },
-          MOCK_SCOPED_CREDENTIALS,
-        ),
+        adapter.connect({ warehouse: "WH", database: "DB" }, validCredentials),
       ).rejects.toThrow(ValidationError);
     });
   });

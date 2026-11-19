@@ -5,10 +5,17 @@
 import { RedshiftClient, CreateClusterCommand } from "@aws-sdk/client-redshift";
 import { mockClient } from "aws-sdk-client-mock";
 import { MOCK_SCOPED_CREDENTIALS } from "./helpers/mock-credentials";
+import { markScopedCredentials } from "../credential-guard";
 
 const rsMock = mockClient(RedshiftClient);
 
 import { RedshiftAdapter } from "../redshift-adapter";
+
+const PROVISION_CREDS = markScopedCredentials({
+  ...MOCK_SCOPED_CREDENTIALS,
+  masterUsername: "admin",
+  masterPassword: "Secret123!",
+});
 
 describe("RedshiftAdapter.provision - default node type", () => {
   const adapter = new RedshiftAdapter();
@@ -24,10 +31,8 @@ describe("RedshiftAdapter.provision - default node type", () => {
     await adapter.provision(
       {
         clusterIdentifier: "test",
-        masterUsername: "admin",
-        masterPassword: "Secret123!",
       },
-      MOCK_SCOPED_CREDENTIALS,
+      PROVISION_CREDS,
     );
 
     const calls = rsMock.commandCalls(CreateClusterCommand);
@@ -39,11 +44,9 @@ describe("RedshiftAdapter.provision - default node type", () => {
     await adapter.provision(
       {
         clusterIdentifier: "test",
-        masterUsername: "admin",
-        masterPassword: "Secret123!",
         nodeType: "ra3.xlplus",
       },
-      MOCK_SCOPED_CREDENTIALS,
+      PROVISION_CREDS,
     );
 
     const calls = rsMock.commandCalls(CreateClusterCommand);
@@ -55,12 +58,10 @@ describe("RedshiftAdapter.provision - default node type", () => {
     await adapter.provision(
       {
         clusterIdentifier: "test",
-        masterUsername: "admin",
-        masterPassword: "Secret123!",
         nodeType: "ra3.xlplus",
         numberOfNodes: 1,
       },
-      MOCK_SCOPED_CREDENTIALS,
+      PROVISION_CREDS,
     );
 
     // Even with numberOfNodes=1, ra3.xlplus requires multi-node (min 2)
@@ -72,11 +73,9 @@ describe("RedshiftAdapter.provision - default node type", () => {
     await adapter.provision(
       {
         clusterIdentifier: "test",
-        masterUsername: "admin",
-        masterPassword: "Secret123!",
         nodeType: "ra3.4xlarge",
       },
-      MOCK_SCOPED_CREDENTIALS,
+      PROVISION_CREDS,
     );
 
     const calls = rsMock.commandCalls(CreateClusterCommand);

@@ -103,7 +103,7 @@ export class RdsAdapter implements ConnectorAdapter {
 
   async provision(
     config: Record<string, unknown>,
-    _credentials?: Record<string, unknown>,
+    credentials?: Record<string, unknown>,
   ): Promise<ProvisionResult> {
     const client = this.platformProvisionClient();
     const identifier =
@@ -111,8 +111,8 @@ export class RdsAdapter implements ConnectorAdapter {
       `citadel-${this.engine}-${Date.now()}`;
     const engineName = this.engine === "postgres" ? "postgres" : "mysql";
 
-    const masterUsername = config.masterUsername as string | undefined;
-    const masterPassword = config.masterPassword as string | undefined;
+    const masterUsername = credentials?.masterUsername as string | undefined;
+    const masterPassword = credentials?.masterPassword as string | undefined;
 
     if (!masterUsername || !masterPassword) {
       throw new ProvisioningError(

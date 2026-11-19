@@ -292,8 +292,6 @@ describe("Property 1: Adapter SDK error wrapping", () => {
     mockRdsSend,
     {
       dbInstanceIdentifier: "db",
-      masterUsername: "u",
-      masterPassword: "p",
       dataStoreId: "ds-1",
       orgId: "org-1",
     },
@@ -442,9 +440,8 @@ describe("Property 1: Adapter SDK error wrapping", () => {
       accountIdentifier: "acct",
       warehouse: "WH",
       database: "DB",
-      username: "u",
-      password: "p",
     };
+    const creds = { username: "u", password: "p" };
 
     await fc.assert(
       fc.asyncProperty(
@@ -456,7 +453,7 @@ describe("Property 1: Adapter SDK error wrapping", () => {
             (cb: (err: unknown) => void) => cb(sdkError),
           );
           try {
-            await adapter.testConnection(config, MOCK_SCOPED_CREDENTIALS);
+            await adapter.testConnection(config, creds);
           } catch (thrown) {
             expect(thrown).toBeInstanceOf(DataStoreError);
             expect((thrown as DataStoreError).cause).toBe(sdkError);
@@ -473,8 +470,8 @@ describe("Property 1: Adapter SDK error wrapping", () => {
     const config = {
       host: "h.databricks.com",
       httpPath: "/sql/1.0/warehouses/x",
-      token: "tok",
     };
+    const creds = { token: "tok" };
 
     await fc.assert(
       fc.asyncProperty(
@@ -485,7 +482,7 @@ describe("Property 1: Adapter SDK error wrapping", () => {
           mockDatabricksConnect.mockRejectedValueOnce(sdkError);
           mockDatabricksClose.mockResolvedValueOnce(undefined);
           try {
-            await adapter.testConnection(config, MOCK_SCOPED_CREDENTIALS);
+            await adapter.testConnection(config, creds);
           } catch (thrown) {
             expect(thrown).toBeInstanceOf(DataStoreError);
             expect((thrown as DataStoreError).cause).toBe(sdkError);
