@@ -106,7 +106,10 @@ const OWNER_EVENT = {
   },
 };
 
-function seedOwnerApp(appId = "app-1") {
+function seedOwnerApp(
+  appId = "app-1",
+  manifestOverrides: Record<string, unknown> = {},
+) {
   seedMockRegistry("agent", appId, {
     name: "Test App",
     status: "ACTIVE",
@@ -116,6 +119,8 @@ function seedOwnerApp(appId = "app-1") {
         orgId: APP_ORG,
         createdBy: OWNER_ID,
         access: {},
+        agentBindings: [{ agentId: "agent-default", status: "READY" }],
+        ...manifestOverrides,
       },
     }),
   });
@@ -244,6 +249,9 @@ describe("publishApp: tag-policy enforcement (step 3c)", () => {
 
   test("strict + bound agent with policy-violating tags → TAG_POLICY_VIOLATION, no publish", async () => {
     mockGetGovernanceEnforce.mockResolvedValue("strict");
+    seedOwnerApp("app-1", {
+      agentBindings: [{ agentId: "agent-tagged-1", status: "READY" }],
+    });
     seedAgentWithTags("agent-tagged-1", { team: "platform" });
     mockEnforceTagPolicy.mockRejectedValueOnce(
       new TagPolicyViolationError(
@@ -254,14 +262,7 @@ describe("publishApp: tag-policy enforcement (step 3c)", () => {
     );
 
     ddbMock.on(QueryCommand).resolves({
-      Items: [
-        makeMetadata({ workflowIds: [] }),
-        {
-          sortId: "AGENT#agent-tagged-1",
-          agentId: "agent-tagged-1",
-          status: "READY",
-        },
-      ],
+      Items: [makeMetadata({ workflowIds: [] })],
     });
 
     await expect(
@@ -284,6 +285,9 @@ describe("publishApp: tag-policy enforcement (step 3c)", () => {
 
   test("shadow + bound agent with violating tags → proceeds with warn", async () => {
     mockGetGovernanceEnforce.mockResolvedValue("shadow");
+    seedOwnerApp("app-1", {
+      agentBindings: [{ agentId: "agent-tagged-2", status: "READY" }],
+    });
     seedAgentWithTags("agent-tagged-2", { team: "platform" });
     mockEnforceTagPolicy.mockResolvedValueOnce({
       ok: false,
@@ -291,14 +295,7 @@ describe("publishApp: tag-policy enforcement (step 3c)", () => {
     });
 
     ddbMock.on(QueryCommand).resolves({
-      Items: [
-        makeMetadata({ workflowIds: [] }),
-        {
-          sortId: "AGENT#agent-tagged-2",
-          agentId: "agent-tagged-2",
-          status: "READY",
-        },
-      ],
+      Items: [makeMetadata({ workflowIds: [] })],
     });
     ddbMock.on(PutCommand).resolves({});
     ddbMock.on(UpdateCommand).resolves({});
@@ -317,6 +314,9 @@ describe("publishApp: tag-policy enforcement (step 3c)", () => {
 
   test("no policy → proceeds (enforcement returns ok:true)", async () => {
     mockGetGovernanceEnforce.mockResolvedValue("strict");
+    seedOwnerApp("app-1", {
+      agentBindings: [{ agentId: "agent-tagged-3", status: "READY" }],
+    });
     seedAgentWithTags("agent-tagged-3", {
       env: "prod",
       team: "platform",
@@ -327,14 +327,7 @@ describe("publishApp: tag-policy enforcement (step 3c)", () => {
     });
 
     ddbMock.on(QueryCommand).resolves({
-      Items: [
-        makeMetadata({ workflowIds: [] }),
-        {
-          sortId: "AGENT#agent-tagged-3",
-          agentId: "agent-tagged-3",
-          status: "READY",
-        },
-      ],
+      Items: [makeMetadata({ workflowIds: [] })],
     });
     ddbMock.on(PutCommand).resolves({});
     ddbMock.on(UpdateCommand).resolves({});
@@ -352,17 +345,13 @@ describe("publishApp: tag-policy enforcement (step 3c)", () => {
 
   test("bound agent with no tags → enforcement NOT called", async () => {
     mockGetGovernanceEnforce.mockResolvedValue("strict");
+    seedOwnerApp("app-1", {
+      agentBindings: [{ agentId: "agent-no-tags-1", status: "READY" }],
+    });
     seedAgentWithoutTags("agent-no-tags-1");
 
     ddbMock.on(QueryCommand).resolves({
-      Items: [
-        makeMetadata({ workflowIds: [] }),
-        {
-          sortId: "AGENT#agent-no-tags-1",
-          agentId: "agent-no-tags-1",
-          status: "READY",
-        },
-      ],
+      Items: [makeMetadata({ workflowIds: [] })],
     });
     ddbMock.on(PutCommand).resolves({});
     ddbMock.on(UpdateCommand).resolves({});
@@ -380,6 +369,12 @@ describe("publishApp: tag-policy enforcement (step 3c)", () => {
 
   test("multiple bound agents, one violates in strict → blocks before any write", async () => {
     mockGetGovernanceEnforce.mockResolvedValue("strict");
+    seedOwnerApp("app-1", {
+      agentBindings: [
+        { agentId: "agent-ok", status: "READY" },
+        { agentId: "agent-bad", status: "READY" },
+      ],
+    });
     seedAgentWithTags("agent-ok", { env: "prod", team: "platform" });
     seedAgentWithTags("agent-bad", { team: "platform" });
 
@@ -398,19 +393,7 @@ describe("publishApp: tag-policy enforcement (step 3c)", () => {
     );
 
     ddbMock.on(QueryCommand).resolves({
-      Items: [
-        makeMetadata({ workflowIds: ["wf-1"] }),
-        {
-          sortId: "AGENT#agent-ok",
-          agentId: "agent-ok",
-          status: "READY",
-        },
-        {
-          sortId: "AGENT#agent-bad",
-          agentId: "agent-bad",
-          status: "READY",
-        },
-      ],
+      Items: [makeMetadata({ workflowIds: ["wf-1"] })],
     });
 
     await expect(

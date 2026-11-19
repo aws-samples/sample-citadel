@@ -80,7 +80,10 @@ const OWNER_EVENT = {
   },
 };
 
-function seedOwnerApp(appId: string = "app-1") {
+function seedOwnerApp(
+  appId: string = "app-1",
+  manifestOverrides: Record<string, unknown> = {},
+) {
   seedMockRegistry("agent", appId, {
     name: "Test App",
     status: "ACTIVE",
@@ -90,6 +93,8 @@ function seedOwnerApp(appId: string = "app-1") {
         orgId: PUBLISH_APP_ORG,
         createdBy: PUBLISH_OWNER_ID,
         access: {},
+        agentBindings: [{ agentId: "agent-1", status: "READY" }],
+        ...manifestOverrides,
       },
     }),
   });
@@ -194,21 +199,13 @@ describe("publishApp: record-approval dispatch gate", () => {
 
   test("strict + DRAFT bound-agent record throws, no publish write", async () => {
     mockGetGovernanceEnforce.mockResolvedValue("strict");
+    seedOwnerApp("app-1", {
+      agentBindings: [{ agentId: "agent-draft-1", status: "READY" }],
+    });
     seedAgentRecord("agent-draft-1", "DRAFT");
 
     ddbMock.on(QueryCommand).resolves({
-      Items: [
-        makeMetadata({ workflowIds: [] }),
-        {
-          sortId: "AGENT#agent-draft-1",
-          agentId: "agent-draft-1",
-          status: "READY",
-        },
-        {
-          sortId: "CONFIG#values",
-          values: { adminEmail: "admin@example.com" },
-        },
-      ],
+      Items: [makeMetadata({ workflowIds: [] })],
     });
 
     await expect(
@@ -222,24 +219,16 @@ describe("publishApp: record-approval dispatch gate", () => {
 
   test("shadow + DRAFT bound-agent record proceeds and warns", async () => {
     mockGetGovernanceEnforce.mockResolvedValue("shadow");
+    seedOwnerApp("app-1", {
+      agentBindings: [{ agentId: "agent-draft-2", status: "READY" }],
+    });
     seedAgentRecord("agent-draft-2", "DRAFT");
     const warnSpy = jest
       .spyOn(console, "warn")
       .mockImplementation(() => undefined);
 
     ddbMock.on(QueryCommand).resolves({
-      Items: [
-        makeMetadata({ workflowIds: [] }),
-        {
-          sortId: "AGENT#agent-draft-2",
-          agentId: "agent-draft-2",
-          status: "READY",
-        },
-        {
-          sortId: "CONFIG#values",
-          values: { adminEmail: "admin@example.com" },
-        },
-      ],
+      Items: [makeMetadata({ workflowIds: [] })],
     });
     ddbMock.on(PutCommand).resolves({});
     ddbMock.on(UpdateCommand).resolves({});
@@ -261,24 +250,16 @@ describe("publishApp: record-approval dispatch gate", () => {
 
   test("APPROVED bound-agent record proceeds in strict mode without warning", async () => {
     mockGetGovernanceEnforce.mockResolvedValue("strict");
+    seedOwnerApp("app-1", {
+      agentBindings: [{ agentId: "agent-approved-1", status: "READY" }],
+    });
     seedAgentRecord("agent-approved-1", "APPROVED");
     const warnSpy = jest
       .spyOn(console, "warn")
       .mockImplementation(() => undefined);
 
     ddbMock.on(QueryCommand).resolves({
-      Items: [
-        makeMetadata({ workflowIds: [] }),
-        {
-          sortId: "AGENT#agent-approved-1",
-          agentId: "agent-approved-1",
-          status: "READY",
-        },
-        {
-          sortId: "CONFIG#values",
-          values: { adminEmail: "admin@example.com" },
-        },
-      ],
+      Items: [makeMetadata({ workflowIds: [] })],
     });
     ddbMock.on(PutCommand).resolves({});
     ddbMock.on(UpdateCommand).resolves({});
@@ -300,22 +281,14 @@ describe("publishApp: record-approval dispatch gate", () => {
 
   test("legacy agent (no Registry record) falls back to AGENT_CONFIG_TABLE registryStatus, strict + DRAFT throws", async () => {
     mockGetGovernanceEnforce.mockResolvedValue("strict");
+    seedOwnerApp("app-1", {
+      agentBindings: [{ agentId: "agent-legacy-1", status: "READY" }],
+    });
     // No seedAgentRecord call: "agent-legacy-1" has no Registry record, so
     // getResource resolves null and the loop must fall back to the legacy
     // cache row instead of skipping (verify feedback, loop 1).
     ddbMock.on(QueryCommand).resolves({
-      Items: [
-        makeMetadata({ workflowIds: [] }),
-        {
-          sortId: "AGENT#agent-legacy-1",
-          agentId: "agent-legacy-1",
-          status: "READY",
-        },
-        {
-          sortId: "CONFIG#values",
-          values: { adminEmail: "admin@example.com" },
-        },
-      ],
+      Items: [makeMetadata({ workflowIds: [] })],
     });
     ddbMock.on(GetCommand).resolves({
       Item: {
@@ -336,19 +309,11 @@ describe("publishApp: record-approval dispatch gate", () => {
 
   test("legacy agent with no AGENT_CONFIG_TABLE row is skipped (not found anywhere), publish proceeds", async () => {
     mockGetGovernanceEnforce.mockResolvedValue("strict");
+    seedOwnerApp("app-1", {
+      agentBindings: [{ agentId: "agent-ghost-1", status: "READY" }],
+    });
     ddbMock.on(QueryCommand).resolves({
-      Items: [
-        makeMetadata({ workflowIds: [] }),
-        {
-          sortId: "AGENT#agent-ghost-1",
-          agentId: "agent-ghost-1",
-          status: "READY",
-        },
-        {
-          sortId: "CONFIG#values",
-          values: { adminEmail: "admin@example.com" },
-        },
-      ],
+      Items: [makeMetadata({ workflowIds: [] })],
     });
     ddbMock.on(GetCommand).resolves({ Item: undefined });
     ddbMock.on(PutCommand).resolves({});
