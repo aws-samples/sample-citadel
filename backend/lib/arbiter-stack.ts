@@ -57,7 +57,7 @@ function makePythonFunction(
   props: PythonFunctionProps,
 ): lambda.Function {
   if (isSkipBundling()) {
-    const { entry, index, handler, bundling, ...rest } = props;
+    const { entry, index, handler, bundling: _bundling, ...rest } = props;
     const pyModule = (index ?? "index.py").replace(/\.py$/, "");
     return new lambda.Function(scope, id, {
       ...rest,
@@ -782,6 +782,7 @@ export class ArbiterStack extends cdk.Stack {
           ...(props.integrationsTable && {
             INTEGRATIONS_TABLE: props.integrationsTable.tableName,
           }),
+          MODEL_CATALOG_TABLE: `citadel-model-catalog-${props.environment}`,
         },
         initialPolicy: [
           new PolicyStatement({
@@ -817,6 +818,14 @@ export class ArbiterStack extends cdk.Stack {
     props.agentConfigTable.grantReadData(credentialVenderLambda);
     props.dataStoresTable?.grantReadData(credentialVenderLambda);
     props.integrationsTable?.grantReadData(credentialVenderLambda);
+
+    // Model catalog read access for inference-profile ARN resolution
+    const venderModelCatalogTable = dynamodb.Table.fromTableName(
+      this,
+      "VenderModelCatalogTableRef",
+      `citadel-model-catalog-${props.environment}`,
+    );
+    venderModelCatalogTable.grantReadData(credentialVenderLambda);
 
     // Tool-call idempotency ledger (PR1). Org-scoped, TTL'd operational
     // dedupe table — NOT an audit artifact (distinct from the 90-day
@@ -1028,6 +1037,11 @@ export class ArbiterStack extends cdk.Stack {
           AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
           AGENT_BUCKET_NAME: props.codeBucket.bucketName,
           CREDENTIAL_VENDER_FUNCTION: credentialVenderLambda.functionName,
+          // Configurable model selection: the worker resolves the runtime
+          // model from these two tables and unions the foundation model id
+          // into the vend request's requiredPermissions.models (PR-5 task 2).
+          MODEL_CONFIG_TABLE: `citadel-model-config-${props.environment}`,
+          MODEL_CATALOG_TABLE: `citadel-model-catalog-${props.environment}`,
           // Governance enforcement-mode resolution: hierarchy.py reads
           // ENVIRONMENT to build the SSM parameter path
           // /citadel/governance/enforce/{ENVIRONMENT}. Without it the mode
@@ -1123,6 +1137,10 @@ export class ArbiterStack extends cdk.Stack {
     // read-only access to ExecutionSpecifications for dispatch-time
     // status checks. Never written to from the worker.
     props.executionSpecificationsTable.grantReadData(workerAgentWrapperLambda);
+    // PR-5 task 2: worker reads the model-config + model-catalog tables to
+    // resolve the runtime model and union it into the vend request. Read-only.
+    modelConfigTable.grantReadData(workerAgentWrapperLambda);
+    modelCatalogTable.grantReadData(workerAgentWrapperLambda);
 
     // Write-then-signal durable write (decision O2, HARD GATE). The worker's
     // access to the executions table is deliberately NOT a bare

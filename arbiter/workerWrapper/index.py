@@ -791,6 +791,133 @@ def _merge_required_permissions(agent_permissions: dict | None, tool_bindings: d
 NO_CLOUD_SENTINEL = {"credentialMode": "none"}
 
 
+# ---------------------------------------------------------------------------
+# Runtime model resolution for the fail-closed credential gate (PR-5 task 2).
+#
+# At dispatch, the worker resolves the effective foundation model id the
+# subprocess will actually invoke and unions it into requiredPermissions.models
+# BEFORE calling the vender. This ensures:
+# (a) a later change of the slot default cannot strand agents on stale stamped
+#     models — the runtime-resolved model is always present in the vend request;
+# (b) the vender computes IAM resources (foundation-model ARN + inference-
+#     profile ARN) for the actual model, not just the stamped one.
+#
+# Resolution is SERVER-SIDE only (config/catalog DDB tables); never from agent
+# output.
+# ---------------------------------------------------------------------------
+
+# Module-level cache: resolved once per Lambda container, reused across
+# invocations. None means "not yet resolved"; a string is the base_model_id;
+# '' means "resolution failed (no tables or no config)".
+_cached_runtime_model: str | None = None
+
+
+def _resolve_runtime_model_id(*, model_override: str | None = None) -> str | None:
+    """Resolve the foundation model id (baseModelId) the subprocess will invoke.
+
+    When *model_override* is an inference-profile id (e.g.
+    ``us.anthropic.claude-sonnet-5``), reverse-maps it to the catalog entry's
+    ``baseModelId``. When no override is set, resolves the
+    ``fabricated_agent_default`` slot (or global default) from the model
+    config table.
+
+    Returns ``None`` on any failure (missing env, DDB error). Never raises.
+    """
+    global _cached_runtime_model
+
+    config_table = os.environ.get('MODEL_CONFIG_TABLE')
+    catalog_table = os.environ.get('MODEL_CATALOG_TABLE')
+    if not config_table or not catalog_table:
+        return None
+
+    try:
+        resource = _get_dynamodb()
+        config_item = resource.Table(config_table).get_item(
+            Key={'scope': 'platform'}
+        ).get('Item')
+        catalog_items = resource.Table(catalog_table).scan().get('Items', [])
+    except Exception as exc:  # noqa: BLE001 — model resolution must never break dispatch
+        print(json.dumps({
+            'level': 'WARN',
+            'component': 'WorkerWrapper',
+            'action': 'runtime_model_resolution_failed',
+            'error': str(exc),
+        }))
+        return None
+
+    if not config_item or not catalog_items:
+        return None
+
+    # Build a lookup: {modelKey: item, profileId: item} for reverse mapping
+    catalog_by_key: dict[str, dict] = {}
+    catalog_by_profile: dict[str, dict] = {}
+    for item in catalog_items:
+        mk = item.get('modelKey', '')
+        if mk:
+            catalog_by_key[mk] = item
+        for profile_id in (item.get('regionProfiles') or {}).values():
+            if profile_id:
+                catalog_by_profile[profile_id] = item
+
+    # If model_override is an inference-profile id, reverse-map to baseModelId
+    if model_override:
+        entry = catalog_by_profile.get(model_override)
+        if entry and entry.get('baseModelId'):
+            return entry['baseModelId']
+        # Might be a modelKey directly
+        entry = catalog_by_key.get(model_override)
+        if entry and entry.get('baseModelId'):
+            return entry['baseModelId']
+        # Can't resolve override — fall through to slot/global default
+
+    # Resolve via precedence: fabricated_agent_default slot → global default
+    slot_defaults = config_item.get('slotDefaults') or {}
+    global_key = config_item.get('globalDefaultKey')
+
+    for key in [slot_defaults.get('fabricated_agent_default'), global_key]:
+        if key:
+            entry = catalog_by_key.get(key)
+            if entry and entry.get('status') == 'enabled' and entry.get('baseModelId'):
+                return entry['baseModelId']
+
+    return None
+
+
+def _union_runtime_model(
+    required_permissions: dict | None,
+    *,
+    model_override: str | None = None,
+) -> dict:
+    """Union the runtime-resolved model id into requiredPermissions.models.
+
+    Returns the (possibly augmented) requiredPermissions dict. Graceful
+    degradation: if model resolution fails, returns the input unchanged.
+    Never raises.
+    """
+    perms = dict(required_permissions) if required_permissions else {}
+    try:
+        resolved = _resolve_runtime_model_id(model_override=model_override)
+        if resolved:
+            models = list(perms.get('models') or [])
+            if resolved not in models:
+                models.append(resolved)
+            perms['models'] = models
+    except Exception as exc:  # noqa: BLE001 — must never break dispatch
+        print(json.dumps({
+            'level': 'WARN',
+            'component': 'WorkerWrapper',
+            'action': 'runtime_model_union_failed',
+            'error': str(exc),
+        }))
+    return perms
+
+
+def __reset_cached_runtime_model_for_test() -> None:
+    """Test-only: reset the cached runtime model."""
+    global _cached_runtime_model
+    _cached_runtime_model = None
+
+
 def _is_absent_or_empty_permissions(required_permissions: dict | None) -> bool:
     """True when *required_permissions* declares no resource access at all —
     the deny-default condition the fail-closed gate refuses on (unless the
@@ -798,7 +925,9 @@ def _is_absent_or_empty_permissions(required_permissions: dict | None) -> bool:
     if not required_permissions:
         return True
     return not (
-        required_permissions.get('integrations') or required_permissions.get('dataStores')
+        required_permissions.get('models')
+        or required_permissions.get('integrations')
+        or required_permissions.get('dataStores')
     )
 
 
@@ -1766,6 +1895,12 @@ def _process_workflow_node(event, message_attributes=None):
 
             required_permissions = config.get('requiredPermissions')
             credential_mode = _resolve_credential_mode(config, required_permissions)
+            # PR-5 task 2: union the runtime-resolved model into the vend
+            # request so a slot-default change cannot strand agents.
+            if credential_mode != 'none':
+                required_permissions = _union_runtime_model(
+                    required_permissions, model_override=model_override,
+                )
             if credential_mode != 'none' and _is_absent_or_empty_permissions(required_permissions):
                 _refuse_dispatch_fail_closed(
                     agent_id=msg.agent_id,
@@ -2129,6 +2264,12 @@ def process_event(event, context, message_attributes=None):
     # resource access is refused BEFORE any credential vend attempt or
     # subprocess spawn, unless it opted into the explicit no-cloud sentinel.
     credential_mode = _resolve_credential_mode(config, required_permissions)
+    # PR-5 task 2: union the runtime-resolved model into the vend request
+    # so a slot-default change cannot strand agents on stale stamped models.
+    if credential_mode != 'none':
+        required_permissions = _union_runtime_model(
+            required_permissions, model_override=model_override,
+        )
     if credential_mode != 'none' and _is_absent_or_empty_permissions(required_permissions):
         try:
             _refuse_dispatch_fail_closed(

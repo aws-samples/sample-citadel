@@ -33,6 +33,7 @@ import {
   computeAgentPolicies,
   AgentPermissions,
 } from "../utils/policy-helpers";
+import { computeModelResources } from "../utils/model-permission-resources";
 
 const policyManager = new PolicyManager();
 const dynamodb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -40,6 +41,11 @@ const dynamodb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const AGENT_CONFIG_TABLE = process.env.AGENT_CONFIG_TABLE || "";
 const DATASTORES_TABLE = process.env.DATASTORES_TABLE || "";
 const INTEGRATIONS_TABLE = process.env.INTEGRATIONS_TABLE || "";
+
+/** Read at call time so tests can toggle the env var between invocations. */
+function getModelCatalogTable(): string {
+  return process.env.MODEL_CATALOG_TABLE || "";
+}
 
 interface VendCredentialsEvent {
   agentId: string;
@@ -54,6 +60,71 @@ interface VendCredentialsResult {
     sessionToken: string;
   } | null;
   error?: string;
+}
+
+/**
+ * Converts a foundation model ID to the model catalog table's PK format.
+ * Mirrors modelKeyFromId in model-catalog-sync.ts.
+ */
+function modelKeyFromId(id: string): string {
+  return id
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+/**
+ * Looks up model catalog entries and computes the full set of IAM resource
+ * ARNs (foundation-model + inference-profile) for the declared models.
+ * Falls back to foundation-model-only ARNs when the catalog is unavailable.
+ */
+async function resolveModelResources(
+  models: string[],
+  accountId: string,
+  region: string,
+): Promise<string[]> {
+  const catalogTable = getModelCatalogTable();
+  if (!catalogTable) {
+    console.warn(
+      "MODEL_CATALOG_TABLE not set — falling back to foundation-model ARNs only",
+    );
+    return [];
+  }
+
+  const allArns: string[] = [];
+  for (const modelId of models) {
+    try {
+      const modelKey = modelKeyFromId(modelId);
+      const result = await dynamodb.send(
+        new GetCommand({
+          TableName: catalogTable,
+          Key: { modelKey },
+        }),
+      );
+
+      if (result.Item?.regionProfiles) {
+        const regionProfiles = result.Item.regionProfiles as Record<
+          string,
+          string
+        >;
+        const resources = computeModelResources(
+          modelId,
+          regionProfiles,
+          accountId,
+          region,
+        );
+        allArns.push(...resources.allResourceArns);
+      }
+      // If no catalog entry, fall through — computeAgentPolicies will
+      // use the foundation-model ARN from the models array.
+    } catch (err) {
+      console.warn(
+        `Failed to look up model catalog for ${modelId}: ${String(err)}`,
+      );
+      // Graceful degradation: proceed without inference-profile ARNs
+    }
+  }
+  return allArns;
 }
 
 /** Thrown internally to short-circuit to the fail-closed error response. */
@@ -186,9 +257,30 @@ export async function handler(
     await assertSameOrgOrThrow(agentId, org, requiredPermissions);
 
     const { accountId, region } = await policyManager.getAccountContext();
+
+    // Resolve inference-profile ARNs from the model catalog before
+    // computing the IAM policies. Gracefully degrades to
+    // foundation-model-only ARNs when the catalog is unavailable.
+    let modelResources: string[] | undefined;
+    if (requiredPermissions.models && requiredPermissions.models.length > 0) {
+      const resolved = await resolveModelResources(
+        requiredPermissions.models,
+        accountId,
+        region,
+      );
+      if (resolved.length > 0) {
+        modelResources = resolved;
+      }
+    }
+
+    const policiesPermissions: AgentPermissions = {
+      ...requiredPermissions,
+      ...(modelResources ? { modelResources } : {}),
+    };
+
     const policies = computeAgentPolicies(
       agentId,
-      requiredPermissions,
+      policiesPermissions,
       accountId,
       region,
     );

@@ -235,7 +235,7 @@ def _copy_s3_to_scoped_key(s3_client, bucket, module_filename, record_id):
             )
 
 
-def _seed_agent_registry_record(agent_id, description, module_filename, worker_queue_url):
+def _seed_agent_registry_record(agent_id, description, module_filename, worker_queue_url, credential_mode=None):
     """Create an agent's AgentCore Registry record (dual-store seam).
 
     Generalized from the original demo-echo-only helper so the same
@@ -375,6 +375,9 @@ def _seed_agent_registry_record(agent_id, description, module_filename, worker_q
         'createdBy': 'seedConfig',
         'orgId': 'All Organizations',
     }
+    if credential_mode is not None:
+        config['credentialMode'] = credential_mode
+        custom_metadata['credentialMode'] = credential_mode
 
     client = boto3.client('agent-registry-control')
     try:
@@ -472,7 +475,7 @@ def _seed_demo_agent_registry_record(worker_queue_url):
     Returns the underlying seeder's record-info dict (or None)."""
     return _seed_agent_registry_record(
         DEMO_ECHO_AGENT_ID, DEMO_ECHO_DESCRIPTION, DEMO_ECHO_MODULE_FILENAME,
-        worker_queue_url,
+        worker_queue_url, credential_mode='none',
     )
 
 
@@ -531,6 +534,7 @@ def _seed_smoke_idempotency_agent(table, worker_queue_url, agent_bucket):
             'name': SMOKE_IDEMPOTENCY_AGENT_ID,
             'filename': SMOKE_IDEMPOTENCY_MODULE_FILENAME,
             'description': SMOKE_IDEMPOTENCY_DESCRIPTION,
+            'credentialMode': 'none',
             'schema': {
                 'type': 'object',
                 'properties': {
@@ -559,6 +563,7 @@ def _seed_smoke_idempotency_agent(table, worker_queue_url, agent_bucket):
     smoke_record = _seed_agent_registry_record(
         SMOKE_IDEMPOTENCY_AGENT_ID, SMOKE_IDEMPOTENCY_DESCRIPTION,
         SMOKE_IDEMPOTENCY_MODULE_FILENAME, worker_queue_url,
+        credential_mode='none',
     )
 
     # Canonical recordId-keyed row + thin name-keyed pointer.
@@ -683,6 +688,7 @@ def handler(event, context):
                 'name': DEMO_ECHO_AGENT_ID,
                 'filename': DEMO_ECHO_MODULE_FILENAME,
                 'description': DEMO_ECHO_DESCRIPTION,
+                'credentialMode': 'none',
                 'schema': {
                     'type': 'object',
                     'properties': {
@@ -768,6 +774,7 @@ def handler(event, context):
                 'name': DEMO_ROUTER_AGENT_ID,
                 'filename': DEMO_ROUTER_MODULE_FILENAME,
                 'description': DEMO_ROUTER_DESCRIPTION,
+                'credentialMode': 'none',
                 'schema': {
                     'type': 'object',
                     'properties': {
@@ -794,6 +801,7 @@ def handler(event, context):
         router_record = _seed_agent_registry_record(
             DEMO_ROUTER_AGENT_ID, DEMO_ROUTER_DESCRIPTION,
             DEMO_ROUTER_MODULE_FILENAME, worker_queue_url,
+            credential_mode='none',
         )
 
         _write_canonical_and_pointer(

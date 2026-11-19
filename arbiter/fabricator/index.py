@@ -2844,6 +2844,7 @@ def process_event(event, context, request_type=None):
     # credentialMode: "none" sentinel.
     derived_required_permissions = derive_required_permissions(
         integration_bindings, datastore_bindings,
+        resolved_model_id=FABRICATOR_MODEL_ID,
     )
 
     # CIT-256 H2: thread the ExecutionSpecification id so the registration-
