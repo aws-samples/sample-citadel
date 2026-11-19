@@ -30,6 +30,10 @@ const PLATFORM_CLIENT_ALLOWLIST: Record<string, string> = {
     "STS GetCallerIdentity — read-only account context query under Lambda execution role",
   platformS3Client:
     "CIT-298: S3 preflight bucket ownership check (GetBucketTagging + HeadBucket) — runs under datastore-resolver Lambda direct S3 grants on citadel-* buckets before any scoped role is vended",
+  platformBedrockProvisionClient:
+    "Continuum C3 (PR-2): Bedrock CreateKnowledgeBase control-plane provisioning — runs under datastore-resolver Lambda's tag/region-constrained grants, never the tenant-assumable citadel-ds-<id> role",
+  platformProvisionClient:
+    "Continuum C3 (PR-2): DynamoDB/RDS control-plane provisioning (CreateTable/DeleteTable/CreateDBInstance/DeleteDBInstance/TagResource/AddTagsToResource) — runs under datastore-resolver Lambda's tag/region-constrained grants, never the tenant-assumable citadel-ds-<id> role",
 };
 
 /**
@@ -108,7 +112,16 @@ describe("adapter-ambient-client guard", () => {
       path.join(ADAPTER_DIR, "s3-adapter.ts"),
       "utf-8",
     );
-    const allContent = kbContent + "\n" + s3Content;
+    const dynamoContent = fs.readFileSync(
+      path.join(ADAPTER_DIR, "dynamodb-adapter.ts"),
+      "utf-8",
+    );
+    const rdsContent = fs.readFileSync(
+      path.join(ADAPTER_DIR, "rds-adapter.ts"),
+      "utf-8",
+    );
+    const allContent =
+      kbContent + "\n" + s3Content + "\n" + dynamoContent + "\n" + rdsContent;
     for (const method of Object.keys(PLATFORM_CLIENT_ALLOWLIST)) {
       expect(allContent).toContain(`private ${method}(`);
     }

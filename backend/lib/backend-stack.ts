@@ -3169,18 +3169,35 @@ export class BackendStack extends cdk.Stack {
     );
 
     // Grant Bedrock permissions for Knowledge Base adapter (uses Lambda creds directly)
+    // Continuum C3 (PR-2): CreateKnowledgeBase/TagResource (create-verbs,
+    // necessarily "*" since the resource doesn't exist yet) are gated by
+    // region + a mandatory citadel:dataStoreId request tag. Delete/Get/
+    // Retrieve/Associate/ListTags are left on "*" because Bedrock knowledge
+    // bases have no deterministic ARN pattern available before create and
+    // the resolver already gates callers via preflight ownership checks
+    // (C2) before ever reaching these — same rationale as the pre-PR-2
+    // grant, unchanged by this PR except for the narrowed create-verbs.
+    dataStoreResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["bedrock:CreateKnowledgeBase", "bedrock:TagResource"],
+        resources: ["*"],
+        conditions: {
+          StringEquals: { "aws:RequestedRegion": this.region },
+          Null: { "aws:RequestTag/citadel:dataStoreId": "false" },
+        },
+      }),
+    );
     dataStoreResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: [
-          "bedrock:CreateKnowledgeBase",
           "bedrock:DeleteKnowledgeBase",
           "bedrock:GetKnowledgeBase",
           "bedrock:Retrieve",
           "bedrock:AssociateThirdPartyKnowledgeBase",
-          // Citadel PR-1 (C1+C2): tag the KB at create, and read its tags
-          // during conflict resolution / ownership preflight.
-          "bedrock:TagResource",
+          // Citadel PR-1 (C1+C2): read KB tags during conflict resolution /
+          // ownership preflight.
           "bedrock:ListTagsForResource",
         ],
         resources: ["*"],
@@ -3236,6 +3253,107 @@ export class BackendStack extends cdk.Stack {
         ],
         resources: ["*"],
       }),
+    );
+
+    // Continuum C3 (PR-2): DynamoDB control-plane provisioning. CreateTable
+    // is necessarily "*" (the table doesn't exist yet) and is gated by
+    // region + a mandatory citadel:dataStoreId request tag — the adapter
+    // (DynamoDBAdapter.provision) always tags at create, so an untagged
+    // CreateTable call is refused by the condition before it ever reaches
+    // AWS. Delete/Describe/Tag are bounded to account+region and gated by
+    // a mandatory citadel:dataStoreId RESOURCE tag, so the platform role
+    // can only delete/describe/tag tables that are already citadel-managed.
+    dataStoreResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["dynamodb:CreateTable"],
+        resources: ["*"],
+        conditions: {
+          StringEquals: { "aws:RequestedRegion": this.region },
+          Null: { "aws:RequestTag/citadel:dataStoreId": "false" },
+        },
+      }),
+    );
+    dataStoreResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          "dynamodb:DeleteTable",
+          "dynamodb:DescribeTable",
+          "dynamodb:TagResource",
+        ],
+        resources: [
+          `arn:${cdk.Aws.PARTITION}:dynamodb:${this.region}:${this.account}:table/*`,
+        ],
+        conditions: {
+          Null: { "aws:ResourceTag/citadel:dataStoreId": "false" },
+        },
+      }),
+    );
+
+    // Continuum C3 (PR-2): RDS control-plane provisioning. Same shape as
+    // DynamoDB above — CreateDBInstance is "*" + region/tag-gated;
+    // Delete/Describe/AddTags are account+region bounded + gated by a
+    // mandatory citadel:dataStoreId resource tag.
+    dataStoreResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["rds:CreateDBInstance"],
+        resources: ["*"],
+        conditions: {
+          StringEquals: { "aws:RequestedRegion": this.region },
+          Null: { "aws:RequestTag/citadel:dataStoreId": "false" },
+        },
+      }),
+    );
+    dataStoreResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          "rds:DeleteDBInstance",
+          "rds:DescribeDBInstances",
+          "rds:AddTagsToResource",
+        ],
+        resources: [
+          `arn:${cdk.Aws.PARTITION}:rds:${this.region}:${this.account}:db:*`,
+        ],
+        conditions: {
+          Null: { "aws:ResourceTag/citadel:dataStoreId": "false" },
+        },
+      }),
+    );
+    NagSuppressions.addResourceSuppressions(
+      dataStoreResolverFunction.role!,
+      [
+        {
+          id: "AwsSolutions-IAM5",
+          reason:
+            "Continuum C3 (PR-2): DynamoDB/RDS/Bedrock create-verbs (CreateTable, " +
+            'CreateDBInstance, CreateKnowledgeBase) necessarily grant "*" because ' +
+            "the target resource does not exist yet — identical in shape to the " +
+            "already-accepted s3:CreateBucket wildcard. Each is bounded by " +
+            "aws:RequestedRegion and a mandatory aws:RequestTag/citadel:dataStoreId " +
+            "condition, and the corresponding adapter always sets that tag at create " +
+            "(DynamoDBAdapter.provision, RdsAdapter.provision, " +
+            "KnowledgeBaseAdapter.provision), so an untagged create call is refused " +
+            "by the condition. DynamoDB/RDS Delete/Describe/Tag statements use a " +
+            "table/*  and db:*  wildcard because the concrete identifier is only " +
+            "known at runtime, but are bounded to this account+region and gated by " +
+            "a mandatory aws:ResourceTag/citadel:dataStoreId condition, so the " +
+            "platform role can only act on resources it (or the migration backfill) " +
+            "has already tagged as citadel-managed. These statements replace the " +
+            "pre-PR-2 unconditional wildcards that were minted onto the " +
+            "tenant-assumable citadel-ds-<id> role.",
+          appliesTo: [
+            "Resource::*",
+            `Resource::arn:${cdk.Aws.PARTITION}:dynamodb:${this.region}:${this.account}:table/*`,
+            `Resource::arn:<AWS::Partition>:dynamodb:${this.region}:${this.account}:table/*`,
+            `Resource::arn:${cdk.Aws.PARTITION}:rds:${this.region}:${this.account}:db:*`,
+            `Resource::arn:<AWS::Partition>:rds:${this.region}:${this.account}:db:*`,
+          ],
+        },
+      ],
+      true,
     );
 
     // DataStore AppSync data source and resolvers

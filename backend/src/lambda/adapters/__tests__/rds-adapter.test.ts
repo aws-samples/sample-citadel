@@ -29,7 +29,13 @@ jest.mock("@aws-sdk/client-rds", () => {
 describe("RdsAdapter", () => {
   let postgresAdapter: RdsAdapter;
   let mysqlAdapter: RdsAdapter;
-  const config = { dbInstanceIdentifier: "my-test-db" };
+  const config = {
+    dbInstanceIdentifier: "my-test-db",
+    masterUsername: "dbadmin",
+    masterPassword: "secret123",
+    dataStoreId: "ds-1",
+    orgId: "org-1",
+  };
   const creds = markScopedCredentials({
     masterUsername: "dbadmin",
     masterPassword: "secret123",
@@ -99,11 +105,15 @@ describe("RdsAdapter", () => {
       );
     });
 
-    it("throws CredentialMissingError when scoped credentials are missing", async () => {
-      const { CredentialMissingError } =
-        await import("../../../adapters/errors");
-      await expect(postgresAdapter.provision(config, {})).rejects.toThrow(
-        CredentialMissingError,
+    it("does not require scoped credentials — provision runs on the platform path (Continuum C3)", async () => {
+      mockSend.mockResolvedValueOnce({
+        DBInstance: {
+          DBInstanceArn: "arn:aws:rds:us-east-1:123:db:my-test-db",
+        },
+      });
+      const result = await postgresAdapter.provision(config, undefined);
+      expect(result.resourceArn).toBe(
+        "arn:aws:rds:us-east-1:123:db:my-test-db",
       );
     });
 

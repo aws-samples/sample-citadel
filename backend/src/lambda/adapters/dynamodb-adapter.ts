@@ -3,6 +3,7 @@ import {
   CreateTableCommand,
   DeleteTableCommand,
   DescribeTableCommand,
+  TagResourceCommand,
   KeyType,
   ScalarAttributeType,
   BillingMode,
@@ -54,6 +55,18 @@ export class DynamoDBAdapter implements ConnectorAdapter {
     return new DynamoDBClient({ credentials });
   }
 
+  /**
+   * Continuum C3 (PR-2): control-plane provisioning (CreateTable/
+   * DeleteTable/DescribeTable/TagResource) runs under the
+   * datastore-resolver Lambda's directly-granted, tag/region-constrained
+   * permissions — NOT under the scoped citadel-ds-<id> role, which is
+   * minted connect-only post-provision. Named so the ambient-client guard
+   * test can allowlist it explicitly.
+   */
+  private platformProvisionClient(): DynamoDBClient {
+    return new DynamoDBClient({});
+  }
+
   requiredPolicies(
     config: Record<string, unknown>,
     accountId: string,
@@ -63,12 +76,19 @@ export class DynamoDBAdapter implements ConnectorAdapter {
     const tableArn = `arn:aws:dynamodb:${region}:${accountId}:table/${tableName}`;
 
     return {
+      // Continuum C3 (PR-2): this policy is CDK-mirrored platform-only
+      // documentation — it is NEVER minted onto the tenant-assumable
+      // citadel-ds-<id> role. The resolver mints only `.connect`.
+      // Provisioning itself runs under platformProvisionClient() using the
+      // datastore-resolver Lambda's directly-granted, tag/region-constrained
+      // IAM statements (see backend-stack.ts).
       provision: [
         {
           actions: [
             "dynamodb:CreateTable",
             "dynamodb:DeleteTable",
             "dynamodb:DescribeTable",
+            "dynamodb:TagResource",
           ],
           resources: ["*"],
         },
@@ -90,12 +110,24 @@ export class DynamoDBAdapter implements ConnectorAdapter {
 
   async provision(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>,
+    _credentials?: Record<string, unknown>,
   ): Promise<ProvisionResult> {
-    const client = this.makeClient(credentials, "provision");
+    const client = this.platformProvisionClient();
     const tableName = config.tableName as string | undefined;
     const partitionKey = (config.partitionKey as string | undefined) || "pk";
     const sortKey = (config.sortKey as string | undefined) || undefined;
+
+    // Continuum C3 (PR-2): dataStoreId + orgId are required so the table
+    // can be tagged at create. Tags back the `aws:ResourceTag` condition
+    // that bounds the platform role's DeleteTable grant to citadel-managed
+    // tables (backend-stack.ts), and future ownership checks.
+    const dataStoreId = config.dataStoreId as string | undefined;
+    const orgId = config.orgId as string | undefined;
+    if (!dataStoreId || !orgId) {
+      throw new ProvisioningError(
+        "DynamoDB table provisioning requires dataStoreId and orgId",
+      );
+    }
 
     try {
       const keySchema = [
@@ -117,12 +149,34 @@ export class DynamoDBAdapter implements ConnectorAdapter {
           KeySchema: keySchema,
           AttributeDefinitions: attributeDefinitions,
           BillingMode: BillingMode.PAY_PER_REQUEST,
+          Tags: [
+            { Key: "citadel:orgId", Value: orgId },
+            { Key: "citadel:dataStoreId", Value: dataStoreId },
+            { Key: "ManagedBy", Value: "citadel" },
+          ],
         }),
       );
     } catch (error) {
       const err = error as SdkError;
       if (err.name === "ResourceInUseException") {
-        // Idempotent success — table already exists
+        // Idempotent success — table already exists. Ensure it carries the
+        // ownership tags (e.g. a retry after a partial prior failure).
+        try {
+          const tableArn = `arn:aws:dynamodb:${config.region ?? "us-east-1"}:${config.accountId ?? "000000000000"}:table/${tableName}`;
+          await client.send(
+            new TagResourceCommand({
+              ResourceArn: tableArn,
+              Tags: [
+                { Key: "citadel:orgId", Value: orgId },
+                { Key: "citadel:dataStoreId", Value: dataStoreId },
+                { Key: "ManagedBy", Value: "citadel" },
+              ],
+            }),
+          );
+        } catch {
+          // Tagging a pre-existing table is best-effort; idempotent
+          // re-provision must not fail because of it.
+        }
       } else if (
         err.name === "AccessDenied" ||
         err.name === "AccessDeniedException"
@@ -196,9 +250,9 @@ export class DynamoDBAdapter implements ConnectorAdapter {
 
   async deprovision(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>,
+    _credentials?: Record<string, unknown>,
   ): Promise<void> {
-    const client = this.makeClient(credentials, "deprovision");
+    const client = this.platformProvisionClient();
     const tableName = config.tableName as string | undefined;
 
     try {

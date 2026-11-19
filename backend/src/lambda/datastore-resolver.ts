@@ -714,28 +714,14 @@ async function createDataStore(
 
     // Inject dataStoreId + orgId BEFORE requiredPolicies/preflight so both
     // the policy derivation and the ownership check see the real ids.
-    // KnowledgeBaseAdapter.requiredPolicies derives its provision policy
-    // from these ids and returns `provision: []` when they are absent —
-    // injecting them after this call left KB CREATE_NEW with no role to
-    // mint and no scoped credentials to provision with (fail-closed, but
-    // broken). See design §3d.
     config.dataStoreId = dataStoreId;
     config.orgId = callerOrgId;
 
-    // Get account context and set up IAM role
     const { accountId, region } = await policyManager.getAccountContext();
-    const policies =
-      input.provisionMode === "CREATE_NEW"
-        ? adapter.requiredPolicies(config, accountId, region).provision
-        : adapter.requiredPolicies(config, accountId, region).connect;
 
-    // C2: preflight ownership check BEFORE creating any IAM role, run
-    // UNCONDITIONALLY — not only when requiredPolicies(...) returns a
-    // non-empty policy list. An adapter whose connect/provision policies
-    // are empty when scoping identifiers are absent (e.g.
-    // KnowledgeBaseAdapter, CIT-299) must still be preflighted; gating this
-    // on policies.length silently skipped the ownership check on exactly
-    // that path. Uses platform Lambda credentials, not scoped creds.
+    // C2: preflight ownership check BEFORE creating any IAM role OR
+    // provisioning anything, run UNCONDITIONALLY. Uses platform Lambda
+    // credentials, not scoped creds.
     if (adapter.preflight) {
       await adapter.preflight(config, {
         dataStoreId,
@@ -743,6 +729,67 @@ async function createDataStore(
         provisionMode: input.provisionMode,
       });
     }
+
+    // Dispatch to adapter
+    let resourceArn: string | undefined;
+    let size: string | undefined;
+    let records: number | undefined;
+
+    if (input.provisionMode === "CREATE_NEW") {
+      // Continuum C3 (PR-2): provisioning runs on the PLATFORM path BEFORE
+      // any tenant-assumable role exists. Adapters build their own
+      // ambient/named platform clients internally for provision/deprovision
+      // (DynamoDBAdapter.platformProvisionClient, RdsAdapter.platformProvisionClient,
+      // KnowledgeBaseAdapter.platformBedrockProvisionClient) — no scoped
+      // credentials are passed here, and none are needed: `ensureRole` for
+      // this data store has not run yet, so there is no role to assume.
+      //
+      // Update status to PROVISIONING
+      await dynamodb.send(
+        new UpdateCommand({
+          TableName: DATASTORES_TABLE,
+          Key: { dataStoreId },
+          UpdateExpression: "SET #status = :status, updatedAt = :now",
+          ExpressionAttributeNames: { "#status": "status" },
+          ExpressionAttributeValues: {
+            ":status": "PROVISIONING",
+            ":now": new Date().toISOString(),
+          },
+        }),
+      );
+
+      const provisionResult = await adapter.provision!(config, undefined);
+      resourceArn = provisionResult.resourceArn;
+      size = provisionResult.size;
+      records = provisionResult.records;
+
+      // CIT-299: adapters may enrich config during provision (e.g.
+      // KnowledgeBaseAdapter adds collectionId). Persist the updated config
+      // so subsequent connect operations have the scoping identifiers.
+      await dynamodb.send(
+        new UpdateCommand({
+          TableName: DATASTORES_TABLE,
+          Key: { dataStoreId },
+          UpdateExpression: "SET config = :config",
+          ExpressionAttributeValues: {
+            ":config": JSON.stringify(config),
+          },
+        }),
+      );
+    }
+
+    // Continuum C3 (PR-2): the tenant-assumable citadel-ds-<id> role is
+    // ALWAYS minted from `.connect` — never `.provision`. For CREATE_NEW,
+    // provisioning (above) has already resolved concrete resource
+    // identifiers into `config`, so `.connect` now reflects the real
+    // resource ARN rather than a placeholder. This is the ONLY `ensureRole`
+    // call on the create path, and `roleCreated` flips true only here, so
+    // a provisioning failure above has no role to roll back.
+    const policies = adapter.requiredPolicies(
+      config,
+      accountId,
+      region,
+    ).connect;
 
     let scopedCredentials: ScopedCredentials | undefined;
     if (policies.length > 0) {
@@ -798,48 +845,7 @@ async function createDataStore(
       scopedCredentials = creds;
     }
 
-    // Dispatch to adapter
-    let resourceArn: string | undefined;
-    let size: string | undefined;
-    let records: number | undefined;
-
-    if (input.provisionMode === "CREATE_NEW") {
-      // Update status to PROVISIONING
-      await dynamodb.send(
-        new UpdateCommand({
-          TableName: DATASTORES_TABLE,
-          Key: { dataStoreId },
-          UpdateExpression: "SET #status = :status, updatedAt = :now",
-          ExpressionAttributeNames: { "#status": "status" },
-          ExpressionAttributeValues: {
-            ":status": "PROVISIONING",
-            ":now": new Date().toISOString(),
-          },
-        }),
-      );
-
-      const provisionResult = await adapter.provision!(
-        config,
-        dispatchCreds(adapter, scopedCredentials, credentials),
-      );
-      resourceArn = provisionResult.resourceArn;
-      size = provisionResult.size;
-      records = provisionResult.records;
-
-      // CIT-299: adapters may enrich config during provision (e.g.
-      // KnowledgeBaseAdapter adds collectionId). Persist the updated config
-      // so subsequent connect operations have the scoping identifiers.
-      await dynamodb.send(
-        new UpdateCommand({
-          TableName: DATASTORES_TABLE,
-          Key: { dataStoreId },
-          UpdateExpression: "SET config = :config",
-          ExpressionAttributeValues: {
-            ":config": JSON.stringify(config),
-          },
-        }),
-      );
-    } else {
+    if (input.provisionMode !== "CREATE_NEW") {
       await adapter.connect(
         config,
         dispatchCreds(adapter, scopedCredentials, credentials),
@@ -1012,7 +1018,8 @@ async function deleteDataStore(dataStoreId: string, event: unknown) {
       ? JSON.parse(existing.config)
       : existing.config;
 
-  // Get scoped credentials for infrastructure cleanup
+  // Get scoped credentials for disconnect (data-plane; the connect-only
+  // citadel-ds-<id> role still applies here).
   let scopedCredentials: ScopedCredentials | undefined;
   try {
     const { accountId } = await policyManager.getAccountContext();
@@ -1032,10 +1039,14 @@ async function deleteDataStore(dataStoreId: string, event: unknown) {
     console.warn("Failed to disconnect:", error);
   }
 
-  // Deprovision infrastructure if this was a CREATE_NEW data store
+  // Continuum C3 (PR-2): deprovision (Delete*) runs on the PLATFORM path,
+  // scoped to the recorded identifiers persisted in `config` — NEVER under
+  // the tenant-assumable citadel-ds-<id> role, which (post-PR-2) no longer
+  // even carries a Delete* grant. Adapters build their own ambient/named
+  // platform clients internally for deprovision.
   if (existing.provisionMode === "CREATE_NEW" && adapter.deprovision) {
     try {
-      await adapter.deprovision(config, scopedCredentials);
+      await adapter.deprovision(config, undefined);
     } catch (error) {
       console.warn("Failed to deprovision infrastructure:", error);
     }
@@ -1057,7 +1068,7 @@ async function deleteDataStore(dataStoreId: string, event: unknown) {
 
   // Delete IAM role
   try {
-    await policyManager.deleteRole(dataStoreId);
+    await policyManager.deleteRole(dataStoreId, "datastore");
   } catch (error) {
     console.warn("Failed to delete IAM role:", error);
   }

@@ -132,9 +132,11 @@ describe("deleteDataStore - infrastructure cleanup", () => {
     const result = await invokeDelete("ds-123");
 
     expect(result.success).toBe(true);
+    // Continuum C3 (PR-2): deprovision runs on the platform path — no
+    // scoped credentials are dispatched for the destructive Delete* call.
     expect(mockAdapter.deprovision).toHaveBeenCalledWith(
       { bucketName: "my-bucket" },
-      expect.anything(),
+      undefined,
     );
   });
 

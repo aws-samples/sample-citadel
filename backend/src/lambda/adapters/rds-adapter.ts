@@ -3,6 +3,7 @@ import {
   CreateDBInstanceCommand,
   DeleteDBInstanceCommand,
   DescribeDBInstancesCommand,
+  AddTagsToResourceCommand,
 } from "@aws-sdk/client-rds";
 import {
   ConnectorAdapter,
@@ -56,6 +57,18 @@ export class RdsAdapter implements ConnectorAdapter {
     return new RDSClient({ credentials });
   }
 
+  /**
+   * Continuum C3 (PR-2): control-plane provisioning (CreateDBInstance/
+   * DeleteDBInstance/DescribeDBInstances/AddTagsToResource) runs under the
+   * datastore-resolver Lambda's directly-granted, tag/region-constrained
+   * permissions — NOT under the scoped citadel-ds-<id> role, which is
+   * minted connect-only post-provision. Named so the ambient-client guard
+   * test can allowlist it explicitly.
+   */
+  private platformProvisionClient(): RDSClient {
+    return new RDSClient({});
+  }
+
   requiredPolicies(
     config: Record<string, unknown>,
     accountId: string,
@@ -64,6 +77,10 @@ export class RdsAdapter implements ConnectorAdapter {
     const dbArn = `arn:aws:rds:${region}:${accountId}:db:${config.dbInstanceIdentifier ?? "*"}`;
 
     return {
+      // Continuum C3 (PR-2): CDK-mirrored platform-only documentation —
+      // never minted onto citadel-ds-<id>. Runs under
+      // platformProvisionClient() using the resolver Lambda's
+      // tag/region-constrained grants (backend-stack.ts).
       provision: [
         {
           actions: [
@@ -86,18 +103,16 @@ export class RdsAdapter implements ConnectorAdapter {
 
   async provision(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>,
+    _credentials?: Record<string, unknown>,
   ): Promise<ProvisionResult> {
-    const client = this.makeClient(credentials, "provision");
+    const client = this.platformProvisionClient();
     const identifier =
       (config.dbInstanceIdentifier as string | undefined) ??
       `citadel-${this.engine}-${Date.now()}`;
     const engineName = this.engine === "postgres" ? "postgres" : "mysql";
 
-    const masterUsername = (credentials?.masterUsername ??
-      config.masterUsername) as string | undefined;
-    const masterPassword = (credentials?.masterPassword ??
-      config.masterPassword) as string | undefined;
+    const masterUsername = config.masterUsername as string | undefined;
+    const masterPassword = config.masterPassword as string | undefined;
 
     if (!masterUsername || !masterPassword) {
       throw new ProvisioningError(
@@ -116,6 +131,17 @@ export class RdsAdapter implements ConnectorAdapter {
       );
     }
 
+    // Continuum C3 (PR-2): dataStoreId + orgId are required so the instance
+    // can be tagged at create, backing the `aws:ResourceTag` condition that
+    // bounds the platform role's DeleteDBInstance grant.
+    const dataStoreId = config.dataStoreId as string | undefined;
+    const orgId = config.orgId as string | undefined;
+    if (!dataStoreId || !orgId) {
+      throw new ProvisioningError(
+        "RDS instance provisioning requires dataStoreId and orgId",
+      );
+    }
+
     try {
       const result = await client.send(
         new CreateDBInstanceCommand({
@@ -127,6 +153,11 @@ export class RdsAdapter implements ConnectorAdapter {
             (config.allocatedStorage as number | undefined) ?? 20,
           MasterUsername: masterUsername,
           MasterUserPassword: masterPassword,
+          Tags: [
+            { Key: "citadel:orgId", Value: orgId },
+            { Key: "citadel:dataStoreId", Value: dataStoreId },
+            { Key: "ManagedBy", Value: "citadel" },
+          ],
         }),
       );
 
@@ -138,6 +169,22 @@ export class RdsAdapter implements ConnectorAdapter {
     } catch (error) {
       const err = error as SdkError;
       if (err.name === "DBInstanceAlreadyExistsFault") {
+        // Idempotent success — ensure ownership tags are present (best-effort).
+        try {
+          const existingArn = `arn:aws:rds:${config.region ?? "us-east-1"}:${config.accountId ?? "000000000000"}:db:${identifier}`;
+          await client.send(
+            new AddTagsToResourceCommand({
+              ResourceName: existingArn,
+              Tags: [
+                { Key: "citadel:orgId", Value: orgId },
+                { Key: "citadel:dataStoreId", Value: dataStoreId },
+                { Key: "ManagedBy", Value: "citadel" },
+              ],
+            }),
+          );
+        } catch {
+          // best-effort — idempotent re-provision must not fail on tagging
+        }
         return {
           resourceArn: `arn:aws:rds:${config.region ?? "us-east-1"}:${config.accountId ?? "000000000000"}:db:${identifier}`,
         };
@@ -209,9 +256,9 @@ export class RdsAdapter implements ConnectorAdapter {
 
   async deprovision(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>,
+    _credentials?: Record<string, unknown>,
   ): Promise<void> {
-    const client = this.makeClient(credentials, "deprovision");
+    const client = this.platformProvisionClient();
     const identifier = config.dbInstanceIdentifier as string | undefined;
 
     try {

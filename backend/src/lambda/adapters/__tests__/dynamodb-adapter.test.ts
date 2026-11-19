@@ -29,7 +29,11 @@ jest.mock("@aws-sdk/client-dynamodb", () => {
 
 describe("DynamoDBAdapter", () => {
   let adapter: DynamoDBAdapter;
-  const config = { tableName: "my-test-table" };
+  const config = {
+    tableName: "my-test-table",
+    dataStoreId: "ds-1",
+    orgId: "org-1",
+  };
 
   beforeEach(() => {
     adapter = new DynamoDBAdapter();
@@ -37,7 +41,7 @@ describe("DynamoDBAdapter", () => {
   });
 
   describe("requiredPolicies", () => {
-    it("returns provision policies for CreateTable and DescribeTable", () => {
+    it("returns provision policies (documentation-only; never minted onto citadel-ds-<id>) for CreateTable, DeleteTable, DescribeTable, TagResource", () => {
       const policies = adapter.requiredPolicies(
         config,
         "123456789012",
@@ -48,6 +52,7 @@ describe("DynamoDBAdapter", () => {
         "dynamodb:CreateTable",
         "dynamodb:DeleteTable",
         "dynamodb:DescribeTable",
+        "dynamodb:TagResource",
       ]);
       expect(policies.provision[0].resources).toEqual(["*"]);
     });
