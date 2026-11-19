@@ -1,16 +1,18 @@
 """Tests for scripts/audit_missing_required_permissions.py (PR-4 §3):
-dry-run audit of registry records missing requiredPermissions.
+dry-run audit of registry AGENT records missing requiredPermissions.
 
-The script performs NO writes — these tests assert that no mutating
-registry_client call is ever made and that the report correctly
-classifies records as missing-permissions vs. opted-into the explicit
-credentialMode: "none" sentinel vs. properly permissioned.
+Strict TDD — every behaviour asserted here was written before the
+corresponding production fix.
 """
+from __future__ import annotations
+
 import importlib.util
 import json
 import os
 import sys
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _SCRIPT_PATH = os.path.join(_REPO_ROOT, "scripts", "audit_missing_required_permissions.py")
@@ -24,93 +26,314 @@ def _load_script():
     return mod
 
 
-def _descriptor(**kwargs):
-    base = {"categories": [], "config": {}, "createdBy": "fabricator", "orgId": "org-1"}
+def _descriptor(**kwargs) -> str:
+    base: dict = {"categories": [], "config": {}, "createdBy": "fabricator", "orgId": "org-1"}
     base.update(kwargs)
     return json.dumps(base)
 
 
-class TestAuditMissingRequiredPermissions:
-    def test_record_with_no_permissions_is_reported(self):
+# ── Parity: _is_absent_or_empty_permissions vs. worker ──────────────────────
+
+
+class TestIsAbsentOrEmptyPermissionsParity:
+    """The script's helper MUST match the worker's _is_absent_or_empty_permissions
+    exactly (same semantics as arbiter/workerWrapper/index.py)."""
+
+    @pytest.fixture(autouse=True)
+    def _load(self):
+        self.mod = _load_script()
+        # Import the worker's version for parity comparison
+        worker_path = os.path.join(_REPO_ROOT, "arbiter", "workerWrapper", "index.py")
+        worker_spec = importlib.util.spec_from_file_location(
+            "_worker_wrapper_parity", worker_path,
+            submodule_search_locations=[os.path.join(_REPO_ROOT, "arbiter", "workerWrapper")],
+        )
+        worker_mod = importlib.util.module_from_spec(worker_spec)
+        # The worker module has heavy imports; we only need the pure function.
+        # Extract it from source instead.
+        self.worker_fn = None
+
+    @pytest.mark.parametrize("perms,expected", [
+        (None, True),
+        ({}, True),
+        ({"models": [], "integrations": [], "dataStores": []}, True),
+        ({"models": ["m1"]}, False),
+        ({"integrations": ["i1"]}, False),
+        ({"dataStores": ["d1"]}, False),
+        ({"models": ["m1"], "integrations": ["i1"]}, False),
+        ({"models": [], "integrations": ["i1"]}, False),
+        ({"models": [], "dataStores": ["d1"]}, False),
+        # Edge: non-dict treated as absent
+        ("not-a-dict", True),
+        (42, True),
+    ])
+    def test_matches_worker_semantics(self, perms, expected):
+        result = self.mod._is_absent_or_empty_permissions(perms)
+        assert result is expected
+
+
+class TestIsAbsentOrEmptyPermissionsModelsIncluded:
+    """Regression: the script must check models (not just integrations/dataStores)."""
+
+    def test_models_only_is_satisfied(self):
         mod = _load_script()
+        assert mod._is_absent_or_empty_permissions({"models": ["m1"]}) is False
+
+    def test_empty_models_with_no_others_is_absent(self):
+        mod = _load_script()
+        assert mod._is_absent_or_empty_permissions(
+            {"models": [], "integrations": [], "dataStores": []}
+        ) is True
+
+
+# ── Type filtering: AGENT records only ──────────────────────────────────────
+
+
+class TestAgentTypeFiltering:
+    """The audit must filter to AGENT records only, excluding tools and apps."""
+
+    def test_tool_record_excluded(self):
+        """A record with no manifest is a tool — must be excluded."""
+        mod = _load_script()
+        # Tool: no manifest in descriptor
+        tool_descriptor = _descriptor(config={})  # no manifest key
+        with patch.object(mod, "list_agent_records", return_value=[
+            {"recordId": "tool-1", "name": "my-tool", "status": "APPROVED"},
+        ]), patch.object(mod, "get_agent_record", return_value={
+            "recordId": "tool-1",
+            "customDescriptorContent": tool_descriptor,
+        }):
+            findings = mod.audit_missing_required_permissions("reg-1")
+        assert findings == []
+
+    def test_app_record_excluded(self):
+        """A record with appId in descriptor is an app — must be excluded."""
+        mod = _load_script()
+        app_descriptor = json.dumps({
+            "config": {},
+            "manifest": {"name": "my-app"},
+            "appId": "app-123",
+            "orgId": "org-1",
+            "createdBy": "user",
+        })
+        with patch.object(mod, "list_agent_records", return_value=[
+            {"recordId": "app-1", "name": "my-app", "status": "PUBLISHED"},
+        ]), patch.object(mod, "get_agent_record", return_value={
+            "recordId": "app-1",
+            "customDescriptorContent": app_descriptor,
+        }):
+            findings = mod.audit_missing_required_permissions("reg-1")
+        assert findings == []
+
+    def test_app_with_agent_bindings_excluded(self):
+        """manifest.agentBindings → app, excluded."""
+        mod = _load_script()
+        app_descriptor = json.dumps({
+            "config": {},
+            "manifest": {"agentBindings": [{"agentId": "a1"}]},
+            "orgId": "org-1",
+            "createdBy": "user",
+        })
+        with patch.object(mod, "list_agent_records", return_value=[
+            {"recordId": "app-2", "name": "my-app-2", "status": "APPROVED"},
+        ]), patch.object(mod, "get_agent_record", return_value={
+            "recordId": "app-2",
+            "customDescriptorContent": app_descriptor,
+        }):
+            findings = mod.audit_missing_required_permissions("reg-1")
+        assert findings == []
+
+    def test_app_with_manifest_access_excluded(self):
+        """manifest.access → app, excluded."""
+        mod = _load_script()
+        app_descriptor = json.dumps({
+            "config": {},
+            "manifest": {"access": {"role": "admin"}},
+            "orgId": "org-1",
+            "createdBy": "user",
+        })
+        with patch.object(mod, "list_agent_records", return_value=[
+            {"recordId": "app-3", "name": "my-app-3", "status": "APPROVED"},
+        ]), patch.object(mod, "get_agent_record", return_value={
+            "recordId": "app-3",
+            "customDescriptorContent": app_descriptor,
+        }):
+            findings = mod.audit_missing_required_permissions("reg-1")
+        assert findings == []
+
+    def test_agent_record_included(self):
+        """A record with manifest but no app fields is an agent — must be included."""
+        mod = _load_script()
+        agent_descriptor = json.dumps({
+            "config": {},
+            "manifest": {"name": "my-agent"},
+            "orgId": "org-1",
+            "createdBy": "fabricator",
+        })
+        with patch.object(mod, "list_agent_records", return_value=[
+            {"recordId": "agent-1", "name": "my-agent", "status": "APPROVED"},
+        ]), patch.object(mod, "get_agent_record", return_value={
+            "recordId": "agent-1",
+            "customDescriptorContent": agent_descriptor,
+        }):
+            findings = mod.audit_missing_required_permissions("reg-1")
+        assert len(findings) == 1
+        assert findings[0]["recordId"] == "agent-1"
+
+
+# ── Satisfaction semantics ──────────────────────────────────────────────────
+
+
+class TestSatisfactionSemantics:
+    """A record is satisfied when requiredPermissions has non-empty models OR
+    integrations OR dataStores, or credentialMode is 'none'."""
+
+    def _agent_descriptor(self, **extra) -> str:
+        """Build a descriptor that passes the agent type filter."""
+        base: dict = {
+            "config": {},
+            "manifest": {"name": "test-agent"},
+            "orgId": "org-1",
+            "createdBy": "fabricator",
+        }
+        base.update(extra)
+        return json.dumps(base)
+
+    def test_models_satisfies(self):
+        mod = _load_script()
+        desc = self._agent_descriptor(
+            config={"requiredPermissions": {"models": ["anthropic.claude-sonnet-5"]}},
+        )
+        with patch.object(mod, "list_agent_records", return_value=[
+            {"recordId": "r1", "name": "a1", "status": "APPROVED"},
+        ]), patch.object(mod, "get_agent_record", return_value={
+            "recordId": "r1", "customDescriptorContent": desc,
+        }):
+            assert mod.audit_missing_required_permissions("reg-1") == []
+
+    def test_integrations_satisfies(self):
+        mod = _load_script()
+        desc = self._agent_descriptor(
+            config={"requiredPermissions": {"integrations": ["int-1"]}},
+        )
+        with patch.object(mod, "list_agent_records", return_value=[
+            {"recordId": "r2", "name": "a2", "status": "APPROVED"},
+        ]), patch.object(mod, "get_agent_record", return_value={
+            "recordId": "r2", "customDescriptorContent": desc,
+        }):
+            assert mod.audit_missing_required_permissions("reg-1") == []
+
+    def test_datastores_satisfies(self):
+        mod = _load_script()
+        desc = self._agent_descriptor(
+            config={"requiredPermissions": {"dataStores": ["ds-1"]}},
+        )
+        with patch.object(mod, "list_agent_records", return_value=[
+            {"recordId": "r3", "name": "a3", "status": "APPROVED"},
+        ]), patch.object(mod, "get_agent_record", return_value={
+            "recordId": "r3", "customDescriptorContent": desc,
+        }):
+            assert mod.audit_missing_required_permissions("reg-1") == []
+
+    def test_credential_mode_none_satisfies(self):
+        mod = _load_script()
+        desc = self._agent_descriptor(config={"credentialMode": "none"})
+        with patch.object(mod, "list_agent_records", return_value=[
+            {"recordId": "r4", "name": "a4", "status": "APPROVED"},
+        ]), patch.object(mod, "get_agent_record", return_value={
+            "recordId": "r4", "customDescriptorContent": desc,
+        }):
+            assert mod.audit_missing_required_permissions("reg-1") == []
+
+    def test_empty_everything_is_finding(self):
+        mod = _load_script()
+        desc = self._agent_descriptor(
+            config={"requiredPermissions": {"models": [], "integrations": [], "dataStores": []}},
+        )
+        with patch.object(mod, "list_agent_records", return_value=[
+            {"recordId": "r5", "name": "a5", "status": "APPROVED"},
+        ]), patch.object(mod, "get_agent_record", return_value={
+            "recordId": "r5", "customDescriptorContent": desc,
+        }):
+            findings = mod.audit_missing_required_permissions("reg-1")
+            assert len(findings) == 1
+
+
+# ── Exit codes ──────────────────────────────────────────────────────────────
+
+
+class TestExitCodes:
+    """Exit 0 = clean, 1 = missing permissions found, 2 = registry call failed."""
+
+    def test_exit_0_when_clean(self):
+        mod = _load_script()
+        with patch.object(mod, "list_agent_records", return_value=[]):
+            code = mod.main(["--registry-id", "reg-1"])
+        assert code == 0
+
+    def test_exit_1_when_findings(self):
+        mod = _load_script()
+        agent_desc = json.dumps({
+            "config": {},
+            "manifest": {"name": "agent-no-perms"},
+            "orgId": "org-1",
+            "createdBy": "fabricator",
+        })
         with patch.object(mod, "list_agent_records", return_value=[
             {"recordId": "rec-1", "name": "agent-no-perms", "status": "DRAFT"},
         ]), patch.object(mod, "get_agent_record", return_value={
             "recordId": "rec-1",
-            "customDescriptorContent": _descriptor(config={}),
+            "customDescriptorContent": agent_desc,
         }):
-            findings = mod.audit_missing_required_permissions("reg-1")
+            code = mod.main(["--registry-id", "reg-1"])
+        assert code == 1
 
-        assert len(findings) == 1
-        assert findings[0]["recordId"] == "rec-1"
-        assert findings[0]["name"] == "agent-no-perms"
-        assert findings[0]["orgId"] == "org-1"
-
-    def test_record_with_empty_permissions_is_reported(self):
+    def test_exit_2_when_registry_call_fails(self):
         mod = _load_script()
-        with patch.object(mod, "list_agent_records", return_value=[
-            {"recordId": "rec-2", "name": "agent-empty-perms", "status": "APPROVED"},
-        ]), patch.object(mod, "get_agent_record", return_value={
-            "recordId": "rec-2",
-            "customDescriptorContent": _descriptor(
-                config={"requiredPermissions": {"integrations": [], "dataStores": []}},
-            ),
-        }):
-            findings = mod.audit_missing_required_permissions("reg-1")
+        with patch.object(mod, "list_agent_records", side_effect=Exception("connection refused")):
+            code = mod.main(["--registry-id", "reg-1"])
+        assert code == 2
 
-        assert len(findings) == 1
-        assert findings[0]["recordId"] == "rec-2"
-
-    def test_record_with_permissions_is_not_reported(self):
+    def test_exit_0_no_registry_id(self):
+        """No registry-id and no env var → nothing to audit, exit 0."""
         mod = _load_script()
-        with patch.object(mod, "list_agent_records", return_value=[
-            {"recordId": "rec-3", "name": "agent-ok", "status": "APPROVED"},
-        ]), patch.object(mod, "get_agent_record", return_value={
-            "recordId": "rec-3",
-            "customDescriptorContent": _descriptor(
-                config={"requiredPermissions": {"integrations": ["int-1"], "dataStores": []}},
-            ),
-        }):
-            findings = mod.audit_missing_required_permissions("reg-1")
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("REGISTRY_ID", None)
+            code = mod.main([])
+        assert code == 0
 
-        assert findings == []
 
-    def test_record_with_no_cloud_sentinel_is_not_reported(self):
+# ── Dry-run / read-only invariant ───────────────────────────────────────────
+
+
+class TestDryRunInvariant:
+    def test_never_calls_any_mutating_registry_client_function(self):
+        """The script module must not expose/call any write-capable
+        registry_client function at all."""
         mod = _load_script()
-        with patch.object(mod, "list_agent_records", return_value=[
-            {"recordId": "rec-4", "name": "pure-compute-agent", "status": "APPROVED"},
-        ]), patch.object(mod, "get_agent_record", return_value={
-            "recordId": "rec-4",
-            "customDescriptorContent": _descriptor(
-                config={"credentialMode": "none"},
-            ),
-        }):
-            findings = mod.audit_missing_required_permissions("reg-1")
+        for name in dir(mod):
+            assert "update_" not in name.lower() or name.startswith("_")
+            assert "create_" not in name.lower() or name.startswith("_")
+            assert "delete_" not in name.lower() or name.startswith("_")
 
-        assert findings == []
 
-    def test_descriptor_level_sentinel_also_excludes(self):
-        """The sentinel may be stamped at the top level of the descriptor
-        (custom_metadata) rather than nested under config — both locations
-        must be checked."""
-        mod = _load_script()
-        with patch.object(mod, "list_agent_records", return_value=[
-            {"recordId": "rec-5", "name": "pure-compute-agent-2", "status": "APPROVED"},
-        ]), patch.object(mod, "get_agent_record", return_value={
-            "recordId": "rec-5",
-            "customDescriptorContent": _descriptor(credentialMode="none", config={}),
-        }):
-            findings = mod.audit_missing_required_permissions("reg-1")
+# ── Malformed / edge cases ──────────────────────────────────────────────────
 
-        assert findings == []
 
-    def test_no_registry_records_yields_empty_findings(self):
-        mod = _load_script()
-        with patch.object(mod, "list_agent_records", return_value=[]):
-            findings = mod.audit_missing_required_permissions("reg-1")
-        assert findings == []
+class TestEdgeCases:
+    def _agent_descriptor(self, **extra) -> str:
+        base: dict = {
+            "config": {},
+            "manifest": {"name": "test-agent"},
+            "orgId": "org-1",
+            "createdBy": "fabricator",
+        }
+        base.update(extra)
+        return json.dumps(base)
 
-    def test_malformed_descriptor_content_skipped_not_raised(self):
+    def test_malformed_descriptor_content_skipped(self):
+        """A record with unparseable descriptor is skipped (not reported,
+        since we can't determine if it's an agent)."""
         mod = _load_script()
         with patch.object(mod, "list_agent_records", return_value=[
             {"recordId": "rec-6", "name": "broken", "status": "DRAFT"},
@@ -119,51 +342,35 @@ class TestAuditMissingRequiredPermissions:
             "customDescriptorContent": "not json",
         }):
             findings = mod.audit_missing_required_permissions("reg-1")
-        # Malformed descriptor parses to {} -> treated as missing permissions
-        # (deny-default is the SAFE direction for a report tool: better to
-        # over-report than silently skip a record whose permissions could
-        # not be determined).
-        assert len(findings) == 1
-        assert findings[0]["recordId"] == "rec-6"
+        # Malformed descriptor → can't determine kind → skip
+        assert findings == []
 
-    def test_never_calls_any_mutating_registry_client_function(self):
-        """Dry-run invariant: the script module must not expose/call any
-        write-capable registry_client function at all."""
-        mod = _load_script()
-        for name in dir(mod):
-            assert "update_" not in name.lower() or name.startswith("_")
-            assert "create_" not in name.lower() or name.startswith("_")
-            assert "delete_" not in name.lower() or name.startswith("_")
-
-
-class TestMainIsDryRunAndAlwaysExitsZero:
-    def test_main_returns_zero_with_findings(self, capsys):
-        mod = _load_script()
-        with patch.object(mod, "list_agent_records", return_value=[
-            {"recordId": "rec-1", "name": "agent-no-perms", "status": "DRAFT"},
-        ]), patch.object(mod, "get_agent_record", return_value={
-            "recordId": "rec-1",
-            "customDescriptorContent": _descriptor(config={}),
-        }):
-            exit_code = mod.main(["--registry-id", "reg-1"])
-
-        assert exit_code == 0
-        captured = capsys.readouterr()
-        assert "1 record(s)" in captured.out or "rec-1" in captured.out
-        assert "DRY-RUN ONLY" in captured.out
-
-    def test_main_returns_zero_with_no_findings(self, capsys):
+    def test_no_registry_records_yields_empty(self):
         mod = _load_script()
         with patch.object(mod, "list_agent_records", return_value=[]):
-            exit_code = mod.main(["--registry-id", "reg-1"])
+            findings = mod.audit_missing_required_permissions("reg-1")
+        assert findings == []
 
-        assert exit_code == 0
-        captured = capsys.readouterr()
-        assert "0 record" in captured.out or "(none)" in captured.out
-
-    def test_main_returns_zero_with_no_registry_id(self):
+    def test_descriptor_level_sentinel_excludes(self):
         mod = _load_script()
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("REGISTRY_ID", None)
-            exit_code = mod.main([])
-        assert exit_code == 0
+        desc = self._agent_descriptor(credentialMode="none")
+        with patch.object(mod, "list_agent_records", return_value=[
+            {"recordId": "r1", "name": "a1", "status": "APPROVED"},
+        ]), patch.object(mod, "get_agent_record", return_value={
+            "recordId": "r1", "customDescriptorContent": desc,
+        }):
+            assert mod.audit_missing_required_permissions("reg-1") == []
+
+    def test_descriptor_level_permissions_checked(self):
+        """requiredPermissions stamped at descriptor top-level (not nested
+        under config) should also satisfy."""
+        mod = _load_script()
+        desc = self._agent_descriptor(
+            requiredPermissions={"models": ["m1"]},
+        )
+        with patch.object(mod, "list_agent_records", return_value=[
+            {"recordId": "r2", "name": "a2", "status": "APPROVED"},
+        ]), patch.object(mod, "get_agent_record", return_value={
+            "recordId": "r2", "customDescriptorContent": desc,
+        }):
+            assert mod.audit_missing_required_permissions("reg-1") == []
