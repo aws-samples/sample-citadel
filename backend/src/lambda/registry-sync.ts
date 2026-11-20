@@ -707,8 +707,11 @@ export function buildAgentProjectionRow(
 
   const row: AgentProjectionRow = {
     ...base,
-    // Override state using record.status as fallback for unknown descriptor values
-    state: toInternalState(meta.state, record.status),
+    // State authority: record.status (the registry's own lifecycle status)
+    // is the single source of truth, exactly as the live GA path derives it
+    // via toInternalStateFromGaStatus — see deriveProjectedState's doc
+    // comment for why the descriptor's `state` mirror must never win here.
+    state: deriveProjectedState(meta.state, record.status),
     // Override fields that buildAgentCacheRecord cannot set from the legacy path
     registryRecordId: record.recordId,
     registryStatus: record.status,
@@ -858,6 +861,12 @@ export function buildToolProjectionRow(
 
   const row: ToolProjectionRow = {
     ...base,
+    // State authority: record.status (the registry's own lifecycle status)
+    // is the single source of truth, exactly as the live GA path derives it
+    // via toInternalStateFromGaStatus and as buildAgentProjectionRow already
+    // does for agents — see deriveProjectedState's doc comment for why the
+    // descriptor's `state` mirror must never win here.
+    state: deriveProjectedState(meta.state, record.status),
     config: fullConfig,
     description: record.description ?? "",
     name: record.name ?? "",
@@ -942,6 +951,41 @@ export function toInternalStateFromGaStatus(
       );
       return undefined;
   }
+}
+
+/**
+ * Single shared `state` derivation used by BOTH the live event-driven path
+ * (`buildGaMergeFields`, `handleStatusChanged`'s GA branch) and the
+ * offline rebuild/resync path (`buildAgentProjectionRow`), so a rebuild of
+ * a record produces byte-for-byte the same `state` as the deployed sync
+ * handler would have written for it.
+ *
+ * `record.status` is AUTHORITATIVE and wins whenever it maps to a known
+ * value. This is deliberate, not incidental: the fabricator
+ * (arbiter/fabricator/index.py) writes the descriptor's `custom.state` as
+ * `'inactive'` exactly once at creation time as a quarantine flag for a
+ * brand-new DRAFT record. Approval (SubmitRegistryRecordForApproval) flips
+ * only the top-level `record.status` to APPROVED — it never touches the
+ * descriptor — so `custom.state` is stale ('inactive') on every approved
+ * fabricator-created agent while `record.status` correctly reflects
+ * APPROVED. This drift is documented and intentional at
+ * registry-agent-record-resolver.ts (search "which drifts: the fabricator
+ * writes"): `custom.state` is NOT an operator override field; it is only
+ * ever meaningful as the initial quarantine marker on a DRAFT record, and
+ * `record.status` must win once the record has moved past DRAFT.
+ *
+ * `descriptorState` (the legacy `meta.state`/`toInternalState` value) is
+ * consulted ONLY when `record.status` itself fails to map to a known
+ * value, mirroring `toInternalState`'s existing unknown-status fallback
+ * behaviour for records with no usable status at all.
+ */
+export function deriveProjectedState(
+  descriptorState: string,
+  recordStatus: string | undefined,
+): string {
+  const fromStatus = toInternalStateFromGaStatus(recordStatus);
+  if (fromStatus !== undefined) return fromStatus;
+  return toInternalState(descriptorState);
 }
 
 /**
@@ -1616,6 +1660,15 @@ export async function handleGaUpsert(
  * resync/backfill script can produce byte-for-byte the same projection row
  * shape through ONE writer — never a second, independently-maintained copy
  * of this attribute-flattening logic.
+ *
+ * Optional fields that are `undefined` on the built row (appId,
+ * sourceProjectId, registryRecordId, manifest, config, createdBy, tags,
+ * decidedBy, decidedAt, statusReason, integrationBindings,
+ * dataStoreBindings — e.g. a fabricated agent/tool, which never carries an
+ * appId) are OMITTED from the SET clause rather than written. DynamoDB's
+ * document client rejects `undefined` inside ExpressionAttributeValues, and
+ * omitting (rather than REMOVE-ing) the attribute preserves whatever value
+ * may already exist on the row instead of deleting it.
  */
 export async function writeProjectionRow(
   docClient: DynamoDBDocumentClient,
@@ -1637,6 +1690,19 @@ export async function writeProjectionRow(
   const keyAttr = resourceType === "agent" ? "agentId" : "toolId";
   for (const [attr, value] of Object.entries(projectionRow)) {
     if (attr === keyAttr) continue; // skip the key attribute
+    // Optional fields (appId, sourceProjectId, registryRecordId, decidedBy,
+    // decidedAt, statusReason, etc.) are `undefined` on the row type when
+    // the source record carries no value for them (e.g. fabricated
+    // agents/tools never have an appId). Mirrors the omission convention
+    // already used by buildGaMergeFields below: an absent value is left
+    // OUT of the SET clause entirely rather than written as `undefined` or
+    // REMOVEd — DynamoDB's document client throws on `undefined` inside
+    // ExpressionAttributeValues, and omitting (vs. REMOVE) preserves
+    // whatever may already exist on the row instead of deleting it. None
+    // of the projection-row builders ever emit an explicit `null`; if one
+    // starts to (meaning "delete this attribute"), it must be handled as
+    // its own case with a REMOVE clause, not folded into this skip.
+    if (value === undefined) continue;
     const safeName = attr.replace(/[^a-zA-Z0-9_]/g, "_");
     projNames[`#p_${safeName}`] = attr;
     projValues[`:p_${safeName}`] = value;

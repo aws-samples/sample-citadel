@@ -345,3 +345,51 @@ describe("buildAgentProjectionRow — state derived from record.status", () => {
     expect(row.state).toBe("inactive");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Regression: rebuild/resync must match the live path for the stale
+// fabricator descriptor state ('inactive') on a record whose status has
+// since moved past DRAFT. record.status is authoritative; the descriptor's
+// `state` mirror is a quarantine flag written once by the fabricator and
+// never updated on approval (see registry-agent-record-resolver.ts).
+// ---------------------------------------------------------------------------
+describe("buildAgentProjectionRow — authoritative record.status overrides stale fabricator descriptor state", () => {
+  function fabricatorRecord(status: string): RegistryRecord {
+    return {
+      recordId: `rec-fab-${status}`,
+      name: "fabricated-agent",
+      description: "Fabricator-created agent",
+      status,
+      customDescriptorContent: JSON.stringify({
+        categories: ["worker"],
+        icon: "",
+        // Fabricator always writes 'inactive' at creation time (quarantine),
+        // regardless of what the record status later becomes.
+        state: "inactive",
+        orgId: "org-fab",
+      }),
+      createdAt: new Date("2026-10-01T00:00:00Z"),
+      updatedAt: new Date("2026-11-01T00:00:00Z"),
+    } as RegistryRecord;
+  }
+
+  test("APPROVED record with stale descriptor state 'inactive' projects 'active' (matches live path)", () => {
+    const row = buildAgentProjectionRow(fabricatorRecord("APPROVED"));
+    expect(row.state).toBe("active");
+  });
+
+  test("PENDING_APPROVAL record with stale descriptor state 'inactive' projects 'pending'", () => {
+    const row = buildAgentProjectionRow(fabricatorRecord("PENDING_APPROVAL"));
+    expect(row.state).toBe("pending");
+  });
+
+  test("DRAFT record with stale descriptor state 'inactive' projects 'maintenance' (matches live toInternalStateFromGaStatus mapping)", () => {
+    const row = buildAgentProjectionRow(fabricatorRecord("DRAFT"));
+    expect(row.state).toBe("maintenance");
+  });
+
+  test("DEPRECATED record with stale descriptor state 'inactive' projects 'inactive'", () => {
+    const row = buildAgentProjectionRow(fabricatorRecord("DEPRECATED"));
+    expect(row.state).toBe("inactive");
+  });
+});
