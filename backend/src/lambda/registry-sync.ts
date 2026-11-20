@@ -1616,6 +1616,15 @@ export async function handleGaUpsert(
  * resync/backfill script can produce byte-for-byte the same projection row
  * shape through ONE writer — never a second, independently-maintained copy
  * of this attribute-flattening logic.
+ *
+ * Optional fields that are `undefined` on the built row (appId,
+ * sourceProjectId, registryRecordId, manifest, config, createdBy, tags,
+ * decidedBy, decidedAt, statusReason, integrationBindings,
+ * dataStoreBindings — e.g. a fabricated agent/tool, which never carries an
+ * appId) are OMITTED from the SET clause rather than written. DynamoDB's
+ * document client rejects `undefined` inside ExpressionAttributeValues, and
+ * omitting (rather than REMOVE-ing) the attribute preserves whatever value
+ * may already exist on the row instead of deleting it.
  */
 export async function writeProjectionRow(
   docClient: DynamoDBDocumentClient,
@@ -1637,6 +1646,19 @@ export async function writeProjectionRow(
   const keyAttr = resourceType === "agent" ? "agentId" : "toolId";
   for (const [attr, value] of Object.entries(projectionRow)) {
     if (attr === keyAttr) continue; // skip the key attribute
+    // Optional fields (appId, sourceProjectId, registryRecordId, decidedBy,
+    // decidedAt, statusReason, etc.) are `undefined` on the row type when
+    // the source record carries no value for them (e.g. fabricated
+    // agents/tools never have an appId). Mirrors the omission convention
+    // already used by buildGaMergeFields below: an absent value is left
+    // OUT of the SET clause entirely rather than written as `undefined` or
+    // REMOVEd — DynamoDB's document client throws on `undefined` inside
+    // ExpressionAttributeValues, and omitting (vs. REMOVE) preserves
+    // whatever may already exist on the row instead of deleting it. None
+    // of the projection-row builders ever emit an explicit `null`; if one
+    // starts to (meaning "delete this attribute"), it must be handled as
+    // its own case with a REMOVE clause, not folded into this skip.
+    if (value === undefined) continue;
     const safeName = attr.replace(/[^a-zA-Z0-9_]/g, "_");
     projNames[`#p_${safeName}`] = attr;
     projValues[`:p_${safeName}`] = value;

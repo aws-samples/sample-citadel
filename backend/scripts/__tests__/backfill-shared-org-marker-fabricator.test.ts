@@ -3601,6 +3601,80 @@ describe("resyncProjectionForId — rebuilds the projection row via registry-syn
     expect(values[`:${projectionVersionKey!.slice(1)}`]).toBe(1);
   });
 
+  it("apply=true succeeds for a fabricated agent with no appId (writeProjectionRow must never bind an undefined ExpressionAttributeValue)", async () => {
+    // Fabricated agents never carry an appId in their descriptor — this is
+    // exactly the live shape that --resync-projection --apply hit.
+    const record = {
+      recordId: "synthetic-resync-no-appid",
+      name: "synthetic-fabricated-agent",
+      status: "APPROVED",
+      customDescriptorContent: JSON.stringify({
+        orgId: "SyntheticOrg",
+        createdBy: "fabricator",
+        // appId intentionally absent.
+      }),
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-01-02T00:00:00.000Z"),
+    };
+    const registry = {
+      getResource: jest.fn().mockResolvedValue(record),
+    } as unknown as RegistryService;
+    // Mimics the real DynamoDBDocumentClient: it throws when any bound
+    // ExpressionAttributeValue is `undefined`, which is the exact failure
+    // mode `--resync-projection --apply` hit against live DynamoDB before
+    // the fix.
+    const send = jest.fn().mockImplementation((command) => {
+      const ctorName = command?.constructor?.name;
+      if (ctorName === "GetCommand") {
+        return Promise.resolve({
+          Item: {
+            agentId: "synthetic-resync-no-appid",
+            registryStatus: "PENDING_APPROVAL",
+            orgId: "SyntheticOrg",
+          },
+        });
+      }
+      if (ctorName === "UpdateCommand") {
+        const values = command.input.ExpressionAttributeValues as Record<
+          string,
+          unknown
+        >;
+        for (const [key, value] of Object.entries(values ?? {})) {
+          if (value === undefined) {
+            throw new Error(
+              `ExpressionAttributeValues contains undefined for ${key}`,
+            );
+          }
+        }
+      }
+      return Promise.resolve({});
+    });
+    const docClient = fakeDocClient(send);
+
+    const result = await resyncProjectionForId(
+      "synthetic-resync-no-appid",
+      "agent",
+      registry,
+      docClient,
+      "agent-table",
+      /* apply */ true,
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.rebuilt).toBe(true);
+
+    const updateCall = send.mock.calls.find(
+      ([command]) => command?.constructor?.name === "UpdateCommand",
+    );
+    expect(updateCall).toBeDefined();
+    const [updateCommand] = updateCall!;
+    const names = updateCommand.input.ExpressionAttributeNames as Record<
+      string,
+      string
+    >;
+    expect(Object.values(names)).not.toContain("appId");
+  });
+
   it("surfaces a getResource failure as error with recordNotFoundOrWrongType, letting the caller retry as the other kind", async () => {
     const registry = {
       getResource: jest.fn().mockRejectedValue(new Error("TypeMismatchError")),
