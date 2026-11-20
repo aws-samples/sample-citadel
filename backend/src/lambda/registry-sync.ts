@@ -861,6 +861,12 @@ export function buildToolProjectionRow(
 
   const row: ToolProjectionRow = {
     ...base,
+    // State authority: record.status (the registry's own lifecycle status)
+    // is the single source of truth, exactly as the live GA path derives it
+    // via toInternalStateFromGaStatus and as buildAgentProjectionRow already
+    // does for agents — see deriveProjectedState's doc comment for why the
+    // descriptor's `state` mirror must never win here.
+    state: deriveProjectedState(meta.state, record.status),
     config: fullConfig,
     description: record.description ?? "",
     name: record.name ?? "",
