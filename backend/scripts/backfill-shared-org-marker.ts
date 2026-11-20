@@ -79,6 +79,28 @@
  *                                 the script exits non-zero before any
  *                                 write. The dry run always prints the
  *                                 complete fallback candidate list.
+ *   --call-delay-ms <ms>           Non-negative integer inter-call pacing
+ *                                 (ms) applied between registry calls
+ *                                 (getResource, updateResource,
+ *                                 waitForStableState poll,
+ *                                 submitForApproval, decide) in the
+ *                                 marker-edit/corrective path — separate
+ *                                 from the per-record `--delay-ms` retry
+ *                                 backoff. Defaults to 300 when --apply is
+ *                                 set and the flag is omitted (0 in
+ *                                 dry-run, which never writes).
+ *   --restore-approval <id,...>    Comma-separated registry recordId(s)
+ *                                 whose org marker is already correct but
+ *                                 whose registry status was left DRAFT by
+ *                                 a partial write (see `needsReapproval`
+ *                                 in the corrective-mode summary). Runs
+ *                                 wait-stable -> submitForApproval ->
+ *                                 decide(APPROVED) and verifies the final
+ *                                 status. Dry-run by default (prints the
+ *                                 plan); no-op for an already-APPROVED
+ *                                 record; exits non-zero if restoration
+ *                                 fails. Valid ONLY together with
+ *                                 --correct-fabricator-shared.
  *
  * Required env (same convention as backfill-org-ids.ts):
  *   REGISTRY_ID           – AgentCore Registry id
@@ -115,6 +137,7 @@ import {
   ResourceType,
   RegistryRecord,
   ListResourcesResult,
+  RegistryRecordStatusValues,
 } from "../src/services/registry-service";
 import { ALL_ORGS } from "../src/utils/org-constants";
 import { applyMarkerEdit } from "../src/utils/marker-registry-edit";
@@ -294,6 +317,23 @@ export interface BackfillSummary {
   alreadyUnknown: number;
   ambiguousReported: number;
   errors: number;
+  /**
+   * Records attempted (written) in corrective apply mode, regardless of
+   * outcome — successes AND failures. `--limit` bounds this count, never
+   * the success-only counters, so a throttled/failed write still consumes
+   * the limit instead of letting the loop silently touch more than N
+   * records (the exact incident gap: a failure "did not count toward
+   * --limit").
+   */
+  attempted: number;
+  /**
+   * Records whose UpdateRegistryRecord write landed (the registry demoted
+   * them to DRAFT) but whose post-write approval restoration failed —
+   * distinct from `errors`, which covers failures BEFORE the write landed.
+   * Never abandoned: the main loop continues to the next record, and one
+   * more pass runs over this bucket at the end of a corrective apply.
+   */
+  needsReapproval: number;
 }
 
 export function emptySummary(): BackfillSummary {
@@ -307,6 +347,8 @@ export function emptySummary(): BackfillSummary {
     alreadyUnknown: 0,
     ambiguousReported: 0,
     errors: 0,
+    attempted: 0,
+    needsReapproval: 0,
   };
 }
 
@@ -320,6 +362,8 @@ export function addSummary(dst: BackfillSummary, src: BackfillSummary): void {
   dst.alreadyUnknown += src.alreadyUnknown;
   dst.ambiguousReported += src.ambiguousReported;
   dst.errors += src.errors;
+  dst.attempted += src.attempted;
+  dst.needsReapproval += src.needsReapproval;
 }
 
 // ---------------------------------------------------------------------------
@@ -819,12 +863,43 @@ export function planCorrectiveEntry(
 }
 
 /**
+ * True when an {@link MarkerEditResult}-shaped response indicates the
+ * registry write landed (UpdateRegistryRecord succeeded, demoting the
+ * record to DRAFT) but the post-write approval-restoration steps
+ * (submitForApproval / decide) failed to bring it back to APPROVED —
+ * `applyMarkerEdit` swallows that failure internally (console.warn) and
+ * returns successfully with `reapproved: false`, `error: undefined`. That
+ * is indistinguishable from "nothing needed restoring" UNLESS the record
+ * was APPROVED beforehand, so the check requires `priorStatus ===
+ * "APPROVED"` — never flags a record that was already DRAFT/other.
+ */
+function editResultNeedsReapproval(editResult: {
+  priorStatus: string;
+  postStatus: string;
+  reapproved: boolean;
+  error?: string;
+}): boolean {
+  return (
+    editResult.error === undefined &&
+    editResult.priorStatus === "APPROVED" &&
+    !editResult.reapproved
+  );
+}
+
+/**
  * Applies one planned corrective entry to BOTH stores: the registry
  * descriptor (via the approval-preserving marker-edit helper, never a raw
  * Put) and the DynamoDB agents/tools projection row. Conditional on the
  * record still holding its previously-observed value, to avoid clobbering a
  * concurrent write. Ambiguous and unresolvable entries are never written —
  * only planned/reported.
+ *
+ * `needsReapproval: true` in the result means the org marker itself landed
+ * correctly (and the DDB projection write below still proceeds) but the
+ * registry record was left DRAFT instead of its prior APPROVED — the
+ * caller must bucket this distinctly from `error` and retry restoration
+ * later (see `restoreApprovalForRecord` / `--restore-approval`), never
+ * abandon the record.
  */
 export async function applyCorrectiveEntry(
   entry: CorrectivePlanEntry,
@@ -832,7 +907,7 @@ export async function applyCorrectiveEntry(
   registry: RegistryService,
   tableName: string,
   docClient: DynamoDBDocumentClient,
-): Promise<{ error?: string }> {
+): Promise<{ error?: string; needsReapproval?: boolean }> {
   if (entry.reason === "ambiguous-multi-org") {
     return { error: undefined };
   }
@@ -854,6 +929,7 @@ export async function applyCorrectiveEntry(
       },
     );
     if (editResult.error) return { error: editResult.error };
+    const needsReapproval = editResultNeedsReapproval(editResult);
 
     const pkName = type === "agent" ? "agentId" : "toolId";
     await docClient.send(
@@ -876,7 +952,7 @@ export async function applyCorrectiveEntry(
         ReturnValues: "UPDATED_NEW",
       }),
     );
-    return {};
+    return needsReapproval ? { needsReapproval: true } : {};
   }
 
   const editResult = await applyMarkerEdit(
@@ -888,6 +964,7 @@ export async function applyCorrectiveEntry(
     },
   );
   if (editResult.error) return { error: editResult.error };
+  const needsReapproval = editResultNeedsReapproval(editResult);
 
   const pkName = type === "agent" ? "agentId" : "toolId";
   await docClient.send(
@@ -908,7 +985,118 @@ export async function applyCorrectiveEntry(
       ReturnValues: "UPDATED_NEW",
     }),
   );
-  return {};
+  return needsReapproval ? { needsReapproval: true } : {};
+}
+
+/**
+ * Result of a single `--restore-approval <id>` attempt (or an end-of-run
+ * re-approval pass iteration).
+ */
+export interface RestoreApprovalResult {
+  recordId: string;
+  wouldRestore?: boolean;
+  alreadyApproved?: boolean;
+  restored?: boolean;
+  error?: string;
+  /**
+   * Set when `getResource` failed in a way consistent with the id simply
+   * being the other resource type (agent vs tool) — lets the end-of-run
+   * pass retry the other type without treating a type mismatch as a hard
+   * failure.
+   */
+  recordNotFoundOrWrongType?: boolean;
+}
+
+/**
+ * Restores approval for a single record whose org marker is already
+ * correct but whose registry status was left DRAFT by a partial write
+ * (the `needsReapproval` signature). Runs the post-update steps in order
+ * — waitForStableState happens implicitly inside `submitForApproval` /
+ * `updateResourceStatus` on the `RegistryService` side — submitForApproval
+ * then, if still PENDING_APPROVAL, decide(APPROVED); verifies the final
+ * status is APPROVED before reporting success.
+ *
+ * Dry-run by default (`apply: false`): prints the plan (what WOULD be
+ * restored) without calling any mutating registry operation. No-op for a
+ * record that is already APPROVED, in either mode. Never throws — returns
+ * `error` on failure so the caller (CLI `--restore-approval` or the
+ * end-of-run pass) decides on exit code / retry.
+ */
+export async function restoreApprovalForRecord(
+  recordId: string,
+  type: ResourceType,
+  registry: RegistryService,
+  apply: boolean,
+): Promise<RestoreApprovalResult> {
+  let record: RegistryRecord | null;
+  try {
+    record = await registry.getResource(type, recordId);
+  } catch (err) {
+    return {
+      recordId,
+      error: `getResource failed: ${String(err)}`,
+      recordNotFoundOrWrongType: true,
+    };
+  }
+
+  if (!record) {
+    return {
+      recordId,
+      error: "Record not found (null)",
+      recordNotFoundOrWrongType: true,
+    };
+  }
+
+  if (record.status === "APPROVED") {
+    log(
+      "info",
+      `[restore-approval] recordId=${recordId} already APPROVED — no-op`,
+    );
+    return { recordId, alreadyApproved: true };
+  }
+
+  if (!apply) {
+    log(
+      "info",
+      `[restore-approval] PLAN recordId=${recordId} currentStatus=${record.status} -> would run submitForApproval -> decide(APPROVED)`,
+    );
+    return { recordId, wouldRestore: true };
+  }
+
+  try {
+    const submitted = await registry.submitForApproval(recordId);
+    let finalStatus = submitted.status ?? "PENDING_APPROVAL";
+
+    if (finalStatus === "PENDING_APPROVAL") {
+      const decided = await registry.updateResourceStatus(
+        type,
+        recordId,
+        RegistryRecordStatusValues.APPROVED,
+        "restore-approval: restoring status after partial corrective write",
+      );
+      finalStatus = decided.status ?? "APPROVED";
+    }
+
+    if (finalStatus !== "APPROVED") {
+      return {
+        recordId,
+        error: `Restoration did not reach APPROVED (ended at ${finalStatus})`,
+      };
+    }
+
+    // Verify by re-fetching — never trust the mutation response alone.
+    const verified = await registry.getResource(type, recordId);
+    if (!verified || verified.status !== "APPROVED") {
+      return {
+        recordId,
+        error: `Post-restoration verification failed (status=${verified?.status ?? "<null>"})`,
+      };
+    }
+
+    return { recordId, restored: true };
+  } catch (err) {
+    return { recordId, error: `Restoration failed: ${String(err)}` };
+  }
 }
 
 /**
@@ -1028,10 +1216,42 @@ export async function reconcileDroppedRecords(
 }
 
 /**
+ * Default inter-call pacing (ms) applied between registry calls in apply
+ * mode via `--call-delay-ms`, separate from the per-record `--delay-ms`
+ * backoff schedule. 0 by default here; `main()` applies the spec's
+ * ">= 300 when --apply" floor when the flag is omitted in apply mode.
+ */
+export const DEFAULT_CALL_DELAY_MS = 0;
+
+/**
+ * Spec floor for `--call-delay-ms` when `--apply` is set and the flag is
+ * omitted — inter-call pacing between registry calls, separate from the
+ * per-record `--delay-ms` retry backoff.
+ */
+export const MIN_APPLY_CALL_DELAY_MS = 300;
+
+/** Injectable inter-call pacing hook — overridable in tests. */
+export type CallPacer = (delayMs: number) => Promise<void>;
+
+export const defaultCallPacer: CallPacer = (delayMs) => sleep(delayMs);
+
+/**
  * Scans one registry resource type for corrective-mode targets, logging the
  * previous value of every planned entry. Refuses (returns an error summary)
  * if the underlying list is partial/throttled — per spec, a throttled or
  * failed read is an error, never a silent partial apply.
+ *
+ * `limit` bounds the number of records ATTEMPTED (`summary.attempted`) —
+ * successes AND failures — never just successes, so a throttled/failed
+ * write still consumes the limit (incident: a failure "did not count
+ * toward --limit"). A `needsReapproval` outcome from
+ * {@link applyCorrectiveEntry} is bucketed into `summary.needsReapproval`
+ * and the loop CONTINUES to the next record — it is never treated as an
+ * abandon-the-run error.
+ *
+ * `callDelayMs`/`callPacer` add inter-call pacing between attempted
+ * registry writes, separate from the per-record retry backoff in
+ * {@link reconcileDroppedRecords}.
  */
 export async function runCorrectiveForRegistryType(
   type: ResourceType,
@@ -1046,6 +1266,8 @@ export async function runCorrectiveForRegistryType(
   retryDelayMs: number = CORRECTIVE_RECORD_RETRY_BASE_DELAY_MS,
   retryMaxAttempts: number = CORRECTIVE_RECORD_RETRY_MIN_ATTEMPTS,
   fallbackOrg?: string,
+  callDelayMs: number = DEFAULT_CALL_DELAY_MS,
+  callPacer: CallPacer = defaultCallPacer,
 ): Promise<CorrectivePlanEntry[]> {
   const plan: CorrectivePlanEntry[] = [];
   const kind = type === "agent" ? "agent" : "tool";
@@ -1117,12 +1339,12 @@ export async function runCorrectiveForRegistryType(
     const inCanaryScope = recordId === undefined || entry.id === recordId;
 
     if (apply && inCanaryScope) {
-      if (
-        limit !== undefined &&
-        summary.markedTenant + summary.markedUnknown + summary.markedFallback >=
-          limit
-      ) {
+      if (limit !== undefined && summary.attempted >= limit) {
         continue;
+      }
+      summary.attempted++;
+      if (callDelayMs > 0) {
+        await callPacer(callDelayMs);
       }
       try {
         const result = await applyCorrectiveEntry(
@@ -1140,6 +1362,13 @@ export async function runCorrectiveForRegistryType(
           summary.errors++;
           continue;
         }
+        if (result.needsReapproval) {
+          summary.needsReapproval++;
+          log(
+            "warn",
+            `[correct-fabricator:${type}] recordId=${entry.id} org marker updated but approval restoration failed — bucketed into needsReapproval, continuing with next record`,
+          );
+        }
       } catch (err) {
         log(
           "error",
@@ -1147,6 +1376,9 @@ export async function runCorrectiveForRegistryType(
         );
         summary.errors++;
         continue;
+      }
+      if (callDelayMs > 0) {
+        await callPacer(callDelayMs);
       }
       if (entry.reason === "fallback-org") summary.markedFallback++;
       else if (entry.resolvedOrgId !== undefined) summary.markedTenant++;
@@ -1463,6 +1695,40 @@ export async function main(): Promise<void> {
     throw new Error("--fallback-org requires a value");
   }
 
+  const callDelayMsIdx = args.indexOf("--call-delay-ms");
+  const callDelayMsRaw =
+    callDelayMsIdx !== -1 && args[callDelayMsIdx + 1] !== undefined
+      ? args[callDelayMsIdx + 1]
+      : undefined;
+  if (callDelayMsRaw !== undefined && !/^\d+$/.test(callDelayMsRaw)) {
+    throw new Error(
+      `--call-delay-ms must be a non-negative integer, got "${callDelayMsRaw}"`,
+    );
+  }
+  // Spec default: >= 300ms inter-call pacing when --apply is set and the
+  // flag is omitted; 0 (off) in dry-run, where no registry writes happen.
+  const callDelayMs =
+    callDelayMsRaw !== undefined
+      ? Number(callDelayMsRaw)
+      : apply
+        ? MIN_APPLY_CALL_DELAY_MS
+        : DEFAULT_CALL_DELAY_MS;
+
+  const restoreApprovalIdx = args.indexOf("--restore-approval");
+  const restoreApprovalRaw =
+    restoreApprovalIdx !== -1 && args[restoreApprovalIdx + 1] !== undefined
+      ? args[restoreApprovalIdx + 1]
+      : undefined;
+  if (restoreApprovalIdx !== -1 && restoreApprovalRaw === undefined) {
+    throw new Error("--restore-approval requires a comma-separated id list");
+  }
+  const restoreApprovalIds = restoreApprovalRaw
+    ? restoreApprovalRaw
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
+    : undefined;
+
   const registryId = process.env.REGISTRY_ID;
   const region = process.env.AWS_REGION || "us-west-2";
   const agentTable = process.env.AGENT_CONFIG_TABLE;
@@ -1482,6 +1748,11 @@ export async function main(): Promise<void> {
       "--fallback-org is only valid together with --correct-fabricator-shared",
     );
   }
+  if (restoreApprovalIds !== undefined && !correctFabricatorShared) {
+    throw new Error(
+      "--restore-approval is only valid together with --correct-fabricator-shared",
+    );
+  }
 
   log("info", `Mode: ${dryRun ? "DRY-RUN" : "APPLY"}`);
   log("info", `REGISTRY_ID=${registryId} REGION=${region}`);
@@ -1492,6 +1763,40 @@ export async function main(): Promise<void> {
 
   const registry = new RegistryService({ registryId, region });
   const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+
+  if (restoreApprovalIds !== undefined) {
+    log(
+      "info",
+      `--restore-approval: ${dryRun ? "DRY-RUN" : "APPLY"} for id(s)=${restoreApprovalIds.join(",")}`,
+    );
+    let anyFailed = false;
+    for (const id of restoreApprovalIds) {
+      // Try agent first, then tool — a wrong-type getResource failure on
+      // the agent attempt is retried as a tool before giving up, since
+      // the CLI does not require the caller to know the record's kind.
+      let result = await restoreApprovalForRecord(id, "agent", registry, apply);
+      if (result.error && result.recordNotFoundOrWrongType) {
+        result = await restoreApprovalForRecord(id, "tool", registry, apply);
+      }
+      if (result.error) {
+        log("error", `--restore-approval id=${id} failed: ${result.error}`);
+        anyFailed = true;
+      } else if (result.wouldRestore) {
+        log(
+          "info",
+          `--restore-approval id=${id}: plan printed above (dry-run)`,
+        );
+      } else if (result.alreadyApproved) {
+        log("info", `--restore-approval id=${id}: already APPROVED, no-op`);
+      } else if (result.restored) {
+        log("info", `--restore-approval id=${id}: restored to APPROVED`);
+      }
+    }
+    if (anyFailed) {
+      process.exit(1);
+    }
+    return;
+  }
 
   if (correctFabricatorShared) {
     await runCorrectiveMode(
@@ -1506,6 +1811,8 @@ export async function main(): Promise<void> {
       recordId,
       delayMs,
       fallbackOrg,
+      callDelayMs,
+      defaultCallPacer,
     );
     return;
   }
@@ -1763,6 +2070,8 @@ async function runCorrectiveMode(
   recordId: string | undefined,
   delayMs: number = CORRECTIVE_RECORD_RETRY_BASE_DELAY_MS,
   fallbackOrg?: string,
+  callDelayMs: number = DEFAULT_CALL_DELAY_MS,
+  callPacer: CallPacer = defaultCallPacer,
 ): Promise<void> {
   log("info", `Corrective mode: ${apply ? "APPLY" : "DRY-RUN"}`);
   if (recordId) log("info", `Scoped to single record id=${recordId} (canary)`);
@@ -1809,6 +2118,8 @@ async function runCorrectiveMode(
     delayMs,
     undefined,
     fallbackOrg,
+    callDelayMs,
+    callPacer,
   );
   const toolPlan = await runCorrectiveForRegistryType(
     "tool",
@@ -1823,6 +2134,8 @@ async function runCorrectiveMode(
     delayMs,
     undefined,
     fallbackOrg,
+    callDelayMs,
+    callPacer,
   );
 
   // R2: the registry-sourced scans above only find records whose CURRENT
@@ -1867,12 +2180,12 @@ async function runCorrectiveMode(
 
     const inCanaryScope = recordId === undefined || entry.id === recordId;
     if (!apply || !inCanaryScope) continue;
-    if (
-      limit !== undefined &&
-      summary.markedTenant + summary.markedUnknown + summary.markedFallback >=
-        limit
-    ) {
+    if (limit !== undefined && summary.attempted >= limit) {
       continue;
+    }
+    summary.attempted++;
+    if (callDelayMs > 0) {
+      await callPacer(callDelayMs);
     }
 
     try {
@@ -1893,6 +2206,13 @@ async function runCorrectiveMode(
         summary.errors++;
         continue;
       }
+      if (result.needsReapproval) {
+        summary.needsReapproval++;
+        log(
+          "warn",
+          `[correct-fabricator:ddb-only:${entry.kind}] recordId=${entry.id} org marker updated but approval restoration failed — bucketed into needsReapproval, continuing with next record`,
+        );
+      }
     } catch (err) {
       log(
         "error",
@@ -1900,6 +2220,9 @@ async function runCorrectiveMode(
       );
       summary.errors++;
       continue;
+    }
+    if (callDelayMs > 0) {
+      await callPacer(callDelayMs);
     }
     if (entry.reason === "fallback-org") summary.markedFallback++;
     else if (entry.resolvedOrgId !== undefined) summary.markedTenant++;
@@ -1948,9 +2271,62 @@ async function runCorrectiveMode(
   log("info", `markedUnknown:     ${summary.markedUnknown}`);
   log("info", `markedFallback:    ${summary.markedFallback}`);
   log("info", `ambiguousReported: ${summary.ambiguousReported}`);
+  log("info", `needsReapproval:   ${summary.needsReapproval}`);
   log("info", `errors:            ${summary.errors}`);
 
-  if (summary.errors > 0) {
+  // End-of-run re-approval pass: records whose org marker was written but
+  // whose registry status was left DRAFT by a throttled approval-
+  // restoration step get ONE more attempt here, in the same run, before
+  // the operator has to invoke --restore-approval separately. Only in
+  // apply mode — a dry run has nothing to restore.
+  if (apply && summary.needsReapproval > 0) {
+    const needsReapprovalIds = fullPlan
+      .filter((e) => e.reason !== "ambiguous-multi-org")
+      .map((e) => e.id);
+    log(
+      "info",
+      `--- End-of-run re-approval pass (${summary.needsReapproval} record(s) flagged needsReapproval) ---`,
+    );
+    let stillNeedsReapproval = 0;
+    for (const id of needsReapprovalIds) {
+      // Re-check each planned id's CURRENT status rather than assuming
+      // every planned id needed restoration — only a DRAFT-but-should-be-
+      // APPROVED record is actually touched; everything else is a no-op.
+      const agentType: ResourceType = "agent";
+      let restoreResult = await restoreApprovalForRecord(
+        id,
+        agentType,
+        registry,
+        true,
+      );
+      if (restoreResult.error && restoreResult.recordNotFoundOrWrongType) {
+        restoreResult = await restoreApprovalForRecord(
+          id,
+          "tool",
+          registry,
+          true,
+        );
+      }
+      if (restoreResult.restored) {
+        log("info", `[restore-approval] id=${id} restored to APPROVED`);
+      } else if (restoreResult.alreadyApproved) {
+        // Already fine — nothing to do.
+      } else {
+        stillNeedsReapproval++;
+        log(
+          "error",
+          `[restore-approval] id=${id} still not APPROVED after end-of-run pass: ${restoreResult.error ?? "unknown"}`,
+        );
+      }
+    }
+    summary.needsReapproval = stillNeedsReapproval;
+    log(
+      "info",
+      `--- End-of-run re-approval pass complete: ${stillNeedsReapproval} still needsReapproval ---`,
+    );
+  }
+
+  if (summary.errors > 0 || summary.needsReapproval > 0) {
     process.exit(1);
   }
 }

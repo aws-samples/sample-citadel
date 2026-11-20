@@ -1266,6 +1266,21 @@ export class RegistryService {
    */
   /**
    * Waits for a registry record to leave transitional states (CREATING, UPDATING).
+   *
+   * LIVE INCIDENT 2026-11-20 (canary --correct-fabricator-shared --apply
+   * --limit 3 --fallback-org Default): this poll used a raw
+   * `this.client.send(...)` with no retry wrapper. UpdateRegistryRecord
+   * landed successfully, but the very next poll here threw
+   * ThrottlingException uncaught, aborting `updateResource` before the
+   * caller's approval-restoration steps (submitForApproval/decide) ever
+   * ran — leaving the record DRAFT while the DDB projection had already
+   * moved on. Every poll iteration now goes through `withRetry` (same
+   * exponential-backoff-with-full-jitter shape used elsewhere in this
+   * class) so a transient throttle during the wait is retried instead of
+   * propagating out of `updateResource`. Uses the mutation-path retry
+   * shape (5 attempts, base 500ms, full jitter — ceiling tops out at 8s on
+   * the final attempt) rather than the shorter default read retry, since
+   * this poll sits directly in the marker-edit/corrective write path.
    */
   private async waitForStableState(
     recordId: string,
@@ -1273,8 +1288,13 @@ export class RegistryService {
   ): Promise<void> {
     const start = Date.now();
     while (Date.now() - start < maxWaitMs) {
-      const result = await this.client.send(
-        new GetRegistryRecordCommand({ registryId: this.registryId, recordId }),
+      const result = await this.withMutationRetry(() =>
+        this.client.send(
+          new GetRegistryRecordCommand({
+            registryId: this.registryId,
+            recordId,
+          }),
+        ),
       );
       const s = result.status as string;
       if (s !== "CREATING" && s !== "UPDATING") return;

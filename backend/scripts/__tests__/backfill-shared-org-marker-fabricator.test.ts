@@ -2136,3 +2136,522 @@ describe("findDdbOnlyCorrectiveTargets — --fallback-org applies to DDB-only un
     expect(entries).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 22. applyCorrectiveEntry — needsReapproval bucket (throttle-after-write)
+// ---------------------------------------------------------------------------
+//
+// Incident reproduction (synthetic ids/names/orgs): UpdateRegistryRecord
+// lands (the registry demotes an updated record to DRAFT), then the
+// post-write approval-restoration steps inside applyMarkerEdit fail — it
+// returns successfully (no `error`) with priorStatus APPROVED, postStatus
+// DRAFT, reapproved false. That exact signature must be surfaced as a
+// distinct `needsReapproval` outcome, never folded into a generic error and
+// never treated as a clean success.
+
+describe("applyCorrectiveEntry — needsReapproval bucket", () => {
+  const { applyMarkerEdit } = jest.requireMock(
+    "../../src/utils/marker-registry-edit",
+  ) as { applyMarkerEdit: jest.Mock };
+
+  beforeEach(() => {
+    applyMarkerEdit.mockReset();
+  });
+
+  function fakeRegistry(): RegistryService {
+    return {} as unknown as RegistryService;
+  }
+
+  function fakeDocClient(sendImpl: jest.Mock) {
+    return {
+      send: sendImpl,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+  }
+
+  it("flags needsReapproval=true when the registry write landed but approval restoration failed (priorStatus APPROVED, postStatus DRAFT, reapproved false, no error)", async () => {
+    applyMarkerEdit.mockResolvedValue({
+      recordId: "synthetic-agent-1",
+      priorStatus: "APPROVED",
+      postStatus: "DRAFT",
+      fieldsChanged: ["orgId"],
+      reapproved: false,
+      error: undefined,
+    });
+    const send = jest.fn().mockResolvedValue({});
+    const entry = {
+      id: "synthetic-agent-1",
+      name: "synthetic-fabricated-agent",
+      kind: "agent" as const,
+      previousOrgId: ALL_ORGS,
+      resolvedOrgId: "SyntheticOrg",
+      reason: "fabricator-agent-sourceProjectId",
+    };
+
+    const result = await applyCorrectiveEntry(
+      entry,
+      "agent",
+      fakeRegistry(),
+      "agent-table",
+      fakeDocClient(send),
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.needsReapproval).toBe(true);
+    // The DDB projection write still proceeds — the org marker itself is
+    // correct, only the registry approval state is stuck.
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not flag needsReapproval for a clean successful reapproval", async () => {
+    applyMarkerEdit.mockResolvedValue({
+      recordId: "synthetic-agent-2",
+      priorStatus: "APPROVED",
+      postStatus: "APPROVED",
+      fieldsChanged: ["orgId"],
+      reapproved: true,
+      error: undefined,
+    });
+    const send = jest.fn().mockResolvedValue({});
+    const entry = {
+      id: "synthetic-agent-2",
+      name: "synthetic-fabricated-agent-2",
+      kind: "agent" as const,
+      previousOrgId: ALL_ORGS,
+      resolvedOrgId: "SyntheticOrg",
+      reason: "fabricator-agent-sourceProjectId",
+    };
+
+    const result = await applyCorrectiveEntry(
+      entry,
+      "agent",
+      fakeRegistry(),
+      "agent-table",
+      fakeDocClient(send),
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.needsReapproval).toBeFalsy();
+  });
+
+  it("does not flag needsReapproval when the record was never APPROVED to begin with (priorStatus DRAFT)", async () => {
+    applyMarkerEdit.mockResolvedValue({
+      recordId: "synthetic-tool-1",
+      priorStatus: "DRAFT",
+      postStatus: "DRAFT",
+      fieldsChanged: ["orgId"],
+      reapproved: false,
+      error: undefined,
+    });
+    const send = jest.fn().mockResolvedValue({});
+    const entry = {
+      id: "synthetic-tool-1",
+      name: "synthetic-fabricated-tool",
+      kind: "tool" as const,
+      previousOrgId: ALL_ORGS,
+      resolvedOrgId: "SyntheticOrg",
+      reason: "fabricator-tool-name",
+    };
+
+    const result = await applyCorrectiveEntry(
+      entry,
+      "tool",
+      fakeRegistry(),
+      "tool-table",
+      fakeDocClient(send),
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.needsReapproval).toBeFalsy();
+  });
+
+  it("still surfaces a genuine updateResource failure as `error`, never as needsReapproval", async () => {
+    applyMarkerEdit.mockResolvedValue({
+      recordId: "synthetic-agent-3",
+      priorStatus: "APPROVED",
+      postStatus: "APPROVED",
+      fieldsChanged: [],
+      reapproved: false,
+      error: "updateResource failed: ThrottlingException",
+    });
+    const send = jest.fn();
+    const entry = {
+      id: "synthetic-agent-3",
+      name: "synthetic-fabricated-agent-3",
+      kind: "agent" as const,
+      previousOrgId: ALL_ORGS,
+      resolvedOrgId: "SyntheticOrg",
+      reason: "fabricator-agent-sourceProjectId",
+    };
+
+    const result = await applyCorrectiveEntry(
+      entry,
+      "agent",
+      fakeRegistry(),
+      "agent-table",
+      fakeDocClient(send),
+    );
+
+    expect(result.error).toBe("updateResource failed: ThrottlingException");
+    expect(result.needsReapproval).toBeFalsy();
+    expect(send).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 23. runCorrectiveForRegistryType — needsReapproval bucket, continue+retry,
+//     and --limit counting ATTEMPTS (successes + failures), not just
+//     successes
+// ---------------------------------------------------------------------------
+
+describe("runCorrectiveForRegistryType — needsReapproval bucket and --limit counts attempts", () => {
+  const { applyMarkerEdit } = jest.requireMock(
+    "../../src/utils/marker-registry-edit",
+  ) as { applyMarkerEdit: jest.Mock };
+
+  beforeEach(() => {
+    applyMarkerEdit.mockReset();
+  });
+
+  const orgResolver: OrgResolver = {
+    resolveAgentOrg: (rec: RecordShape) =>
+      rec.sourceProjectId === "proj-synthetic" ? "SyntheticOrg" : undefined,
+    resolveToolOrg: () => undefined,
+  };
+
+  function makeListedRegistry(
+    items: Array<{
+      recordId: string;
+      name: string;
+      orgId: string;
+      createdBy: string;
+      sourceProjectId?: string;
+    }>,
+  ): RegistryService {
+    const listResourcesChecked = jest.fn().mockResolvedValue({
+      items: items.map((i) => ({
+        recordId: i.recordId,
+        name: i.name,
+        status: "APPROVED",
+        customDescriptorContent: JSON.stringify({
+          orgId: i.orgId,
+          createdBy: i.createdBy,
+          sourceProjectId: i.sourceProjectId,
+        }),
+      })),
+      partial: false,
+      droppedCount: 0,
+      throttled: false,
+    });
+    return { listResourcesChecked } as unknown as RegistryService;
+  }
+
+  it("buckets a needsReapproval record into summary.needsReapproval and continues to the next record (never abandons the loop)", async () => {
+    const registry = makeListedRegistry([
+      {
+        recordId: "synthetic-rec-1",
+        name: "synthetic-agent-a",
+        orgId: ALL_ORGS,
+        createdBy: "fabricator",
+        sourceProjectId: "proj-synthetic",
+      },
+      {
+        recordId: "synthetic-rec-2",
+        name: "synthetic-agent-b",
+        orgId: ALL_ORGS,
+        createdBy: "fabricator",
+        sourceProjectId: "proj-synthetic",
+      },
+    ]);
+    applyMarkerEdit
+      .mockResolvedValueOnce({
+        recordId: "synthetic-rec-1",
+        priorStatus: "APPROVED",
+        postStatus: "DRAFT",
+        reapproved: false,
+        error: undefined,
+      })
+      .mockResolvedValueOnce({
+        recordId: "synthetic-rec-2",
+        priorStatus: "APPROVED",
+        postStatus: "APPROVED",
+        reapproved: true,
+        error: undefined,
+      });
+    const send = jest.fn().mockResolvedValue({});
+    const docClient = {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+    const summary = emptySummary();
+
+    const plan = await runCorrectiveForRegistryType(
+      "agent",
+      registry,
+      orgResolver,
+      /* apply */ true,
+      /* limit */ undefined,
+      summary,
+      "agent-table",
+      docClient,
+      undefined,
+    );
+
+    expect(plan).toHaveLength(2);
+    expect(summary.needsReapproval).toBe(1);
+    expect(summary.errors).toBe(0);
+    // Both records were still attempted (the loop continued past the
+    // needsReapproval record instead of abandoning the run).
+    expect(applyMarkerEdit).toHaveBeenCalledTimes(2);
+  });
+
+  it("--limit bounds ATTEMPTS (successes + failures), matching the incident where a failed write never counted toward --limit", async () => {
+    const registry = makeListedRegistry([
+      {
+        recordId: "synthetic-rec-1",
+        name: "synthetic-agent-a",
+        orgId: ALL_ORGS,
+        createdBy: "fabricator",
+        sourceProjectId: "proj-synthetic",
+      },
+      {
+        recordId: "synthetic-rec-2",
+        name: "synthetic-agent-b",
+        orgId: ALL_ORGS,
+        createdBy: "fabricator",
+        sourceProjectId: "proj-synthetic",
+      },
+      {
+        recordId: "synthetic-rec-3",
+        name: "synthetic-agent-c",
+        orgId: ALL_ORGS,
+        createdBy: "fabricator",
+        sourceProjectId: "proj-synthetic",
+      },
+    ]);
+    // First attempt fails outright (a genuine error) — under the OLD
+    // behaviour this would not count toward --limit and a 3rd record
+    // would still be attempted even with --limit 2. Under the fix, it
+    // DOES count, so only 2 records are ever attempted.
+    applyMarkerEdit
+      .mockResolvedValueOnce({
+        recordId: "synthetic-rec-1",
+        priorStatus: "APPROVED",
+        postStatus: "APPROVED",
+        reapproved: false,
+        error: "updateResource failed: ThrottlingException",
+      })
+      .mockResolvedValueOnce({
+        recordId: "synthetic-rec-2",
+        priorStatus: "APPROVED",
+        postStatus: "APPROVED",
+        reapproved: true,
+        error: undefined,
+      });
+    const send = jest.fn().mockResolvedValue({});
+    const docClient = {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+    const summary = emptySummary();
+
+    await runCorrectiveForRegistryType(
+      "agent",
+      registry,
+      orgResolver,
+      /* apply */ true,
+      /* limit */ 2,
+      summary,
+      "agent-table",
+      docClient,
+      undefined,
+    );
+
+    // Exactly 2 attempts were made (1 failure + 1 success); the 3rd
+    // record was never attempted because --limit counts the failed
+    // attempt too.
+    expect(applyMarkerEdit).toHaveBeenCalledTimes(2);
+    expect(summary.errors).toBe(1);
+  });
+
+  it("passes callDelayMs through to an injectable pacing hook invoked between registry calls", async () => {
+    const registry = makeListedRegistry([
+      {
+        recordId: "synthetic-rec-1",
+        name: "synthetic-agent-a",
+        orgId: ALL_ORGS,
+        createdBy: "fabricator",
+        sourceProjectId: "proj-synthetic",
+      },
+      {
+        recordId: "synthetic-rec-2",
+        name: "synthetic-agent-b",
+        orgId: ALL_ORGS,
+        createdBy: "fabricator",
+        sourceProjectId: "proj-synthetic",
+      },
+    ]);
+    applyMarkerEdit.mockResolvedValue({
+      recordId: "unused",
+      priorStatus: "APPROVED",
+      postStatus: "APPROVED",
+      reapproved: true,
+      error: undefined,
+    });
+    const send = jest.fn().mockResolvedValue({});
+    const docClient = {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+    const summary = emptySummary();
+    const pacer = jest.fn().mockResolvedValue(undefined);
+
+    await runCorrectiveForRegistryType(
+      "agent",
+      registry,
+      orgResolver,
+      /* apply */ true,
+      /* limit */ undefined,
+      summary,
+      "agent-table",
+      docClient,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      /* callDelayMs */ 400,
+      pacer,
+    );
+
+    // Pacing is invoked once per attempted write (between registry calls).
+    expect(pacer).toHaveBeenCalledWith(400);
+    expect(pacer.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 24. --restore-approval — restoreApprovalForRecord
+// ---------------------------------------------------------------------------
+
+describe("restoreApprovalForRecord", () => {
+  const { applyMarkerEdit } = jest.requireMock(
+    "../../src/utils/marker-registry-edit",
+  ) as { applyMarkerEdit: jest.Mock };
+
+  beforeEach(() => {
+    applyMarkerEdit.mockReset();
+  });
+
+  it("dry-run (default) prints the plan and never calls applyMarkerEdit", async () => {
+    const { restoreApprovalForRecord } = jest.requireActual(
+      "../backfill-shared-org-marker",
+    ) as typeof import("../backfill-shared-org-marker");
+
+    const registry = {
+      getResource: jest.fn().mockResolvedValue({
+        recordId: "synthetic-rec-1",
+        name: "synthetic-agent",
+        status: "DRAFT",
+        customDescriptorContent: JSON.stringify({ orgId: "SyntheticOrg" }),
+      }),
+    } as unknown as RegistryService;
+
+    const result = await restoreApprovalForRecord(
+      "synthetic-rec-1",
+      "agent",
+      registry,
+      /* apply */ false,
+    );
+
+    expect(result.wouldRestore).toBe(true);
+    expect(applyMarkerEdit).not.toHaveBeenCalled();
+  });
+
+  it("is a no-op when the record is already APPROVED", async () => {
+    const { restoreApprovalForRecord } = jest.requireActual(
+      "../backfill-shared-org-marker",
+    ) as typeof import("../backfill-shared-org-marker");
+
+    const registry = {
+      getResource: jest.fn().mockResolvedValue({
+        recordId: "synthetic-rec-2",
+        name: "synthetic-agent-2",
+        status: "APPROVED",
+        customDescriptorContent: JSON.stringify({ orgId: "SyntheticOrg" }),
+      }),
+    } as unknown as RegistryService;
+
+    const result = await restoreApprovalForRecord(
+      "synthetic-rec-2",
+      "agent",
+      registry,
+      /* apply */ true,
+    );
+
+    expect(result.alreadyApproved).toBe(true);
+    expect(result.error).toBeUndefined();
+    expect(applyMarkerEdit).not.toHaveBeenCalled();
+  });
+
+  it("in apply mode, runs submitForApproval -> decide on a DRAFT record and verifies APPROVED", async () => {
+    const { restoreApprovalForRecord } = jest.requireActual(
+      "../backfill-shared-org-marker",
+    ) as typeof import("../backfill-shared-org-marker");
+
+    let status = "DRAFT";
+    const registry = {
+      getResource: jest.fn().mockImplementation(() =>
+        Promise.resolve({
+          recordId: "synthetic-rec-3",
+          name: "synthetic-agent-3",
+          status,
+          customDescriptorContent: JSON.stringify({ orgId: "SyntheticOrg" }),
+        }),
+      ),
+      submitForApproval: jest.fn().mockImplementation(() => {
+        status = "PENDING_APPROVAL";
+        return Promise.resolve({ recordId: "synthetic-rec-3", status });
+      }),
+      updateResourceStatus: jest.fn().mockImplementation(() => {
+        status = "APPROVED";
+        return Promise.resolve({ recordId: "synthetic-rec-3", status });
+      }),
+    } as unknown as RegistryService;
+
+    const result = await restoreApprovalForRecord(
+      "synthetic-rec-3",
+      "agent",
+      registry,
+      /* apply */ true,
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.restored).toBe(true);
+    expect(registry.submitForApproval).toHaveBeenCalledWith("synthetic-rec-3");
+    expect(registry.updateResourceStatus).toHaveBeenCalled();
+  });
+
+  it("exits with a non-zero-signaling error if restoration fails to reach APPROVED", async () => {
+    const { restoreApprovalForRecord } = jest.requireActual(
+      "../backfill-shared-org-marker",
+    ) as typeof import("../backfill-shared-org-marker");
+
+    const registry = {
+      getResource: jest.fn().mockResolvedValue({
+        recordId: "synthetic-rec-4",
+        name: "synthetic-agent-4",
+        status: "DRAFT",
+        customDescriptorContent: JSON.stringify({ orgId: "SyntheticOrg" }),
+      }),
+      submitForApproval: jest
+        .fn()
+        .mockRejectedValue(new Error("ThrottlingException")),
+    } as unknown as RegistryService;
+
+    const result = await restoreApprovalForRecord(
+      "synthetic-rec-4",
+      "agent",
+      registry,
+      /* apply */ true,
+    );
+
+    expect(result.error).toBeDefined();
+    expect(result.restored).toBeFalsy();
+  });
+});
