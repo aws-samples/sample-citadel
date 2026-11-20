@@ -907,6 +907,8 @@ export async function applyCorrectiveEntry(
   registry: RegistryService,
   tableName: string,
   docClient: DynamoDBDocumentClient,
+  callDelayMs: number = DEFAULT_CALL_DELAY_MS,
+  callPacer: CallPacer = defaultCallPacer,
 ): Promise<{ error?: string; needsReapproval?: boolean }> {
   if (entry.reason === "ambiguous-multi-org") {
     return { error: undefined };
@@ -926,6 +928,8 @@ export async function applyCorrectiveEntry(
         registryService: registry,
         dryRun: false,
         operationLabel: "backfill-shared-org-marker-correct-fabricator",
+        callDelayMs,
+        callPacer,
       },
     );
     if (editResult.error) return { error: editResult.error };
@@ -961,6 +965,8 @@ export async function applyCorrectiveEntry(
       registryService: registry,
       dryRun: false,
       operationLabel: "backfill-shared-org-marker-correct-fabricator",
+      callDelayMs,
+      callPacer,
     },
   );
   if (editResult.error) return { error: editResult.error };
@@ -1349,9 +1355,6 @@ export async function runCorrectiveForRegistryType(
         continue;
       }
       summary.attempted++;
-      if (callDelayMs > 0) {
-        await callPacer(callDelayMs);
-      }
       try {
         const result = await applyCorrectiveEntry(
           entry,
@@ -1359,6 +1362,8 @@ export async function runCorrectiveForRegistryType(
           registry,
           tableName,
           docClient,
+          callDelayMs,
+          callPacer,
         );
         if (result.error) {
           log(
@@ -1383,9 +1388,6 @@ export async function runCorrectiveForRegistryType(
         );
         summary.errors++;
         continue;
-      }
-      if (callDelayMs > 0) {
-        await callPacer(callDelayMs);
       }
       if (entry.reason === "fallback-org") summary.markedFallback++;
       else if (entry.resolvedOrgId !== undefined) summary.markedTenant++;
@@ -2066,7 +2068,7 @@ export async function buildOrgResolverFromTablesWithKnownOrgs(
  * or normally-resolvable record. The dry run always prints the complete
  * list of records that would receive the fallback.
  */
-async function runCorrectiveMode(
+export async function runCorrectiveMode(
   registry: RegistryService,
   docClient: DynamoDBDocumentClient,
   agentTable: string,
@@ -2200,9 +2202,6 @@ async function runCorrectiveMode(
       continue;
     }
     summary.attempted++;
-    if (callDelayMs > 0) {
-      await callPacer(callDelayMs);
-    }
 
     try {
       const type: ResourceType = entry.kind === "agent" ? "agent" : "tool";
@@ -2213,6 +2212,8 @@ async function runCorrectiveMode(
         registry,
         tableName,
         docClient,
+        callDelayMs,
+        callPacer,
       );
       if (result.error) {
         log(
@@ -2240,9 +2241,6 @@ async function runCorrectiveMode(
       );
       summary.errors++;
       continue;
-    }
-    if (callDelayMs > 0) {
-      await callPacer(callDelayMs);
     }
     if (entry.reason === "fallback-org") summary.markedFallback++;
     else if (entry.resolvedOrgId !== undefined) summary.markedTenant++;

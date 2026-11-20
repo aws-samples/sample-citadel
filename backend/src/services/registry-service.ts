@@ -1293,7 +1293,7 @@ export class RegistryService {
    * Waits for a registry record to leave transitional states (CREATING, UPDATING).
    *
    * LIVE INCIDENT 2026-11-20 (canary --correct-fabricator-shared --apply
-   * --limit 3 --fallback-org Default): this poll used a raw
+   * --limit 3 --fallback-org <org>): this poll used a raw
    * `this.client.send(...)` with no retry wrapper. UpdateRegistryRecord
    * landed successfully, but the very next poll here threw
    * ThrottlingException uncaught, aborting `updateResource` before the
@@ -1426,11 +1426,18 @@ export class RegistryService {
       ),
     );
 
-    const refreshed = await this.client.send(
-      new GetRegistryRecordCommand({
-        registryId: this.registryId,
-        recordId,
-      }),
+    // Registry throttle resilience: this refresh is a registry call like
+    // any other in the marker-edit/corrective path (getResource,
+    // updateResource, submitForApproval, decide) and must retry a
+    // ThrottlingException rather than let it escape and abandon a
+    // restoration that already landed its submit.
+    const refreshed = await this.withMutationRetry(() =>
+      this.client.send(
+        new GetRegistryRecordCommand({
+          registryId: this.registryId,
+          recordId,
+        }),
+      ),
     );
 
     return {

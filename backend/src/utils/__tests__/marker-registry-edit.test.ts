@@ -384,6 +384,66 @@ describe("applyMarkerEdit", () => {
     expect(registry.updateResourceStatus).not.toHaveBeenCalled();
   });
 
+  // Registry throttle resilience (verify iteration 2, required change 2):
+  // the backfill script's --call-delay-ms help text documents pacing
+  // between EVERY registry call in the marker-edit path (getResource,
+  // updateResource, submitForApproval, decide) — this is the sequence
+  // applyMarkerEdit actually issues, so the pacer must be threaded through
+  // here rather than invoked once per record by the outer loop.
+  test("paces between each internal registry call when callDelayMs/callPacer are supplied (APPROVED record: full 4-call sequence)", async () => {
+    const registry = mockRegistryService({ status: "APPROVED" });
+    const pacer = jest.fn().mockResolvedValue(undefined);
+    const spec: MarkerEditSpec = {
+      recordId: "rec-1",
+      type: "agent",
+      fieldsToSet: { orgId: "org-2" },
+    };
+    const result = await applyMarkerEdit(
+      spec,
+      baseOptions(registry, { callDelayMs: 250, callPacer: pacer }),
+    );
+
+    expect(result.reapproved).toBe(true);
+    // getResource -> [pace] -> updateResource -> [pace] ->
+    // submitForApproval -> [pace] -> decide(updateResourceStatus): 3 paces
+    // between the 4 registry calls.
+    expect(pacer).toHaveBeenCalledTimes(3);
+    expect(pacer).toHaveBeenCalledWith(250);
+  });
+
+  test("does not pace when callDelayMs is 0 (dry-run / unpaced default)", async () => {
+    const registry = mockRegistryService({ status: "APPROVED" });
+    const pacer = jest.fn().mockResolvedValue(undefined);
+    const spec: MarkerEditSpec = {
+      recordId: "rec-1",
+      type: "agent",
+      fieldsToSet: { orgId: "org-2" },
+    };
+    await applyMarkerEdit(
+      spec,
+      baseOptions(registry, { callDelayMs: 0, callPacer: pacer }),
+    );
+
+    expect(pacer).not.toHaveBeenCalled();
+  });
+
+  test("paces only once, between getResource and updateResource, for a non-APPROVED record (no restoration steps)", async () => {
+    const registry = mockRegistryService({ status: "DRAFT" });
+    const pacer = jest.fn().mockResolvedValue(undefined);
+    const spec: MarkerEditSpec = {
+      recordId: "rec-1",
+      type: "agent",
+      fieldsToSet: { orgId: "org-2" },
+    };
+    await applyMarkerEdit(
+      spec,
+      baseOptions(registry, { callDelayMs: 250, callPacer: pacer }),
+    );
+
+    expect(pacer).toHaveBeenCalledTimes(1);
+    expect(pacer).toHaveBeenCalledWith(250);
+  });
+
   test("propagates changed fields into nested config object", async () => {
     const registry = mockRegistryService({ status: "DRAFT" });
     const spec: MarkerEditSpec = {

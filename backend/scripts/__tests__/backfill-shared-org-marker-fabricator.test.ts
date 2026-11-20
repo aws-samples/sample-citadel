@@ -28,6 +28,7 @@ import {
   runCorrectiveForRegistryType,
   findDdbOnlyCorrectiveTargets,
   reconcileDroppedRecords,
+  runCorrectiveMode,
   type RecordShape,
   type OrgResolver,
   type AgentConfigLike,
@@ -2548,7 +2549,7 @@ describe("runCorrectiveForRegistryType — needsReapproval bucket and --limit co
     expect(summary.errors).toBe(1);
   });
 
-  it("passes callDelayMs through to an injectable pacing hook invoked between registry calls", async () => {
+  it("forwards callDelayMs/callPacer through applyCorrectiveEntry into applyMarkerEdit, which paces between its own internal registry calls", async () => {
     const registry = makeListedRegistry([
       {
         recordId: "synthetic-rec-1",
@@ -2596,9 +2597,18 @@ describe("runCorrectiveForRegistryType — needsReapproval bucket and --limit co
       pacer,
     );
 
-    // Pacing is invoked once per attempted write (between registry calls).
-    expect(pacer).toHaveBeenCalledWith(400);
-    expect(pacer.mock.calls.length).toBeGreaterThanOrEqual(2);
+    // applyMarkerEdit is mocked in this file, so the pacing itself (now
+    // internal to the real applyMarkerEdit — see
+    // marker-registry-edit.test.ts for that coverage) never fires here.
+    // What this test asserts is that the outer loop forwards callDelayMs
+    // and callPacer into applyMarkerEdit's options for every attempted
+    // write, for both records.
+    expect(applyMarkerEdit).toHaveBeenCalledTimes(2);
+    for (const call of applyMarkerEdit.mock.calls) {
+      const options = call[1] as { callDelayMs?: number; callPacer?: unknown };
+      expect(options.callDelayMs).toBe(400);
+      expect(options.callPacer).toBe(pacer);
+    }
   });
 });
 
@@ -2730,5 +2740,260 @@ describe("restoreApprovalForRecord", () => {
 
     expect(result.error).toBeDefined();
     expect(result.restored).toBeFalsy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 25. runCorrectiveMode — exit code on residual needsReapproval, and the
+//     end-of-run re-approval pass that runs before that exit decision.
+// ---------------------------------------------------------------------------
+//
+// `applyMarkerEdit` stays mocked (module-level jest.mock above) so the
+// corrective-write path returns a controlled needsReapproval result; the
+// end-of-run re-approval pass itself calls `registry.getResource` /
+// `registry.submitForApproval` / `registry.updateResourceStatus` directly
+// (see `restoreApprovalForRecord`), so those are stubbed on the registry
+// fixture independently of `applyMarkerEdit`.
+describe("runCorrectiveMode — needsReapproval exit code and end-of-run re-approval pass", () => {
+  const { applyMarkerEdit } = jest.requireMock(
+    "../../src/utils/marker-registry-edit",
+  ) as { applyMarkerEdit: jest.Mock };
+
+  let exitSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    applyMarkerEdit.mockReset();
+    exitSpy = jest.spyOn(process, "exit").mockImplementation(((
+      code?: number,
+    ) => {
+      throw new Error(`process.exit(${code})`);
+    }) as never);
+  });
+
+  afterEach(() => {
+    exitSpy.mockRestore();
+  });
+
+  function makeDocClient(): import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient {
+    // Every ScanCommand used by buildOrgResolverFromTablesWithKnownOrgs and
+    // findDdbOnlyCorrectiveTargets resolves to an empty page — the plan in
+    // these tests comes entirely from the registry-sourced listing, so the
+    // DDB-only scan path contributes nothing and the org-resolver build
+    // needs no known orgs (no --fallback-org is used).
+    const send = jest.fn().mockResolvedValue({ Items: [] });
+    return {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+  }
+
+  function makeRegistry(
+    items: Array<{ recordId: string; name: string; orgId: string }>,
+  ): RegistryService {
+    // Scoped to "agent" only, mirroring a registry that holds just one
+    // resource kind for these synthetic ids — avoids the same record
+    // being double-planned under both "agent" and "tool" kinds, which
+    // would otherwise double every count in these exit-code/pass tests.
+    const listResourcesChecked = jest.fn().mockImplementation((type: string) =>
+      Promise.resolve({
+        items:
+          type === "agent"
+            ? items.map((i) => ({
+                recordId: i.recordId,
+                name: i.name,
+                status: "APPROVED",
+                customDescriptorContent: JSON.stringify({
+                  orgId: i.orgId,
+                  createdBy: "fabricator",
+                  sourceProjectId: "proj-synthetic",
+                }),
+              }))
+            : [],
+        partial: false,
+        droppedCount: 0,
+        throttled: false,
+      }),
+    );
+    return {
+      listResourcesChecked,
+      // Stubbed for findDdbOnlyCorrectiveTargets's type-check call sites
+      // and any incidental getResource use outside applyMarkerEdit.
+      getResource: jest.fn().mockResolvedValue(null),
+    } as unknown as RegistryService;
+  }
+
+  it("exits 0 when every record resolves cleanly (no needsReapproval, no errors)", async () => {
+    const registry = makeRegistry([
+      {
+        recordId: "synthetic-rec-10",
+        name: "synthetic-agent-10",
+        orgId: ALL_ORGS,
+      },
+    ]);
+    applyMarkerEdit.mockResolvedValue({
+      recordId: "synthetic-rec-10",
+      priorStatus: "APPROVED",
+      postStatus: "APPROVED",
+      reapproved: true,
+      error: undefined,
+    });
+    const docClient = makeDocClient();
+
+    await runCorrectiveMode(
+      registry,
+      docClient,
+      "agent-table",
+      "tool-table",
+      "projects-table",
+      /* apply */ true,
+      /* limit */ undefined,
+      /* recordId */ undefined,
+    );
+
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
+
+  it("runs the end-of-run re-approval pass for a flagged record and exits 0 when the pass restores it", async () => {
+    const registry = makeRegistry([
+      {
+        recordId: "synthetic-rec-11",
+        name: "synthetic-agent-11",
+        orgId: ALL_ORGS,
+      },
+    ]);
+    // applyCorrectiveEntry's call into applyMarkerEdit reports the exact
+    // incident shape: write landed, approval restoration failed.
+    applyMarkerEdit.mockResolvedValue({
+      recordId: "synthetic-rec-11",
+      priorStatus: "APPROVED",
+      postStatus: "DRAFT",
+      reapproved: false,
+      error: undefined,
+    });
+    (registry.getResource as jest.Mock)
+      .mockResolvedValueOnce({
+        recordId: "synthetic-rec-11",
+        name: "synthetic-agent-11",
+        status: "DRAFT",
+        customDescriptorContent: JSON.stringify({ orgId: ALL_ORGS }),
+      })
+      .mockResolvedValueOnce({
+        recordId: "synthetic-rec-11",
+        name: "synthetic-agent-11",
+        status: "APPROVED",
+        customDescriptorContent: JSON.stringify({ orgId: ALL_ORGS }),
+      });
+    (
+      registry as unknown as { submitForApproval: jest.Mock }
+    ).submitForApproval = jest.fn().mockResolvedValue({
+      recordId: "synthetic-rec-11",
+      status: "PENDING_APPROVAL",
+    });
+    (
+      registry as unknown as { updateResourceStatus: jest.Mock }
+    ).updateResourceStatus = jest.fn().mockResolvedValue({
+      recordId: "synthetic-rec-11",
+      status: "APPROVED",
+    });
+    const docClient = makeDocClient();
+
+    await runCorrectiveMode(
+      registry,
+      docClient,
+      "agent-table",
+      "tool-table",
+      "projects-table",
+      /* apply */ true,
+      /* limit */ undefined,
+      /* recordId */ undefined,
+    );
+
+    // End-of-run pass restored the only flagged record — no exit(1).
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(
+      (registry as unknown as { submitForApproval: jest.Mock })
+        .submitForApproval,
+    ).toHaveBeenCalledWith("synthetic-rec-11");
+    expect(
+      (registry as unknown as { updateResourceStatus: jest.Mock })
+        .updateResourceStatus,
+    ).toHaveBeenCalled();
+  });
+
+  it("exits 1 when the end-of-run re-approval pass cannot restore a flagged record", async () => {
+    const registry = makeRegistry([
+      {
+        recordId: "synthetic-rec-12",
+        name: "synthetic-agent-12",
+        orgId: ALL_ORGS,
+      },
+    ]);
+    applyMarkerEdit.mockResolvedValue({
+      recordId: "synthetic-rec-12",
+      priorStatus: "APPROVED",
+      postStatus: "DRAFT",
+      reapproved: false,
+      error: undefined,
+    });
+    (registry.getResource as jest.Mock).mockResolvedValue({
+      recordId: "synthetic-rec-12",
+      name: "synthetic-agent-12",
+      status: "DRAFT",
+      customDescriptorContent: JSON.stringify({ orgId: ALL_ORGS }),
+    });
+    (
+      registry as unknown as { submitForApproval: jest.Mock }
+    ).submitForApproval = jest.fn().mockRejectedValue(
+      Object.assign(new Error("Request rate exceeded."), {
+        name: "ThrottlingException",
+      }),
+    );
+    const docClient = makeDocClient();
+
+    await expect(
+      runCorrectiveMode(
+        registry,
+        docClient,
+        "agent-table",
+        "tool-table",
+        "projects-table",
+        /* apply */ true,
+        /* limit */ undefined,
+        /* recordId */ undefined,
+      ),
+    ).rejects.toThrow("process.exit(1)");
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+  });
+
+  it("does not attempt the end-of-run re-approval pass in dry-run mode (nothing to restore)", async () => {
+    const registry = makeRegistry([
+      {
+        recordId: "synthetic-rec-13",
+        name: "synthetic-agent-13",
+        orgId: ALL_ORGS,
+      },
+    ]);
+    const submitForApproval = jest.fn();
+    (
+      registry as unknown as { submitForApproval: jest.Mock }
+    ).submitForApproval = submitForApproval;
+    const docClient = makeDocClient();
+
+    await runCorrectiveMode(
+      registry,
+      docClient,
+      "agent-table",
+      "tool-table",
+      "projects-table",
+      /* apply */ false,
+      /* limit */ undefined,
+      /* recordId */ undefined,
+    );
+
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(submitForApproval).not.toHaveBeenCalled();
+    // Dry-run never writes, so applyMarkerEdit (via applyCorrectiveEntry)
+    // is never reached either.
+    expect(applyMarkerEdit).not.toHaveBeenCalled();
   });
 });

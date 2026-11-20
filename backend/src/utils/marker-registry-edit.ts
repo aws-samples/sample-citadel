@@ -71,12 +71,30 @@ export interface MarkerEditOptions {
   dryRun: boolean;
   ledgerWriter?: (decision: GovernanceDecision) => Promise<string | undefined>;
   operationLabel: string;
+  /**
+   * Inter-call pacing (ms) applied BETWEEN each registry call issued by
+   * this function (getResource, updateResource, submitForApproval,
+   * decide) — mirrors `--call-delay-ms` in
+   * backend/scripts/backfill-shared-org-marker.ts, which documents pacing
+   * at exactly this granularity. Omitted/0 means no pacing (the default
+   * for callers that don't opt in, e.g. existing non-corrective-mode
+   * marker-edit callers).
+   */
+  callDelayMs?: number;
+  /** Injectable pacing hook; defaults to a real `setTimeout`-based sleep. */
+  callPacer?: (delayMs: number) => Promise<void>;
 }
 
 // ---- Helpers ----
 
 function deepEqual(a: unknown, b: unknown): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** Promise-based sleep used as the default `callPacer` when the caller
+ * supplies a `callDelayMs` but no injectable hook. */
+function defaultSleep(delayMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
 function validateFieldsAllowed(
@@ -101,8 +119,22 @@ export async function applyMarkerEdit(
   spec: MarkerEditSpec,
   options: MarkerEditOptions,
 ): Promise<MarkerEditResult> {
-  const { registryService, dryRun, ledgerWriter, operationLabel } = options;
+  const {
+    registryService,
+    dryRun,
+    ledgerWriter,
+    operationLabel,
+    callDelayMs = 0,
+    callPacer = defaultSleep,
+  } = options;
   const { recordId, type, fieldsToSet, fieldsToRemove = [] } = spec;
+
+  /** Paces between two consecutive registry calls; no-op when unconfigured. */
+  const pace = async (): Promise<void> => {
+    if (callDelayMs > 0) {
+      await callPacer(callDelayMs);
+    }
+  };
 
   try {
     // 1. Validate allowlist
@@ -214,6 +246,7 @@ export async function applyMarkerEdit(
 
     let settleFailed = false;
     try {
+      await pace();
       const updated = await registryService.updateResource(type, recordId, {
         customMetadata: JSON.stringify(newMeta),
       });
@@ -249,6 +282,7 @@ export async function applyMarkerEdit(
       try {
         // Step 1: Submit for approval (DRAFT → PENDING_APPROVAL, or
         // auto-approve to APPROVED when the registry is configured for it)
+        await pace();
         const submitted = await registryService.submitForApproval(recordId);
         const submittedStatus = submitted.status ?? "PENDING_APPROVAL";
 
@@ -261,6 +295,7 @@ export async function applyMarkerEdit(
           const reason =
             `${operationLabel}: marker-only edit of [${changedFields.join(", ")}]; ` +
             `restoring prior APPROVED status`;
+          await pace();
           const decided = await registryService.updateResourceStatus(
             type,
             recordId,
