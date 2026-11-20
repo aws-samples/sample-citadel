@@ -41,10 +41,41 @@
  *   ts-node backend/scripts/backfill-shared-org-marker.ts --dry-run (default)
  *   ts-node backend/scripts/backfill-shared-org-marker.ts --apply
  *
+ *   Corrective mode — re-stamps records that were previously (incorrectly)
+ *   marked ALL_ORGS because "fabricator" used to be in
+ *   SEED_ALLOWLIST_CREATED_BY (see finding 85a5b270):
+ *   ts-node backend/scripts/backfill-shared-org-marker.ts \
+ *     --correct-fabricator-shared [--apply] [--record-id <id>] \
+ *     [--limit <n>] [--delay-ms <ms>]
+ *
+ *   --correct-fabricator-shared  Enable corrective mode (default: off).
+ *                                 Dry-run unless `--apply` is also given.
+ *   --record-id <id>              Scope WRITES to a single record id (canary).
+ *                                 The full planned set is still printed;
+ *                                 only the matching record is ever mutated.
+ *   --limit <n>                   Non-negative integer cap on how many
+ *                                 records get WRITTEN in `--apply` mode
+ *                                 (the plan/print phase is never bounded).
+ *                                 Non-numeric values throw.
+ *   --delay-ms <ms>                Non-negative integer base delay (ms) for
+ *                                 the per-record exponential backoff used
+ *                                 when re-fetching registry records whose
+ *                                 detail GET was throttled. Default 1000.
+ *                                 Retries target ONLY the specific dropped
+ *                                 recordIds (concurrency 1), never the
+ *                                 whole registry type, and give up after 5
+ *                                 attempts per record.
+ *
  * Required env (same convention as backfill-org-ids.ts):
  *   REGISTRY_ID           – AgentCore Registry id
  *   AGENT_CONFIG_TABLE     – DDB table name for legacy agent configs
  *   TOOL_CONFIG_TABLE      – DDB table name for legacy tool configs
+ *   PROJECTS_TABLE         – DDB table name for projects (projectId ->
+ *                            organization); REQUIRED only when
+ *                            --correct-fabricator-shared is set, used to
+ *                            resolve the tenant org for fabricator-created
+ *                            agents (via sourceProjectId) and tools (via
+ *                            their binding agents' sourceProjectId)
  *   AWS_REGION             – optional, defaults to us-west-2
  *
  * Constraints:
@@ -54,6 +85,9 @@
  *     auto-assigned, even in `--apply` mode.
  *   - Per-record errors are logged and swallowed; the main loop never
  *     throws.
+ *   - Corrective mode refuses to act (error, exit non-zero) if any record
+ *     is still unfetched after the targeted per-record retry — never a
+ *     silent partial apply.
  */
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
@@ -768,53 +802,119 @@ export async function applyCorrectiveEntry(
 }
 
 /**
- * Default bounded re-list attempts for a throttled/partial registry list,
- * before refusing to act. Exponential backoff with full jitter, matching
- * the shape of {@link RegistryService}'s own internal `withRetry`.
+ * Default minimum attempts for retrying a single dropped record's detail
+ * fetch before giving up on it. Per spec: "per-record exponential backoff
+ * in seconds (>=5 attempts)".
  */
-const CORRECTIVE_LIST_MAX_ATTEMPTS = 4;
-const CORRECTIVE_LIST_BASE_DELAY_MS = 500;
+const CORRECTIVE_RECORD_RETRY_MIN_ATTEMPTS = 5;
+/** Base delay (ms) for the per-record backoff schedule — overridable via `--delay-ms`. */
+const CORRECTIVE_RECORD_RETRY_BASE_DELAY_MS = 1000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
- * Calls {@link RegistryService.listResourcesChecked} up to
- * `maxAttempts` times with exponential backoff, retrying only while the
- * result is partial/throttled. Returns the first non-partial result, or
- * the LAST (still-partial) result once attempts are exhausted — the caller
- * is responsible for refusing to act on a result that is still partial.
- * `RegistryService.listResourcesChecked` already retries individual SDK
- * calls internally (list + per-record detail GETs); this adds a coarser
- * re-list loop on top for the case where an entire pass still ends up
- * partial after those inner retries (e.g. sustained throttling across the
- * whole scan).
+ * Injectable backoff schedule: given an attempt number (1-based) and the
+ * base delay in ms, returns how long to wait before the next attempt.
+ * Exponential in seconds, matching {@link RegistryService}'s own retry
+ * shape but exposed here so tests can supply a zero/near-zero schedule.
  */
-export async function listResourcesCheckedWithBackoff(
+export type RetryDelayFn = (attempt: number, baseDelayMs: number) => number;
+
+export const defaultRetryDelay: RetryDelayFn = (attempt, baseDelayMs) =>
+  baseDelayMs * Math.pow(2, attempt - 1);
+
+/**
+ * Re-fetches exactly the records whose detail GET failed on the initial
+ * {@link RegistryService.listResourcesChecked} pass, one at a time
+ * (concurrency 1, never re-listing the whole type), with per-record
+ * exponential backoff. A record still unfetched after `maxAttempts` stays
+ * dropped — the caller (which refuses to act on any remaining drop) is
+ * responsible for treating that as an error.
+ *
+ * This deliberately does NOT retry via the registry's own list+detail
+ * pass: re-listing the whole type re-triggers RegistryService's internal
+ * concurrency-3 detail fetch across every record (not just the failed
+ * ones), which re-saturates the same rate limit that caused the drops in
+ * the first place and can make droppedCount grow across attempts instead
+ * of shrink. Targeting only the known-bad recordIds, at concurrency 1,
+ * keeps each retry pass small enough to fit under the limit.
+ */
+export async function reconcileDroppedRecords(
   registry: RegistryService,
   type: ResourceType,
-  maxAttempts: number = CORRECTIVE_LIST_MAX_ATTEMPTS,
-  baseDelayMs: number = CORRECTIVE_LIST_BASE_DELAY_MS,
+  initial: ListResourcesResult,
+  maxAttempts: number = CORRECTIVE_RECORD_RETRY_MIN_ATTEMPTS,
+  baseDelayMs: number = CORRECTIVE_RECORD_RETRY_BASE_DELAY_MS,
+  delayFn: RetryDelayFn = defaultRetryDelay,
 ): Promise<ListResourcesResult> {
-  let last: ListResourcesResult | undefined;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    last = await registry.listResourcesChecked(type);
-    if (!last.partial && !last.throttled) {
-      return last;
+  const dropped = initial.droppedRecordIds ?? [];
+  if (dropped.length === 0) {
+    return initial;
+  }
+
+  const items = [...initial.items];
+  let remaining = [...dropped];
+
+  for (
+    let attempt = 1;
+    attempt <= maxAttempts && remaining.length > 0;
+    attempt++
+  ) {
+    const stillMissing: string[] = [];
+    for (const recordId of remaining) {
+      try {
+        const record = await registry.getResource(type, recordId);
+        if (record) {
+          items.push(record);
+        } else {
+          // Record genuinely gone (404) — not a throttle; do not keep
+          // retrying something that will never resolve.
+          log(
+            "warn",
+            `[correct-fabricator:${type}] recordId=${recordId} no longer exists (404) — dropping from plan`,
+          );
+        }
+      } catch (err) {
+        // A TypeMismatchError means the original detail-fetch drop was
+        // never a throttle failure for THIS type — the record is the
+        // other kind (agent vs tool) and listResourcesChecked's own
+        // in-flight type filter would have excluded it anyway. Treat it
+        // the same as that "filtered" outcome: drop silently, never
+        // retry, never count as an unresolved partial.
+        if (err instanceof Error && err.name === "TypeMismatchError") {
+          log(
+            "info",
+            `[correct-fabricator:${type}] recordId=${recordId} is the other resource type — filtered, not a throttle failure`,
+          );
+          continue;
+        }
+        stillMissing.push(recordId);
+        log(
+          "warn",
+          `[correct-fabricator:${type}] recordId=${recordId} targeted re-fetch failed (attempt ${attempt}/${maxAttempts}): ${String(err)}`,
+        );
+      }
     }
-    if (attempt < maxAttempts) {
-      const ceiling = baseDelayMs * Math.pow(2, attempt - 1);
-      const delayMs = Math.floor(Math.random() * ceiling) + 1;
+    remaining = stillMissing;
+    if (remaining.length > 0 && attempt < maxAttempts) {
+      const delayMs = delayFn(attempt, baseDelayMs);
       log(
         "warn",
-        `[correct-fabricator:${type}] list partial/throttled (attempt ${attempt}/${maxAttempts}, droppedCount=${last.droppedCount}) — retrying in ${delayMs}ms`,
+        `[correct-fabricator:${type}] ${remaining.length} record(s) still unfetched — retrying in ${delayMs}ms (attempt ${attempt + 1}/${maxAttempts})`,
       );
       await sleep(delayMs);
     }
   }
-  // last is guaranteed set: maxAttempts >= 1
-  return last as ListResourcesResult;
+
+  return {
+    items,
+    partial: remaining.length > 0,
+    droppedCount: remaining.length,
+    throttled: remaining.length > 0,
+    droppedRecordIds: remaining.length > 0 ? remaining : undefined,
+  };
 }
 
 /**
@@ -833,17 +933,26 @@ export async function runCorrectiveForRegistryType(
   tableName: string,
   docClient: DynamoDBDocumentClient,
   recordId: string | undefined,
+  retryDelayMs: number = CORRECTIVE_RECORD_RETRY_BASE_DELAY_MS,
+  retryMaxAttempts: number = CORRECTIVE_RECORD_RETRY_MIN_ATTEMPTS,
 ): Promise<CorrectivePlanEntry[]> {
   const plan: CorrectivePlanEntry[] = [];
   const kind = type === "agent" ? "agent" : "tool";
 
-  const listed = await listResourcesCheckedWithBackoff(registry, type);
+  const initialList = await registry.listResourcesChecked(type);
+  const listed = await reconcileDroppedRecords(
+    registry,
+    type,
+    initialList,
+    retryMaxAttempts,
+    retryDelayMs,
+  );
   summary.scanned += listed.items.length;
 
   if (listed.partial || listed.throttled) {
     log(
       "error",
-      `[correct-fabricator:${type}] registry list is still partial/throttled after ${CORRECTIVE_LIST_MAX_ATTEMPTS} attempts (droppedCount=${listed.droppedCount}) — refusing to act on a known-partial list`,
+      `[correct-fabricator:${type}] ${listed.droppedCount} record(s) still unfetched after targeted retry (recordIds=${(listed.droppedRecordIds ?? []).join(",")}) — refusing to act on a known-partial list`,
     );
     summary.errors++;
     return plan;
@@ -1004,6 +1113,21 @@ export async function main(): Promise<void> {
   }
   const limit = limitRaw !== undefined ? Number(limitRaw) : undefined;
 
+  const delayMsIdx = args.indexOf("--delay-ms");
+  const delayMsRaw =
+    delayMsIdx !== -1 && args[delayMsIdx + 1] !== undefined
+      ? args[delayMsIdx + 1]
+      : undefined;
+  if (delayMsRaw !== undefined && !/^\d+$/.test(delayMsRaw)) {
+    throw new Error(
+      `--delay-ms must be a non-negative integer, got "${delayMsRaw}"`,
+    );
+  }
+  const delayMs =
+    delayMsRaw !== undefined
+      ? Number(delayMsRaw)
+      : CORRECTIVE_RECORD_RETRY_BASE_DELAY_MS;
+
   const registryId = process.env.REGISTRY_ID;
   const region = process.env.AWS_REGION || "us-west-2";
   const agentTable = process.env.AGENT_CONFIG_TABLE;
@@ -1040,6 +1164,7 @@ export async function main(): Promise<void> {
       apply,
       limit,
       recordId,
+      delayMs,
     );
     return;
   }
@@ -1099,6 +1224,7 @@ async function runCorrectiveMode(
   apply: boolean,
   limit: number | undefined,
   recordId: string | undefined,
+  delayMs: number = CORRECTIVE_RECORD_RETRY_BASE_DELAY_MS,
 ): Promise<void> {
   log("info", `Corrective mode: ${apply ? "APPLY" : "DRY-RUN"}`);
   if (recordId) log("info", `Scoped to single record id=${recordId} (canary)`);
@@ -1183,6 +1309,7 @@ async function runCorrectiveMode(
     agentTable,
     docClient,
     recordId,
+    delayMs,
   );
   const toolPlan = await runCorrectiveForRegistryType(
     "tool",
@@ -1194,6 +1321,7 @@ async function runCorrectiveMode(
     toolTable,
     docClient,
     recordId,
+    delayMs,
   );
 
   fullPlan.push(

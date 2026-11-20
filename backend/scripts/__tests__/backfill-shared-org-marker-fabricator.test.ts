@@ -22,7 +22,7 @@ import {
   buildOrgResolverFromMaps,
   applyCorrectiveEntry,
   runCorrectiveForRegistryType,
-  listResourcesCheckedWithBackoff,
+  reconcileDroppedRecords,
   type RecordShape,
   type OrgResolver,
 } from "../backfill-shared-org-marker";
@@ -855,15 +855,20 @@ describe("runCorrectiveForRegistryType — throttled/partial list refuses to act
     resolveToolOrg: () => undefined,
   };
 
-  it("sets an error and plans nothing when every re-list attempt stays partial/throttled", async () => {
+  it("sets an error and plans nothing when a dropped record never resolves via targeted re-fetch", async () => {
     const listResourcesChecked = jest.fn().mockResolvedValue({
       items: [],
       partial: true,
-      droppedCount: 58,
+      droppedCount: 1,
       throttled: true,
+      droppedRecordIds: ["rec-missing"],
     });
+    const getResource = jest
+      .fn()
+      .mockRejectedValue(new Error("ThrottlingException"));
     const registry = {
       listResourcesChecked,
+      getResource,
     } as unknown as RegistryService;
     const send = jest.fn();
     const docClient = {
@@ -881,43 +886,58 @@ describe("runCorrectiveForRegistryType — throttled/partial list refuses to act
       "tool-table",
       docClient,
       undefined,
+      1, // tiny delay to keep the test fast
+      5, // maxAttempts
     );
 
     expect(plan).toEqual([]);
     expect(summary.errors).toBe(1);
     expect(send).not.toHaveBeenCalled();
-    // Re-list was retried, not just attempted once.
-    expect(listResourcesChecked.mock.calls.length).toBeGreaterThan(1);
+    // The list itself is called exactly once — the retry targets only the
+    // dropped record via getResource, never re-listing the whole type.
+    expect(listResourcesChecked).toHaveBeenCalledTimes(1);
+    expect(getResource).toHaveBeenCalledTimes(5);
+    expect(getResource).toHaveBeenCalledWith("tool", "rec-missing");
   });
 
-  it("recovers and proceeds once a later re-list attempt comes back non-partial", async () => {
-    const listResourcesChecked = jest
+  it("recovers and proceeds once a targeted re-fetch of the dropped record succeeds", async () => {
+    const listResourcesChecked = jest.fn().mockResolvedValue({
+      items: [],
+      partial: true,
+      droppedCount: 1,
+      throttled: true,
+      droppedRecordIds: ["rec-1"],
+    });
+    const getResource = jest
       .fn()
+      .mockResolvedValueOnce(null)
       .mockResolvedValueOnce({
-        items: [],
-        partial: true,
-        droppedCount: 5,
-        throttled: true,
-      })
+        recordId: "rec-1",
+        name: "fab-tool-1",
+        status: "APPROVED",
+        customDescriptorContent: JSON.stringify({
+          orgId: ALL_ORGS,
+          createdBy: "fabricator",
+          appId: "app-1",
+        }),
+      });
+    // First attempt throws (still throttled), second attempt succeeds.
+    getResource.mockReset();
+    getResource
+      .mockRejectedValueOnce(new Error("ThrottlingException"))
       .mockResolvedValueOnce({
-        items: [
-          {
-            recordId: "rec-1",
-            name: "fab-tool-1",
-            status: "APPROVED",
-            customDescriptorContent: JSON.stringify({
-              orgId: ALL_ORGS,
-              createdBy: "fabricator",
-              appId: "app-1",
-            }),
-          },
-        ],
-        partial: false,
-        droppedCount: 0,
-        throttled: false,
+        recordId: "rec-1",
+        name: "fab-tool-1",
+        status: "APPROVED",
+        customDescriptorContent: JSON.stringify({
+          orgId: ALL_ORGS,
+          createdBy: "fabricator",
+          appId: "app-1",
+        }),
       });
     const registry = {
       listResourcesChecked,
+      getResource,
     } as unknown as RegistryService;
     const docClient = {
       send: jest.fn(),
@@ -934,70 +954,166 @@ describe("runCorrectiveForRegistryType — throttled/partial list refuses to act
       "tool-table",
       docClient,
       undefined,
+      1,
+      5,
     );
 
     expect(summary.errors).toBe(0);
     expect(plan).toHaveLength(1);
     expect(plan[0].id).toBe("rec-1");
-    expect(listResourcesChecked).toHaveBeenCalledTimes(2);
+    expect(listResourcesChecked).toHaveBeenCalledTimes(1);
+    expect(getResource).toHaveBeenCalledTimes(2);
   });
 });
 
 // ---------------------------------------------------------------------------
-// 15. listResourcesCheckedWithBackoff — bounded retries
+// 15. reconcileDroppedRecords — targeted per-record retry, concurrency 1
 // ---------------------------------------------------------------------------
 
-describe("listResourcesCheckedWithBackoff", () => {
-  it("stops retrying and returns the first non-partial result", async () => {
-    const listResourcesChecked = jest
-      .fn()
-      .mockResolvedValueOnce({
-        items: [],
-        partial: true,
-        droppedCount: 1,
-        throttled: true,
-      })
-      .mockResolvedValueOnce({
-        items: [],
-        partial: false,
-        droppedCount: 0,
-        throttled: false,
-      });
-    const registry = {
-      listResourcesChecked,
-    } as unknown as RegistryService;
+describe("reconcileDroppedRecords", () => {
+  it("returns the initial result unchanged when nothing was dropped", async () => {
+    const getResource = jest.fn();
+    const registry = { getResource } as unknown as RegistryService;
+    const initial = {
+      items: [{ recordId: "r1", name: "a", status: "APPROVED" }],
+      partial: false,
+      droppedCount: 0,
+      throttled: false,
+    };
 
-    const result = await listResourcesCheckedWithBackoff(
+    const result = await reconcileDroppedRecords(registry, "agent", initial);
+
+    expect(result).toBe(initial);
+    expect(getResource).not.toHaveBeenCalled();
+  });
+
+  it("retries only the dropped recordIds, one at a time, with injected backoff", async () => {
+    const callOrder: string[] = [];
+    const getResource = jest.fn(async (_type: string, id: string) => {
+      callOrder.push(id);
+      if (id === "r-slow") {
+        // Fails on first attempt, succeeds on second.
+        if (callOrder.filter((c) => c === "r-slow").length === 1) {
+          throw new Error("ThrottlingException");
+        }
+      }
+      return { recordId: id, name: id, status: "APPROVED" };
+    });
+    const registry = { getResource } as unknown as RegistryService;
+    const initial = {
+      items: [{ recordId: "r-ok", name: "ok", status: "APPROVED" }],
+      partial: true,
+      droppedCount: 2,
+      throttled: true,
+      droppedRecordIds: ["r-fast", "r-slow"],
+    };
+    const delayFn = jest.fn().mockReturnValue(1);
+
+    const result = await reconcileDroppedRecords(
       registry,
       "agent",
-      3,
-      1, // tiny base delay to keep the test fast
+      initial,
+      5,
+      1000,
+      delayFn,
     );
 
     expect(result.partial).toBe(false);
-    expect(listResourcesChecked).toHaveBeenCalledTimes(2);
+    expect(result.items.map((i) => i.recordId).sort()).toEqual([
+      "r-fast",
+      "r-ok",
+      "r-slow",
+    ]);
+    expect(delayFn).toHaveBeenCalledWith(1, 1000);
   });
 
-  it("returns the last (still-partial) result after exhausting maxAttempts, without exceeding it", async () => {
-    const listResourcesChecked = jest.fn().mockResolvedValue({
+  it("gives up on a record still unfetched after maxAttempts and reports it as dropped", async () => {
+    const getResource = jest
+      .fn()
+      .mockRejectedValue(new Error("ThrottlingException"));
+    const registry = { getResource } as unknown as RegistryService;
+    const initial = {
       items: [],
       partial: true,
-      droppedCount: 9,
+      droppedCount: 1,
       throttled: true,
-    });
-    const registry = {
-      listResourcesChecked,
-    } as unknown as RegistryService;
+      droppedRecordIds: ["r-dead"],
+    };
 
-    const result = await listResourcesCheckedWithBackoff(
+    const result = await reconcileDroppedRecords(
       registry,
       "tool",
-      3,
+      initial,
+      5,
       1,
     );
 
     expect(result.partial).toBe(true);
-    expect(listResourcesChecked).toHaveBeenCalledTimes(3);
+    expect(result.droppedRecordIds).toEqual(["r-dead"]);
+    expect(getResource).toHaveBeenCalledTimes(5);
+  });
+
+  it("drops a record that resolves to null (genuine 404) without retrying it further", async () => {
+    const getResource = jest.fn().mockResolvedValue(null);
+    const registry = { getResource } as unknown as RegistryService;
+    const initial = {
+      items: [],
+      partial: true,
+      droppedCount: 1,
+      throttled: false,
+      droppedRecordIds: ["r-gone"],
+    };
+
+    const result = await reconcileDroppedRecords(
+      registry,
+      "tool",
+      initial,
+      5,
+      1,
+    );
+
+    expect(getResource).toHaveBeenCalledTimes(1);
+    expect(result.partial).toBe(false);
+    expect(result.items).toEqual([]);
+  });
+
+  it("treats a TypeMismatchError as filtered (other resource type), not an unresolved throttle", async () => {
+    class TypeMismatchError extends Error {
+      constructor(message: string) {
+        super(message);
+        this.name = "TypeMismatchError";
+      }
+    }
+    const getResource = jest
+      .fn()
+      .mockRejectedValue(
+        new TypeMismatchError(
+          "Record r-agent exists but is not a tool (has manifest)",
+        ),
+      );
+    const registry = { getResource } as unknown as RegistryService;
+    const initial = {
+      items: [],
+      partial: true,
+      droppedCount: 1,
+      throttled: true,
+      droppedRecordIds: ["r-agent"],
+    };
+
+    const result = await reconcileDroppedRecords(
+      registry,
+      "tool",
+      initial,
+      5,
+      1,
+    );
+
+    // Only attempted once — a type mismatch is not retried.
+    expect(getResource).toHaveBeenCalledTimes(1);
+    expect(result.partial).toBe(false);
+    expect(result.throttled).toBe(false);
+    expect(result.droppedRecordIds).toBeUndefined();
+    expect(result.items).toEqual([]);
   });
 });
 

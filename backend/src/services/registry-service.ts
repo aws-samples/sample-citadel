@@ -691,6 +691,13 @@ export interface ListResourcesResult {
   droppedCount: number;
   /** True specifically when throttling caused records to be dropped. */
   throttled: boolean;
+  /**
+   * recordId of every summary whose detail GET failed (throttled or
+   * otherwise) and was therefore excluded from `items`. Omitted/empty when
+   * nothing was dropped. Lets a caller retry exactly the missing records
+   * instead of re-listing the whole type.
+   */
+  droppedRecordIds?: string[];
 }
 
 export class RegistryService {
@@ -1717,6 +1724,7 @@ export class RegistryService {
     let truncated = false;
     let droppedCount = 0;
     let throttledDrop = false;
+    const droppedRecordIds: string[] = [];
 
     do {
       if (budgetLow()) {
@@ -1832,6 +1840,7 @@ export class RegistryService {
           case "dropped": {
             const recId = summaries[i].recordId ?? "(unknown)";
             droppedCount += 1;
+            if (recId !== "(unknown)") droppedRecordIds.push(recId);
             console.warn(
               JSON.stringify({
                 level: "WARN",
@@ -1895,6 +1904,8 @@ export class RegistryService {
         partial: truncated || droppedCount > 0,
         droppedCount,
         throttled: throttledDrop,
+        droppedRecordIds:
+          droppedRecordIds.length > 0 ? droppedRecordIds : undefined,
       };
     }
 
@@ -1903,6 +1914,8 @@ export class RegistryService {
       partial: truncated || droppedCount > 0,
       droppedCount,
       throttled: throttledDrop,
+      droppedRecordIds:
+        droppedRecordIds.length > 0 ? droppedRecordIds : undefined,
     };
   }
 

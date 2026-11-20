@@ -228,22 +228,75 @@ describe("RegistryService.listResources — bounded parallel detail fetch", () =
 
     const metricLogs = warnSpy.mock.calls
       .map((args) => {
-        try { return JSON.parse(args[0] as string); } catch { return null; }
+        try {
+          return JSON.parse(args[0] as string);
+        } catch {
+          return null;
+        }
       })
       .filter((o) => o?.metricName === "DetailFetchFailed");
 
     // Per-record log
-    const perRecord = metricLogs.find((o: Record<string, unknown>) => o.recordId === "rec-0000");
+    const perRecord = metricLogs.find(
+      (o: Record<string, unknown>) => o.recordId === "rec-0000",
+    );
     expect(perRecord).toBeDefined();
     expect(perRecord.reason).toBe("ServiceUnavailableException");
     expect(perRecord.metric).toBe("Citadel/Registry");
-    expect(perRecord.dimensions).toEqual({ reason: "ServiceUnavailableException" });
+    expect(perRecord.dimensions).toEqual({
+      reason: "ServiceUnavailableException",
+    });
 
     // Summary log with count
-    const summaryLog = metricLogs.find((o: Record<string, unknown>) => o.droppedCount !== undefined);
+    const summaryLog = metricLogs.find(
+      (o: Record<string, unknown>) => o.droppedCount !== undefined,
+    );
     expect(summaryLog).toBeDefined();
     expect(summaryLog.droppedCount).toBe(1);
     expect(summaryLog.metricValue).toBe(1);
+  });
+
+  it("listResourcesChecked exposes the recordId of every dropped detail fetch", async () => {
+    sdkMock.on(ListRegistryRecordsCommand).resolves({
+      registryRecords: summaries(3),
+      nextToken: undefined,
+    });
+    sdkMock
+      .on(GetRegistryRecordCommand)
+      .callsFake(async (input: { recordId: string }) => {
+        if (input.recordId === "rec-0000" || input.recordId === "rec-0002") {
+          throw Object.assign(new Error("throttled"), {
+            name: "ThrottlingException",
+          });
+        }
+        return agentDetail(input.recordId, "agent-1");
+      });
+
+    const result = await service.listResourcesChecked("agent");
+
+    expect(result.partial).toBe(true);
+    expect(result.droppedCount).toBe(2);
+    expect(result.droppedRecordIds).toEqual(
+      expect.arrayContaining(["rec-0000", "rec-0002"]),
+    );
+    expect(result.droppedRecordIds).toHaveLength(2);
+  });
+
+  it("listResourcesChecked omits droppedRecordIds when nothing was dropped", async () => {
+    sdkMock.on(ListRegistryRecordsCommand).resolves({
+      registryRecords: summaries(1),
+      nextToken: undefined,
+    });
+    sdkMock
+      .on(GetRegistryRecordCommand)
+      .callsFake(async (input: { recordId: string }) =>
+        agentDetail(input.recordId, "agent-1"),
+      );
+
+    const result = await service.listResourcesChecked("agent");
+
+    expect(result.partial).toBe(false);
+    expect(result.droppedRecordIds).toBeUndefined();
   });
 
   it("preserves order of successful records when some GETs fail", async () => {
@@ -292,7 +345,11 @@ describe("RegistryService.listResources — bounded parallel detail fetch", () =
     // No DetailFetchFailed warnings emitted.
     const metricLogs = warnSpy.mock.calls
       .map((args) => {
-        try { return JSON.parse(args[0] as string); } catch { return null; }
+        try {
+          return JSON.parse(args[0] as string);
+        } catch {
+          return null;
+        }
       })
       .filter((o) => o?.metricName === "DetailFetchFailed");
     expect(metricLogs).toHaveLength(0);
