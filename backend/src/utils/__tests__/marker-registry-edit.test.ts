@@ -47,6 +47,17 @@ function mockRegistryService(overrides: Record<string, unknown> = {}) {
     updateResource: jest.fn().mockImplementation(() => {
       // updateResource demotes to DRAFT (AgentCore GA behaviour)
       currentStatus = "DRAFT";
+      // `settleFailed` models the incident shape: the write landed (hence
+      // the demotion above) but registry-service.ts's own settle poll
+      // exhausted its retries, so it returns the flag instead of throwing.
+      if (overrides.settleFailed) {
+        return Promise.resolve({
+          recordId: "rec-1",
+          name: "test-agent",
+          status: "UPDATING",
+          settleFailed: true,
+        });
+      }
       return Promise.resolve({});
     }),
     updateResourceStatus: jest
@@ -176,6 +187,63 @@ describe("applyMarkerEdit", () => {
     };
     const result = await applyMarkerEdit(spec, baseOptions(registry));
     expect(result.error).toContain("updateResource failed");
+    expect(result.reapproved).toBe(false);
+  });
+
+  // LIVE INCIDENT 2026-11-20: UpdateRegistryRecord lands (the write
+  // succeeds, demoting the record to DRAFT) but the post-write settle poll
+  // (waitForStableState/getResource) exhausts its throttle retries.
+  // registry-service.ts's updateResource now returns `settleFailed: true`
+  // instead of throwing. applyMarkerEdit must still proceed to step 7
+  // (submitForApproval -> decide) rather than returning the early
+  // "updateResource failed" error that would skip approval restoration
+  // entirely — the exact gap that left the incident record DRAFT forever.
+  test("settleFailed from updateResource still proceeds to approval restoration and succeeds", async () => {
+    const registry = mockRegistryService({
+      status: "APPROVED",
+      settleFailed: true,
+    });
+    const spec: MarkerEditSpec = {
+      recordId: "rec-1",
+      type: "agent",
+      fieldsToSet: { credentialMode: "none" },
+    };
+    const result = await applyMarkerEdit(spec, baseOptions(registry));
+
+    expect(result.error).toBeUndefined();
+    // submitForApproval/updateResourceStatus run against the mock's
+    // shared `currentStatus` (demoted to DRAFT by the updateResource mock
+    // above even though settleFailed was set) and succeed normally,
+    // proving step 7 was reached and completed rather than skipped.
+    expect(registry.submitForApproval).toHaveBeenCalledWith("rec-1");
+    expect(result.reapproved).toBe(true);
+    expect(result.postStatus).toBe("APPROVED");
+  });
+
+  test("settleFailed followed by a genuine approval-restoration failure buckets as needsReapproval shape (no error, DRAFT, reapproved false)", async () => {
+    const registry = mockRegistryService({
+      status: "APPROVED",
+      settleFailed: true,
+      submitForApproval: jest.fn().mockRejectedValue(
+        Object.assign(new Error("Request rate exceeded."), {
+          name: "ThrottlingException",
+        }),
+      ),
+    });
+    const spec: MarkerEditSpec = {
+      recordId: "rec-1",
+      type: "agent",
+      fieldsToSet: { credentialMode: "none" },
+    };
+    const result = await applyMarkerEdit(spec, baseOptions(registry));
+
+    // This is the exact signature `editResultNeedsReapproval` (in
+    // backfill-shared-org-marker.ts) detects: no `error`, priorStatus
+    // APPROVED, reapproved false — bucketed as needsReapproval, never as
+    // an abandoned error.
+    expect(result.error).toBeUndefined();
+    expect(result.priorStatus).toBe("APPROVED");
+    expect(result.postStatus).toBe("DRAFT");
     expect(result.reapproved).toBe(false);
   });
 

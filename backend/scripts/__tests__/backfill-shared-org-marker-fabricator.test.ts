@@ -2264,7 +2264,14 @@ describe("applyCorrectiveEntry — needsReapproval bucket", () => {
     expect(result.needsReapproval).toBeFalsy();
   });
 
-  it("still surfaces a genuine updateResource failure as `error`, never as needsReapproval", async () => {
+  it("still surfaces a genuine pre-write updateResource failure (UpdateRegistryRecord itself never landed) as `error`, never as needsReapproval", async () => {
+    // Post-incident-fix, `applyMarkerEdit` only returns `error:
+    // "updateResource failed: ..."` when the UpdateRegistryRecordCommand
+    // call itself threw — i.e. the write never landed, nothing to restore.
+    // That is a DIFFERENT failure shape from the incident (write landed,
+    // post-write settle poll throttled): this test's mocked postStatus
+    // "APPROVED" with an `error` string models the pre-write case, which
+    // must still bucket as a genuine `error`, never `needsReapproval`.
     applyMarkerEdit.mockResolvedValue({
       recordId: "synthetic-agent-3",
       priorStatus: "APPROVED",
@@ -2401,6 +2408,76 @@ describe("runCorrectiveForRegistryType — needsReapproval bucket and --limit co
     // Both records were still attempted (the loop continued past the
     // needsReapproval record instead of abandoning the run).
     expect(applyMarkerEdit).toHaveBeenCalledTimes(2);
+  });
+
+  // Reproduces the review finding: the end-of-run re-approval pass must
+  // iterate ONLY the ids flagged needsReapproval, never the full planned
+  // set — otherwise, with --limit scoping writes to a subset of the plan,
+  // the pass would getResource/submit/approve every un-attempted
+  // non-APPROVED record too, violating --limit's attempted-record
+  // boundary. This asserts the shared `needsReapprovalEntries` array
+  // (threaded through to the caller and iterated by main()'s end-of-run
+  // pass) accumulates exactly the flagged record and not the clean one.
+  it("tracks only the flagged record's {id, type} in the shared needsReapprovalEntries array, never the clean one", async () => {
+    const registry = makeListedRegistry([
+      {
+        recordId: "synthetic-rec-1",
+        name: "synthetic-agent-a",
+        orgId: ALL_ORGS,
+        createdBy: "fabricator",
+        sourceProjectId: "proj-synthetic",
+      },
+      {
+        recordId: "synthetic-rec-2",
+        name: "synthetic-agent-b",
+        orgId: ALL_ORGS,
+        createdBy: "fabricator",
+        sourceProjectId: "proj-synthetic",
+      },
+    ]);
+    applyMarkerEdit
+      .mockResolvedValueOnce({
+        recordId: "synthetic-rec-1",
+        priorStatus: "APPROVED",
+        postStatus: "DRAFT",
+        reapproved: false,
+        error: undefined,
+      })
+      .mockResolvedValueOnce({
+        recordId: "synthetic-rec-2",
+        priorStatus: "APPROVED",
+        postStatus: "APPROVED",
+        reapproved: true,
+        error: undefined,
+      });
+    const send = jest.fn().mockResolvedValue({});
+    const docClient = {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+    const summary = emptySummary();
+    const needsReapprovalEntries: { id: string; type: "agent" | "tool" }[] = [];
+
+    await runCorrectiveForRegistryType(
+      "agent",
+      registry,
+      orgResolver,
+      /* apply */ true,
+      /* limit */ undefined,
+      summary,
+      "agent-table",
+      docClient,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      /* callDelayMs */ 0,
+      undefined,
+      needsReapprovalEntries,
+    );
+
+    expect(needsReapprovalEntries).toEqual([
+      { id: "synthetic-rec-1", type: "agent" },
+    ]);
   });
 
   it("--limit bounds ATTEMPTS (successes + failures), matching the incident where a failed write never counted toward --limit", async () => {

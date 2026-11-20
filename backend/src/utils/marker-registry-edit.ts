@@ -212,11 +212,18 @@ export async function applyMarkerEdit(
       }
     }
 
+    let settleFailed = false;
     try {
-      await registryService.updateResource(type, recordId, {
+      const updated = await registryService.updateResource(type, recordId, {
         customMetadata: JSON.stringify(newMeta),
       });
+      settleFailed = updated.settleFailed === true;
     } catch (err) {
+      // A thrown error here means the write itself (UpdateRegistryRecord)
+      // never landed — genuinely abandon the record, nothing to restore.
+      // Contrast with `settleFailed` above: that signals the write landed
+      // but the post-write settle poll was throttled, which must NOT take
+      // this early-return path (see LIVE INCIDENT 2026-11-20).
       return {
         recordId,
         priorStatus,
@@ -271,7 +278,7 @@ export async function applyMarkerEdit(
         }
       } catch (err) {
         console.warn(
-          `Marker edit: failed to restore APPROVED status for ${recordId}: ${String(err)}`,
+          `Marker edit: failed to restore APPROVED status for ${recordId}${settleFailed ? " (write settle step was also throttled)" : ""}: ${String(err)}`,
         );
         // postStatus stays DRAFT — manual approval needed
       }

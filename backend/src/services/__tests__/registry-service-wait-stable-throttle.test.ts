@@ -79,7 +79,19 @@ describe("RegistryService.updateResource — waitForStableState throttle resilie
     expect(sdkMock.commandCalls(GetRegistryRecordCommand)).toHaveLength(3);
   });
 
-  it("gives up after exhausting retries on a persistently throttled stabilization poll and surfaces the error to the caller (never silently swallowed)", async () => {
+  it("surfaces exhausted retries on a persistently throttled stabilization poll as settleFailed instead of throwing and abandoning the record", async () => {
+    // LIVE INCIDENT 2026-11-20: this test previously asserted the opposite
+    // contract — that updateResource THROWS when the post-write settle
+    // poll exhausts retries. That throw is exactly what the incident
+    // showed to be wrong: the write (UpdateRegistryRecord) had already
+    // landed, and letting the throw propagate aborted updateResource
+    // before the marker-edit/corrective path's approval-restoration steps
+    // (submitForApproval/decide) ever ran, leaving the record DRAFT with
+    // no retry and no bucketing. The correct contract is: never throw once
+    // the write has landed — return the record with `settleFailed: true`
+    // so the caller can still attempt approval restoration and bucket a
+    // further failure into `needsReapproval` (see marker-registry-edit.ts
+    // and backfill-shared-org-marker.ts).
     sdkMock.on(UpdateRegistryRecordCommand).resolves({
       recordId: "synthetic-agent-2",
       name: "SyntheticAgent2",
@@ -94,10 +106,15 @@ describe("RegistryService.updateResource — waitForStableState throttle resilie
     );
     sdkMock.on(GetRegistryRecordCommand).rejects(throttleErr);
 
-    await expect(
-      service.updateResource("agent", "synthetic-agent-2", {
-        description: "marker edit",
-      }),
-    ).rejects.toThrow(/Request rate exceeded/);
+    const result = await service.updateResource("agent", "synthetic-agent-2", {
+      description: "marker edit",
+    });
+
+    expect(result.settleFailed).toBe(true);
+    // The write landed; the returned status is the pre-settle transitional
+    // snapshot from UpdateRegistryRecordCommand's own response, since the
+    // settle re-fetch never completed.
+    expect(result.status).toBe("UPDATING");
+    expect(result.recordId).toBe("synthetic-agent-2");
   });
 });

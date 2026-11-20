@@ -492,6 +492,18 @@ export interface RegistryRecord {
   customDescriptorContent?: string;
   createdAt?: Date;
   updatedAt?: Date;
+  /**
+   * Set by `updateResource` when the write itself (UpdateRegistryRecord)
+   * succeeded but the post-write settle step (waitForStableState /
+   * getResource) exhausted its retries — e.g. sustained throttling. The
+   * record's content landed; its returned `status` reflects the pre-settle
+   * transitional snapshot (DRAFT/UPDATING), not necessarily the final
+   * settled value. Callers in the approval-restoration path (see
+   * `applyMarkerEdit`) must still attempt submitForApproval/decide rather
+   * than treating this as a failed write — see LIVE INCIDENT 2026-11-20
+   * on `waitForStableState`.
+   */
+  settleFailed?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -1251,10 +1263,23 @@ export class RegistryService {
     // already stable (no transition), this is a same-value re-fetch and a
     // no-op for callers.
     if (statusBefore === "CREATING" || statusBefore === "UPDATING") {
-      await this.waitForStableState(recordId);
-      const settled = await this.getResource(type, recordId);
-      if (settled) {
-        record = settled;
+      try {
+        await this.waitForStableState(recordId);
+        const settled = await this.getResource(type, recordId);
+        if (settled) {
+          record = settled;
+        }
+      } catch (err) {
+        // LIVE INCIDENT 2026-11-20: the write above already landed — do
+        // NOT throw and abandon the record. Surface the settle failure as
+        // a typed flag so the marker-edit/corrective path can still run
+        // its approval-restoration steps (submitForApproval/decide) and,
+        // on their failure, bucket the record into `needsReapproval`
+        // instead of a generic abandoned `error`.
+        console.error(
+          `registry-service: updateResource settle step (waitForStableState/getResource) failed for ${recordId} after the write landed: ${String(err)}`,
+        );
+        record.settleFailed = true;
       }
     }
 

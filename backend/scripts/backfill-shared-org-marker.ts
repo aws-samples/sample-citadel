@@ -1253,6 +1253,11 @@ export const defaultCallPacer: CallPacer = (delayMs) => sleep(delayMs);
  * registry writes, separate from the per-record retry backoff in
  * {@link reconcileDroppedRecords}.
  */
+export interface NeedsReapprovalEntry {
+  id: string;
+  type: ResourceType;
+}
+
 export async function runCorrectiveForRegistryType(
   type: ResourceType,
   registry: RegistryService,
@@ -1268,6 +1273,7 @@ export async function runCorrectiveForRegistryType(
   fallbackOrg?: string,
   callDelayMs: number = DEFAULT_CALL_DELAY_MS,
   callPacer: CallPacer = defaultCallPacer,
+  needsReapprovalEntries: NeedsReapprovalEntry[] = [],
 ): Promise<CorrectivePlanEntry[]> {
   const plan: CorrectivePlanEntry[] = [];
   const kind = type === "agent" ? "agent" : "tool";
@@ -1364,6 +1370,7 @@ export async function runCorrectiveForRegistryType(
         }
         if (result.needsReapproval) {
           summary.needsReapproval++;
+          needsReapprovalEntries.push({ id: entry.id, type });
           log(
             "warn",
             `[correct-fabricator:${type}] recordId=${entry.id} org marker updated but approval restoration failed — bucketed into needsReapproval, continuing with next record`,
@@ -2104,6 +2111,13 @@ async function runCorrectiveMode(
 
   const summary = emptySummary();
   const fullPlan: CorrectivePlanEntry[] = [];
+  // Flagged exactly where `summary.needsReapproval` is incremented (three
+  // sites: the registry-sourced loop inside runCorrectiveForRegistryType,
+  // called twice below, and the DDB-only loop further down). The
+  // end-of-run re-approval pass iterates THIS list, never `fullPlan` —
+  // `fullPlan` is every planned target, most of which are never attempted
+  // under --limit and must not be touched by the re-approval pass.
+  const needsReapprovalEntries: NeedsReapprovalEntry[] = [];
 
   const agentPlan = await runCorrectiveForRegistryType(
     "agent",
@@ -2120,6 +2134,7 @@ async function runCorrectiveMode(
     fallbackOrg,
     callDelayMs,
     callPacer,
+    needsReapprovalEntries,
   );
   const toolPlan = await runCorrectiveForRegistryType(
     "tool",
@@ -2136,6 +2151,7 @@ async function runCorrectiveMode(
     fallbackOrg,
     callDelayMs,
     callPacer,
+    needsReapprovalEntries,
   );
 
   // R2: the registry-sourced scans above only find records whose CURRENT
@@ -2208,6 +2224,10 @@ async function runCorrectiveMode(
       }
       if (result.needsReapproval) {
         summary.needsReapproval++;
+        needsReapprovalEntries.push({
+          id: entry.id,
+          type: entry.kind === "agent" ? "agent" : "tool",
+        });
         log(
           "warn",
           `[correct-fabricator:ddb-only:${entry.kind}] recordId=${entry.id} org marker updated but approval restoration failed — bucketed into needsReapproval, continuing with next record`,
@@ -2278,35 +2298,24 @@ async function runCorrectiveMode(
   // whose registry status was left DRAFT by a throttled approval-
   // restoration step get ONE more attempt here, in the same run, before
   // the operator has to invoke --restore-approval separately. Only in
-  // apply mode — a dry run has nothing to restore.
+  // apply mode — a dry run has nothing to restore. Iterates
+  // `needsReapprovalEntries` — the ids flagged exactly at the
+  // `summary.needsReapproval++` sites above — never `fullPlan`, which
+  // holds every planned target regardless of whether it was ever
+  // attempted under --limit.
   if (apply && summary.needsReapproval > 0) {
-    const needsReapprovalIds = fullPlan
-      .filter((e) => e.reason !== "ambiguous-multi-org")
-      .map((e) => e.id);
     log(
       "info",
       `--- End-of-run re-approval pass (${summary.needsReapproval} record(s) flagged needsReapproval) ---`,
     );
     let stillNeedsReapproval = 0;
-    for (const id of needsReapprovalIds) {
-      // Re-check each planned id's CURRENT status rather than assuming
-      // every planned id needed restoration — only a DRAFT-but-should-be-
-      // APPROVED record is actually touched; everything else is a no-op.
-      const agentType: ResourceType = "agent";
-      let restoreResult = await restoreApprovalForRecord(
+    for (const { id, type: flaggedType } of needsReapprovalEntries) {
+      const restoreResult = await restoreApprovalForRecord(
         id,
-        agentType,
+        flaggedType,
         registry,
         true,
       );
-      if (restoreResult.error && restoreResult.recordNotFoundOrWrongType) {
-        restoreResult = await restoreApprovalForRecord(
-          id,
-          "tool",
-          registry,
-          true,
-        );
-      }
       if (restoreResult.restored) {
         log("info", `[restore-approval] id=${id} restored to APPROVED`);
       } else if (restoreResult.alreadyApproved) {
