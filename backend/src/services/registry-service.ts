@@ -492,6 +492,18 @@ export interface RegistryRecord {
   customDescriptorContent?: string;
   createdAt?: Date;
   updatedAt?: Date;
+  /**
+   * Set by `updateResource` when the write itself (UpdateRegistryRecord)
+   * succeeded but the post-write settle step (waitForStableState /
+   * getResource) exhausted its retries — e.g. sustained throttling. The
+   * record's content landed; its returned `status` reflects the pre-settle
+   * transitional snapshot (DRAFT/UPDATING), not necessarily the final
+   * settled value. Callers in the approval-restoration path (see
+   * `applyMarkerEdit`) must still attempt submitForApproval/decide rather
+   * than treating this as a failed write — see LIVE INCIDENT 2026-11-20
+   * on `waitForStableState`.
+   */
+  settleFailed?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -1251,10 +1263,23 @@ export class RegistryService {
     // already stable (no transition), this is a same-value re-fetch and a
     // no-op for callers.
     if (statusBefore === "CREATING" || statusBefore === "UPDATING") {
-      await this.waitForStableState(recordId);
-      const settled = await this.getResource(type, recordId);
-      if (settled) {
-        record = settled;
+      try {
+        await this.waitForStableState(recordId);
+        const settled = await this.getResource(type, recordId);
+        if (settled) {
+          record = settled;
+        }
+      } catch (err) {
+        // LIVE INCIDENT 2026-11-20: the write above already landed — do
+        // NOT throw and abandon the record. Surface the settle failure as
+        // a typed flag so the marker-edit/corrective path can still run
+        // its approval-restoration steps (submitForApproval/decide) and,
+        // on their failure, bucket the record into `needsReapproval`
+        // instead of a generic abandoned `error`.
+        console.error(
+          `registry-service: updateResource settle step (waitForStableState/getResource) failed for ${recordId} after the write landed: ${String(err)}`,
+        );
+        record.settleFailed = true;
       }
     }
 
@@ -1266,6 +1291,21 @@ export class RegistryService {
    */
   /**
    * Waits for a registry record to leave transitional states (CREATING, UPDATING).
+   *
+   * LIVE INCIDENT 2026-11-20 (canary --correct-fabricator-shared --apply
+   * --limit 3 --fallback-org <org>): this poll used a raw
+   * `this.client.send(...)` with no retry wrapper. UpdateRegistryRecord
+   * landed successfully, but the very next poll here threw
+   * ThrottlingException uncaught, aborting `updateResource` before the
+   * caller's approval-restoration steps (submitForApproval/decide) ever
+   * ran — leaving the record DRAFT while the DDB projection had already
+   * moved on. Every poll iteration now goes through `withRetry` (same
+   * exponential-backoff-with-full-jitter shape used elsewhere in this
+   * class) so a transient throttle during the wait is retried instead of
+   * propagating out of `updateResource`. Uses the mutation-path retry
+   * shape (5 attempts, base 500ms, full jitter — ceiling tops out at 8s on
+   * the final attempt) rather than the shorter default read retry, since
+   * this poll sits directly in the marker-edit/corrective write path.
    */
   private async waitForStableState(
     recordId: string,
@@ -1273,8 +1313,13 @@ export class RegistryService {
   ): Promise<void> {
     const start = Date.now();
     while (Date.now() - start < maxWaitMs) {
-      const result = await this.client.send(
-        new GetRegistryRecordCommand({ registryId: this.registryId, recordId }),
+      const result = await this.withMutationRetry(() =>
+        this.client.send(
+          new GetRegistryRecordCommand({
+            registryId: this.registryId,
+            recordId,
+          }),
+        ),
       );
       const s = result.status as string;
       if (s !== "CREATING" && s !== "UPDATING") return;
@@ -1381,11 +1426,18 @@ export class RegistryService {
       ),
     );
 
-    const refreshed = await this.client.send(
-      new GetRegistryRecordCommand({
-        registryId: this.registryId,
-        recordId,
-      }),
+    // Registry throttle resilience: this refresh is a registry call like
+    // any other in the marker-edit/corrective path (getResource,
+    // updateResource, submitForApproval, decide) and must retry a
+    // ThrottlingException rather than let it escape and abandon a
+    // restoration that already landed its submit.
+    const refreshed = await this.withMutationRetry(() =>
+      this.client.send(
+        new GetRegistryRecordCommand({
+          registryId: this.registryId,
+          recordId,
+        }),
+      ),
     );
 
     return {

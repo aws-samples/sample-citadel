@@ -110,4 +110,51 @@ describe("RegistryService.submitForApproval", () => {
     // Never falls through to re-fetch/return a stale record on failure.
     expect(sdkMock.commandCalls(GetRegistryRecordCommand)).toHaveLength(0);
   });
+
+  // Registry throttle resilience (verify iteration 2, required change 1):
+  // the post-submit GetRegistryRecordCommand refresh previously ran as a
+  // raw client.send with no retry wrapper, so a throttle landing right
+  // after a successful submit threw instead of being retried like every
+  // other registry call in the marker-edit/corrective path.
+  it("retries a ThrottlingException thrown by the post-submit refresh instead of letting it abort the restoration", async () => {
+    sdkMock.on(SubmitRegistryRecordForApprovalCommand).resolves({
+      recordId: "agent-1",
+      status: "PENDING_APPROVAL",
+    });
+
+    const throttleErr = Object.assign(
+      new Error("Request rate exceeded. Please retry after some time."),
+      { name: "ThrottlingException" },
+    );
+    sdkMock.on(GetRegistryRecordCommand).rejectsOnce(throttleErr).resolvesOnce({
+      recordId: "agent-1",
+      name: "Agent One",
+      status: "PENDING_APPROVAL",
+    });
+
+    const result = await service.submitForApproval("agent-1");
+
+    expect(result.status).toBe("PENDING_APPROVAL");
+    // 1 throttled attempt (retried, not thrown) + 1 successful refresh.
+    expect(sdkMock.commandCalls(GetRegistryRecordCommand)).toHaveLength(2);
+  });
+
+  it("throws when the post-submit refresh exhausts retries on a persistent throttle", async () => {
+    sdkMock.on(SubmitRegistryRecordForApprovalCommand).resolves({
+      recordId: "agent-1",
+      status: "PENDING_APPROVAL",
+    });
+
+    const throttleErr = Object.assign(
+      new Error("Request rate exceeded. Please retry after some time."),
+      { name: "ThrottlingException" },
+    );
+    sdkMock.on(GetRegistryRecordCommand).rejects(throttleErr);
+
+    await expect(service.submitForApproval("agent-1")).rejects.toThrow(
+      "Request rate exceeded",
+    );
+    // withMutationRetry: 5 attempts.
+    expect(sdkMock.commandCalls(GetRegistryRecordCommand)).toHaveLength(5);
+  });
 });

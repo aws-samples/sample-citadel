@@ -47,6 +47,17 @@ function mockRegistryService(overrides: Record<string, unknown> = {}) {
     updateResource: jest.fn().mockImplementation(() => {
       // updateResource demotes to DRAFT (AgentCore GA behaviour)
       currentStatus = "DRAFT";
+      // `settleFailed` models the incident shape: the write landed (hence
+      // the demotion above) but registry-service.ts's own settle poll
+      // exhausted its retries, so it returns the flag instead of throwing.
+      if (overrides.settleFailed) {
+        return Promise.resolve({
+          recordId: "rec-1",
+          name: "test-agent",
+          status: "UPDATING",
+          settleFailed: true,
+        });
+      }
       return Promise.resolve({});
     }),
     updateResourceStatus: jest
@@ -176,6 +187,63 @@ describe("applyMarkerEdit", () => {
     };
     const result = await applyMarkerEdit(spec, baseOptions(registry));
     expect(result.error).toContain("updateResource failed");
+    expect(result.reapproved).toBe(false);
+  });
+
+  // LIVE INCIDENT 2026-11-20: UpdateRegistryRecord lands (the write
+  // succeeds, demoting the record to DRAFT) but the post-write settle poll
+  // (waitForStableState/getResource) exhausts its throttle retries.
+  // registry-service.ts's updateResource now returns `settleFailed: true`
+  // instead of throwing. applyMarkerEdit must still proceed to step 7
+  // (submitForApproval -> decide) rather than returning the early
+  // "updateResource failed" error that would skip approval restoration
+  // entirely — the exact gap that left the incident record DRAFT forever.
+  test("settleFailed from updateResource still proceeds to approval restoration and succeeds", async () => {
+    const registry = mockRegistryService({
+      status: "APPROVED",
+      settleFailed: true,
+    });
+    const spec: MarkerEditSpec = {
+      recordId: "rec-1",
+      type: "agent",
+      fieldsToSet: { credentialMode: "none" },
+    };
+    const result = await applyMarkerEdit(spec, baseOptions(registry));
+
+    expect(result.error).toBeUndefined();
+    // submitForApproval/updateResourceStatus run against the mock's
+    // shared `currentStatus` (demoted to DRAFT by the updateResource mock
+    // above even though settleFailed was set) and succeed normally,
+    // proving step 7 was reached and completed rather than skipped.
+    expect(registry.submitForApproval).toHaveBeenCalledWith("rec-1");
+    expect(result.reapproved).toBe(true);
+    expect(result.postStatus).toBe("APPROVED");
+  });
+
+  test("settleFailed followed by a genuine approval-restoration failure buckets as needsReapproval shape (no error, DRAFT, reapproved false)", async () => {
+    const registry = mockRegistryService({
+      status: "APPROVED",
+      settleFailed: true,
+      submitForApproval: jest.fn().mockRejectedValue(
+        Object.assign(new Error("Request rate exceeded."), {
+          name: "ThrottlingException",
+        }),
+      ),
+    });
+    const spec: MarkerEditSpec = {
+      recordId: "rec-1",
+      type: "agent",
+      fieldsToSet: { credentialMode: "none" },
+    };
+    const result = await applyMarkerEdit(spec, baseOptions(registry));
+
+    // This is the exact signature `editResultNeedsReapproval` (in
+    // backfill-shared-org-marker.ts) detects: no `error`, priorStatus
+    // APPROVED, reapproved false — bucketed as needsReapproval, never as
+    // an abandoned error.
+    expect(result.error).toBeUndefined();
+    expect(result.priorStatus).toBe("APPROVED");
+    expect(result.postStatus).toBe("DRAFT");
     expect(result.reapproved).toBe(false);
   });
 
@@ -314,6 +382,66 @@ describe("applyMarkerEdit", () => {
     expect(result.priorStatus).toBe("DRAFT");
     expect(result.reapproved).toBe(false);
     expect(registry.updateResourceStatus).not.toHaveBeenCalled();
+  });
+
+  // Registry throttle resilience (verify iteration 2, required change 2):
+  // the backfill script's --call-delay-ms help text documents pacing
+  // between EVERY registry call in the marker-edit path (getResource,
+  // updateResource, submitForApproval, decide) — this is the sequence
+  // applyMarkerEdit actually issues, so the pacer must be threaded through
+  // here rather than invoked once per record by the outer loop.
+  test("paces between each internal registry call when callDelayMs/callPacer are supplied (APPROVED record: full 4-call sequence)", async () => {
+    const registry = mockRegistryService({ status: "APPROVED" });
+    const pacer = jest.fn().mockResolvedValue(undefined);
+    const spec: MarkerEditSpec = {
+      recordId: "rec-1",
+      type: "agent",
+      fieldsToSet: { orgId: "org-2" },
+    };
+    const result = await applyMarkerEdit(
+      spec,
+      baseOptions(registry, { callDelayMs: 250, callPacer: pacer }),
+    );
+
+    expect(result.reapproved).toBe(true);
+    // getResource -> [pace] -> updateResource -> [pace] ->
+    // submitForApproval -> [pace] -> decide(updateResourceStatus): 3 paces
+    // between the 4 registry calls.
+    expect(pacer).toHaveBeenCalledTimes(3);
+    expect(pacer).toHaveBeenCalledWith(250);
+  });
+
+  test("does not pace when callDelayMs is 0 (dry-run / unpaced default)", async () => {
+    const registry = mockRegistryService({ status: "APPROVED" });
+    const pacer = jest.fn().mockResolvedValue(undefined);
+    const spec: MarkerEditSpec = {
+      recordId: "rec-1",
+      type: "agent",
+      fieldsToSet: { orgId: "org-2" },
+    };
+    await applyMarkerEdit(
+      spec,
+      baseOptions(registry, { callDelayMs: 0, callPacer: pacer }),
+    );
+
+    expect(pacer).not.toHaveBeenCalled();
+  });
+
+  test("paces only once, between getResource and updateResource, for a non-APPROVED record (no restoration steps)", async () => {
+    const registry = mockRegistryService({ status: "DRAFT" });
+    const pacer = jest.fn().mockResolvedValue(undefined);
+    const spec: MarkerEditSpec = {
+      recordId: "rec-1",
+      type: "agent",
+      fieldsToSet: { orgId: "org-2" },
+    };
+    await applyMarkerEdit(
+      spec,
+      baseOptions(registry, { callDelayMs: 250, callPacer: pacer }),
+    );
+
+    expect(pacer).toHaveBeenCalledTimes(1);
+    expect(pacer).toHaveBeenCalledWith(250);
   });
 
   test("propagates changed fields into nested config object", async () => {

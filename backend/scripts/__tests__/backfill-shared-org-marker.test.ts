@@ -136,6 +136,9 @@ describe("summary accumulation", () => {
       alreadyUnknown: 0,
       ambiguousReported: 0,
       errors: 0,
+      attempted: 0,
+      needsReapproval: 0,
+      projectionLag: 0,
     });
   });
 
@@ -150,6 +153,9 @@ describe("summary accumulation", () => {
       alreadyUnknown: 0,
       ambiguousReported: 1,
       errors: 0,
+      attempted: 2,
+      needsReapproval: 1,
+      projectionLag: 1,
     };
     const b = {
       scanned: 3,
@@ -161,6 +167,9 @@ describe("summary accumulation", () => {
       alreadyUnknown: 1,
       ambiguousReported: 0,
       errors: 1,
+      attempted: 1,
+      needsReapproval: 0,
+      projectionLag: 0,
     };
     const dst = emptySummary();
     addSummary(dst, a);
@@ -175,6 +184,9 @@ describe("summary accumulation", () => {
       alreadyUnknown: 1,
       ambiguousReported: 1,
       errors: 1,
+      attempted: 3,
+      needsReapproval: 1,
+      projectionLag: 1,
     });
   });
 });
