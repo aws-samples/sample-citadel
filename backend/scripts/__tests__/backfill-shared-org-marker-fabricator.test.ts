@@ -22,9 +22,11 @@ import {
   isCorrectiveTarget,
   planCorrectiveEntry,
   buildOrgResolverFromMaps,
+  buildOrgResolverFromTablesWithKnownOrgs,
   buildToolNameOrgIndex,
   applyCorrectiveEntry,
   runCorrectiveForRegistryType,
+  findDdbOnlyCorrectiveTargets,
   reconcileDroppedRecords,
   type RecordShape,
   type OrgResolver,
@@ -64,7 +66,7 @@ describe("classifyRecord — fabricator mark-tenant path", () => {
       return undefined;
     },
     resolveToolOrg: (rec: RecordShape) => {
-      if (rec.name === "fetch_inbox_invoices") return "Default";
+      if (rec.name === "sync_widget_catalog") return "Default";
       return undefined;
     },
   };
@@ -88,7 +90,7 @@ describe("classifyRecord — fabricator mark-tenant path", () => {
   it("classifies a tool whose name resolves to a single org (via the name index) as mark-tenant", () => {
     const rec: RecordShape = {
       id: "t1",
-      name: "fetch_inbox_invoices",
+      name: "sync_widget_catalog",
       orgId: "",
       createdBy: "fabricator",
     };
@@ -336,7 +338,7 @@ describe("planCorrectiveEntry", () => {
     resolveAgentOrg: (rec: RecordShape) =>
       rec.sourceProjectId === "proj-1" ? "Default" : undefined,
     resolveToolOrg: (rec: RecordShape) => {
-      if (rec.name === "fetch_inbox_invoices") return "Default";
+      if (rec.name === "sync_widget_catalog") return "Default";
       if (rec.name === "multi_org_tool") return "AMBIGUOUS";
       return undefined;
     },
@@ -373,14 +375,14 @@ describe("planCorrectiveEntry", () => {
   it("plans a resolvable tool via its name with reason fabricator-tool-name", () => {
     const rec: RecordShape = {
       id: "t1",
-      name: "fetch_inbox_invoices",
+      name: "sync_widget_catalog",
       orgId: ALL_ORGS,
       createdBy: "fabricator",
     };
     const entry = planCorrectiveEntry(rec, "tool", orgResolver);
     expect(entry).toEqual({
       id: "t1",
-      name: "fetch_inbox_invoices",
+      name: "sync_widget_catalog",
       kind: "tool",
       previousOrgId: ALL_ORGS,
       resolvedOrgId: "Default",
@@ -453,11 +455,11 @@ describe("buildToolNameOrgIndex", () => {
         name: "custom-agent",
         createdBy: "fabricator",
         sourceProjectId: "proj-1",
-        config: JSON.stringify({ schema: { tools: ["fetch_inbox_invoices"] } }),
+        config: JSON.stringify({ schema: { tools: ["sync_widget_catalog"] } }),
       },
     ];
     const index = buildToolNameOrgIndex(agents, resolveAgentOrg);
-    expect(index.get("fetch_inbox_invoices")).toEqual(new Set(["Default"]));
+    expect(index.get("sync_widget_catalog")).toEqual(new Set(["Default"]));
   });
 
   it("indexes a tool name from a non-empty manifest.tools[] in addition to config.schema.tools[]", () => {
@@ -615,10 +617,10 @@ describe("buildOrgResolverFromMaps — NAME-based resolveToolOrg", () => {
   it("resolveToolOrg returns the single org when the tool name maps to exactly one org", () => {
     const resolver = buildOrgResolverFromMaps(
       new Map([["proj-1", "Default"]]),
-      new Map([["fetch_inbox_invoices", new Set(["Default"])]]),
+      new Map([["sync_widget_catalog", new Set(["Default"])]]),
     );
     expect(
-      resolver.resolveToolOrg({ id: "t1", name: "fetch_inbox_invoices" }),
+      resolver.resolveToolOrg({ id: "t1", name: "sync_widget_catalog" }),
     ).toBe("Default");
   });
 
@@ -1654,5 +1656,483 @@ describe("R2: corrective mode catches DDB-only ALL_ORGS drift (registry/DDB disa
     expect(send.mock.calls[0][0].input.Key).toEqual({
       agentId: "d3RXDPrgL9t5",
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 19. buildToolNameOrgIndex — config as object/map (live rows are mostly maps)
+// ---------------------------------------------------------------------------
+
+describe("buildToolNameOrgIndex — config accepted as object/map OR JSON string", () => {
+  const resolveAgentOrg = (rec: RecordShape): string | undefined => {
+    if (
+      rec.orgId !== undefined &&
+      rec.orgId !== "" &&
+      rec.orgId !== "All Organizations"
+    )
+      return rec.orgId;
+    if (rec.sourceProjectId === "proj-1") return "Default";
+    if (rec.sourceProjectId === "proj-2") return "Acme Corp";
+    return undefined;
+  };
+
+  it("indexes a tool name from config.schema.tools[] when config is a plain object/map (live DDB shape)", () => {
+    const agents: AgentConfigLike[] = [
+      {
+        name: "map-config-agent",
+        createdBy: "fabricator",
+        sourceProjectId: "proj-1",
+        config: { schema: { tools: ["sync_widget_catalog"] } },
+      },
+    ];
+    const index = buildToolNameOrgIndex(agents, resolveAgentOrg);
+    expect(index.get("sync_widget_catalog")).toEqual(new Set(["Default"]));
+  });
+
+  it("indexes a tool name from config.schema.tools[] when config is a JSON string (legacy shape)", () => {
+    const agents: AgentConfigLike[] = [
+      {
+        name: "string-config-agent",
+        createdBy: "fabricator",
+        sourceProjectId: "proj-1",
+        config: JSON.stringify({ schema: { tools: ["sync_widget_catalog"] } }),
+      },
+    ];
+    const index = buildToolNameOrgIndex(agents, resolveAgentOrg);
+    expect(index.get("sync_widget_catalog")).toEqual(new Set(["Default"]));
+  });
+
+  it("an agent with an unparsable JSON-string config still contributes nothing without throwing", () => {
+    const agents: AgentConfigLike[] = [
+      {
+        name: "broken-string-agent",
+        createdBy: "fabricator",
+        sourceProjectId: "proj-1",
+        config: "{not valid json",
+      },
+    ];
+    expect(() => buildToolNameOrgIndex(agents, resolveAgentOrg)).not.toThrow();
+    expect(buildToolNameOrgIndex(agents, resolveAgentOrg).size).toBe(0);
+  });
+
+  it("a target agent (ALL_ORGS, createdBy fabricator, non-seed name) contributes its RESOLVED org, not ALL_ORGS", () => {
+    const agents: AgentConfigLike[] = [
+      {
+        name: "target-agent",
+        orgId: "All Organizations",
+        createdBy: "fabricator",
+        sourceProjectId: "proj-2",
+        config: { schema: { tools: ["reconcile_ledger_entries"] } },
+      },
+    ];
+    const index = buildToolNameOrgIndex(agents, resolveAgentOrg);
+    expect(index.get("reconcile_ledger_entries")).toEqual(
+      new Set(["Acme Corp"]),
+    );
+  });
+
+  it("an ALL_ORGS agent that is NOT a fabricator corrective target (createdBy allowlisted) still contributes nothing", () => {
+    const agents: AgentConfigLike[] = [
+      {
+        name: "platform-shared-agent",
+        orgId: "All Organizations",
+        createdBy: "seedConfig",
+        sourceProjectId: "proj-1",
+        config: { schema: { tools: ["platform_tool"] } },
+      },
+    ];
+    const index = buildToolNameOrgIndex(agents, resolveAgentOrg);
+    expect(index.has("platform_tool")).toBe(false);
+  });
+
+  it("a target agent whose sourceProjectId does not resolve contributes nothing", () => {
+    const agents: AgentConfigLike[] = [
+      {
+        name: "unresolvable-target-agent",
+        orgId: "All Organizations",
+        createdBy: "fabricator",
+        config: { schema: { tools: ["orphan_from_target"] } },
+      },
+    ];
+    const index = buildToolNameOrgIndex(agents, resolveAgentOrg);
+    expect(index.has("orphan_from_target")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 20. --fallback-org — planCorrectiveEntry wiring
+// ---------------------------------------------------------------------------
+
+describe("planCorrectiveEntry — --fallback-org applies ONLY to unresolvable fabricator/non-seed records", () => {
+  const orgResolver: OrgResolver = {
+    resolveAgentOrg: (rec: RecordShape) =>
+      rec.sourceProjectId === "proj-1" ? "Default" : undefined,
+    resolveToolOrg: (rec: RecordShape) => {
+      if (rec.name === "sync_widget_catalog") return "Default";
+      if (rec.name === "multi_org_tool") return "AMBIGUOUS";
+      return undefined;
+    },
+  };
+
+  it("applies the fallback org to an unresolvable fabricator, non-seed-name tool", () => {
+    const rec: RecordShape = {
+      id: "t-orphan",
+      name: "orphan_tool",
+      orgId: "All Organizations",
+      createdBy: "fabricator",
+    };
+    const entry = planCorrectiveEntry(rec, "tool", orgResolver, "Default");
+    expect(entry).toEqual({
+      id: "t-orphan",
+      name: "orphan_tool",
+      kind: "tool",
+      previousOrgId: "All Organizations",
+      resolvedOrgId: "Default",
+      reason: "fallback-org",
+    });
+  });
+
+  it("does NOT apply the fallback to an ambiguous (multi-org) tool", () => {
+    const rec: RecordShape = {
+      id: "t-multi",
+      name: "multi_org_tool",
+      orgId: "All Organizations",
+      createdBy: "fabricator",
+    };
+    const entry = planCorrectiveEntry(rec, "tool", orgResolver, "Default");
+    expect(entry?.reason).toBe("ambiguous-multi-org");
+    expect(entry?.resolvedOrgId).toBeUndefined();
+  });
+
+  it("does NOT apply the fallback to a seed-name record (out of corrective scope entirely)", () => {
+    const rec: RecordShape = {
+      id: "a-seed",
+      name: "fabricator",
+      orgId: "All Organizations",
+      createdBy: "fabricator",
+    };
+    const entry = planCorrectiveEntry(rec, "agent", orgResolver, "Default");
+    expect(entry).toBeUndefined();
+  });
+
+  it("does NOT apply the fallback to a non-fabricator record (out of corrective scope entirely)", () => {
+    const rec: RecordShape = {
+      id: "a-system",
+      name: "system-agent",
+      orgId: "All Organizations",
+      createdBy: "system",
+    };
+    const entry = planCorrectiveEntry(rec, "agent", orgResolver, "Default");
+    expect(entry).toBeUndefined();
+  });
+
+  it("does NOT apply the fallback to a record resolvable via sourceProjectId (normal resolution wins)", () => {
+    const rec: RecordShape = {
+      id: "a-resolvable",
+      name: "resolvable-agent",
+      orgId: "All Organizations",
+      createdBy: "fabricator",
+      sourceProjectId: "proj-1",
+    };
+    const entry = planCorrectiveEntry(rec, "agent", orgResolver, "Default");
+    expect(entry?.reason).toBe("fabricator-agent-sourceProjectId");
+    expect(entry?.resolvedOrgId).toBe("Default");
+  });
+
+  it("without --fallback-org, an unresolvable record stays unresolvable-orgUnknown (behaviour unchanged)", () => {
+    const rec: RecordShape = {
+      id: "t-orphan-2",
+      name: "orphan_tool_2",
+      orgId: "All Organizations",
+      createdBy: "fabricator",
+    };
+    const entry = planCorrectiveEntry(rec, "tool", orgResolver);
+    expect(entry?.reason).toBe("unresolvable-orgUnknown");
+    expect(entry?.resolvedOrgId).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 21. --fallback-org — runCorrectiveForRegistryType end-to-end wiring
+// ---------------------------------------------------------------------------
+
+describe("runCorrectiveForRegistryType — --fallback-org wiring and summary counting", () => {
+  const { applyMarkerEdit } = jest.requireMock(
+    "../../src/utils/marker-registry-edit",
+  ) as { applyMarkerEdit: jest.Mock };
+
+  beforeEach(() => {
+    applyMarkerEdit.mockReset();
+    applyMarkerEdit.mockResolvedValue({ recordId: "unused" });
+  });
+
+  const orgResolver: OrgResolver = {
+    resolveAgentOrg: () => undefined,
+    resolveToolOrg: () => undefined,
+  };
+
+  function makeListedRegistry(
+    items: Array<{
+      recordId: string;
+      name: string;
+      orgId: string;
+      createdBy: string;
+    }>,
+  ): RegistryService {
+    const listResourcesChecked = jest.fn().mockResolvedValue({
+      items: items.map((i) => ({
+        recordId: i.recordId,
+        name: i.name,
+        status: "APPROVED",
+        customDescriptorContent: JSON.stringify({
+          orgId: i.orgId,
+          createdBy: i.createdBy,
+        }),
+      })),
+      partial: false,
+      droppedCount: 0,
+      throttled: false,
+    });
+    return { listResourcesChecked } as unknown as RegistryService;
+  }
+
+  it("applies the fallback org and writes it, counting markedFallback (not markedTenant/markedUnknown)", async () => {
+    const registry = makeListedRegistry([
+      {
+        recordId: "tool-orphan-1",
+        name: "orphan_tool_3",
+        orgId: "All Organizations",
+        createdBy: "fabricator",
+      },
+    ]);
+    const send = jest.fn().mockResolvedValue({});
+    const docClient = {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+    const summary = emptySummary();
+
+    const plan = await runCorrectiveForRegistryType(
+      "tool",
+      registry,
+      orgResolver,
+      true,
+      undefined,
+      summary,
+      "tool-table",
+      docClient,
+      undefined,
+      1,
+      5,
+      "Default",
+    );
+
+    expect(plan).toHaveLength(1);
+    expect(plan[0].reason).toBe("fallback-org");
+    expect(plan[0].resolvedOrgId).toBe("Default");
+    expect(applyMarkerEdit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recordId: "tool-orphan-1",
+        fieldsToSet: { orgId: "Default" },
+      }),
+      expect.anything(),
+    );
+    expect(summary.markedFallback).toBe(1);
+    expect(summary.markedTenant).toBe(0);
+    expect(summary.markedUnknown).toBe(0);
+  });
+
+  it("without --fallback-org, the same record is written as orgUnknown and counted under markedUnknown", async () => {
+    const registry = makeListedRegistry([
+      {
+        recordId: "tool-orphan-2",
+        name: "orphan_tool_4",
+        orgId: "All Organizations",
+        createdBy: "fabricator",
+      },
+    ]);
+    const send = jest.fn().mockResolvedValue({});
+    const docClient = {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+    const summary = emptySummary();
+
+    const plan = await runCorrectiveForRegistryType(
+      "tool",
+      registry,
+      orgResolver,
+      true,
+      undefined,
+      summary,
+      "tool-table",
+      docClient,
+      undefined,
+    );
+
+    expect(plan).toHaveLength(1);
+    expect(plan[0].reason).toBe("unresolvable-orgUnknown");
+    expect(summary.markedUnknown).toBe(1);
+    expect(summary.markedFallback).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 22. --fallback-org — org-existence validation (buildOrgResolverFromTablesWithKnownOrgs)
+// ---------------------------------------------------------------------------
+
+describe("buildOrgResolverFromTablesWithKnownOrgs — known-org validation support", () => {
+  it("returns the distinct set of organization values found in the projects table", async () => {
+    const send = jest.fn().mockImplementation((command) => {
+      if (command.input.TableName === "projects-table") {
+        return Promise.resolve({
+          Items: [
+            { projectId: "proj-1", organization: "Default" },
+            { projectId: "proj-2", organization: "Acme Corp" },
+            { projectId: "proj-3", organization: "Default" },
+          ],
+        });
+      }
+      return Promise.resolve({ Items: [] });
+    });
+    const docClient = {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+
+    const { knownOrgs } = await buildOrgResolverFromTablesWithKnownOrgs(
+      docClient,
+      "projects-table",
+      "agent-table",
+    );
+
+    expect(knownOrgs).toEqual(new Set(["Default", "Acme Corp"]));
+  });
+
+  it("the returned orgResolver still resolves agent org via sourceProjectId", async () => {
+    const send = jest.fn().mockImplementation((command) => {
+      if (command.input.TableName === "projects-table") {
+        return Promise.resolve({
+          Items: [{ projectId: "proj-1", organization: "Default" }],
+        });
+      }
+      return Promise.resolve({ Items: [] });
+    });
+    const docClient = {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+
+    const { orgResolver } = await buildOrgResolverFromTablesWithKnownOrgs(
+      docClient,
+      "projects-table",
+      "agent-table",
+    );
+
+    expect(
+      orgResolver.resolveAgentOrg({ id: "a1", sourceProjectId: "proj-1" }),
+    ).toBe("Default");
+  });
+});
+
+describe("main() --fallback-org CLI validation", () => {
+  const originalEnv = process.env;
+  const originalArgv = process.argv;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    process.argv = [...originalArgv];
+  });
+
+  afterAll(() => {
+    process.env = originalEnv;
+    process.argv = originalArgv;
+  });
+
+  it("rejects --fallback-org when --correct-fabricator-shared is not set", async () => {
+    process.env.REGISTRY_ID = "reg-1";
+    process.env.AGENT_CONFIG_TABLE = "t-agents";
+    process.env.TOOL_CONFIG_TABLE = "t-tools";
+    process.argv = ["node", "script", "--fallback-org", "Default"];
+    await expect(main()).rejects.toThrow(
+      "--fallback-org is only valid together with --correct-fabricator-shared",
+    );
+  });
+
+  it("rejects --fallback-org with no value", async () => {
+    process.env.REGISTRY_ID = "reg-1";
+    process.env.AGENT_CONFIG_TABLE = "t-agents";
+    process.env.TOOL_CONFIG_TABLE = "t-tools";
+    process.env.PROJECTS_TABLE = "t-projects";
+    process.argv = [
+      "node",
+      "script",
+      "--correct-fabricator-shared",
+      "--fallback-org",
+    ];
+    await expect(main()).rejects.toThrow("--fallback-org requires a value");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 23. --fallback-org — findDdbOnlyCorrectiveTargets wiring
+// ---------------------------------------------------------------------------
+
+describe("findDdbOnlyCorrectiveTargets — --fallback-org applies to DDB-only unresolvable targets too", () => {
+  const orgResolver: OrgResolver = {
+    resolveAgentOrg: () => undefined,
+    resolveToolOrg: () => undefined,
+  };
+
+  it("plans a DDB-only fabricator tool row with reason fallback-org when a fallback is supplied", async () => {
+    const send = jest.fn().mockResolvedValue({
+      Items: [
+        {
+          toolId: "ddb-tool-orphan",
+          name: "ddb_orphan_tool",
+          orgId: "All Organizations",
+          createdBy: "fabricator",
+        },
+      ],
+    });
+    const docClient = {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+
+    const entries = await findDdbOnlyCorrectiveTargets(
+      "tool",
+      "tool-table",
+      docClient,
+      orgResolver,
+      new Set(),
+      "Default",
+    );
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0].reason).toBe("fallback-org");
+    expect(entries[0].resolvedOrgId).toBe("Default");
+  });
+
+  it("does not apply the fallback to a DDB-only seed-name row", async () => {
+    const send = jest.fn().mockResolvedValue({
+      Items: [
+        {
+          agentId: "ddb-seed",
+          name: "fabricator",
+          orgId: "All Organizations",
+          createdBy: "fabricator",
+        },
+      ],
+    });
+    const docClient = {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+
+    const entries = await findDdbOnlyCorrectiveTargets(
+      "agent",
+      "agent-table",
+      docClient,
+      orgResolver,
+      new Set(),
+      "Default",
+    );
+
+    expect(entries).toHaveLength(0);
   });
 });

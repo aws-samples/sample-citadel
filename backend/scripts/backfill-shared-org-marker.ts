@@ -65,6 +65,20 @@
  *                                 recordIds (concurrency 1), never the
  *                                 whole registry type, and give up after 5
  *                                 attempts per record.
+ *   --fallback-org <org>           Owner-supplied explicit fallback,
+ *                                 OFF by default, valid ONLY together with
+ *                                 --correct-fabricator-shared. Applies
+ *                                 ONLY to records that are createdBy
+ *                                 fabricator, non-seed-name, and otherwise
+ *                                 unresolvable (reason `fallback-org`) —
+ *                                 never to ambiguous, seed-name,
+ *                                 non-fabricator, or normally-resolvable
+ *                                 records. The value must match an
+ *                                 `organization` value that actually
+ *                                 exists in the projects table; otherwise
+ *                                 the script exits non-zero before any
+ *                                 write. The dry run always prints the
+ *                                 complete fallback candidate list.
  *
  * Required env (same convention as backfill-org-ids.ts):
  *   REGISTRY_ID           – AgentCore Registry id
@@ -275,6 +289,7 @@ export interface BackfillSummary {
   markedShared: number;
   markedTenant: number;
   markedUnknown: number;
+  markedFallback: number;
   alreadyShared: number;
   alreadyUnknown: number;
   ambiguousReported: number;
@@ -287,6 +302,7 @@ export function emptySummary(): BackfillSummary {
     markedShared: 0,
     markedTenant: 0,
     markedUnknown: 0,
+    markedFallback: 0,
     alreadyShared: 0,
     alreadyUnknown: 0,
     ambiguousReported: 0,
@@ -299,6 +315,7 @@ export function addSummary(dst: BackfillSummary, src: BackfillSummary): void {
   dst.markedShared += src.markedShared;
   dst.markedTenant += src.markedTenant;
   dst.markedUnknown += src.markedUnknown;
+  dst.markedFallback += src.markedFallback;
   dst.alreadyShared += src.alreadyShared;
   dst.alreadyUnknown += src.alreadyUnknown;
   dst.ambiguousReported += src.ambiguousReported;
@@ -749,11 +766,20 @@ export function isCorrectiveTarget(rec: RecordShape): boolean {
  * Resolves the corrective plan entry for one in-scope record, or `undefined`
  * if the record is not in scope. Never writes — pure planning function so
  * dry-run and apply share the identical decision.
+ *
+ * `fallbackOrg`, when supplied, is applied ONLY when the record would
+ * otherwise be `unresolvable-orgUnknown` — i.e. it is already known (via
+ * {@link isCorrectiveTarget}) to be createdBy fabricator and non-seed-name,
+ * and the normal resolution path (sourceProjectId / tool-name index) found
+ * nothing. It NEVER overrides an `ambiguous-multi-org` result or a
+ * normally-resolvable one. The resulting entry carries
+ * `reason: "fallback-org"`.
  */
 export function planCorrectiveEntry(
   rec: RecordShape,
   kind: "agent" | "tool",
   orgResolver: OrgResolver,
+  fallbackOrg?: string,
 ): CorrectivePlanEntry | undefined {
   if (!isCorrectiveTarget(rec)) return undefined;
 
@@ -761,6 +787,17 @@ export function planCorrectiveEntry(
     kind === "agent"
       ? orgResolver.resolveAgentOrg(rec)
       : orgResolver.resolveToolOrg(rec);
+
+  if (resolved === undefined && fallbackOrg !== undefined) {
+    return {
+      id: rec.id,
+      name: rec.name,
+      kind,
+      previousOrgId: ALL_ORGS,
+      resolvedOrgId: fallbackOrg,
+      reason: "fallback-org",
+    };
+  }
 
   const reason =
     resolved === undefined
@@ -1008,6 +1045,7 @@ export async function runCorrectiveForRegistryType(
   recordId: string | undefined,
   retryDelayMs: number = CORRECTIVE_RECORD_RETRY_BASE_DELAY_MS,
   retryMaxAttempts: number = CORRECTIVE_RECORD_RETRY_MIN_ATTEMPTS,
+  fallbackOrg?: string,
 ): Promise<CorrectivePlanEntry[]> {
   const plan: CorrectivePlanEntry[] = [];
   const kind = type === "agent" ? "agent" : "tool";
@@ -1059,7 +1097,7 @@ export async function runCorrectiveForRegistryType(
           : undefined,
     };
 
-    const entry = planCorrectiveEntry(rec, kind, orgResolver);
+    const entry = planCorrectiveEntry(rec, kind, orgResolver, fallbackOrg);
     if (!entry) continue;
 
     plan.push(entry);
@@ -1081,7 +1119,8 @@ export async function runCorrectiveForRegistryType(
     if (apply && inCanaryScope) {
       if (
         limit !== undefined &&
-        summary.markedTenant + summary.markedUnknown >= limit
+        summary.markedTenant + summary.markedUnknown + summary.markedFallback >=
+          limit
       ) {
         continue;
       }
@@ -1109,7 +1148,8 @@ export async function runCorrectiveForRegistryType(
         summary.errors++;
         continue;
       }
-      if (entry.resolvedOrgId !== undefined) summary.markedTenant++;
+      if (entry.reason === "fallback-org") summary.markedFallback++;
+      else if (entry.resolvedOrgId !== undefined) summary.markedTenant++;
       else summary.markedUnknown++;
     }
   }
@@ -1142,6 +1182,7 @@ export async function findDdbOnlyCorrectiveTargets(
   docClient: DynamoDBDocumentClient,
   orgResolver: OrgResolver,
   alreadyPlannedIds: ReadonlySet<string>,
+  fallbackOrg?: string,
 ): Promise<CorrectivePlanEntry[]> {
   const entries: CorrectivePlanEntry[] = [];
   const pkName = kind === "agent" ? "agentId" : "toolId";
@@ -1172,7 +1213,7 @@ export async function findDdbOnlyCorrectiveTargets(
             : undefined,
       };
 
-      const entry = planCorrectiveEntry(rec, kind, orgResolver);
+      const entry = planCorrectiveEntry(rec, kind, orgResolver, fallbackOrg);
       if (entry) entries.push(entry);
     }
 
@@ -1185,10 +1226,12 @@ export async function findDdbOnlyCorrectiveTargets(
 /**
  * Minimal shape of an agent record needed to contribute to the
  * toolName -> org index (see {@link buildToolNameOrgIndex}). `config` is
- * the agent's raw config JSON STRING (as persisted in the registry
- * descriptor / DDB projection row) — tolerated as missing or unparsable.
- * `manifest` is the agent's manifest object; only a non-empty `tools[]`
- * array on it contributes.
+ * the agent's raw config as persisted — in live DDB rows this is most
+ * often a MAP (plain object), occasionally a JSON STRING, occasionally
+ * absent. Both shapes are accepted and normalised once; missing/unparsable
+ * config is tolerated (logged once by the caller if desired, contributes
+ * nothing here). `manifest` is the agent's manifest object; only a
+ * non-empty `tools[]` array on it contributes.
  */
 export interface AgentConfigLike {
   name?: string;
@@ -1196,20 +1239,51 @@ export interface AgentConfigLike {
   orgUnknown?: boolean;
   createdBy?: string;
   sourceProjectId?: string;
-  config?: string;
+  config?: string | Record<string, unknown>;
   manifest?: Record<string, unknown>;
 }
 
 /**
+ * Normalises an agent's raw `config` (object/map OR JSON string) into a
+ * parsed object, or `undefined` if absent/unparsable. Never throws.
+ */
+function normalizeAgentConfig(
+  config: string | Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (config === undefined) return undefined;
+  if (typeof config === "object" && config !== null) return config;
+  if (typeof config === "string") {
+    try {
+      const parsed = JSON.parse(config);
+      return typeof parsed === "object" && parsed !== null
+        ? (parsed as Record<string, unknown>)
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+/**
  * Builds, ONCE per run, the toolName -> set(resolved org) index that
- * backs the NAME-based tool->agent binding (option A). For every agent:
- *   - ALL_ORGS, seed-name (SEED_ALLOWLIST_NAMES), or orgUnknown agents
- *     contribute nothing (no positive org signal to propagate to a tool).
+ * backs the NAME-based tool->agent binding (option A). `config` is
+ * accepted as either an object/map (live DDB rows are mostly maps) or a
+ * JSON string; both are normalised via {@link normalizeAgentConfig}. For
+ * every agent:
+ *   - a seed-name (SEED_ALLOWLIST_NAMES) or orgUnknown agent contributes
+ *     nothing (no positive org signal to propagate to a tool).
  *   - an agent with an explicit, real tenant `orgId` (not ALL_ORGS, not
  *     blank) contributes that org directly.
- *   - otherwise a fabricated agent resolves its org via `sourceProjectId`
- *     through `resolveAgentOrg` (typically projectId -> projects table ->
- *     organization); if unresolvable, the agent contributes nothing.
+ *   - an agent currently stamped ALL_ORGS that is itself a corrective
+ *     target (createdBy fabricator, non-seed-name — see
+ *     {@link isCorrectiveTarget}) contributes its RESOLVED org via
+ *     `resolveAgentOrg`/`sourceProjectId`, never its current ALL_ORGS
+ *     value; if unresolvable it contributes nothing.
+ *   - any other blank/absent-orgId agent resolves its org via
+ *     `sourceProjectId` through `resolveAgentOrg` (typically projectId ->
+ *     projects table -> organization); if unresolvable, it contributes
+ *     nothing.
  * For every contributing agent, every tool name in its parsed
  * `config.schema.tools[]` plus every tool name in a non-empty
  * `manifest.tools[]` gets that agent's resolved org added to its set.
@@ -1236,17 +1310,34 @@ export function buildToolNameOrgIndex(
   };
 
   for (const agent of agents) {
-    // ALL_ORGS / seed-name / orgUnknown agents contribute nothing.
+    // Seed-name / orgUnknown agents contribute nothing.
     if (agent.orgUnknown === true) continue;
-    if (agent.orgId === ALL_ORGS) continue;
     if (agent.name !== undefined && SEED_ALLOWLIST_NAMES.includes(agent.name))
       continue;
 
     let org: string | undefined;
-    if (agent.orgId !== undefined && agent.orgId !== "") {
+    if (
+      agent.orgId !== undefined &&
+      agent.orgId !== "" &&
+      agent.orgId !== ALL_ORGS
+    ) {
       // Explicit, real tenant orgId — use it directly.
       org = agent.orgId;
+    } else if (
+      agent.orgId === ALL_ORGS &&
+      !(
+        agent.createdBy === "fabricator" &&
+        (agent.name === undefined || !SEED_ALLOWLIST_NAMES.includes(agent.name))
+      )
+    ) {
+      // ALL_ORGS but not itself a fabricator corrective target (e.g. a
+      // genuine platform-shared record via createdBy allowlist) —
+      // contributes nothing; its current value is not a tenant org.
+      continue;
     } else {
+      // Either blank/absent orgId, or an ALL_ORGS fabricator corrective
+      // target — resolve the RESOLVED org via sourceProjectId, never the
+      // current ALL_ORGS value.
       org = resolveAgentOrg({
         id: "",
         sourceProjectId: agent.sourceProjectId,
@@ -1254,17 +1345,14 @@ export function buildToolNameOrgIndex(
     }
     if (org === undefined) continue;
 
+    const parsedConfig = normalizeAgentConfig(agent.config);
     let schemaTools: unknown;
-    if (agent.config !== undefined) {
-      try {
-        const parsed = JSON.parse(agent.config);
-        schemaTools = (parsed as Record<string, unknown>)?.schema;
-        schemaTools = (schemaTools as Record<string, unknown> | undefined)
-          ?.tools;
-      } catch {
-        // Unparsable config — contributes nothing from config.schema.tools.
-        schemaTools = undefined;
-      }
+    if (parsedConfig !== undefined) {
+      const schema = parsedConfig.schema;
+      schemaTools =
+        schema !== null && typeof schema === "object"
+          ? (schema as Record<string, unknown>).tools
+          : undefined;
     }
     if (Array.isArray(schemaTools)) {
       addToolNames(schemaTools as string[], org);
@@ -1366,6 +1454,15 @@ export async function main(): Promise<void> {
       ? Number(delayMsRaw)
       : CORRECTIVE_RECORD_RETRY_BASE_DELAY_MS;
 
+  const fallbackOrgIdx = args.indexOf("--fallback-org");
+  const fallbackOrg =
+    fallbackOrgIdx !== -1 && args[fallbackOrgIdx + 1] !== undefined
+      ? args[fallbackOrgIdx + 1]
+      : undefined;
+  if (fallbackOrgIdx !== -1 && fallbackOrg === undefined) {
+    throw new Error("--fallback-org requires a value");
+  }
+
   const registryId = process.env.REGISTRY_ID;
   const region = process.env.AWS_REGION || "us-west-2";
   const agentTable = process.env.AGENT_CONFIG_TABLE;
@@ -1378,6 +1475,11 @@ export async function main(): Promise<void> {
   if (correctFabricatorShared && !projectsTable) {
     throw new Error(
       "PROJECTS_TABLE env var required when --correct-fabricator-shared is set",
+    );
+  }
+  if (fallbackOrg !== undefined && !correctFabricatorShared) {
+    throw new Error(
+      "--fallback-org is only valid together with --correct-fabricator-shared",
     );
   }
 
@@ -1403,6 +1505,7 @@ export async function main(): Promise<void> {
       limit,
       recordId,
       delayMs,
+      fallbackOrg,
     );
     return;
   }
@@ -1563,7 +1666,11 @@ export async function buildOrgResolverFromTables(
             typeof item.sourceProjectId === "string"
               ? item.sourceProjectId
               : undefined,
-          config: typeof item.config === "string" ? item.config : undefined,
+          config:
+            typeof item.config === "string" ||
+            (item.config !== null && typeof item.config === "object")
+              ? (item.config as string | Record<string, unknown>)
+              : undefined,
           manifest:
             item.manifest !== null && typeof item.manifest === "object"
               ? (item.manifest as Record<string, unknown>)
@@ -1583,6 +1690,50 @@ export async function buildOrgResolverFromTables(
 }
 
 /**
+ * Same as {@link buildOrgResolverFromTables}, but also returns the set of
+ * distinct `organization` values observed in the projects table — used to
+ * validate an owner-supplied `--fallback-org` against organisations that
+ * actually exist before any corrective write is planned or applied.
+ */
+export async function buildOrgResolverFromTablesWithKnownOrgs(
+  docClient: DynamoDBDocumentClient,
+  projectsTable: string,
+  agentTable: string,
+): Promise<{ orgResolver: OrgResolver; knownOrgs: ReadonlySet<string> }> {
+  const knownOrgs = new Set<string>();
+  {
+    let exclusiveStartKey: Record<string, NativeAttributeValue> | undefined;
+    do {
+      let scanResult;
+      try {
+        scanResult = await docClient.send(
+          new ScanCommand({
+            TableName: projectsTable,
+            ExclusiveStartKey: exclusiveStartKey,
+          }),
+        );
+      } catch (err) {
+        throw new Error(`Projects table scan failed: ${String(err)}`);
+      }
+      for (const item of scanResult.Items || []) {
+        if (typeof item.organization === "string") {
+          knownOrgs.add(item.organization);
+        }
+      }
+      exclusiveStartKey = scanResult.LastEvaluatedKey;
+    } while (exclusiveStartKey);
+  }
+
+  const orgResolver = await buildOrgResolverFromTables(
+    docClient,
+    projectsTable,
+    agentTable,
+  );
+
+  return { orgResolver, knownOrgs };
+}
+
+/**
  * Corrective-mode entry point. Pre-fetches the projects table (projectId ->
  * organization) and the agents table (building the toolName -> org index)
  * once, builds a synchronous OrgResolver from those maps, then scans the
@@ -1591,6 +1742,15 @@ export async function buildOrgResolverFromTables(
  * row for each resolvable one. Dry-run by default; `--record-id` scopes to
  * a single canary record; `--limit` bounds how many records get WRITTEN in
  * apply mode (the plan/print phase is never bounded).
+ *
+ * `fallbackOrg`, when supplied, must name an organisation that actually
+ * exists among the projects table's distinct `organization` values — if
+ * it does not, this function logs an error and exits non-zero (`process.exit(1)`)
+ * BEFORE any write. When valid, it is applied only to records that are
+ * createdBy fabricator, non-seed-name, and otherwise unresolvable (reason
+ * `fallback-org`); it never overrides an ambiguous, seed, non-fabricator,
+ * or normally-resolvable record. The dry run always prints the complete
+ * list of records that would receive the fallback.
  */
 async function runCorrectiveMode(
   registry: RegistryService,
@@ -1602,19 +1762,33 @@ async function runCorrectiveMode(
   limit: number | undefined,
   recordId: string | undefined,
   delayMs: number = CORRECTIVE_RECORD_RETRY_BASE_DELAY_MS,
+  fallbackOrg?: string,
 ): Promise<void> {
   log("info", `Corrective mode: ${apply ? "APPLY" : "DRY-RUN"}`);
   if (recordId) log("info", `Scoped to single record id=${recordId} (canary)`);
+  if (fallbackOrg) log("info", `Fallback org configured: ${fallbackOrg}`);
 
   let orgResolver: OrgResolver;
+  let knownOrgs: ReadonlySet<string>;
   try {
-    orgResolver = await buildOrgResolverFromTables(
+    const built = await buildOrgResolverFromTablesWithKnownOrgs(
       docClient,
       projectsTable,
       agentTable,
     );
+    orgResolver = built.orgResolver;
+    knownOrgs = built.knownOrgs;
   } catch (err) {
     log("error", String(err));
+    process.exit(1);
+    return;
+  }
+
+  if (fallbackOrg !== undefined && !knownOrgs.has(fallbackOrg)) {
+    log(
+      "error",
+      `--fallback-org "${fallbackOrg}" does not match any organisation found in the projects table — refusing to proceed. Known organisations: ${[...knownOrgs].join(", ") || "<none>"}`,
+    );
     process.exit(1);
     return;
   }
@@ -1633,6 +1807,8 @@ async function runCorrectiveMode(
     docClient,
     recordId,
     delayMs,
+    undefined,
+    fallbackOrg,
   );
   const toolPlan = await runCorrectiveForRegistryType(
     "tool",
@@ -1645,6 +1821,8 @@ async function runCorrectiveMode(
     docClient,
     recordId,
     delayMs,
+    undefined,
+    fallbackOrg,
   );
 
   // R2: the registry-sourced scans above only find records whose CURRENT
@@ -1665,6 +1843,7 @@ async function runCorrectiveMode(
     docClient,
     orgResolver,
     registryPlannedIds,
+    fallbackOrg,
   );
   const toolDdbOnlyPlan = await findDdbOnlyCorrectiveTargets(
     "tool",
@@ -1672,6 +1851,7 @@ async function runCorrectiveMode(
     docClient,
     orgResolver,
     registryPlannedIds,
+    fallbackOrg,
   );
 
   for (const entry of [...agentDdbOnlyPlan, ...toolDdbOnlyPlan]) {
@@ -1689,7 +1869,8 @@ async function runCorrectiveMode(
     if (!apply || !inCanaryScope) continue;
     if (
       limit !== undefined &&
-      summary.markedTenant + summary.markedUnknown >= limit
+      summary.markedTenant + summary.markedUnknown + summary.markedFallback >=
+        limit
     ) {
       continue;
     }
@@ -1720,7 +1901,8 @@ async function runCorrectiveMode(
       summary.errors++;
       continue;
     }
-    if (entry.resolvedOrgId !== undefined) summary.markedTenant++;
+    if (entry.reason === "fallback-org") summary.markedFallback++;
+    else if (entry.resolvedOrgId !== undefined) summary.markedTenant++;
     else summary.markedUnknown++;
   }
 
@@ -1743,12 +1925,28 @@ async function runCorrectiveMode(
     );
   }
 
+  const fallbackEntries = fullPlan.filter((e) => e.reason === "fallback-org");
+  if (fallbackOrg !== undefined) {
+    log(
+      "info",
+      `--- Fallback-org candidates (reason=fallback-org, target org=${fallbackOrg}) ---`,
+    );
+    for (const entry of fallbackEntries) {
+      log(
+        "info",
+        `FALLBACK id=${entry.id} kind=${entry.kind} name=${entry.name ?? "<none>"} reason=${entry.reason}`,
+      );
+    }
+    log("info", `fallbackCandidateCount: ${fallbackEntries.length}`);
+  }
+
   log("info", "--- Corrective mode summary ---");
   log("info", `mode:              ${apply ? "apply" : "dry-run"}`);
   log("info", `scanned:           ${summary.scanned}`);
   log("info", `plannedTotal:      ${fullPlan.length}`);
   log("info", `markedTenant:      ${summary.markedTenant}`);
   log("info", `markedUnknown:     ${summary.markedUnknown}`);
+  log("info", `markedFallback:    ${summary.markedFallback}`);
   log("info", `ambiguousReported: ${summary.ambiguousReported}`);
   log("info", `errors:            ${summary.errors}`);
 
