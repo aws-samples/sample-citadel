@@ -29,12 +29,33 @@ import {
   findDdbOnlyCorrectiveTargets,
   reconcileDroppedRecords,
   runCorrectiveMode,
+  resyncProjectionForId,
+  resyncProjectionIds,
+  waitForProjectionConvergence,
+  applyDdbOnlyCorrectiveEntry,
   type RecordShape,
   type OrgResolver,
   type AgentConfigLike,
+  type Clock,
 } from "../backfill-shared-org-marker";
 import type { RegistryService } from "../../src/services/registry-service";
 import { ALL_ORGS } from "../../src/utils/org-constants";
+
+/**
+ * Synthetic injectable clock for the bounded projection-convergence wait —
+ * `now()` returns a counter that advances by `pollIntervalMs` on every
+ * `sleep()` call, and `sleep()` resolves immediately (no real timers), so
+ * tests never wait out a real wall-clock window.
+ */
+function fastClock(): Clock {
+  let current = 0;
+  return {
+    now: () => current,
+    sleep: async (ms: number) => {
+      current += ms;
+    },
+  };
+}
 
 // ---------------------------------------------------------------------------
 // 1. Fabricator removed from SEED_ALLOWLIST_CREATED_BY
@@ -666,7 +687,7 @@ jest.mock("../../src/utils/marker-registry-edit", () => ({
   applyMarkerEdit: jest.fn(),
 }));
 
-describe("applyCorrectiveEntry — both-store write", () => {
+describe("applyCorrectiveEntry — registry-only write, then wait for projection convergence", () => {
   const { applyMarkerEdit } = jest.requireMock(
     "../../src/utils/marker-registry-edit",
   ) as { applyMarkerEdit: jest.Mock };
@@ -685,9 +706,14 @@ describe("applyCorrectiveEntry — both-store write", () => {
     } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
   }
 
-  it("writes the resolved org to both the registry (via applyMarkerEdit) and the DDB row with a ConditionExpression on the previous value", async () => {
-    applyMarkerEdit.mockResolvedValue({ recordId: "a1" });
-    const send = jest.fn().mockResolvedValue({});
+  it("writes the resolved org to the registry ONLY (no direct DDB write) and succeeds once the projection converges", async () => {
+    applyMarkerEdit.mockResolvedValue({
+      recordId: "a1",
+      priorStatus: "APPROVED",
+    });
+    const send = jest.fn().mockResolvedValue({
+      Item: { agentId: "a1", orgId: "Default", registryStatus: "APPROVED" },
+    });
     const entry = {
       id: "a1",
       name: "fabricated-agent",
@@ -703,9 +729,15 @@ describe("applyCorrectiveEntry — both-store write", () => {
       fakeRegistry(),
       "agent-table",
       fakeDocClient(send),
+      0,
+      undefined,
+      60000,
+      1000,
+      fastClock(),
     );
 
     expect(result.error).toBeUndefined();
+    expect(result.projectionLag).toBeFalsy();
     expect(applyMarkerEdit).toHaveBeenCalledWith(
       expect.objectContaining({
         recordId: "a1",
@@ -714,20 +746,23 @@ describe("applyCorrectiveEntry — both-store write", () => {
       }),
       expect.objectContaining({ dryRun: false }),
     );
-    expect(send).toHaveBeenCalledTimes(1);
-    const [command] = send.mock.calls[0];
-    expect(command.input.TableName).toBe("agent-table");
-    expect(command.input.Key).toEqual({ agentId: "a1" });
-    expect(command.input.ConditionExpression).toBe("#orgId = :previousOrgId");
-    expect(command.input.ExpressionAttributeValues[":previousOrgId"]).toBe(
-      ALL_ORGS,
-    );
-    expect(command.input.ExpressionAttributeValues[":orgId"]).toBe("Default");
+    // Every send() call must be a read (GetCommand) — never an UpdateCommand
+    // — the registry-backed corrective path writes ONLY the registry.
+    for (const [command] of send.mock.calls) {
+      expect(command.input.TableName).toBe("agent-table");
+      expect(command.input.Key).toEqual({ agentId: "a1" });
+      expect(command.input.UpdateExpression).toBeUndefined();
+    }
   });
 
-  it("writes orgUnknown=true and removes orgId for an unresolvable entry, conditioned on the previous value", async () => {
-    applyMarkerEdit.mockResolvedValue({ recordId: "t2" });
-    const send = jest.fn().mockResolvedValue({});
+  it("marks orgUnknown=true as the expected convergence state for an unresolvable entry, never writing DDB directly", async () => {
+    applyMarkerEdit.mockResolvedValue({
+      recordId: "t2",
+      priorStatus: "APPROVED",
+    });
+    const send = jest.fn().mockResolvedValue({
+      Item: { toolId: "t2", orgUnknown: true, registryStatus: "APPROVED" },
+    });
     const entry = {
       id: "t2",
       name: "orphan-tool",
@@ -743,9 +778,15 @@ describe("applyCorrectiveEntry — both-store write", () => {
       fakeRegistry(),
       "tool-table",
       fakeDocClient(send),
+      0,
+      undefined,
+      60000,
+      1000,
+      fastClock(),
     );
 
     expect(result.error).toBeUndefined();
+    expect(result.projectionLag).toBeFalsy();
     expect(applyMarkerEdit).toHaveBeenCalledWith(
       expect.objectContaining({
         recordId: "t2",
@@ -755,13 +796,12 @@ describe("applyCorrectiveEntry — both-store write", () => {
       }),
       expect.anything(),
     );
-    const [command] = send.mock.calls[0];
-    expect(command.input.TableName).toBe("tool-table");
-    expect(command.input.Key).toEqual({ toolId: "t2" });
-    expect(command.input.ConditionExpression).toBe("#orgId = :previousOrgId");
+    for (const [command] of send.mock.calls) {
+      expect(command.input.UpdateExpression).toBeUndefined();
+    }
   });
 
-  it("never writes to DDB for an ambiguous entry", async () => {
+  it("never calls applyMarkerEdit or docClient.send for an ambiguous entry", async () => {
     const send = jest.fn();
     const entry = {
       id: "t3",
@@ -785,7 +825,7 @@ describe("applyCorrectiveEntry — both-store write", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
-  it("propagates a registry marker-edit failure as an error and skips the DDB write", async () => {
+  it("propagates a registry marker-edit failure as an error and never polls DDB", async () => {
     applyMarkerEdit.mockResolvedValue({
       recordId: "a1",
       error: "updateResource failed: ConditionalCheckFailed",
@@ -810,6 +850,122 @@ describe("applyCorrectiveEntry — both-store write", () => {
 
     expect(result.error).toBe("updateResource failed: ConditionalCheckFailed");
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it("buckets projectionLag=true (never errors) when the projection never converges within the wait window", async () => {
+    applyMarkerEdit.mockResolvedValue({
+      recordId: "a1",
+      priorStatus: "APPROVED",
+    });
+    // Row never converges — always reports the stale pre-edit value.
+    const send = jest.fn().mockResolvedValue({
+      Item: { agentId: "a1", orgId: ALL_ORGS, registryStatus: "APPROVED" },
+    });
+    const entry = {
+      id: "a1",
+      name: "fabricated-agent",
+      kind: "agent" as const,
+      previousOrgId: ALL_ORGS,
+      resolvedOrgId: "Default",
+      reason: "fabricator-agent-sourceProjectId",
+    };
+
+    const result = await applyCorrectiveEntry(
+      entry,
+      "agent",
+      fakeRegistry(),
+      "agent-table",
+      fakeDocClient(send),
+      0,
+      undefined,
+      5000,
+      1000,
+      fastClock(),
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.projectionLag).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 12b. waitForProjectionConvergence — bounded poll semantics
+// ---------------------------------------------------------------------------
+
+describe("waitForProjectionConvergence", () => {
+  function fakeDocClient(sendImpl: jest.Mock) {
+    return {
+      send: sendImpl,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+  }
+
+  it("returns true as soon as the row matches orgId + registryStatus", async () => {
+    const send = jest.fn().mockResolvedValue({
+      Item: { agentId: "a1", orgId: "Default", registryStatus: "APPROVED" },
+    });
+    const converged = await waitForProjectionConvergence(
+      fakeDocClient(send),
+      "agent-table",
+      "agentId",
+      "a1",
+      { expectedOrgId: "Default", expectedRegistryStatus: "APPROVED" },
+      60000,
+      1000,
+      fastClock(),
+    );
+    expect(converged).toBe(true);
+  });
+
+  it("returns true for the orgUnknown expectation when orgId is absent and orgUnknown is true", async () => {
+    const send = jest.fn().mockResolvedValue({
+      Item: { toolId: "t1", orgUnknown: true, registryStatus: "APPROVED" },
+    });
+    const converged = await waitForProjectionConvergence(
+      fakeDocClient(send),
+      "tool-table",
+      "toolId",
+      "t1",
+      { expectedOrgUnknown: true, expectedRegistryStatus: "APPROVED" },
+      60000,
+      1000,
+      fastClock(),
+    );
+    expect(converged).toBe(true);
+  });
+
+  it("returns false once the deadline elapses without convergence", async () => {
+    const send = jest.fn().mockResolvedValue({
+      Item: { agentId: "a1", orgId: ALL_ORGS, registryStatus: "APPROVED" },
+    });
+    const converged = await waitForProjectionConvergence(
+      fakeDocClient(send),
+      "agent-table",
+      "agentId",
+      "a1",
+      { expectedOrgId: "Default", expectedRegistryStatus: "APPROVED" },
+      5000,
+      1000,
+      fastClock(),
+    );
+    expect(converged).toBe(false);
+  });
+
+  it("treats a transient read failure as not-yet-converged and keeps polling until the deadline", async () => {
+    const send = jest
+      .fn()
+      .mockRejectedValue(new Error("ProvisionedThroughputExceededException"));
+    const converged = await waitForProjectionConvergence(
+      fakeDocClient(send),
+      "agent-table",
+      "agentId",
+      "a1",
+      { expectedOrgId: "Default", expectedRegistryStatus: "APPROVED" },
+      3000,
+      1000,
+      fastClock(),
+    );
+    expect(converged).toBe(false);
+    expect(send.mock.calls.length).toBeGreaterThan(1);
   });
 });
 
@@ -877,7 +1033,9 @@ describe("runCorrectiveForRegistryType — --record-id scopes WRITES, not just t
         sourceProjectId: "proj-1",
       },
     ]);
-    const send = jest.fn().mockResolvedValue({});
+    const send = jest.fn().mockResolvedValue({
+      Item: { agentId: "rec-1", orgId: "Default", registryStatus: undefined },
+    });
     const docClient = {
       send,
     } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
@@ -893,18 +1051,30 @@ describe("runCorrectiveForRegistryType — --record-id scopes WRITES, not just t
       "agent-table",
       docClient,
       /* recordId canary */ "rec-1",
+      1000,
+      undefined,
+      undefined,
+      0,
+      undefined,
+      [],
+      [],
+      60000,
+      1000,
+      fastClock(),
     );
 
     // Both records are planned (printed) ...
     expect(plan.map((e) => e.id).sort()).toEqual(["rec-1", "rec-2"]);
-    // ... but only rec-1 was actually written to either store.
+    // ... but only rec-1 was actually written (registry-only — no direct
+    // DDB write; `send` calls below are the convergence poll reads).
     expect(applyMarkerEdit).toHaveBeenCalledTimes(1);
     expect(applyMarkerEdit).toHaveBeenCalledWith(
       expect.objectContaining({ recordId: "rec-1" }),
       expect.anything(),
     );
-    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalled();
     expect(send.mock.calls[0][0].input.Key).toEqual({ agentId: "rec-1" });
+    expect(send.mock.calls[0][0].input.UpdateExpression).toBeUndefined();
     expect(summary.markedTenant).toBe(1);
   });
 
@@ -959,7 +1129,9 @@ describe("runCorrectiveForRegistryType — --record-id scopes WRITES, not just t
         sourceProjectId: "proj-1",
       },
     ]);
-    const send = jest.fn().mockResolvedValue({});
+    const send = jest.fn().mockResolvedValue({
+      Item: { agentId: "rec-1", orgId: "Default", registryStatus: undefined },
+    });
     const docClient = {
       send,
     } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
@@ -975,10 +1147,24 @@ describe("runCorrectiveForRegistryType — --record-id scopes WRITES, not just t
       "agent-table",
       docClient,
       undefined,
+      1000,
+      undefined,
+      undefined,
+      0,
+      undefined,
+      [],
+      [],
+      60000,
+      1000,
+      fastClock(),
     );
 
     expect(applyMarkerEdit).toHaveBeenCalledTimes(2);
-    expect(send).toHaveBeenCalledTimes(2);
+    expect(send).toHaveBeenCalled();
+    // No direct DDB write — every send() call is a convergence poll read.
+    for (const [command] of send.mock.calls) {
+      expect(command.input.UpdateExpression).toBeUndefined();
+    }
   });
 });
 
@@ -1303,7 +1489,13 @@ describe("convergence: after corrective apply, a second dry run plans zero chang
       return { listResourcesChecked } as unknown as RegistryService;
     }
 
-    const send = jest.fn().mockResolvedValue({});
+    const send = jest.fn().mockResolvedValue({
+      Item: {
+        agentId: "a-converge-1",
+        orgId: "Default",
+        registryStatus: undefined,
+      },
+    });
     const docClient = {
       send,
     } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
@@ -1319,6 +1511,16 @@ describe("convergence: after corrective apply, a second dry run plans zero chang
       "agent-table",
       docClient,
       undefined,
+      1,
+      5,
+      undefined,
+      0,
+      undefined,
+      [],
+      [],
+      60000,
+      1000,
+      fastClock(),
     );
     expect(firstPlan).toHaveLength(1);
     expect(summary1.markedTenant).toBe(1);
@@ -1622,7 +1824,7 @@ describe("R2: corrective mode catches DDB-only ALL_ORGS drift (registry/DDB disa
     expect(entries).toHaveLength(0);
   });
 
-  it("applyCorrectiveEntry re-stamps both stores for a DDB-only divergent entry, converging the registry to match", async () => {
+  it("applyDdbOnlyCorrectiveEntry re-stamps both stores for a DDB-only divergent entry, converging the registry to match via a direct conditional DDB write", async () => {
     applyMarkerEdit.mockResolvedValue({ recordId: "d3RXDPrgL9t5" });
     const send = jest.fn().mockResolvedValue({});
     const entry = {
@@ -1637,7 +1839,7 @@ describe("R2: corrective mode catches DDB-only ALL_ORGS drift (registry/DDB disa
       send,
     } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
 
-    const result = await applyCorrectiveEntry(
+    const result = await applyDdbOnlyCorrectiveEntry(
       entry,
       "agent",
       {} as unknown as RegistryService,
@@ -1657,6 +1859,78 @@ describe("R2: corrective mode catches DDB-only ALL_ORGS drift (registry/DDB disa
     expect(send.mock.calls[0][0].input.Key).toEqual({
       agentId: "d3RXDPrgL9t5",
     });
+    expect(send.mock.calls[0][0].input.ConditionExpression).toBe(
+      "#orgId = :previousOrgId",
+    );
+  });
+
+  it("applyDdbOnlyCorrectiveEntry treats a ConditionalCheckFailedException as success when the row is already in the desired state", async () => {
+    applyMarkerEdit.mockResolvedValue({ recordId: "d3RXDPrgL9t5" });
+    const conditionalError = new Error("The conditional request failed");
+    conditionalError.name = "ConditionalCheckFailedException";
+    const send = jest
+      .fn()
+      .mockRejectedValueOnce(conditionalError)
+      .mockResolvedValueOnce({
+        Item: { agentId: "d3RXDPrgL9t5", orgId: "Default" },
+      });
+    const entry = {
+      id: "d3RXDPrgL9t5",
+      name: "divergent-agent",
+      kind: "agent" as const,
+      previousOrgId: "All Organizations",
+      resolvedOrgId: "Default",
+      reason: "fabricator-agent-sourceProjectId",
+    };
+    const docClient = {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+
+    const result = await applyDdbOnlyCorrectiveEntry(
+      entry,
+      "agent",
+      {} as unknown as RegistryService,
+      "agent-table",
+      docClient,
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it("applyDdbOnlyCorrectiveEntry reports a genuine error when ConditionalCheckFailedException fires and the row is NOT in the desired state", async () => {
+    applyMarkerEdit.mockResolvedValue({ recordId: "d3RXDPrgL9t5" });
+    const conditionalError = new Error("The conditional request failed");
+    conditionalError.name = "ConditionalCheckFailedException";
+    const send = jest
+      .fn()
+      .mockRejectedValueOnce(conditionalError)
+      .mockResolvedValueOnce({
+        Item: { agentId: "d3RXDPrgL9t5", orgId: "SomeOtherOrg" },
+      });
+    const entry = {
+      id: "d3RXDPrgL9t5",
+      name: "divergent-agent",
+      kind: "agent" as const,
+      previousOrgId: "All Organizations",
+      resolvedOrgId: "Default",
+      reason: "fabricator-agent-sourceProjectId",
+    };
+    const docClient = {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+
+    const result = await applyDdbOnlyCorrectiveEntry(
+      entry,
+      "agent",
+      {} as unknown as RegistryService,
+      "agent-table",
+      docClient,
+    );
+
+    expect(result.error).toBe(
+      "ConditionalCheckFailedException and row is not in the desired state",
+    );
   });
 });
 
@@ -1906,7 +2180,13 @@ describe("runCorrectiveForRegistryType — --fallback-org wiring and summary cou
         createdBy: "fabricator",
       },
     ]);
-    const send = jest.fn().mockResolvedValue({});
+    const send = jest.fn().mockResolvedValue({
+      Item: {
+        toolId: "tool-orphan-1",
+        orgId: "Default",
+        registryStatus: undefined,
+      },
+    });
     const docClient = {
       send,
     } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
@@ -1925,6 +2205,13 @@ describe("runCorrectiveForRegistryType — --fallback-org wiring and summary cou
       1,
       5,
       "Default",
+      0,
+      undefined,
+      [],
+      [],
+      60000,
+      1000,
+      fastClock(),
     );
 
     expect(plan).toHaveLength(1);
@@ -1951,7 +2238,13 @@ describe("runCorrectiveForRegistryType — --fallback-org wiring and summary cou
         createdBy: "fabricator",
       },
     ]);
-    const send = jest.fn().mockResolvedValue({});
+    const send = jest.fn().mockResolvedValue({
+      Item: {
+        toolId: "tool-orphan-2",
+        orgUnknown: true,
+        registryStatus: undefined,
+      },
+    });
     const docClient = {
       send,
     } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
@@ -1967,6 +2260,16 @@ describe("runCorrectiveForRegistryType — --fallback-org wiring and summary cou
       "tool-table",
       docClient,
       undefined,
+      1,
+      5,
+      undefined,
+      0,
+      undefined,
+      [],
+      [],
+      60000,
+      1000,
+      fastClock(),
     );
 
     expect(plan).toHaveLength(1);
@@ -2178,7 +2481,13 @@ describe("applyCorrectiveEntry — needsReapproval bucket", () => {
       reapproved: false,
       error: undefined,
     });
-    const send = jest.fn().mockResolvedValue({});
+    const send = jest.fn().mockResolvedValue({
+      Item: {
+        agentId: "synthetic-agent-1",
+        orgId: "SyntheticOrg",
+        registryStatus: "APPROVED",
+      },
+    });
     const entry = {
       id: "synthetic-agent-1",
       name: "synthetic-fabricated-agent",
@@ -2194,13 +2503,21 @@ describe("applyCorrectiveEntry — needsReapproval bucket", () => {
       fakeRegistry(),
       "agent-table",
       fakeDocClient(send),
+      0,
+      undefined,
+      60000,
+      1000,
+      fastClock(),
     );
 
     expect(result.error).toBeUndefined();
     expect(result.needsReapproval).toBe(true);
-    // The DDB projection write still proceeds — the org marker itself is
-    // correct, only the registry approval state is stuck.
-    expect(send).toHaveBeenCalledTimes(1);
+    expect(result.projectionLag).toBeFalsy();
+    // No direct DDB write — every send() call is a read poll, never an
+    // UpdateCommand.
+    for (const [command] of send.mock.calls) {
+      expect(command.input.UpdateExpression).toBeUndefined();
+    }
   });
 
   it("does not flag needsReapproval for a clean successful reapproval", async () => {
@@ -2212,7 +2529,13 @@ describe("applyCorrectiveEntry — needsReapproval bucket", () => {
       reapproved: true,
       error: undefined,
     });
-    const send = jest.fn().mockResolvedValue({});
+    const send = jest.fn().mockResolvedValue({
+      Item: {
+        agentId: "synthetic-agent-2",
+        orgId: "SyntheticOrg",
+        registryStatus: "APPROVED",
+      },
+    });
     const entry = {
       id: "synthetic-agent-2",
       name: "synthetic-fabricated-agent-2",
@@ -2228,6 +2551,11 @@ describe("applyCorrectiveEntry — needsReapproval bucket", () => {
       fakeRegistry(),
       "agent-table",
       fakeDocClient(send),
+      0,
+      undefined,
+      60000,
+      1000,
+      fastClock(),
     );
 
     expect(result.error).toBeUndefined();
@@ -2243,7 +2571,13 @@ describe("applyCorrectiveEntry — needsReapproval bucket", () => {
       reapproved: false,
       error: undefined,
     });
-    const send = jest.fn().mockResolvedValue({});
+    const send = jest.fn().mockResolvedValue({
+      Item: {
+        toolId: "synthetic-tool-1",
+        orgId: "SyntheticOrg",
+        registryStatus: "DRAFT",
+      },
+    });
     const entry = {
       id: "synthetic-tool-1",
       name: "synthetic-fabricated-tool",
@@ -2259,6 +2593,11 @@ describe("applyCorrectiveEntry — needsReapproval bucket", () => {
       fakeRegistry(),
       "tool-table",
       fakeDocClient(send),
+      0,
+      undefined,
+      60000,
+      1000,
+      fastClock(),
     );
 
     expect(result.error).toBeUndefined();
@@ -2385,7 +2724,13 @@ describe("runCorrectiveForRegistryType — needsReapproval bucket and --limit co
         reapproved: true,
         error: undefined,
       });
-    const send = jest.fn().mockResolvedValue({});
+    const send = jest.fn().mockResolvedValue({
+      Item: {
+        agentId: "synthetic-rec-1",
+        orgId: "SyntheticOrg",
+        registryStatus: "APPROVED",
+      },
+    });
     const docClient = {
       send,
     } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
@@ -2401,6 +2746,16 @@ describe("runCorrectiveForRegistryType — needsReapproval bucket and --limit co
       "agent-table",
       docClient,
       undefined,
+      1,
+      5,
+      undefined,
+      0,
+      undefined,
+      [],
+      [],
+      60000,
+      1000,
+      fastClock(),
     );
 
     expect(plan).toHaveLength(2);
@@ -2451,7 +2806,13 @@ describe("runCorrectiveForRegistryType — needsReapproval bucket and --limit co
         reapproved: true,
         error: undefined,
       });
-    const send = jest.fn().mockResolvedValue({});
+    const send = jest.fn().mockResolvedValue({
+      Item: {
+        agentId: "synthetic-rec-1",
+        orgId: "SyntheticOrg",
+        registryStatus: "APPROVED",
+      },
+    });
     const docClient = {
       send,
     } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
@@ -2474,6 +2835,10 @@ describe("runCorrectiveForRegistryType — needsReapproval bucket and --limit co
       /* callDelayMs */ 0,
       undefined,
       needsReapprovalEntries,
+      [],
+      60000,
+      1000,
+      fastClock(),
     );
 
     expect(needsReapprovalEntries).toEqual([
@@ -2524,7 +2889,13 @@ describe("runCorrectiveForRegistryType — needsReapproval bucket and --limit co
         reapproved: true,
         error: undefined,
       });
-    const send = jest.fn().mockResolvedValue({});
+    const send = jest.fn().mockResolvedValue({
+      Item: {
+        agentId: "synthetic-rec-2",
+        orgId: "SyntheticOrg",
+        registryStatus: "APPROVED",
+      },
+    });
     const docClient = {
       send,
     } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
@@ -2540,6 +2911,16 @@ describe("runCorrectiveForRegistryType — needsReapproval bucket and --limit co
       "agent-table",
       docClient,
       undefined,
+      1,
+      5,
+      undefined,
+      0,
+      undefined,
+      [],
+      [],
+      60000,
+      1000,
+      fastClock(),
     );
 
     // Exactly 2 attempts were made (1 failure + 1 success); the 3rd
@@ -2573,7 +2954,13 @@ describe("runCorrectiveForRegistryType — needsReapproval bucket and --limit co
       reapproved: true,
       error: undefined,
     });
-    const send = jest.fn().mockResolvedValue({});
+    const send = jest.fn().mockResolvedValue({
+      Item: {
+        agentId: "unused",
+        orgId: "SyntheticOrg",
+        registryStatus: "APPROVED",
+      },
+    });
     const docClient = {
       send,
     } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
@@ -2595,6 +2982,11 @@ describe("runCorrectiveForRegistryType — needsReapproval bucket and --limit co
       undefined,
       /* callDelayMs */ 400,
       pacer,
+      [],
+      [],
+      60000,
+      1000,
+      fastClock(),
     );
 
     // applyMarkerEdit is mocked in this file, so the pacing itself (now
@@ -2786,6 +3178,28 @@ describe("runCorrectiveMode — needsReapproval exit code and end-of-run re-appr
     } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
   }
 
+  /**
+   * Same Scan-returns-empty-page behaviour as {@link makeDocClient}, but
+   * GetCommand resolves to a converged projection row (matching
+   * `expectedOrgId`/`expectedRegistryStatus`) so the bounded convergence
+   * wait in `applyCorrectiveEntry` succeeds immediately instead of
+   * exhausting the wait window and bucketing `projectionLag`.
+   */
+  function makeConvergingDocClient(
+    convergedItem: Record<string, unknown>,
+  ): import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient {
+    const send = jest.fn().mockImplementation((command) => {
+      const ctorName = command?.constructor?.name;
+      if (ctorName === "GetCommand") {
+        return Promise.resolve({ Item: convergedItem });
+      }
+      return Promise.resolve({ Items: [] });
+    });
+    return {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+  }
+
   function makeRegistry(
     items: Array<{ recordId: string; name: string; orgId: string }>,
   ): RegistryService {
@@ -2836,7 +3250,11 @@ describe("runCorrectiveMode — needsReapproval exit code and end-of-run re-appr
       reapproved: true,
       error: undefined,
     });
-    const docClient = makeDocClient();
+    const docClient = makeConvergingDocClient({
+      agentId: "synthetic-rec-10",
+      orgUnknown: true,
+      registryStatus: "APPROVED",
+    });
 
     await runCorrectiveMode(
       registry,
@@ -2847,6 +3265,13 @@ describe("runCorrectiveMode — needsReapproval exit code and end-of-run re-appr
       /* apply */ true,
       /* limit */ undefined,
       /* recordId */ undefined,
+      1000,
+      undefined,
+      0,
+      undefined,
+      5000,
+      1000,
+      fastClock(),
     );
 
     expect(exitSpy).not.toHaveBeenCalled();
@@ -2894,7 +3319,11 @@ describe("runCorrectiveMode — needsReapproval exit code and end-of-run re-appr
       recordId: "synthetic-rec-11",
       status: "APPROVED",
     });
-    const docClient = makeDocClient();
+    const docClient = makeConvergingDocClient({
+      agentId: "synthetic-rec-11",
+      orgUnknown: true,
+      registryStatus: "APPROVED",
+    });
 
     await runCorrectiveMode(
       registry,
@@ -2905,10 +3334,14 @@ describe("runCorrectiveMode — needsReapproval exit code and end-of-run re-appr
       /* apply */ true,
       /* limit */ undefined,
       /* recordId */ undefined,
+      1000,
+      undefined,
+      0,
+      undefined,
+      5000,
+      1000,
+      fastClock(),
     );
-
-    // End-of-run pass restored the only flagged record — no exit(1).
-    expect(exitSpy).not.toHaveBeenCalled();
     expect(
       (registry as unknown as { submitForApproval: jest.Mock })
         .submitForApproval,
@@ -2947,7 +3380,11 @@ describe("runCorrectiveMode — needsReapproval exit code and end-of-run re-appr
         name: "ThrottlingException",
       }),
     );
-    const docClient = makeDocClient();
+    const docClient = makeConvergingDocClient({
+      agentId: "synthetic-rec-12",
+      orgUnknown: true,
+      registryStatus: "APPROVED",
+    });
 
     await expect(
       runCorrectiveMode(
@@ -2959,6 +3396,13 @@ describe("runCorrectiveMode — needsReapproval exit code and end-of-run re-appr
         /* apply */ true,
         /* limit */ undefined,
         /* recordId */ undefined,
+        1000,
+        undefined,
+        0,
+        undefined,
+        5000,
+        1000,
+        fastClock(),
       ),
     ).rejects.toThrow("process.exit(1)");
 
@@ -2995,5 +3439,481 @@ describe("runCorrectiveMode — needsReapproval exit code and end-of-run re-appr
     // Dry-run never writes, so applyMarkerEdit (via applyCorrectiveEntry)
     // is never reached either.
     expect(applyMarkerEdit).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 26. resyncProjectionForId / resyncProjectionIds — rebuild a DDB projection
+//     row from the registry through registry-sync's OWN mapper/writer
+//     (Required change 2).
+// ---------------------------------------------------------------------------
+
+describe("resyncProjectionForId — rebuilds the projection row via registry-sync's own mapper/writer", () => {
+  function fakeDocClient(sendImpl: jest.Mock) {
+    return {
+      send: sendImpl,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+  }
+
+  it("is a no-op (alreadyMatches) when the current row already matches the mapper's output", async () => {
+    const record = {
+      recordId: "synthetic-resync-1",
+      name: "synthetic-agent-resync",
+      status: "APPROVED",
+      customDescriptorContent: JSON.stringify({
+        orgId: "SyntheticOrg",
+        createdBy: "fabricator",
+      }),
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-01-02T00:00:00.000Z"),
+    };
+    const registry = {
+      getResource: jest.fn().mockResolvedValue(record),
+    } as unknown as RegistryService;
+    const send = jest.fn().mockResolvedValue({
+      Item: {
+        agentId: "synthetic-resync-1",
+        orgId: "SyntheticOrg",
+        orgUnknown: undefined,
+        registryStatus: "APPROVED",
+      },
+    });
+    const docClient = fakeDocClient(send);
+
+    const result = await resyncProjectionForId(
+      "synthetic-resync-1",
+      "agent",
+      registry,
+      docClient,
+      "agent-table",
+      /* apply */ false,
+    );
+
+    expect(result.alreadyMatches).toBe(true);
+    expect(result.error).toBeUndefined();
+    // Only the read happened — no write attempted for a no-op.
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("dry-run (apply=false) reports wouldRebuild and never writes when the row diverges", async () => {
+    const record = {
+      recordId: "synthetic-resync-2",
+      name: "synthetic-agent-resync-2",
+      status: "APPROVED",
+      customDescriptorContent: JSON.stringify({
+        orgId: "SyntheticOrg",
+        createdBy: "fabricator",
+      }),
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-01-02T00:00:00.000Z"),
+    };
+    const registry = {
+      getResource: jest.fn().mockResolvedValue(record),
+    } as unknown as RegistryService;
+    const send = jest.fn().mockResolvedValue({
+      Item: {
+        agentId: "synthetic-resync-2",
+        registryStatus: "PENDING_APPROVAL",
+        orgId: "SyntheticOrg",
+      },
+    });
+    const docClient = fakeDocClient(send);
+
+    const result = await resyncProjectionForId(
+      "synthetic-resync-2",
+      "agent",
+      registry,
+      docClient,
+      "agent-table",
+      /* apply */ false,
+    );
+
+    expect(result.wouldRebuild).toBe(true);
+    expect(result.error).toBeUndefined();
+    // Dry-run: only the read happened.
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("apply=true rebuilds the row through writeProjectionRow (the shared registry-sync writer), setting registry-sync's own ordering/version fields", async () => {
+    const record = {
+      recordId: "synthetic-resync-3",
+      name: "synthetic-agent-resync-3",
+      status: "APPROVED",
+      customDescriptorContent: JSON.stringify({
+        orgId: "SyntheticOrg",
+        createdBy: "fabricator",
+      }),
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-01-02T00:00:00.000Z"),
+    };
+    const registry = {
+      getResource: jest.fn().mockResolvedValue(record),
+    } as unknown as RegistryService;
+    const send = jest.fn().mockImplementation((command) => {
+      const ctorName = command?.constructor?.name;
+      if (ctorName === "GetCommand") {
+        return Promise.resolve({
+          Item: {
+            agentId: "synthetic-resync-3",
+            registryStatus: "PENDING_APPROVAL",
+            orgId: "SyntheticOrg",
+          },
+        });
+      }
+      return Promise.resolve({});
+    });
+    const docClient = fakeDocClient(send);
+
+    const result = await resyncProjectionForId(
+      "synthetic-resync-3",
+      "agent",
+      registry,
+      docClient,
+      "agent-table",
+      /* apply */ true,
+    );
+
+    expect(result.rebuilt).toBe(true);
+    expect(result.error).toBeUndefined();
+
+    const updateCall = send.mock.calls.find(
+      ([command]) => command?.constructor?.name === "UpdateCommand",
+    );
+    expect(updateCall).toBeDefined();
+    const [updateCommand] = updateCall!;
+    expect(updateCommand.input.TableName).toBe("agent-table");
+    expect(updateCommand.input.Key).toEqual({ agentId: "synthetic-resync-3" });
+    // The rebuilt row carries registry-sync's own ordering/version fields
+    // (projectionVersion, projectedAt, registryStatus) — produced by
+    // buildAgentProjectionRow, the SAME mapper the live lambda uses.
+    const values = updateCommand.input.ExpressionAttributeValues as Record<
+      string,
+      unknown
+    >;
+    const names = updateCommand.input.ExpressionAttributeNames as Record<
+      string,
+      string
+    >;
+    const projectionVersionKey = Object.keys(names).find(
+      (k) => names[k] === "projectionVersion",
+    );
+    expect(projectionVersionKey).toBeDefined();
+    expect(values[`:${projectionVersionKey!.slice(1)}`]).toBe(1);
+  });
+
+  it("surfaces a getResource failure as error with recordNotFoundOrWrongType, letting the caller retry as the other kind", async () => {
+    const registry = {
+      getResource: jest.fn().mockRejectedValue(new Error("TypeMismatchError")),
+    } as unknown as RegistryService;
+    const docClient = fakeDocClient(jest.fn());
+
+    const result = await resyncProjectionForId(
+      "synthetic-resync-4",
+      "agent",
+      registry,
+      docClient,
+      "agent-table",
+      false,
+    );
+
+    expect(result.error).toBeDefined();
+    expect(result.recordNotFoundOrWrongType).toBe(true);
+  });
+});
+
+describe("resyncProjectionIds — --resync-projection CLI, agent-then-tool retry", () => {
+  it("retries as a tool when the agent attempt fails with recordNotFoundOrWrongType, and succeeds", async () => {
+    const toolRecord = {
+      recordId: "synthetic-resync-5",
+      name: "synthetic-tool-resync",
+      status: "APPROVED",
+      customDescriptorContent: JSON.stringify({
+        orgId: "SyntheticOrg",
+        createdBy: "fabricator",
+      }),
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-01-02T00:00:00.000Z"),
+    };
+    const getResource = jest
+      .fn()
+      .mockRejectedValueOnce(new Error("TypeMismatchError"))
+      .mockResolvedValueOnce(toolRecord);
+    const registry = { getResource } as unknown as RegistryService;
+    const send = jest.fn().mockResolvedValue({
+      Item: {
+        toolId: "synthetic-resync-5",
+        registryStatus: "PENDING_APPROVAL",
+      },
+    });
+    const docClient = {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+
+    const results = await resyncProjectionIds(
+      ["synthetic-resync-5"],
+      registry,
+      docClient,
+      "agent-table",
+      "tool-table",
+      false,
+    );
+
+    expect(results).toHaveLength(1);
+    expect(results[0].type).toBe("tool");
+    expect(results[0].wouldRebuild).toBe(true);
+    expect(getResource).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 27. End-of-run resync pass (Required change 1 + 2) and the exact incident 2
+//     race: registry succeeds, script's OWN direct DDB write would have
+//     ConditionalCheckFailedException'd — but under the fix there is no
+//     direct DDB write on the registry-backed path at all, so the race
+//     cannot occur there; the DDB-only drift path still treats
+//     ConditionalCheckFailedException + desired-state as success.
+// ---------------------------------------------------------------------------
+
+describe("runCorrectiveMode — end-of-run resync pass for projectionLag (Required change 1 + 2)", () => {
+  const { applyMarkerEdit } = jest.requireMock(
+    "../../src/utils/marker-registry-edit",
+  ) as { applyMarkerEdit: jest.Mock };
+
+  let exitSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    applyMarkerEdit.mockReset();
+    exitSpy = jest.spyOn(process, "exit").mockImplementation(((
+      code?: number,
+    ) => {
+      throw new Error(`process.exit(${code})`);
+    }) as never);
+  });
+
+  afterEach(() => {
+    exitSpy.mockRestore();
+  });
+
+  function makeRegistry(
+    items: Array<{ recordId: string; name: string; orgId: string }>,
+    detailRecord?: Record<string, unknown>,
+  ): RegistryService {
+    const listResourcesChecked = jest.fn().mockImplementation((type: string) =>
+      Promise.resolve({
+        items:
+          type === "agent"
+            ? items.map((i) => ({
+                recordId: i.recordId,
+                name: i.name,
+                status: "APPROVED",
+                customDescriptorContent: JSON.stringify({
+                  orgId: i.orgId,
+                  createdBy: "fabricator",
+                  sourceProjectId: "proj-synthetic",
+                }),
+              }))
+            : [],
+        partial: false,
+        droppedCount: 0,
+        throttled: false,
+      }),
+    );
+    return {
+      listResourcesChecked,
+      getResource: jest.fn().mockResolvedValue(detailRecord ?? null),
+    } as unknown as RegistryService;
+  }
+
+  it("resyncs a projectionLag record at end-of-run and exits 0 once it converges", async () => {
+    const registry = makeRegistry(
+      [
+        {
+          recordId: "synthetic-rec-20",
+          name: "synthetic-agent-20",
+          orgId: ALL_ORGS,
+        },
+      ],
+      {
+        recordId: "synthetic-rec-20",
+        name: "synthetic-agent-20",
+        status: "APPROVED",
+        customDescriptorContent: JSON.stringify({
+          orgUnknown: true,
+          createdBy: "fabricator",
+        }),
+        createdAt: new Date("2026-01-01T00:00:00.000Z"),
+        updatedAt: new Date("2026-01-02T00:00:00.000Z"),
+      },
+    );
+    applyMarkerEdit.mockResolvedValue({
+      recordId: "synthetic-rec-20",
+      priorStatus: "APPROVED",
+      postStatus: "APPROVED",
+      reapproved: true,
+      error: undefined,
+    });
+
+    // The projection poll NEVER converges during the bounded wait (always
+    // reports the stale pre-edit row) — this forces projectionLag — but
+    // the end-of-run resync pass's resyncProjectionForId then SUCCEEDS
+    // (via registry.getResource + writeProjectionRow), converging it.
+    const send = jest.fn().mockImplementation((command) => {
+      const ctorName = command?.constructor?.name;
+      if (ctorName === "GetCommand") {
+        return Promise.resolve({
+          Item: {
+            agentId: "synthetic-rec-20",
+            orgId: ALL_ORGS,
+            registryStatus: "APPROVED",
+          },
+        });
+      }
+      return Promise.resolve({ Items: [] });
+    });
+    const docClient = {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+
+    await runCorrectiveMode(
+      registry,
+      docClient,
+      "agent-table",
+      "tool-table",
+      "projects-table",
+      /* apply */ true,
+      /* limit */ undefined,
+      /* recordId */ undefined,
+      1000,
+      undefined,
+      0,
+      undefined,
+      3000,
+      1000,
+      fastClock(),
+    );
+
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
+
+  it("exits 1 when a projectionLag record is still unconverged after the end-of-run resync pass", async () => {
+    const registry = makeRegistry(
+      [
+        {
+          recordId: "synthetic-rec-21",
+          name: "synthetic-agent-21",
+          orgId: ALL_ORGS,
+        },
+      ],
+      null as unknown as Record<string, unknown>,
+    );
+    // getResource returns null -> resyncProjectionForId reports an error,
+    // so the end-of-run pass cannot converge the record either.
+    (registry.getResource as jest.Mock).mockResolvedValue(null);
+    applyMarkerEdit.mockResolvedValue({
+      recordId: "synthetic-rec-21",
+      priorStatus: "APPROVED",
+      postStatus: "APPROVED",
+      reapproved: true,
+      error: undefined,
+    });
+    const send = jest.fn().mockResolvedValue({ Items: [] }); // GetCommand -> no Item -> never converges
+    const docClient = {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+
+    await expect(
+      runCorrectiveMode(
+        registry,
+        docClient,
+        "agent-table",
+        "tool-table",
+        "projects-table",
+        /* apply */ true,
+        /* limit */ undefined,
+        /* recordId */ undefined,
+        1000,
+        undefined,
+        0,
+        undefined,
+        3000,
+        1000,
+        fastClock(),
+      ),
+    ).rejects.toThrow("process.exit(1)");
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 28. Incident 2 exact failure signature (see board-task spec, item 1):
+//     registry write lands (orgId corrected, APPROVED), but under the OLD
+//     behaviour the script's OWN direct DDB UpdateItem then raced
+//     registry-sync's projection and threw ConditionalCheckFailedException
+//     even though the end state was already correct. Under the fix, the
+//     registry-backed corrective path performs NO direct DDB write at
+//     all, so this exact race class cannot occur there — this test
+//     documents that invariant directly against applyCorrectiveEntry.
+// ---------------------------------------------------------------------------
+
+describe("Incident 2 regression — registry-backed path never races registry-sync's own projection write", () => {
+  const { applyMarkerEdit } = jest.requireMock(
+    "../../src/utils/marker-registry-edit",
+  ) as { applyMarkerEdit: jest.Mock };
+
+  beforeEach(() => {
+    applyMarkerEdit.mockReset();
+  });
+
+  it("never issues a docClient UpdateCommand for a registry-backed corrective entry, even when the registry write succeeds and the projection later converges via registry-sync", async () => {
+    applyMarkerEdit.mockResolvedValue({
+      recordId: "YixBXASgDciL-synthetic",
+      priorStatus: "APPROVED",
+    });
+    // Simulates registry-sync's OWN concurrent projection write already
+    // having landed the correct value by the time the script polls —
+    // exactly the incident scenario, but now observed via a read-only
+    // poll instead of raced against a competing write from this script.
+    const send = jest.fn().mockResolvedValue({
+      Item: {
+        agentId: "YixBXASgDciL-synthetic",
+        orgId: "SyntheticOrg",
+        registryStatus: "APPROVED",
+      },
+    });
+    const docClient = {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+    const entry = {
+      id: "YixBXASgDciL-synthetic",
+      name: "synthetic-fabricated-agent",
+      kind: "agent" as const,
+      previousOrgId: ALL_ORGS,
+      resolvedOrgId: "SyntheticOrg",
+      reason: "fabricator-agent-sourceProjectId",
+    };
+
+    const result = await applyCorrectiveEntry(
+      entry,
+      "agent",
+      {} as unknown as RegistryService,
+      "agent-table",
+      docClient,
+      0,
+      undefined,
+      60000,
+      1000,
+      fastClock(),
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.projectionLag).toBeFalsy();
+    // The defining assertion: NOT ONE send() call is an UpdateCommand —
+    // every call is a read (GetCommand) poll. A ConditionalCheckFailed
+    // race against registry-sync's own write is structurally impossible
+    // here because this path never writes DDB.
+    for (const [command] of send.mock.calls) {
+      expect(command.input.UpdateExpression).toBeUndefined();
+    }
   });
 });

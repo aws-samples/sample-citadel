@@ -128,6 +128,7 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
+  GetCommand,
   ScanCommand,
   UpdateCommand,
   type NativeAttributeValue,
@@ -141,6 +142,11 @@ import {
 } from "../src/services/registry-service";
 import { ALL_ORGS } from "../src/utils/org-constants";
 import { applyMarkerEdit } from "../src/utils/marker-registry-edit";
+import {
+  buildAgentProjectionRow,
+  buildToolProjectionRow,
+  writeProjectionRow,
+} from "../src/lambda/registry-sync";
 
 // ---------------------------------------------------------------------------
 // Allowlists — the ONLY positive signals for "legitimately shared"
@@ -334,6 +340,18 @@ export interface BackfillSummary {
    * more pass runs over this bucket at the end of a corrective apply.
    */
   needsReapproval: number;
+  /**
+   * Records whose registry write landed and converged fine, EXCEPT the
+   * registry-backed path never writes DDB directly anymore (Required
+   * change 1) — it WAITS (bounded, injectable clock) for registry-sync to
+   * project the new orgId/registryStatus into the DDB row. A record that
+   * does not converge within the wait window is bucketed here, distinct
+   * from `errors`, and the loop continues to the next record. The
+   * end-of-run resync pass (Required change 2) gets one more attempt at
+   * every id in this bucket; only an id STILL unconverged after that pass
+   * counts toward a non-zero exit.
+   */
+  projectionLag: number;
 }
 
 export function emptySummary(): BackfillSummary {
@@ -349,6 +367,7 @@ export function emptySummary(): BackfillSummary {
     errors: 0,
     attempted: 0,
     needsReapproval: 0,
+    projectionLag: 0,
   };
 }
 
@@ -364,6 +383,7 @@ export function addSummary(dst: BackfillSummary, src: BackfillSummary): void {
   dst.errors += src.errors;
   dst.attempted += src.attempted;
   dst.needsReapproval += src.needsReapproval;
+  dst.projectionLag += src.projectionLag;
 }
 
 // ---------------------------------------------------------------------------
@@ -887,19 +907,111 @@ function editResultNeedsReapproval(editResult: {
 }
 
 /**
- * Applies one planned corrective entry to BOTH stores: the registry
- * descriptor (via the approval-preserving marker-edit helper, never a raw
- * Put) and the DynamoDB agents/tools projection row. Conditional on the
- * record still holding its previously-observed value, to avoid clobbering a
- * concurrent write. Ambiguous and unresolvable entries are never written —
- * only planned/reported.
+ * Injectable clock/sleep pair for the bounded projection-convergence wait
+ * below — mirrors the `RetryDelayFn`/`CallPacer` injection pattern already
+ * used elsewhere in this file, so tests can supply a synthetic clock with
+ * zero real delay instead of waiting out a real 60s window.
+ */
+export interface Clock {
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+}
+
+export const defaultClock: Clock = {
+  now: () => Date.now(),
+  sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
+
+/** Default bounded wait window (ms) for projection convergence. */
+export const DEFAULT_PROJECTION_WAIT_MS = 60000;
+/** Default poll interval (ms) for projection convergence. */
+export const DEFAULT_PROJECTION_POLL_INTERVAL_MS = 2000;
+
+/**
+ * The desired post-edit projection state a convergence wait polls for.
+ * `expectedOrgId: undefined` together with `expectedOrgUnknown: true`
+ * covers the orgUnknown branch (orgId attribute absent, orgUnknown=true);
+ * otherwise `expectedOrgId` names the resolved tenant org and
+ * `expectedOrgUnknown` must be absent/false.
+ */
+export interface ProjectionExpectation {
+  expectedOrgId?: string;
+  expectedOrgUnknown?: boolean;
+  /** The pre-edit registry status the projection should still show (e.g. APPROVED). */
+  expectedRegistryStatus: string;
+}
+
+/**
+ * Bounded poll (injectable clock) for registry-sync to project the new
+ * orgId/registryStatus into the DDB row — the single-writer replacement
+ * for the removed direct DDB write in the registry-backed corrective path
+ * (Required change 1). Never writes; read-only `GetCommand` polling.
  *
- * `needsReapproval: true` in the result means the org marker itself landed
- * correctly (and the DDB projection write below still proceeds) but the
- * registry record was left DRAFT instead of its prior APPROVED — the
- * caller must bucket this distinctly from `error` and retry restoration
- * later (see `restoreApprovalForRecord` / `--restore-approval`), never
- * abandon the record.
+ * Converged when the row's `orgId` (or absence + `orgUnknown===true`)
+ * matches the expectation AND `registryStatus` equals
+ * `expectedRegistryStatus` (the pre-edit status, since a marker-only edit
+ * does not change registry status). Returns `true` on convergence within
+ * `maxWaitMs`, `false` otherwise — the caller buckets a `false` result into
+ * `projectionLag`, never `errors`.
+ */
+export async function waitForProjectionConvergence(
+  docClient: DynamoDBDocumentClient,
+  tableName: string,
+  pkName: "agentId" | "toolId",
+  id: string,
+  expectation: ProjectionExpectation,
+  maxWaitMs: number = DEFAULT_PROJECTION_WAIT_MS,
+  pollIntervalMs: number = DEFAULT_PROJECTION_POLL_INTERVAL_MS,
+  clock: Clock = defaultClock,
+): Promise<boolean> {
+  const start = clock.now();
+  const matches = (item: Record<string, unknown> | undefined): boolean => {
+    if (!item) return false;
+    if (item.registryStatus !== expectation.expectedRegistryStatus) {
+      return false;
+    }
+    if (expectation.expectedOrgUnknown) {
+      return item.orgUnknown === true && item.orgId === undefined;
+    }
+    return item.orgId === expectation.expectedOrgId && item.orgUnknown !== true;
+  };
+
+  for (;;) {
+    let result;
+    try {
+      result = await docClient.send(
+        new GetCommand({ TableName: tableName, Key: { [pkName]: id } }),
+      );
+    } catch {
+      // A transient read failure during the wait is treated as "not yet
+      // converged" — the loop retries until the deadline rather than
+      // propagating, since a poll read failure is not itself an error in
+      // the corrective write (which already landed in the registry).
+      result = undefined;
+    }
+    if (matches(result?.Item)) return true;
+    if (clock.now() - start >= maxWaitMs) return false;
+    await clock.sleep(pollIntervalMs);
+  }
+}
+
+/**
+ * Applies one planned corrective entry to the registry ONLY — via the
+ * approval-preserving marker-edit helper, never a raw Put — and then WAITS
+ * (bounded, injectable clock) for registry-sync to project the new
+ * orgId/registryStatus into the DDB row, instead of writing DDB directly
+ * (Required change 1: single-writer, registry-sync owns the DDB
+ * projection). Ambiguous and unresolvable-without-fallback entries are
+ * never written — only planned/reported.
+ *
+ * `needsReapproval: true` means the org marker landed but the registry
+ * record was left DRAFT instead of its prior APPROVED — bucketed distinct
+ * from `error`, retried by the end-of-run re-approval pass /
+ * `--restore-approval`. `projectionLag: true` means the registry write (and
+ * reapproval, if any) succeeded but the DDB projection had not converged
+ * within the wait window — bucketed distinct from both `error` and
+ * `needsReapproval`, retried by the end-of-run resync pass /
+ * `--resync-projection`.
  */
 export async function applyCorrectiveEntry(
   entry: CorrectivePlanEntry,
@@ -909,58 +1021,36 @@ export async function applyCorrectiveEntry(
   docClient: DynamoDBDocumentClient,
   callDelayMs: number = DEFAULT_CALL_DELAY_MS,
   callPacer: CallPacer = defaultCallPacer,
-): Promise<{ error?: string; needsReapproval?: boolean }> {
+  waitMs: number = DEFAULT_PROJECTION_WAIT_MS,
+  pollIntervalMs: number = DEFAULT_PROJECTION_POLL_INTERVAL_MS,
+  clock: Clock = defaultClock,
+): Promise<{
+  error?: string;
+  needsReapproval?: boolean;
+  projectionLag?: boolean;
+}> {
   if (entry.reason === "ambiguous-multi-org") {
     return { error: undefined };
   }
-  if (
-    entry.reason === "unresolvable-orgUnknown" ||
-    entry.resolvedOrgId === undefined
-  ) {
-    const editResult = await applyMarkerEdit(
-      {
-        recordId: entry.id,
-        type,
-        fieldsToSet: { orgUnknown: true },
-        fieldsToRemove: ["orgId"],
-      },
-      {
-        registryService: registry,
-        dryRun: false,
-        operationLabel: "backfill-shared-org-marker-correct-fabricator",
-        callDelayMs,
-        callPacer,
-      },
-    );
-    if (editResult.error) return { error: editResult.error };
-    const needsReapproval = editResultNeedsReapproval(editResult);
 
-    const pkName = type === "agent" ? "agentId" : "toolId";
-    await docClient.send(
-      new UpdateCommand({
-        TableName: tableName,
-        Key: { [pkName]: entry.id },
-        UpdateExpression:
-          "REMOVE #orgId SET #orgUnknown = :orgUnknown, #updatedAt = :updatedAt",
-        ConditionExpression: "#orgId = :previousOrgId",
-        ExpressionAttributeNames: {
-          "#orgId": "orgId",
-          "#orgUnknown": "orgUnknown",
-          "#updatedAt": "updatedAt",
-        },
-        ExpressionAttributeValues: {
-          ":orgUnknown": true,
-          ":updatedAt": new Date().toISOString(),
-          ":previousOrgId": entry.previousOrgId,
-        },
-        ReturnValues: "UPDATED_NEW",
-      }),
-    );
-    return needsReapproval ? { needsReapproval: true } : {};
-  }
+  const pkName: "agentId" | "toolId" = type === "agent" ? "agentId" : "toolId";
+  const isUnresolvable =
+    entry.reason === "unresolvable-orgUnknown" ||
+    entry.resolvedOrgId === undefined;
 
   const editResult = await applyMarkerEdit(
-    { recordId: entry.id, type, fieldsToSet: { orgId: entry.resolvedOrgId } },
+    isUnresolvable
+      ? {
+          recordId: entry.id,
+          type,
+          fieldsToSet: { orgUnknown: true },
+          fieldsToRemove: ["orgId"],
+        }
+      : {
+          recordId: entry.id,
+          type,
+          fieldsToSet: { orgId: entry.resolvedOrgId },
+        },
     {
       registryService: registry,
       dryRun: false,
@@ -972,32 +1062,310 @@ export async function applyCorrectiveEntry(
   if (editResult.error) return { error: editResult.error };
   const needsReapproval = editResultNeedsReapproval(editResult);
 
-  const pkName = type === "agent" ? "agentId" : "toolId";
-  await docClient.send(
-    new UpdateCommand({
-      TableName: tableName,
-      Key: { [pkName]: entry.id },
-      UpdateExpression: "SET #orgId = :orgId, #updatedAt = :updatedAt",
-      ConditionExpression: "#orgId = :previousOrgId",
-      ExpressionAttributeNames: {
-        "#orgId": "orgId",
-        "#updatedAt": "updatedAt",
-      },
-      ExpressionAttributeValues: {
-        ":orgId": entry.resolvedOrgId,
-        ":updatedAt": new Date().toISOString(),
-        ":previousOrgId": entry.previousOrgId,
-      },
-      ReturnValues: "UPDATED_NEW",
-    }),
+  const converged = await waitForProjectionConvergence(
+    docClient,
+    tableName,
+    pkName,
+    entry.id,
+    isUnresolvable
+      ? {
+          expectedOrgUnknown: true,
+          expectedRegistryStatus: editResult.priorStatus,
+        }
+      : {
+          expectedOrgId: entry.resolvedOrgId,
+          expectedRegistryStatus: editResult.priorStatus,
+        },
+    waitMs,
+    pollIntervalMs,
+    clock,
   );
+
+  const result: {
+    error?: string;
+    needsReapproval?: boolean;
+    projectionLag?: boolean;
+  } = {};
+  if (needsReapproval) result.needsReapproval = true;
+  if (!converged) result.projectionLag = true;
+  return result;
+}
+
+/**
+ * Applies one planned corrective entry that is DDB-only drift (see
+ * {@link findDdbOnlyCorrectiveTargets}): the registry record has no
+ * matching corrective signature (already corrected, or never written),
+ * but the DDB projection row is still stuck. This is the ONE remaining
+ * direct-DDB-write path (Required change 3) — conditioned on the row
+ * still holding its previously-observed value. A
+ * `ConditionalCheckFailedException` is treated as potential convergence,
+ * not an automatic failure: the row is re-read, and if it is ALREADY in
+ * the desired state (idempotent convergence — e.g. registry-sync or a
+ * concurrent run already moved it) this returns success; otherwise it is
+ * a genuine conflict and returns `error`.
+ */
+export async function applyDdbOnlyCorrectiveEntry(
+  entry: CorrectivePlanEntry,
+  type: ResourceType,
+  registry: RegistryService,
+  tableName: string,
+  docClient: DynamoDBDocumentClient,
+  callDelayMs: number = DEFAULT_CALL_DELAY_MS,
+  callPacer: CallPacer = defaultCallPacer,
+): Promise<{ error?: string; needsReapproval?: boolean }> {
+  if (entry.reason === "ambiguous-multi-org") {
+    return { error: undefined };
+  }
+
+  const pkName = type === "agent" ? "agentId" : "toolId";
+  const isUnresolvable =
+    entry.reason === "unresolvable-orgUnknown" ||
+    entry.resolvedOrgId === undefined;
+
+  const editResult = await applyMarkerEdit(
+    isUnresolvable
+      ? {
+          recordId: entry.id,
+          type,
+          fieldsToSet: { orgUnknown: true },
+          fieldsToRemove: ["orgId"],
+        }
+      : {
+          recordId: entry.id,
+          type,
+          fieldsToSet: { orgId: entry.resolvedOrgId },
+        },
+    {
+      registryService: registry,
+      dryRun: false,
+      operationLabel: "backfill-shared-org-marker-correct-fabricator",
+      callDelayMs,
+      callPacer,
+    },
+  );
+  if (editResult.error) return { error: editResult.error };
+  const needsReapproval = editResultNeedsReapproval(editResult);
+
+  const ddbFieldsToSet = isUnresolvable
+    ? {
+        UpdateExpression:
+          "REMOVE #orgId SET #orgUnknown = :orgUnknown, #updatedAt = :updatedAt",
+        names: {
+          "#orgId": "orgId",
+          "#orgUnknown": "orgUnknown",
+          "#updatedAt": "updatedAt",
+        } as Record<string, string>,
+        values: {
+          ":orgUnknown": true,
+          ":updatedAt": new Date().toISOString(),
+          ":previousOrgId": entry.previousOrgId,
+        },
+      }
+    : {
+        UpdateExpression: "SET #orgId = :orgId, #updatedAt = :updatedAt",
+        names: { "#orgId": "orgId", "#updatedAt": "updatedAt" } as Record<
+          string,
+          string
+        >,
+        values: {
+          ":orgId": entry.resolvedOrgId,
+          ":updatedAt": new Date().toISOString(),
+          ":previousOrgId": entry.previousOrgId,
+        },
+      };
+
+  try {
+    await docClient.send(
+      new UpdateCommand({
+        TableName: tableName,
+        Key: { [pkName]: entry.id },
+        UpdateExpression: ddbFieldsToSet.UpdateExpression,
+        ConditionExpression: "#orgId = :previousOrgId",
+        ExpressionAttributeNames: ddbFieldsToSet.names,
+        ExpressionAttributeValues: ddbFieldsToSet.values,
+        ReturnValues: "UPDATED_NEW",
+      }),
+    );
+  } catch (err) {
+    const isConditionalCheckFailed =
+      err instanceof Error && err.name === "ConditionalCheckFailedException";
+    if (!isConditionalCheckFailed) {
+      return { error: `DDB write failed: ${String(err)}` };
+    }
+    // Re-read and treat "already in the desired state" as idempotent
+    // success — a concurrent writer (registry-sync, or another run) may
+    // have already converged this row to exactly what we were about to
+    // write.
+    let current;
+    try {
+      current = await docClient.send(
+        new GetCommand({ TableName: tableName, Key: { [pkName]: entry.id } }),
+      );
+    } catch (readErr) {
+      return {
+        error: `ConditionalCheckFailedException and re-read failed: ${String(readErr)}`,
+      };
+    }
+    const item = current.Item as Record<string, unknown> | undefined;
+    const alreadyDesired = isUnresolvable
+      ? item?.orgUnknown === true && item?.orgId === undefined
+      : item?.orgId === entry.resolvedOrgId && item?.orgUnknown !== true;
+    if (!alreadyDesired) {
+      return {
+        error:
+          "ConditionalCheckFailedException and row is not in the desired state",
+      };
+    }
+  }
+
   return needsReapproval ? { needsReapproval: true } : {};
 }
 
 /**
- * Result of a single `--restore-approval <id>` attempt (or an end-of-run
- * re-approval pass iteration).
+ * Result of a single `--resync-projection <id>` attempt (or an end-of-run
+ * resync pass iteration).
  */
+export interface ResyncProjectionResult {
+  id: string;
+  type: ResourceType;
+  wouldRebuild?: boolean;
+  alreadyMatches?: boolean;
+  rebuilt?: boolean;
+  error?: string;
+  /** Set when `getResource` failed in a way consistent with the id being
+   * the other resource type — lets the caller retry as the other kind. */
+  recordNotFoundOrWrongType?: boolean;
+}
+
+/**
+ * Rebuilds a single DDB projection row from its registry record through
+ * registry-sync's OWN mapping/writer module (Required change 2):
+ * {@link buildAgentProjectionRow}/{@link buildToolProjectionRow} for the
+ * mapping, {@link writeProjectionRow} for the write — the exact same two
+ * functions the live registry-sync lambda uses, so the rebuilt row carries
+ * identical ordering/version fields (`projectionVersion`, `projectedAt`,
+ * `registryStatus`, `statusUpdatedAt`) and is never rejected or regressed
+ * by a later live registry-sync event.
+ *
+ * Dry-run by default (`apply: false`): reads the registry record and
+ * reports whether a rebuild would change anything, without writing. No-op
+ * when the current DDB row already matches what the mapper would produce
+ * (compares `orgId`, `orgUnknown`, `registryStatus`). Never throws —
+ * returns `error` on failure so the caller (CLI `--resync-projection` or
+ * the end-of-run resync pass) decides on exit code / retry.
+ */
+export async function resyncProjectionForId(
+  id: string,
+  type: ResourceType,
+  registry: RegistryService,
+  docClient: DynamoDBDocumentClient,
+  tableName: string,
+  apply: boolean,
+): Promise<ResyncProjectionResult> {
+  let record: RegistryRecord | null;
+  try {
+    record = await registry.getResource(type, id);
+  } catch (err) {
+    return {
+      id,
+      type,
+      error: `getResource failed: ${String(err)}`,
+      recordNotFoundOrWrongType: true,
+    };
+  }
+
+  if (!record) {
+    return {
+      id,
+      type,
+      error: "Record not found (null)",
+      recordNotFoundOrWrongType: true,
+    };
+  }
+
+  const mappedRow =
+    type === "agent"
+      ? buildAgentProjectionRow(record)
+      : buildToolProjectionRow(record);
+  const pkName = type === "agent" ? "agentId" : "toolId";
+
+  let current;
+  try {
+    current = await docClient.send(
+      new GetCommand({ TableName: tableName, Key: { [pkName]: id } }),
+    );
+  } catch (err) {
+    return { id, type, error: `DDB read failed: ${String(err)}` };
+  }
+
+  const existing = current.Item as Record<string, unknown> | undefined;
+  const mapped = mappedRow as unknown as Record<string, unknown>;
+  const alreadyMatches =
+    existing !== undefined &&
+    existing.orgId === mapped.orgId &&
+    existing.orgUnknown === mapped.orgUnknown &&
+    existing.registryStatus === mapped.registryStatus;
+
+  if (alreadyMatches) {
+    log("info", `[resync-projection] id=${id} already matches — no-op`);
+    return { id, type, alreadyMatches: true };
+  }
+
+  if (!apply) {
+    log(
+      "info",
+      `[resync-projection] PLAN id=${id} type=${type} currentOrgId=${existing?.orgId ?? "<absent>"} currentRegistryStatus=${existing?.registryStatus ?? "<absent>"} -> orgId=${mapped.orgId ?? "<absent>"} orgUnknown=${mapped.orgUnknown ?? false} registryStatus=${mapped.registryStatus}`,
+    );
+    return { id, type, wouldRebuild: true };
+  }
+
+  try {
+    await writeProjectionRow(docClient, tableName, type, id, record);
+  } catch (err) {
+    return { id, type, error: `writeProjectionRow failed: ${String(err)}` };
+  }
+
+  return { id, type, rebuilt: true };
+}
+
+/**
+ * `--resync-projection <id,...>` CLI entry point. Tries each id as an
+ * agent first, then a tool, mirroring `--restore-approval`'s wrong-type
+ * retry — the caller does not need to know the record's kind up front.
+ */
+export async function resyncProjectionIds(
+  ids: readonly string[],
+  registry: RegistryService,
+  docClient: DynamoDBDocumentClient,
+  agentTable: string,
+  toolTable: string,
+  apply: boolean,
+): Promise<ResyncProjectionResult[]> {
+  const results: ResyncProjectionResult[] = [];
+  for (const id of ids) {
+    let result = await resyncProjectionForId(
+      id,
+      "agent",
+      registry,
+      docClient,
+      agentTable,
+      apply,
+    );
+    if (result.error && result.recordNotFoundOrWrongType) {
+      result = await resyncProjectionForId(
+        id,
+        "tool",
+        registry,
+        docClient,
+        toolTable,
+        apply,
+      );
+    }
+    results.push(result);
+  }
+  return results;
+}
+
 export interface RestoreApprovalResult {
   recordId: string;
   wouldRestore?: boolean;
@@ -1264,6 +1632,16 @@ export interface NeedsReapprovalEntry {
   type: ResourceType;
 }
 
+/**
+ * An id flagged `projectionLag: true` by {@link applyCorrectiveEntry} —
+ * tracked separately so the end-of-run resync pass (Required change 1)
+ * iterates exactly these ids, never the full planned set.
+ */
+export interface ProjectionLagEntry {
+  id: string;
+  type: ResourceType;
+}
+
 export async function runCorrectiveForRegistryType(
   type: ResourceType,
   registry: RegistryService,
@@ -1280,6 +1658,10 @@ export async function runCorrectiveForRegistryType(
   callDelayMs: number = DEFAULT_CALL_DELAY_MS,
   callPacer: CallPacer = defaultCallPacer,
   needsReapprovalEntries: NeedsReapprovalEntry[] = [],
+  projectionLagEntries: ProjectionLagEntry[] = [],
+  projectionWaitMs: number = DEFAULT_PROJECTION_WAIT_MS,
+  projectionPollIntervalMs: number = DEFAULT_PROJECTION_POLL_INTERVAL_MS,
+  projectionClock: Clock = defaultClock,
 ): Promise<CorrectivePlanEntry[]> {
   const plan: CorrectivePlanEntry[] = [];
   const kind = type === "agent" ? "agent" : "tool";
@@ -1364,6 +1746,9 @@ export async function runCorrectiveForRegistryType(
           docClient,
           callDelayMs,
           callPacer,
+          projectionWaitMs,
+          projectionPollIntervalMs,
+          projectionClock,
         );
         if (result.error) {
           log(
@@ -1379,6 +1764,14 @@ export async function runCorrectiveForRegistryType(
           log(
             "warn",
             `[correct-fabricator:${type}] recordId=${entry.id} org marker updated but approval restoration failed — bucketed into needsReapproval, continuing with next record`,
+          );
+        }
+        if (result.projectionLag) {
+          summary.projectionLag++;
+          projectionLagEntries.push({ id: entry.id, type });
+          log(
+            "warn",
+            `[correct-fabricator:${type}] recordId=${entry.id} registry write landed but the DDB projection has not converged within the wait window — bucketed into projectionLag, continuing with next record`,
           );
         }
       } catch (err) {
@@ -1738,6 +2131,21 @@ export async function main(): Promise<void> {
         .filter((s) => s.length > 0)
     : undefined;
 
+  const resyncProjectionIdx = args.indexOf("--resync-projection");
+  const resyncProjectionRaw =
+    resyncProjectionIdx !== -1 && args[resyncProjectionIdx + 1] !== undefined
+      ? args[resyncProjectionIdx + 1]
+      : undefined;
+  if (resyncProjectionIdx !== -1 && resyncProjectionRaw === undefined) {
+    throw new Error("--resync-projection requires a comma-separated id list");
+  }
+  const resyncProjectionIdsArg = resyncProjectionRaw
+    ? resyncProjectionRaw
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
+    : undefined;
+
   const registryId = process.env.REGISTRY_ID;
   const region = process.env.AWS_REGION || "us-west-2";
   const agentTable = process.env.AGENT_CONFIG_TABLE;
@@ -1762,6 +2170,11 @@ export async function main(): Promise<void> {
       "--restore-approval is only valid together with --correct-fabricator-shared",
     );
   }
+  if (resyncProjectionIdsArg !== undefined && !correctFabricatorShared) {
+    throw new Error(
+      "--resync-projection is only valid together with --correct-fabricator-shared",
+    );
+  }
 
   log("info", `Mode: ${dryRun ? "DRY-RUN" : "APPLY"}`);
   log("info", `REGISTRY_ID=${registryId} REGION=${region}`);
@@ -1772,6 +2185,47 @@ export async function main(): Promise<void> {
 
   const registry = new RegistryService({ registryId, region });
   const docClient = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+
+  if (resyncProjectionIdsArg !== undefined) {
+    log(
+      "info",
+      `--resync-projection: ${dryRun ? "DRY-RUN" : "APPLY"} for id(s)=${resyncProjectionIdsArg.join(",")}`,
+    );
+    const results = await resyncProjectionIds(
+      resyncProjectionIdsArg,
+      registry,
+      docClient,
+      agentTable,
+      toolTable,
+      apply,
+    );
+    let anyFailed = false;
+    for (const result of results) {
+      if (result.error) {
+        log(
+          "error",
+          `--resync-projection id=${result.id} failed: ${result.error}`,
+        );
+        anyFailed = true;
+      } else if (result.wouldRebuild) {
+        log(
+          "info",
+          `--resync-projection id=${result.id}: plan printed above (dry-run)`,
+        );
+      } else if (result.alreadyMatches) {
+        log(
+          "info",
+          `--resync-projection id=${result.id}: already matches, no-op`,
+        );
+      } else if (result.rebuilt) {
+        log("info", `--resync-projection id=${result.id}: rebuilt`);
+      }
+    }
+    if (anyFailed) {
+      process.exit(1);
+    }
+    return;
+  }
 
   if (restoreApprovalIds !== undefined) {
     log(
@@ -2081,6 +2535,9 @@ export async function runCorrectiveMode(
   fallbackOrg?: string,
   callDelayMs: number = DEFAULT_CALL_DELAY_MS,
   callPacer: CallPacer = defaultCallPacer,
+  projectionWaitMs: number = DEFAULT_PROJECTION_WAIT_MS,
+  projectionPollIntervalMs: number = DEFAULT_PROJECTION_POLL_INTERVAL_MS,
+  projectionClock: Clock = defaultClock,
 ): Promise<void> {
   log("info", `Corrective mode: ${apply ? "APPLY" : "DRY-RUN"}`);
   if (recordId) log("info", `Scoped to single record id=${recordId} (canary)`);
@@ -2120,6 +2577,11 @@ export async function runCorrectiveMode(
   // `fullPlan` is every planned target, most of which are never attempted
   // under --limit and must not be touched by the re-approval pass.
   const needsReapprovalEntries: NeedsReapprovalEntry[] = [];
+  // Flagged exactly where `summary.projectionLag` is incremented, by the
+  // registry-sourced loop inside runCorrectiveForRegistryType (called
+  // twice below). The end-of-run resync pass (Required change 1 + 2)
+  // iterates THIS list, never `fullPlan`.
+  const projectionLagEntries: ProjectionLagEntry[] = [];
 
   const agentPlan = await runCorrectiveForRegistryType(
     "agent",
@@ -2137,6 +2599,10 @@ export async function runCorrectiveMode(
     callDelayMs,
     callPacer,
     needsReapprovalEntries,
+    projectionLagEntries,
+    projectionWaitMs,
+    projectionPollIntervalMs,
+    projectionClock,
   );
   const toolPlan = await runCorrectiveForRegistryType(
     "tool",
@@ -2154,6 +2620,10 @@ export async function runCorrectiveMode(
     callDelayMs,
     callPacer,
     needsReapprovalEntries,
+    projectionLagEntries,
+    projectionWaitMs,
+    projectionPollIntervalMs,
+    projectionClock,
   );
 
   // R2: the registry-sourced scans above only find records whose CURRENT
@@ -2206,7 +2676,7 @@ export async function runCorrectiveMode(
     try {
       const type: ResourceType = entry.kind === "agent" ? "agent" : "tool";
       const tableName = entry.kind === "agent" ? agentTable : toolTable;
-      const result = await applyCorrectiveEntry(
+      const result = await applyDdbOnlyCorrectiveEntry(
         entry,
         type,
         registry,
@@ -2290,6 +2760,7 @@ export async function runCorrectiveMode(
   log("info", `markedFallback:    ${summary.markedFallback}`);
   log("info", `ambiguousReported: ${summary.ambiguousReported}`);
   log("info", `needsReapproval:   ${summary.needsReapproval}`);
+  log("info", `projectionLag:     ${summary.projectionLag}`);
   log("info", `errors:            ${summary.errors}`);
 
   // End-of-run re-approval pass: records whose org marker was written but
@@ -2333,7 +2804,58 @@ export async function runCorrectiveMode(
     );
   }
 
-  if (summary.errors > 0 || summary.needsReapproval > 0) {
+  // End-of-run resync pass (Required change 1 + 2): ids flagged
+  // `projectionLag` get ONE more attempt here to rebuild their DDB
+  // projection row through registry-sync's own mapper/writer
+  // ({@link resyncProjectionForId}), in the same run, before the operator
+  // has to invoke `--resync-projection` separately. Only in apply mode.
+  // Iterates `projectionLagEntries` — the ids flagged exactly at the
+  // `summary.projectionLag++` site in runCorrectiveForRegistryType — never
+  // `fullPlan`. Only an id STILL unconverged after this pass counts toward
+  // a non-zero exit (per Required change 1/4).
+  if (apply && summary.projectionLag > 0) {
+    log(
+      "info",
+      `--- End-of-run resync pass (${summary.projectionLag} record(s) flagged projectionLag) ---`,
+    );
+    let stillProjectionLag = 0;
+    for (const { id, type: flaggedType } of projectionLagEntries) {
+      const tableName = flaggedType === "agent" ? agentTable : toolTable;
+      const resyncResult = await resyncProjectionForId(
+        id,
+        flaggedType,
+        registry,
+        docClient,
+        tableName,
+        true,
+      );
+      if (resyncResult.rebuilt || resyncResult.alreadyMatches) {
+        log("info", `[resync-projection] id=${id} converged`);
+      } else {
+        stillProjectionLag++;
+        log(
+          "error",
+          `[resync-projection] id=${id} still not converged after end-of-run pass: ${resyncResult.error ?? "unknown"}`,
+        );
+      }
+    }
+    summary.projectionLag = stillProjectionLag;
+    log(
+      "info",
+      `--- End-of-run resync pass complete: ${stillProjectionLag} still projectionLag ---`,
+    );
+  }
+
+  // Exit code counts only real errors: `errors` (pre-write/genuine write
+  // failures) and any id still outstanding in `needsReapproval` /
+  // `projectionLag` AFTER their respective end-of-run passes have each
+  // had one more attempt. `--limit` already counts attempts above,
+  // independent of this exit-code gate.
+  if (
+    summary.errors > 0 ||
+    summary.needsReapproval > 0 ||
+    summary.projectionLag > 0
+  ) {
     process.exit(1);
   }
 }

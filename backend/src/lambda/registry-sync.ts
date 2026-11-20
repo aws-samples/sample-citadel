@@ -504,7 +504,7 @@ export function extractRawStatus(
   }
 }
 
-function getKeyForResource(
+export function getKeyForResource(
   resourceType: ResourceType,
   resourceId: string,
 ): Record<string, string> {
@@ -1573,56 +1573,95 @@ export async function handleGaUpsert(
 
   await docClient.send(new UpdateCommand(params));
 
-  // Write the full projection row (UpdateCommand, keyed by recordId) so the
-  // list-from-projection path has a complete, self-contained row for this
-  // resource. Uses UpdateCommand (not PutItem) to avoid dropping
-  // lastRegistryEventAt — the stale-event guard depends on it persisting
-  // across events.
-  const projectionRow =
-    resourceType === "agent"
-      ? buildAgentProjectionRow(record)
-      : buildToolProjectionRow(record);
+  // Write the full projection row through the single shared writer (see
+  // {@link writeProjectionRow}) so the list-from-projection path has a
+  // complete, self-contained row for this resource. Best-effort: a
+  // projection-write failure must not break the existing merge-upsert path
+  // above, which already landed.
   try {
-    const projNames: Record<string, string> = {};
-    const projValues: Record<string, unknown> = {};
-    const projClauses: string[] = [];
-
-    const keyAttr = resourceType === "agent" ? "agentId" : "toolId";
-    for (const [attr, value] of Object.entries(projectionRow)) {
-      if (attr === keyAttr) continue; // skip the key attribute
-      const safeName = attr.replace(/[^a-zA-Z0-9_]/g, "_");
-      projNames[`#p_${safeName}`] = attr;
-      projValues[`:p_${safeName}`] = value;
-      projClauses.push(`#p_${safeName} = :p_${safeName}`);
-    }
-
-    // Ensure lastRegistryEventAt is set (and never regressed)
-    if (eventTime) {
-      projNames["#p_lastRegistryEventAt"] = "lastRegistryEventAt";
-      projValues[":p_lastRegistryEventAt"] = eventTime;
-      // Only SET if not already in the projection row's clauses
-      if (!projClauses.some((c) => c.includes("#p_lastRegistryEventAt"))) {
-        projClauses.push("#p_lastRegistryEventAt = :p_lastRegistryEventAt");
-      }
-    }
-
-    await docClient.send(
-      new UpdateCommand({
-        TableName: tableName,
-        Key: getKeyForResource(resourceType, resourceId),
-        UpdateExpression: `SET ${projClauses.join(", ")}`,
-        ExpressionAttributeNames: projNames,
-        ExpressionAttributeValues: projValues,
-      }),
+    await writeProjectionRow(
+      docClient,
+      tableName,
+      resourceType,
+      resourceId,
+      record,
+      eventTime,
     );
   } catch (err) {
-    // Best-effort: projection write failures must not break the existing
-    // merge-upsert path. Log and continue.
     console.error(
       `handleGaUpsert: projection row write failed for ${resourceType} "${resourceId}" (best-effort):`,
       err,
     );
   }
+}
+
+/**
+ * THE single shared writer for the full denormalized projection row
+ * (agent/tool). Builds the row via {@link buildAgentProjectionRow} /
+ * {@link buildToolProjectionRow} (registry-sync's own mapper — the same
+ * mapper used by the live event-driven path above) and writes it with a
+ * full-attribute `UpdateCommand` keyed by `recordId`, exactly matching the
+ * ordering/version fields (`projectionVersion`, `projectedAt`,
+ * `registryStatus`, `statusUpdatedAt`) that the live path sets — so a
+ * later live registry-sync event is never rejected or made to regress by a
+ * row this writer produced.
+ *
+ * Uses `UpdateCommand` (not `PutItem`) so an existing `lastRegistryEventAt`
+ * is never dropped — the stale-event guard depends on it persisting across
+ * events. When `eventTime` is supplied (the live event-driven call site),
+ * it is folded into the same SET clause; callers with no event (e.g. an
+ * offline resync) simply omit it and the row is written without it.
+ *
+ * Exported so both the live `handleGaUpsert` path above AND an offline
+ * resync/backfill script can produce byte-for-byte the same projection row
+ * shape through ONE writer — never a second, independently-maintained copy
+ * of this attribute-flattening logic.
+ */
+export async function writeProjectionRow(
+  docClient: DynamoDBDocumentClient,
+  tableName: string,
+  resourceType: ResourceType,
+  resourceId: string,
+  record: RegistryRecord,
+  eventTime?: string,
+): Promise<void> {
+  const projectionRow =
+    resourceType === "agent"
+      ? buildAgentProjectionRow(record)
+      : buildToolProjectionRow(record);
+
+  const projNames: Record<string, string> = {};
+  const projValues: Record<string, unknown> = {};
+  const projClauses: string[] = [];
+
+  const keyAttr = resourceType === "agent" ? "agentId" : "toolId";
+  for (const [attr, value] of Object.entries(projectionRow)) {
+    if (attr === keyAttr) continue; // skip the key attribute
+    const safeName = attr.replace(/[^a-zA-Z0-9_]/g, "_");
+    projNames[`#p_${safeName}`] = attr;
+    projValues[`:p_${safeName}`] = value;
+    projClauses.push(`#p_${safeName} = :p_${safeName}`);
+  }
+
+  // Ensure lastRegistryEventAt is set (and never regressed)
+  if (eventTime) {
+    projNames["#p_lastRegistryEventAt"] = "lastRegistryEventAt";
+    projValues[":p_lastRegistryEventAt"] = eventTime;
+    // Only SET if not already in the projection row's clauses
+    if (!projClauses.some((c) => c.includes("#p_lastRegistryEventAt"))) {
+      projClauses.push("#p_lastRegistryEventAt = :p_lastRegistryEventAt");
+    }
+  }
+
+  await docClient.send(
+    new UpdateCommand({
+      TableName: tableName,
+      Key: getKeyForResource(resourceType, resourceId),
+      UpdateExpression: `SET ${projClauses.join(", ")}`,
+      ExpressionAttributeNames: projNames,
+      ExpressionAttributeValues: projValues,
+    }),
+  );
 }
 
 // ---------------------------------------------------------------------------
