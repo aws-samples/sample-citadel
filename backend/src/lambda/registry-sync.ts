@@ -707,8 +707,11 @@ export function buildAgentProjectionRow(
 
   const row: AgentProjectionRow = {
     ...base,
-    // Override state using record.status as fallback for unknown descriptor values
-    state: toInternalState(meta.state, record.status),
+    // State authority: record.status (the registry's own lifecycle status)
+    // is the single source of truth, exactly as the live GA path derives it
+    // via toInternalStateFromGaStatus — see deriveProjectedState's doc
+    // comment for why the descriptor's `state` mirror must never win here.
+    state: deriveProjectedState(meta.state, record.status),
     // Override fields that buildAgentCacheRecord cannot set from the legacy path
     registryRecordId: record.recordId,
     registryStatus: record.status,
@@ -942,6 +945,41 @@ export function toInternalStateFromGaStatus(
       );
       return undefined;
   }
+}
+
+/**
+ * Single shared `state` derivation used by BOTH the live event-driven path
+ * (`buildGaMergeFields`, `handleStatusChanged`'s GA branch) and the
+ * offline rebuild/resync path (`buildAgentProjectionRow`), so a rebuild of
+ * a record produces byte-for-byte the same `state` as the deployed sync
+ * handler would have written for it.
+ *
+ * `record.status` is AUTHORITATIVE and wins whenever it maps to a known
+ * value. This is deliberate, not incidental: the fabricator
+ * (arbiter/fabricator/index.py) writes the descriptor's `custom.state` as
+ * `'inactive'` exactly once at creation time as a quarantine flag for a
+ * brand-new DRAFT record. Approval (SubmitRegistryRecordForApproval) flips
+ * only the top-level `record.status` to APPROVED — it never touches the
+ * descriptor — so `custom.state` is stale ('inactive') on every approved
+ * fabricator-created agent while `record.status` correctly reflects
+ * APPROVED. This drift is documented and intentional at
+ * registry-agent-record-resolver.ts (search "which drifts: the fabricator
+ * writes"): `custom.state` is NOT an operator override field; it is only
+ * ever meaningful as the initial quarantine marker on a DRAFT record, and
+ * `record.status` must win once the record has moved past DRAFT.
+ *
+ * `descriptorState` (the legacy `meta.state`/`toInternalState` value) is
+ * consulted ONLY when `record.status` itself fails to map to a known
+ * value, mirroring `toInternalState`'s existing unknown-status fallback
+ * behaviour for records with no usable status at all.
+ */
+export function deriveProjectedState(
+  descriptorState: string,
+  recordStatus: string | undefined,
+): string {
+  const fromStatus = toInternalStateFromGaStatus(recordStatus);
+  if (fromStatus !== undefined) return fromStatus;
+  return toInternalState(descriptorState);
 }
 
 /**
