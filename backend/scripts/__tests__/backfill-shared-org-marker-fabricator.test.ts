@@ -4,7 +4,9 @@
  * Covers:
  *   - "fabricator" removed from SEED_ALLOWLIST_CREATED_BY
  *   - New mark-tenant outcome via sourceProjectId → project → organization
- *   - Tool resolution via appId → agent → sourceProjectId → project → org
+ *   - Tool resolution via a NAME-based toolName -> org index (option A;
+ *     see "Tool resolution — NAME-based binding" below) replacing the old
+ *     appId-based binding
  *   - Multi-org → ambiguous (never assigned)
  *   - Corrective mode (--correct-fabricator-shared)
  *   - Regression: fabricator-created record with sourceProjectId never ALL_ORGS
@@ -20,11 +22,13 @@ import {
   isCorrectiveTarget,
   planCorrectiveEntry,
   buildOrgResolverFromMaps,
+  buildToolNameOrgIndex,
   applyCorrectiveEntry,
   runCorrectiveForRegistryType,
   reconcileDroppedRecords,
   type RecordShape,
   type OrgResolver,
+  type AgentConfigLike,
 } from "../backfill-shared-org-marker";
 import type { RegistryService } from "../../src/services/registry-service";
 import { ALL_ORGS } from "../../src/utils/org-constants";
@@ -60,7 +64,7 @@ describe("classifyRecord — fabricator mark-tenant path", () => {
       return undefined;
     },
     resolveToolOrg: (rec: RecordShape) => {
-      if (rec.appId === "app-1") return "Default";
+      if (rec.name === "fetch_inbox_invoices") return "Default";
       return undefined;
     },
   };
@@ -81,29 +85,27 @@ describe("classifyRecord — fabricator mark-tenant path", () => {
     });
   });
 
-  it("classifies a tool with appId resolvable to a single org as mark-tenant", () => {
+  it("classifies a tool whose name resolves to a single org (via the name index) as mark-tenant", () => {
     const rec: RecordShape = {
       id: "t1",
-      name: "some-tool",
+      name: "fetch_inbox_invoices",
       orgId: "",
       createdBy: "fabricator",
-      appId: "app-1",
     };
     const result = classifyRecord(rec, undefined, orgResolver);
     expect(result).toEqual({
       outcome: "mark-tenant",
       targetOrgId: "Default",
-      reason: "fabricator-tool-appId",
+      reason: "fabricator-tool-name",
     });
   });
 
-  it("classifies a tool with unresolvable appId as mark-unknown", () => {
+  it("classifies a tool whose name does not resolve as mark-unknown", () => {
     const rec: RecordShape = {
       id: "t2",
-      name: "orphan-tool",
+      name: "orphan_tool",
       orgId: "",
       createdBy: "fabricator",
-      appId: "app-unknown",
     };
     const result = classifyRecord(rec, undefined, orgResolver);
     expect(result.outcome).toBe("mark-unknown");
@@ -174,19 +176,18 @@ describe("classifyRecord — tool multi-org ambiguity", () => {
   const multiOrgResolver: OrgResolver = {
     resolveAgentOrg: () => undefined,
     resolveToolOrg: (rec: RecordShape) => {
-      // Simulate: appId resolves to agents in multiple orgs → ambiguous
-      if (rec.appId === "app-multi") return "AMBIGUOUS";
+      // Simulate: tool name resolves to agents in multiple orgs → ambiguous
+      if (rec.name === "multi_org_tool") return "AMBIGUOUS";
       return undefined;
     },
   };
 
-  it("tool with appId that resolves to multiple orgs → ambiguous", () => {
+  it("tool whose name resolves to multiple orgs → ambiguous", () => {
     const rec: RecordShape = {
       id: "t-multi",
-      name: "multi-org-tool",
+      name: "multi_org_tool",
       orgId: "",
       createdBy: "fabricator",
-      appId: "app-multi",
     };
     const result = classifyRecord(rec, undefined, multiOrgResolver);
     expect(result.outcome).toBe("ambiguous");
@@ -335,8 +336,8 @@ describe("planCorrectiveEntry", () => {
     resolveAgentOrg: (rec: RecordShape) =>
       rec.sourceProjectId === "proj-1" ? "Default" : undefined,
     resolveToolOrg: (rec: RecordShape) => {
-      if (rec.appId === "app-1") return "Default";
-      if (rec.appId === "app-multi") return "AMBIGUOUS";
+      if (rec.name === "fetch_inbox_invoices") return "Default";
+      if (rec.name === "multi_org_tool") return "AMBIGUOUS";
       return undefined;
     },
   };
@@ -369,37 +370,35 @@ describe("planCorrectiveEntry", () => {
     });
   });
 
-  it("plans a resolvable tool via appId with reason fabricator-tool-appId", () => {
+  it("plans a resolvable tool via its name with reason fabricator-tool-name", () => {
     const rec: RecordShape = {
       id: "t1",
-      name: "fabricated-tool",
+      name: "fetch_inbox_invoices",
       orgId: ALL_ORGS,
       createdBy: "fabricator",
-      appId: "app-1",
     };
     const entry = planCorrectiveEntry(rec, "tool", orgResolver);
     expect(entry).toEqual({
       id: "t1",
-      name: "fabricated-tool",
+      name: "fetch_inbox_invoices",
       kind: "tool",
       previousOrgId: ALL_ORGS,
       resolvedOrgId: "Default",
-      reason: "fabricator-tool-appId",
+      reason: "fabricator-tool-name",
     });
   });
 
   it("plans an unresolvable record with resolvedOrgId undefined and reason unresolvable-orgUnknown", () => {
     const rec: RecordShape = {
       id: "t2",
-      name: "orphan-tool",
+      name: "orphan_tool",
       orgId: ALL_ORGS,
       createdBy: "fabricator",
-      appId: "app-unknown",
     };
     const entry = planCorrectiveEntry(rec, "tool", orgResolver);
     expect(entry).toEqual({
       id: "t2",
-      name: "orphan-tool",
+      name: "orphan_tool",
       kind: "tool",
       previousOrgId: ALL_ORGS,
       resolvedOrgId: undefined,
@@ -410,15 +409,14 @@ describe("planCorrectiveEntry", () => {
   it("plans a multi-org tool with resolvedOrgId undefined and reason ambiguous-multi-org", () => {
     const rec: RecordShape = {
       id: "t3",
-      name: "multi-org-tool",
+      name: "multi_org_tool",
       orgId: ALL_ORGS,
       createdBy: "fabricator",
-      appId: "app-multi",
     };
     const entry = planCorrectiveEntry(rec, "tool", orgResolver);
     expect(entry).toEqual({
       id: "t3",
-      name: "multi-org-tool",
+      name: "multi_org_tool",
       kind: "tool",
       previousOrgId: ALL_ORGS,
       resolvedOrgId: undefined,
@@ -428,10 +426,167 @@ describe("planCorrectiveEntry", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 11. buildOrgResolverFromMaps — single/multi/none org resolution
+// 11. buildToolNameOrgIndex + buildOrgResolverFromMaps — NAME-based binding
 // ---------------------------------------------------------------------------
+//
+// Option A: the tool->agent binding is built ONCE per run as an index
+// toolName -> set(resolved org), parsed from each agent's config JSON
+// string (config.schema.tools[]) plus non-empty manifest.tools[]. A
+// fabricated agent resolves via sourceProjectId -> projects table -> org;
+// an agent with an explicit tenant orgId contributes that org; ALL_ORGS/
+// seed/orgUnknown agents contribute nothing. A tool name with exactly one
+// distinct contributing org stamps that org; several -> ambiguous
+// (reported only); none -> orgUnknown. Seed-name tools are never targeted.
 
-describe("buildOrgResolverFromMaps", () => {
+describe("buildToolNameOrgIndex", () => {
+  const resolveAgentOrg = (rec: RecordShape): string | undefined => {
+    if (rec.orgId !== undefined && rec.orgId !== "" && rec.orgId !== ALL_ORGS)
+      return rec.orgId;
+    if (rec.sourceProjectId === "proj-1") return "Default";
+    if (rec.sourceProjectId === "proj-2") return "Acme Corp";
+    return undefined;
+  };
+
+  it("indexes a tool name from config.schema.tools[] on a fabricated agent resolved via sourceProjectId", () => {
+    const agents: AgentConfigLike[] = [
+      {
+        name: "custom-agent",
+        createdBy: "fabricator",
+        sourceProjectId: "proj-1",
+        config: JSON.stringify({ schema: { tools: ["fetch_inbox_invoices"] } }),
+      },
+    ];
+    const index = buildToolNameOrgIndex(agents, resolveAgentOrg);
+    expect(index.get("fetch_inbox_invoices")).toEqual(new Set(["Default"]));
+  });
+
+  it("indexes a tool name from a non-empty manifest.tools[] in addition to config.schema.tools[]", () => {
+    const agents: AgentConfigLike[] = [
+      {
+        name: "custom-agent",
+        createdBy: "fabricator",
+        sourceProjectId: "proj-1",
+        config: JSON.stringify({ schema: { tools: [] } }),
+        manifest: { tools: ["send_email_reminder"] },
+      },
+    ];
+    const index = buildToolNameOrgIndex(agents, resolveAgentOrg);
+    expect(index.get("send_email_reminder")).toEqual(new Set(["Default"]));
+  });
+
+  it("ignores an empty manifest.tools[] (does not contribute an empty-array marker)", () => {
+    const agents: AgentConfigLike[] = [
+      {
+        name: "custom-agent",
+        createdBy: "fabricator",
+        sourceProjectId: "proj-1",
+        config: JSON.stringify({ schema: { tools: ["only_tool"] } }),
+        manifest: { tools: [] },
+      },
+    ];
+    const index = buildToolNameOrgIndex(agents, resolveAgentOrg);
+    expect(index.size).toBe(1);
+    expect(index.has("only_tool")).toBe(true);
+  });
+
+  it("an agent with an explicit tenant orgId contributes that org directly (no sourceProjectId needed)", () => {
+    const agents: AgentConfigLike[] = [
+      {
+        name: "tenant-agent",
+        orgId: "Acme Corp",
+        config: JSON.stringify({ schema: { tools: ["acme_only_tool"] } }),
+      },
+    ];
+    const index = buildToolNameOrgIndex(agents, resolveAgentOrg);
+    expect(index.get("acme_only_tool")).toEqual(new Set(["Acme Corp"]));
+  });
+
+  it("an ALL_ORGS agent contributes nothing", () => {
+    const agents: AgentConfigLike[] = [
+      {
+        name: "shared-agent",
+        orgId: ALL_ORGS,
+        config: JSON.stringify({ schema: { tools: ["shared-ish-tool"] } }),
+      },
+    ];
+    const index = buildToolNameOrgIndex(agents, resolveAgentOrg);
+    expect(index.has("shared-ish-tool")).toBe(false);
+  });
+
+  it("a seed-name agent contributes nothing", () => {
+    const agents: AgentConfigLike[] = [
+      {
+        name: "fabricator",
+        createdBy: "fabricator",
+        sourceProjectId: "proj-1",
+        config: JSON.stringify({ schema: { tools: ["seed_owned_tool"] } }),
+      },
+    ];
+    const index = buildToolNameOrgIndex(agents, resolveAgentOrg);
+    expect(index.has("seed_owned_tool")).toBe(false);
+  });
+
+  it("an orgUnknown agent contributes nothing", () => {
+    const agents: AgentConfigLike[] = [
+      {
+        name: "legacy-agent",
+        orgUnknown: true,
+        config: JSON.stringify({ schema: { tools: ["legacy-tool"] } }),
+      },
+    ];
+    const index = buildToolNameOrgIndex(agents, resolveAgentOrg);
+    expect(index.has("legacy-tool")).toBe(false);
+  });
+
+  it("a tool name referenced by agents in two distinct orgs accumulates both orgs in its set (ambiguous upstream)", () => {
+    const agents: AgentConfigLike[] = [
+      {
+        name: "agent-a",
+        createdBy: "fabricator",
+        sourceProjectId: "proj-1",
+        config: JSON.stringify({ schema: { tools: ["shared_tool_name"] } }),
+      },
+      {
+        name: "agent-b",
+        createdBy: "fabricator",
+        sourceProjectId: "proj-2",
+        config: JSON.stringify({ schema: { tools: ["shared_tool_name"] } }),
+      },
+    ];
+    const index = buildToolNameOrgIndex(agents, resolveAgentOrg);
+    expect(index.get("shared_tool_name")).toEqual(
+      new Set(["Default", "Acme Corp"]),
+    );
+  });
+
+  it("an agent with an unparsable config JSON string contributes nothing without throwing", () => {
+    const agents: AgentConfigLike[] = [
+      {
+        name: "broken-agent",
+        createdBy: "fabricator",
+        sourceProjectId: "proj-1",
+        config: "{not valid json",
+      },
+    ];
+    expect(() => buildToolNameOrgIndex(agents, resolveAgentOrg)).not.toThrow();
+    const index = buildToolNameOrgIndex(agents, resolveAgentOrg);
+    expect(index.size).toBe(0);
+  });
+
+  it("an agent with missing config and no manifest.tools contributes nothing", () => {
+    const agents: AgentConfigLike[] = [
+      {
+        name: "bare-agent",
+        createdBy: "fabricator",
+        sourceProjectId: "proj-1",
+      },
+    ];
+    const index = buildToolNameOrgIndex(agents, resolveAgentOrg);
+    expect(index.size).toBe(0);
+  });
+});
+
+describe("buildOrgResolverFromMaps — NAME-based resolveToolOrg", () => {
   it("resolveAgentOrg returns the mapped org for a known sourceProjectId", () => {
     const resolver = buildOrgResolverFromMaps(
       new Map([["proj-1", "Default"]]),
@@ -457,66 +612,45 @@ describe("buildOrgResolverFromMaps", () => {
     ).toBeUndefined();
   });
 
-  it("resolveToolOrg returns the single org when all binding agents share one org", () => {
+  it("resolveToolOrg returns the single org when the tool name maps to exactly one org", () => {
     const resolver = buildOrgResolverFromMaps(
-      new Map([
-        ["proj-1", "Default"],
-        ["proj-2", "Default"],
-      ]),
-      new Map([
-        [
-          "app-1",
-          [{ sourceProjectId: "proj-1" }, { sourceProjectId: "proj-2" }],
-        ],
-      ]),
+      new Map([["proj-1", "Default"]]),
+      new Map([["fetch_inbox_invoices", new Set(["Default"])]]),
     );
-    expect(resolver.resolveToolOrg({ id: "t1", appId: "app-1" })).toBe(
-      "Default",
-    );
+    expect(
+      resolver.resolveToolOrg({ id: "t1", name: "fetch_inbox_invoices" }),
+    ).toBe("Default");
   });
 
-  it("resolveToolOrg returns AMBIGUOUS when binding agents resolve to multiple distinct orgs", () => {
+  it("resolveToolOrg returns AMBIGUOUS when the tool name maps to multiple distinct orgs", () => {
     const resolver = buildOrgResolverFromMaps(
-      new Map([
-        ["proj-1", "Default"],
-        ["proj-2", "Acme Corp"],
-      ]),
-      new Map([
-        [
-          "app-multi",
-          [{ sourceProjectId: "proj-1" }, { sourceProjectId: "proj-2" }],
-        ],
-      ]),
+      new Map(),
+      new Map([["shared_tool_name", new Set(["Default", "Acme Corp"])]]),
     );
-    expect(resolver.resolveToolOrg({ id: "t1", appId: "app-multi" })).toBe(
-      "AMBIGUOUS",
-    );
+    expect(
+      resolver.resolveToolOrg({ id: "t1", name: "shared_tool_name" }),
+    ).toBe("AMBIGUOUS");
   });
 
-  it("resolveToolOrg returns undefined when appId has no binding agents", () => {
+  it("resolveToolOrg returns undefined when the tool name has no entry in the index (orgUnknown)", () => {
     const resolver = buildOrgResolverFromMaps(new Map(), new Map());
     expect(
-      resolver.resolveToolOrg({ id: "t1", appId: "app-none" }),
+      resolver.resolveToolOrg({ id: "t1", name: "unindexed_tool" }),
     ).toBeUndefined();
   });
 
-  it("resolveToolOrg returns undefined when appId is absent on the record", () => {
+  it("resolveToolOrg returns undefined when the tool record has no name", () => {
     const resolver = buildOrgResolverFromMaps(new Map(), new Map());
     expect(resolver.resolveToolOrg({ id: "t1" })).toBeUndefined();
   });
 
-  it("resolveToolOrg ignores binding agents with no resolvable sourceProjectId", () => {
+  it("resolveToolOrg returns undefined for a seed-name tool even if (hypothetically) present in the index", () => {
     const resolver = buildOrgResolverFromMaps(
-      new Map([["proj-1", "Default"]]),
-      new Map([
-        [
-          "app-1",
-          [{ sourceProjectId: undefined }, { sourceProjectId: "proj-1" }],
-        ],
-      ]),
+      new Map(),
+      new Map([["fabricator", new Set(["Default"])]]),
     );
-    expect(resolver.resolveToolOrg({ id: "t1", appId: "app-1" })).toBe(
-      "Default",
+    expect(resolver.resolveToolOrg({ id: "t1", name: "fabricator" })).toBe(
+      undefined,
     );
   });
 });
@@ -918,7 +1052,6 @@ describe("runCorrectiveForRegistryType — throttled/partial list refuses to act
         customDescriptorContent: JSON.stringify({
           orgId: ALL_ORGS,
           createdBy: "fabricator",
-          appId: "app-1",
         }),
       });
     // First attempt throws (still throttled), second attempt succeeds.
@@ -932,7 +1065,6 @@ describe("runCorrectiveForRegistryType — throttled/partial list refuses to act
         customDescriptorContent: JSON.stringify({
           orgId: ALL_ORGS,
           createdBy: "fabricator",
-          appId: "app-1",
         }),
       });
     const registry = {

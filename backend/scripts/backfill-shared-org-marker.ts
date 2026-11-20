@@ -133,7 +133,6 @@ export interface RecordShape {
   orgUnknown?: boolean;
   createdBy?: string;
   sourceProjectId?: string;
-  appId?: string;
 }
 
 /**
@@ -143,12 +142,16 @@ export interface RecordShape {
  *   project in the projects table and return its `organization` field, or
  *   `undefined` if not resolvable.
  *
- * `resolveToolOrg` — given a record with `appId`, find agents that share
- *   the same `appId`, resolve their org via `sourceProjectId → project →
- *   organization`, and return:
- *     - the single org string if exactly one org is found
- *     - `"AMBIGUOUS"` if multiple distinct orgs are found
- *     - `undefined` if none resolve
+ * `resolveToolOrg` — given a tool record, look up its `name` in a
+ *   pre-built toolName -> set(org) index (see {@link buildToolNameOrgIndex})
+ *   and return:
+ *     - the single org string if the name maps to exactly one distinct org
+ *     - `"AMBIGUOUS"` if the name maps to multiple distinct orgs
+ *     - `undefined` if the name has no entry (orgUnknown) or is absent
+ *   Tool->agent binding is NAME-based: a tool name is matched against the
+ *   set of tool names referenced by every known agent's
+ *   `config.schema.tools[]` (plus non-empty `manifest.tools[]`), never via
+ *   `appId` (removed — no live data ever populated that binding).
  */
 export interface OrgResolver {
   resolveAgentOrg: (rec: RecordShape) => string | undefined;
@@ -169,8 +172,9 @@ export type ClassifyOutcome =
  * synchronous lookup (callers wrap an async Cognito/user lookup result)
  * from `createdBy` to a single resolvable tenant orgId, or `undefined` if
  * none resolves. `orgResolver`, when supplied, is used for the fabricator
- * tenant-resolution path (sourceProjectId for agents, appId → binding
- * agents for tools) — see `OrgResolver` doc comment. Never mutates `rec`.
+ * tenant-resolution path (sourceProjectId for agents, tool NAME → the
+ * toolName -> org index for tools) — see `OrgResolver` doc comment. Never
+ * mutates `rec`.
  */
 export function classifyRecord(
   rec: RecordShape,
@@ -218,7 +222,10 @@ export function classifyRecord(
   // the owning tenant org instead of stamping ALL_ORGS. A record with a
   // `sourceProjectId` is treated as agent-shaped regardless of `createdBy`
   // (the agent's own fabricator provenance may not always be stamped);
-  // records with `appId` and no `sourceProjectId` are tool-shaped.
+  // a record with neither `sourceProjectId` nor a name-allowlist/createdBy-
+  // allowlist match is tool-shaped and resolved by NAME via `resolveToolOrg`
+  // (see `OrgResolver` doc comment — this never uses `appId`, which no live
+  // agent/tool record ever populated).
   if (orgResolver) {
     if (rec.sourceProjectId !== undefined) {
       const resolved = orgResolver.resolveAgentOrg(rec);
@@ -235,20 +242,18 @@ export function classifyRecord(
       return { outcome: "mark-unknown" };
     }
 
-    if (rec.appId !== undefined) {
-      const resolved = orgResolver.resolveToolOrg(rec);
-      if (resolved === "AMBIGUOUS") {
-        return { outcome: "ambiguous", resolvedOrgId: "AMBIGUOUS" };
-      }
-      if (resolved !== undefined) {
-        return {
-          outcome: "mark-tenant",
-          targetOrgId: resolved,
-          reason: "fabricator-tool-appId",
-        };
-      }
-      return { outcome: "mark-unknown" };
+    const resolved = orgResolver.resolveToolOrg(rec);
+    if (resolved === "AMBIGUOUS") {
+      return { outcome: "ambiguous", resolvedOrgId: "AMBIGUOUS" };
     }
+    if (resolved !== undefined) {
+      return {
+        outcome: "mark-tenant",
+        targetOrgId: resolved,
+        reason: "fabricator-tool-name",
+      };
+    }
+    return { outcome: "mark-unknown" };
   }
 
   if (rec.createdBy !== undefined && resolveCreatedByOrg) {
@@ -359,7 +364,6 @@ async function processRegistryRecord(
       typeof meta.sourceProjectId === "string"
         ? meta.sourceProjectId
         : undefined,
-    appId: typeof meta.appId === "string" ? meta.appId : undefined,
   };
 
   const classification = classifyRecord(rec, undefined, orgResolver);
@@ -589,7 +593,6 @@ export async function processDdbTable(
             typeof item.sourceProjectId === "string"
               ? item.sourceProjectId
               : undefined,
-          appId: typeof item.appId === "string" ? item.appId : undefined,
         };
 
         const classification = classifyRecord(rec, undefined, orgResolver);
@@ -766,7 +769,7 @@ export function planCorrectiveEntry(
         ? "ambiguous-multi-org"
         : kind === "agent"
           ? "fabricator-agent-sourceProjectId"
-          : "fabricator-tool-appId";
+          : "fabricator-tool-name";
 
   return {
     id: rec.id,
@@ -1054,7 +1057,6 @@ export async function runCorrectiveForRegistryType(
         typeof meta.sourceProjectId === "string"
           ? meta.sourceProjectId
           : undefined,
-      appId: typeof meta.appId === "string" ? meta.appId : undefined,
     };
 
     const entry = planCorrectiveEntry(rec, kind, orgResolver);
@@ -1168,7 +1170,6 @@ export async function findDdbOnlyCorrectiveTargets(
           typeof item.sourceProjectId === "string"
             ? item.sourceProjectId
             : undefined,
-        appId: typeof item.appId === "string" ? item.appId : undefined,
       };
 
       const entry = planCorrectiveEntry(rec, kind, orgResolver);
@@ -1182,44 +1183,145 @@ export async function findDdbOnlyCorrectiveTargets(
 }
 
 /**
- * Builds a synchronous {@link OrgResolver} from pre-fetched lookup maps.
- * Corrective mode fetches projects and agent-binding data ONCE up front
- * (one projects-table scan, one agent-table scan) so the resolver itself
- * stays a pure, synchronous function — matching the `OrgResolver` contract
- * and keeping `classifyRecord`/`planCorrectiveEntry` free of I/O.
+ * Minimal shape of an agent record needed to contribute to the
+ * toolName -> org index (see {@link buildToolNameOrgIndex}). `config` is
+ * the agent's raw config JSON STRING (as persisted in the registry
+ * descriptor / DDB projection row) — tolerated as missing or unparsable.
+ * `manifest` is the agent's manifest object; only a non-empty `tools[]`
+ * array on it contributes.
+ */
+export interface AgentConfigLike {
+  name?: string;
+  orgId?: string;
+  orgUnknown?: boolean;
+  createdBy?: string;
+  sourceProjectId?: string;
+  config?: string;
+  manifest?: Record<string, unknown>;
+}
+
+/**
+ * Builds, ONCE per run, the toolName -> set(resolved org) index that
+ * backs the NAME-based tool->agent binding (option A). For every agent:
+ *   - ALL_ORGS, seed-name (SEED_ALLOWLIST_NAMES), or orgUnknown agents
+ *     contribute nothing (no positive org signal to propagate to a tool).
+ *   - an agent with an explicit, real tenant `orgId` (not ALL_ORGS, not
+ *     blank) contributes that org directly.
+ *   - otherwise a fabricated agent resolves its org via `sourceProjectId`
+ *     through `resolveAgentOrg` (typically projectId -> projects table ->
+ *     organization); if unresolvable, the agent contributes nothing.
+ * For every contributing agent, every tool name in its parsed
+ * `config.schema.tools[]` plus every tool name in a non-empty
+ * `manifest.tools[]` gets that agent's resolved org added to its set.
+ * Agents whose `config` is missing/unparsable, or that have no
+ * `schema.tools`/`manifest.tools` at all, are logged once (by the caller
+ * if desired) and simply contribute nothing — never throws.
+ */
+export function buildToolNameOrgIndex(
+  agents: readonly AgentConfigLike[],
+  resolveAgentOrg: (rec: RecordShape) => string | undefined,
+): Map<string, Set<string>> {
+  const index = new Map<string, Set<string>>();
+
+  const addToolNames = (names: readonly string[], org: string): void => {
+    for (const toolName of names) {
+      if (typeof toolName !== "string" || toolName === "") continue;
+      let orgs = index.get(toolName);
+      if (!orgs) {
+        orgs = new Set<string>();
+        index.set(toolName, orgs);
+      }
+      orgs.add(org);
+    }
+  };
+
+  for (const agent of agents) {
+    // ALL_ORGS / seed-name / orgUnknown agents contribute nothing.
+    if (agent.orgUnknown === true) continue;
+    if (agent.orgId === ALL_ORGS) continue;
+    if (agent.name !== undefined && SEED_ALLOWLIST_NAMES.includes(agent.name))
+      continue;
+
+    let org: string | undefined;
+    if (agent.orgId !== undefined && agent.orgId !== "") {
+      // Explicit, real tenant orgId — use it directly.
+      org = agent.orgId;
+    } else {
+      org = resolveAgentOrg({
+        id: "",
+        sourceProjectId: agent.sourceProjectId,
+      });
+    }
+    if (org === undefined) continue;
+
+    let schemaTools: unknown;
+    if (agent.config !== undefined) {
+      try {
+        const parsed = JSON.parse(agent.config);
+        schemaTools = (parsed as Record<string, unknown>)?.schema;
+        schemaTools = (schemaTools as Record<string, unknown> | undefined)
+          ?.tools;
+      } catch {
+        // Unparsable config — contributes nothing from config.schema.tools.
+        schemaTools = undefined;
+      }
+    }
+    if (Array.isArray(schemaTools)) {
+      addToolNames(schemaTools as string[], org);
+    }
+
+    const manifestTools = agent.manifest?.tools;
+    if (Array.isArray(manifestTools) && manifestTools.length > 0) {
+      addToolNames(manifestTools as string[], org);
+    }
+  }
+
+  return index;
+}
+
+/**
+ * Resolves a tool's org from the pre-built toolName -> set(org) index.
+ * Seed-name tools are never targeted (no-op even if the index somehow
+ * contains an entry for one). Returns the single org, `"AMBIGUOUS"` for
+ * more than one distinct org, or `undefined` when the name has no entry.
+ */
+function resolveToolOrgFromIndex(
+  rec: RecordShape,
+  toolNameOrgIndex: ReadonlyMap<string, ReadonlySet<string>>,
+): string | undefined {
+  if (rec.name === undefined) return undefined;
+  if (SEED_ALLOWLIST_NAMES.includes(rec.name)) return undefined;
+
+  const orgs = toolNameOrgIndex.get(rec.name);
+  if (!orgs || orgs.size === 0) return undefined;
+  if (orgs.size > 1) return "AMBIGUOUS";
+  return [...orgs][0];
+}
+
+/**
+ * Builds a synchronous {@link OrgResolver} from pre-fetched lookup data.
+ * Corrective mode fetches projects and the toolName -> org index ONCE up
+ * front (one projects-table scan, one agent-table scan feeding
+ * {@link buildToolNameOrgIndex}) so the resolver itself stays a pure,
+ * synchronous function — matching the `OrgResolver` contract and keeping
+ * `classifyRecord`/`planCorrectiveEntry` free of I/O.
  *
  * `projectOrgById` — projectId -> organization (projects table).
- * `agentsByAppId` — appId -> list of { sourceProjectId } for every agent
- *   bound to that app (used to resolve a tool's org via its binding agents).
+ * `toolNameOrgIndex` — toolName -> set(resolved org), built by
+ *   {@link buildToolNameOrgIndex} from every known agent's
+ *   `config.schema.tools[]` / non-empty `manifest.tools[]`.
  */
 export function buildOrgResolverFromMaps(
   projectOrgById: ReadonlyMap<string, string>,
-  agentsByAppId: ReadonlyMap<
-    string,
-    ReadonlyArray<{ sourceProjectId?: string }>
-  >,
+  toolNameOrgIndex: ReadonlyMap<string, ReadonlySet<string>>,
 ): OrgResolver {
   return {
     resolveAgentOrg: (rec: RecordShape) => {
       if (rec.sourceProjectId === undefined) return undefined;
       return projectOrgById.get(rec.sourceProjectId);
     },
-    resolveToolOrg: (rec: RecordShape) => {
-      if (rec.appId === undefined) return undefined;
-      const boundAgents = agentsByAppId.get(rec.appId);
-      if (!boundAgents || boundAgents.length === 0) return undefined;
-
-      const orgs = new Set<string>();
-      for (const agent of boundAgents) {
-        if (agent.sourceProjectId === undefined) continue;
-        const org = projectOrgById.get(agent.sourceProjectId);
-        if (org !== undefined) orgs.add(org);
-      }
-
-      if (orgs.size === 0) return undefined;
-      if (orgs.size > 1) return "AMBIGUOUS";
-      return [...orgs][0];
-    },
+    resolveToolOrg: (rec: RecordShape) =>
+      resolveToolOrgFromIndex(rec, toolNameOrgIndex),
   };
 }
 
@@ -1387,8 +1489,9 @@ export async function main(): Promise<void> {
 
 /**
  * Scans the projects table (projectId -> organization) and the agents
- * table (appId -> binding agents' sourceProjectId) once, and builds a
- * synchronous {@link OrgResolver} from the resulting maps via
+ * table (building the toolName -> org index via
+ * {@link buildToolNameOrgIndex}) once, and builds a synchronous
+ * {@link OrgResolver} from the resulting maps via
  * {@link buildOrgResolverFromMaps}. Shared by both the default pass
  * (R1 fix — resolves fabricator org outside corrective mode too) and
  * {@link runCorrectiveMode}. Throws on a scan failure; callers decide
@@ -1427,7 +1530,12 @@ export async function buildOrgResolverFromTables(
     } while (exclusiveStartKey);
   }
 
-  const agentsByAppId = new Map<string, Array<{ sourceProjectId?: string }>>();
+  const resolveAgentOrgViaProjects = (rec: RecordShape): string | undefined => {
+    if (rec.sourceProjectId === undefined) return undefined;
+    return projectOrgById.get(rec.sourceProjectId);
+  };
+
+  const agentsForToolIndex: AgentConfigLike[] = [];
   {
     let exclusiveStartKey: Record<string, NativeAttributeValue> | undefined;
     do {
@@ -1445,33 +1553,44 @@ export async function buildOrgResolverFromTables(
         );
       }
       for (const item of scanResult.Items || []) {
-        const appId = item.appId;
-        if (typeof appId !== "string") continue;
-        const list = agentsByAppId.get(appId) ?? [];
-        list.push({
+        agentsForToolIndex.push({
+          name: typeof item.name === "string" ? item.name : undefined,
+          orgId: typeof item.orgId === "string" ? item.orgId : undefined,
+          orgUnknown: item.orgUnknown === true,
+          createdBy:
+            typeof item.createdBy === "string" ? item.createdBy : undefined,
           sourceProjectId:
             typeof item.sourceProjectId === "string"
               ? item.sourceProjectId
               : undefined,
+          config: typeof item.config === "string" ? item.config : undefined,
+          manifest:
+            item.manifest !== null && typeof item.manifest === "object"
+              ? (item.manifest as Record<string, unknown>)
+              : undefined,
         });
-        agentsByAppId.set(appId, list);
       }
       exclusiveStartKey = scanResult.LastEvaluatedKey;
     } while (exclusiveStartKey);
   }
 
-  return buildOrgResolverFromMaps(projectOrgById, agentsByAppId);
+  const toolNameOrgIndex = buildToolNameOrgIndex(
+    agentsForToolIndex,
+    resolveAgentOrgViaProjects,
+  );
+
+  return buildOrgResolverFromMaps(projectOrgById, toolNameOrgIndex);
 }
 
 /**
  * Corrective-mode entry point. Pre-fetches the projects table (projectId ->
- * organization) and the agents table (appId -> binding agents) once, builds
- * a synchronous OrgResolver from those maps, then scans the agent and tool
- * registries for ALL_ORGS+fabricator+non-seed-name records and re-stamps
- * BOTH the registry descriptor and the DynamoDB projection row for each
- * resolvable one. Dry-run by default; `--record-id` scopes to a single
- * canary record; `--limit` bounds how many records get WRITTEN in apply
- * mode (the plan/print phase is never bounded).
+ * organization) and the agents table (building the toolName -> org index)
+ * once, builds a synchronous OrgResolver from those maps, then scans the
+ * agent and tool registries for ALL_ORGS+fabricator+non-seed-name records
+ * and re-stamps BOTH the registry descriptor and the DynamoDB projection
+ * row for each resolvable one. Dry-run by default; `--record-id` scopes to
+ * a single canary record; `--limit` bounds how many records get WRITTEN in
+ * apply mode (the plan/print phase is never bounded).
  */
 async function runCorrectiveMode(
   registry: RegistryService,
