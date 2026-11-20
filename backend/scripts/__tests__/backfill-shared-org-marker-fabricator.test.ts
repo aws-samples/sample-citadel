@@ -3455,6 +3455,47 @@ describe("resyncProjectionForId — rebuilds the projection row via registry-syn
     } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
   }
 
+  it("plans a rebuild when orgId differs (state/registryStatus/orgUnknown all matching otherwise)", async () => {
+    const record = {
+      recordId: "synthetic-resync-orgid-diff",
+      name: "synthetic-agent-resync-orgid-diff",
+      status: "APPROVED",
+      customDescriptorContent: JSON.stringify({
+        orgId: "SyntheticOrgNew",
+        createdBy: "fabricator",
+      }),
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-01-02T00:00:00.000Z"),
+    };
+    const registry = {
+      getResource: jest.fn().mockResolvedValue(record),
+    } as unknown as RegistryService;
+    const send = jest.fn().mockResolvedValue({
+      Item: {
+        agentId: "synthetic-resync-orgid-diff",
+        orgId: "SyntheticOrgOld",
+        orgUnknown: undefined,
+        registryStatus: "APPROVED",
+        state: "active",
+      },
+    });
+    const docClient = fakeDocClient(send);
+
+    const result = await resyncProjectionForId(
+      "synthetic-resync-orgid-diff",
+      "agent",
+      registry,
+      docClient,
+      "agent-table",
+      /* apply */ false,
+    );
+
+    expect(result.alreadyMatches).toBeUndefined();
+    expect(result.wouldRebuild).toBe(true);
+    expect(result.error).toBeUndefined();
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
   it("is a no-op (alreadyMatches) when the current row already matches the mapper's output", async () => {
     const record = {
       recordId: "synthetic-resync-1",
@@ -3476,6 +3517,7 @@ describe("resyncProjectionForId — rebuilds the projection row via registry-syn
         orgId: "SyntheticOrg",
         orgUnknown: undefined,
         registryStatus: "APPROVED",
+        state: "active",
       },
     });
     const docClient = fakeDocClient(send);
@@ -3492,6 +3534,140 @@ describe("resyncProjectionForId — rebuilds the projection row via registry-syn
     expect(result.alreadyMatches).toBe(true);
     expect(result.error).toBeUndefined();
     // Only the read happened — no write attempted for a no-op.
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("plans a rebuild (never alreadyMatches) when orgId/orgUnknown/registryStatus all match but state diverges — the live incident shape (registryStatus APPROVED, state inactive, left by an earlier buggy rebuild)", async () => {
+    const record = {
+      recordId: "synthetic-resync-state-mismatch",
+      name: "synthetic-agent-resync-state-mismatch",
+      status: "APPROVED",
+      customDescriptorContent: JSON.stringify({
+        orgId: "SyntheticOrg",
+        createdBy: "fabricator",
+      }),
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-01-02T00:00:00.000Z"),
+    };
+    const registry = {
+      getResource: jest.fn().mockResolvedValue(record),
+    } as unknown as RegistryService;
+    const send = jest.fn().mockResolvedValue({
+      Item: {
+        agentId: "synthetic-resync-state-mismatch",
+        orgId: "SyntheticOrg",
+        orgUnknown: undefined,
+        registryStatus: "APPROVED",
+        // Left behind by the earlier buggy rebuild: status says APPROVED
+        // but state was never flipped to active.
+        state: "inactive",
+      },
+    });
+    const docClient = fakeDocClient(send);
+
+    const result = await resyncProjectionForId(
+      "synthetic-resync-state-mismatch",
+      "agent",
+      registry,
+      docClient,
+      "agent-table",
+      /* apply */ false,
+    );
+
+    expect(result.alreadyMatches).toBeUndefined();
+    expect(result.wouldRebuild).toBe(true);
+    expect(result.error).toBeUndefined();
+    // No write on a dry run.
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("prints the differing field names (including state) in the PLAN log line when state diverges", async () => {
+    const record = {
+      recordId: "synthetic-resync-state-diff-log",
+      name: "synthetic-agent-resync-state-diff-log",
+      status: "APPROVED",
+      customDescriptorContent: JSON.stringify({
+        orgId: "SyntheticOrg",
+        createdBy: "fabricator",
+      }),
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-01-02T00:00:00.000Z"),
+    };
+    const registry = {
+      getResource: jest.fn().mockResolvedValue(record),
+    } as unknown as RegistryService;
+    const send = jest.fn().mockResolvedValue({
+      Item: {
+        agentId: "synthetic-resync-state-diff-log",
+        orgId: "SyntheticOrg",
+        orgUnknown: undefined,
+        registryStatus: "APPROVED",
+        state: "inactive",
+      },
+    });
+    const docClient = fakeDocClient(send);
+    const logSpy = jest.spyOn(console, "log").mockImplementation(() => {});
+
+    try {
+      await resyncProjectionForId(
+        "synthetic-resync-state-diff-log",
+        "agent",
+        registry,
+        docClient,
+        "agent-table",
+        /* apply */ false,
+      );
+
+      const planLine = logSpy.mock.calls
+        .map((args) => args.join(" "))
+        .find((line) => line.includes("PLAN"));
+      expect(planLine).toBeDefined();
+      expect(planLine).toContain("state");
+      // Should not falsely claim orgId/registryStatus differ when they match.
+      expect(planLine).toMatch(/diff.*state/i);
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it("still reports alreadyMatches (true no-op) when orgId, orgUnknown, registryStatus, AND state all match", async () => {
+    const record = {
+      recordId: "synthetic-resync-full-match",
+      name: "synthetic-agent-resync-full-match",
+      status: "APPROVED",
+      customDescriptorContent: JSON.stringify({
+        orgId: "SyntheticOrg",
+        createdBy: "fabricator",
+      }),
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-01-02T00:00:00.000Z"),
+    };
+    const registry = {
+      getResource: jest.fn().mockResolvedValue(record),
+    } as unknown as RegistryService;
+    const send = jest.fn().mockResolvedValue({
+      Item: {
+        agentId: "synthetic-resync-full-match",
+        orgId: "SyntheticOrg",
+        orgUnknown: undefined,
+        registryStatus: "APPROVED",
+        state: "active",
+      },
+    });
+    const docClient = fakeDocClient(send);
+
+    const result = await resyncProjectionForId(
+      "synthetic-resync-full-match",
+      "agent",
+      registry,
+      docClient,
+      "agent-table",
+      /* apply */ false,
+    );
+
+    expect(result.alreadyMatches).toBe(true);
+    expect(result.wouldRebuild).toBeUndefined();
+    expect(result.error).toBeUndefined();
     expect(send).toHaveBeenCalledTimes(1);
   });
 

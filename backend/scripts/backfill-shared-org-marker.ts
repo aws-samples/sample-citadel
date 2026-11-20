@@ -1249,10 +1249,14 @@ export interface ResyncProjectionResult {
  *
  * Dry-run by default (`apply: false`): reads the registry record and
  * reports whether a rebuild would change anything, without writing. No-op
- * when the current DDB row already matches what the mapper would produce
- * (compares `orgId`, `orgUnknown`, `registryStatus`). Never throws —
- * returns `error` on failure so the caller (CLI `--resync-projection` or
- * the end-of-run resync pass) decides on exit code / retry.
+ * only when the current DDB row already matches EVERY field the mapper
+ * would produce (`orgId`, `orgUnknown`, `registryStatus`, `state`) — the
+ * comparison is derived from `mappedRow`, the exact same builder output
+ * the apply path writes, so it cannot drift from the writer. When any
+ * field diverges the PLAN log line lists the differing field names. Never
+ * throws — returns `error` on failure so the caller (CLI
+ * `--resync-projection` or the end-of-run resync pass) decides on exit
+ * code / retry.
  */
 export async function resyncProjectionForId(
   id: string,
@@ -1300,11 +1304,25 @@ export async function resyncProjectionForId(
 
   const existing = current.Item as Record<string, unknown> | undefined;
   const mapped = mappedRow as unknown as Record<string, unknown>;
-  const alreadyMatches =
-    existing !== undefined &&
-    existing.orgId === mapped.orgId &&
-    existing.orgUnknown === mapped.orgUnknown &&
-    existing.registryStatus === mapped.registryStatus;
+
+  // Compare every field the rebuild would write — at minimum orgId,
+  // orgUnknown, registryStatus, and state — derived from `mapped`
+  // (the same row builder the apply path uses below) so this check can
+  // never drift from the writer. Previously this only compared orgId,
+  // orgUnknown, and registryStatus, so a row left with the wrong `state`
+  // by an earlier buggy rebuild (e.g. registryStatus APPROVED but state
+  // still inactive) was reported as a no-op and never repaired.
+  const COMPARED_FIELDS = [
+    "orgId",
+    "orgUnknown",
+    "registryStatus",
+    "state",
+  ] as const;
+  const diffFields =
+    existing === undefined
+      ? [...COMPARED_FIELDS]
+      : COMPARED_FIELDS.filter((field) => existing[field] !== mapped[field]);
+  const alreadyMatches = existing !== undefined && diffFields.length === 0;
 
   if (alreadyMatches) {
     log("info", `[resync-projection] id=${id} already matches — no-op`);
@@ -1312,9 +1330,15 @@ export async function resyncProjectionForId(
   }
 
   if (!apply) {
+    const diffDetail = diffFields
+      .map(
+        (field) =>
+          `${field}: ${JSON.stringify(existing?.[field] ?? "<absent>")} -> ${JSON.stringify(mapped[field] ?? "<absent>")}`,
+      )
+      .join(", ");
     log(
       "info",
-      `[resync-projection] PLAN id=${id} type=${type} currentOrgId=${existing?.orgId ?? "<absent>"} currentRegistryStatus=${existing?.registryStatus ?? "<absent>"} -> orgId=${mapped.orgId ?? "<absent>"} orgUnknown=${mapped.orgUnknown ?? false} registryStatus=${mapped.registryStatus}`,
+      `[resync-projection] PLAN id=${id} type=${type} diff=[${diffDetail}]`,
     );
     return { id, type, wouldRebuild: true };
   }
