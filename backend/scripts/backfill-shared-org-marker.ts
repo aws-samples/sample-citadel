@@ -330,6 +330,7 @@ async function processRegistryRecord(
   record: RegistryRecord,
   apply: boolean,
   summary: BackfillSummary,
+  orgResolver?: OrgResolver,
 ): Promise<void> {
   summary.scanned++;
   const recordId = record.recordId;
@@ -354,9 +355,14 @@ async function processRegistryRecord(
     orgId: typeof meta.orgId === "string" ? meta.orgId : undefined,
     orgUnknown: meta.orgUnknown === true,
     createdBy: typeof meta.createdBy === "string" ? meta.createdBy : undefined,
+    sourceProjectId:
+      typeof meta.sourceProjectId === "string"
+        ? meta.sourceProjectId
+        : undefined,
+    appId: typeof meta.appId === "string" ? meta.appId : undefined,
   };
 
-  const classification = classifyRecord(rec);
+  const classification = classifyRecord(rec, undefined, orgResolver);
 
   switch (classification.outcome) {
     case "already-shared":
@@ -416,14 +422,44 @@ async function processRegistryRecord(
       return;
     }
     case "mark-tenant": {
-      // Not reachable from the default (non-corrective) pass, which never
-      // supplies an orgResolver — corrective mode re-stamps via
-      // correctFabricatorRecord instead. Handled here only for exhaustiveness.
+      // Reachable from the default pass when an orgResolver is supplied
+      // (see processRegistry/main) — a blank-orgId fabricator-created
+      // record resolves to its tenant org instead of falling through to
+      // orgUnknown. Corrective mode re-stamps already-ALL_ORGS records via
+      // the separate runCorrectiveForRegistryType/applyCorrectiveEntry path.
       summary.markedTenant++;
       log(
         "info",
         `[${type}] recordId=${recordId} -> orgId=${classification.targetOrgId} (${classification.reason})`,
       );
+      if (!apply) return;
+      try {
+        const editResult = await applyMarkerEdit(
+          {
+            recordId,
+            type,
+            fieldsToSet: { orgId: classification.targetOrgId },
+          },
+          {
+            registryService: registry,
+            dryRun: false,
+            operationLabel: "backfill-shared-org-marker",
+          },
+        );
+        if (editResult.error) {
+          log(
+            "error",
+            `[${type}] recordId=${recordId} marker edit failed: ${editResult.error}`,
+          );
+          summary.errors++;
+        }
+      } catch (err) {
+        log(
+          "error",
+          `[${type}] recordId=${recordId} registry write failed: ${String(err)}`,
+        );
+        summary.errors++;
+      }
       return;
     }
     case "mark-unknown": {
@@ -466,10 +502,11 @@ async function processRegistryRecord(
   }
 }
 
-async function processRegistry(
+export async function processRegistry(
   type: ResourceType,
   registry: RegistryService,
   apply: boolean,
+  orgResolver?: OrgResolver,
 ): Promise<BackfillSummary> {
   const summary = emptySummary();
   log("info", `--- Processing registry '${type}' records ---`);
@@ -485,7 +522,14 @@ async function processRegistry(
 
   for (const rec of records) {
     try {
-      await processRegistryRecord(type, registry, rec, apply, summary);
+      await processRegistryRecord(
+        type,
+        registry,
+        rec,
+        apply,
+        summary,
+        orgResolver,
+      );
     } catch (err) {
       log(
         "error",
@@ -502,11 +546,12 @@ async function processRegistry(
 // DDB-legacy table processing
 // ---------------------------------------------------------------------------
 
-async function processDdbTable(
+export async function processDdbTable(
   kind: "agent" | "tool",
   tableName: string,
   docClient: DynamoDBDocumentClient,
   apply: boolean,
+  orgResolver?: OrgResolver,
 ): Promise<BackfillSummary> {
   const summary = emptySummary();
   log("info", `--- Processing DDB '${kind}' table: ${tableName} ---`);
@@ -540,9 +585,14 @@ async function processDdbTable(
           orgUnknown: item.orgUnknown === true,
           createdBy:
             typeof item.createdBy === "string" ? item.createdBy : undefined,
+          sourceProjectId:
+            typeof item.sourceProjectId === "string"
+              ? item.sourceProjectId
+              : undefined,
+          appId: typeof item.appId === "string" ? item.appId : undefined,
         };
 
-        const classification = classifyRecord(rec);
+        const classification = classifyRecord(rec, undefined, orgResolver);
 
         switch (classification.outcome) {
           case "already-shared":
@@ -593,14 +643,34 @@ async function processDdbTable(
             }
             continue;
           case "mark-tenant":
-            // Not reachable from the default (non-corrective) pass. Handled
-            // here only for exhaustiveness — corrective mode re-stamps via
-            // correctFabricatorRecord instead.
+            // Reachable from the default pass when an orgResolver is
+            // supplied (see processDdbTable callers/main) — a blank-orgId
+            // fabricator-created record resolves to its tenant org instead
+            // of falling through to orgUnknown.
             summary.markedTenant++;
             log(
               "info",
               `[${kind}] id=${id} -> orgId=${classification.targetOrgId} (${classification.reason})`,
             );
+            if (apply) {
+              await docClient.send(
+                new UpdateCommand({
+                  TableName: tableName,
+                  Key: { [pkName]: id },
+                  UpdateExpression:
+                    "SET #orgId = :orgId, #updatedAt = :updatedAt",
+                  ExpressionAttributeNames: {
+                    "#orgId": "orgId",
+                    "#updatedAt": "updatedAt",
+                  },
+                  ExpressionAttributeValues: {
+                    ":orgId": classification.targetOrgId,
+                    ":updatedAt": new Date().toISOString(),
+                  },
+                  ReturnValues: "UPDATED_NEW",
+                }),
+              );
+            }
             continue;
           case "mark-unknown":
             summary.markedUnknown++;
@@ -1046,6 +1116,72 @@ export async function runCorrectiveForRegistryType(
 }
 
 /**
+ * Scans a DDB agents/tools projection table directly for corrective-mode
+ * targets that the registry-sourced scan in {@link runCorrectiveForRegistryType}
+ * would miss: rows where the DDB projection still holds
+ * ALL_ORGS+fabricator+non-seed-name, independent of what the matching
+ * registry record currently holds.
+ *
+ * This exists because a prior `--apply` run could leave the two stores
+ * disagreeing — e.g. the registry write was throttled (never landed) or
+ * was already corrected by a different path, while the DDB row is still
+ * stuck at ALL_ORGS. Filtering on the registry listing alone (as the
+ * original registry-sourced pass does) can never find these DDB-only
+ * drift rows, because by definition their registry record is NOT ALL_ORGS
+ * and so never matches `isCorrectiveTarget` there.
+ *
+ * `alreadyPlannedIds` — ids already covered by the registry-sourced plan
+ * for this type; skipped here to avoid a duplicate plan entry (and a
+ * duplicate write) for the same record.
+ */
+export async function findDdbOnlyCorrectiveTargets(
+  kind: "agent" | "tool",
+  tableName: string,
+  docClient: DynamoDBDocumentClient,
+  orgResolver: OrgResolver,
+  alreadyPlannedIds: ReadonlySet<string>,
+): Promise<CorrectivePlanEntry[]> {
+  const entries: CorrectivePlanEntry[] = [];
+  const pkName = kind === "agent" ? "agentId" : "toolId";
+  let exclusiveStartKey: Record<string, NativeAttributeValue> | undefined;
+
+  do {
+    const scanResult = await docClient.send(
+      new ScanCommand({
+        TableName: tableName,
+        ExclusiveStartKey: exclusiveStartKey,
+      }),
+    );
+
+    for (const item of scanResult.Items || []) {
+      const id = item[pkName];
+      if (typeof id !== "string" || alreadyPlannedIds.has(id)) continue;
+
+      const rec: RecordShape = {
+        id,
+        name: typeof item.name === "string" ? item.name : undefined,
+        orgId: typeof item.orgId === "string" ? item.orgId : undefined,
+        orgUnknown: item.orgUnknown === true,
+        createdBy:
+          typeof item.createdBy === "string" ? item.createdBy : undefined,
+        sourceProjectId:
+          typeof item.sourceProjectId === "string"
+            ? item.sourceProjectId
+            : undefined,
+        appId: typeof item.appId === "string" ? item.appId : undefined,
+      };
+
+      const entry = planCorrectiveEntry(rec, kind, orgResolver);
+      if (entry) entries.push(entry);
+    }
+
+    exclusiveStartKey = scanResult.LastEvaluatedKey;
+  } while (exclusiveStartKey);
+
+  return entries;
+}
+
+/**
  * Builds a synchronous {@link OrgResolver} from pre-fetched lookup maps.
  * Corrective mode fetches projects and agent-binding data ONCE up front
  * (one projects-table scan, one agent-table scan) so the resolver itself
@@ -1169,17 +1305,61 @@ export async function main(): Promise<void> {
     return;
   }
 
+  // Default pass: resolve fabricator-created blank-orgId records to their
+  // tenant org too (not just corrective mode) — see R1 fix. Best-effort:
+  // if PROJECTS_TABLE isn't configured, or the resolver scan itself fails,
+  // fall back to the pre-existing behaviour (orgUnknown) rather than
+  // failing the whole run.
+  let defaultPassOrgResolver: OrgResolver | undefined;
+  if (projectsTable) {
+    try {
+      defaultPassOrgResolver = await buildOrgResolverFromTables(
+        docClient,
+        projectsTable,
+        agentTable,
+      );
+    } catch (err) {
+      log(
+        "warn",
+        `Org resolver setup failed — fabricator-created blank-orgId records will be marked orgUnknown instead of resolved: ${String(err)}`,
+      );
+    }
+  } else {
+    log(
+      "warn",
+      "PROJECTS_TABLE not set — fabricator-created blank-orgId records will be marked orgUnknown instead of resolved to their tenant org",
+    );
+  }
+
   const totals = emptySummary();
 
-  addSummary(totals, await processRegistry("agent", registry, apply));
-  addSummary(totals, await processRegistry("tool", registry, apply));
   addSummary(
     totals,
-    await processDdbTable("agent", agentTable, docClient, apply),
+    await processRegistry("agent", registry, apply, defaultPassOrgResolver),
   );
   addSummary(
     totals,
-    await processDdbTable("tool", toolTable, docClient, apply),
+    await processRegistry("tool", registry, apply, defaultPassOrgResolver),
+  );
+  addSummary(
+    totals,
+    await processDdbTable(
+      "agent",
+      agentTable,
+      docClient,
+      apply,
+      defaultPassOrgResolver,
+    ),
+  );
+  addSummary(
+    totals,
+    await processDdbTable(
+      "tool",
+      toolTable,
+      docClient,
+      apply,
+      defaultPassOrgResolver,
+    ),
   );
 
   log("info", "--- Backfill summary ---");
@@ -1206,29 +1386,19 @@ export async function main(): Promise<void> {
 }
 
 /**
- * Corrective-mode entry point. Pre-fetches the projects table (projectId ->
- * organization) and the agents table (appId -> binding agents) once, builds
- * a synchronous OrgResolver from those maps, then scans the agent and tool
- * registries for ALL_ORGS+fabricator+non-seed-name records and re-stamps
- * BOTH the registry descriptor and the DynamoDB projection row for each
- * resolvable one. Dry-run by default; `--record-id` scopes to a single
- * canary record; `--limit` bounds how many records get WRITTEN in apply
- * mode (the plan/print phase is never bounded).
+ * Scans the projects table (projectId -> organization) and the agents
+ * table (appId -> binding agents' sourceProjectId) once, and builds a
+ * synchronous {@link OrgResolver} from the resulting maps via
+ * {@link buildOrgResolverFromMaps}. Shared by both the default pass
+ * (R1 fix — resolves fabricator org outside corrective mode too) and
+ * {@link runCorrectiveMode}. Throws on a scan failure; callers decide
+ * whether that's fatal (corrective mode) or best-effort (default pass).
  */
-async function runCorrectiveMode(
-  registry: RegistryService,
+export async function buildOrgResolverFromTables(
   docClient: DynamoDBDocumentClient,
-  agentTable: string,
-  toolTable: string,
   projectsTable: string,
-  apply: boolean,
-  limit: number | undefined,
-  recordId: string | undefined,
-  delayMs: number = CORRECTIVE_RECORD_RETRY_BASE_DELAY_MS,
-): Promise<void> {
-  log("info", `Corrective mode: ${apply ? "APPLY" : "DRY-RUN"}`);
-  if (recordId) log("info", `Scoped to single record id=${recordId} (canary)`);
-
+  agentTable: string,
+): Promise<OrgResolver> {
   const projectOrgById = new Map<string, string>();
   {
     let exclusiveStartKey: Record<string, NativeAttributeValue> | undefined;
@@ -1242,9 +1412,7 @@ async function runCorrectiveMode(
           }),
         );
       } catch (err) {
-        log("error", `Projects table scan failed: ${String(err)}`);
-        process.exit(1);
-        return;
+        throw new Error(`Projects table scan failed: ${String(err)}`);
       }
       for (const item of scanResult.Items || []) {
         const projectId = item.projectId ?? item.id;
@@ -1272,12 +1440,9 @@ async function runCorrectiveMode(
           }),
         );
       } catch (err) {
-        log(
-          "error",
+        throw new Error(
           `Agent table scan failed (for tool org resolution): ${String(err)}`,
         );
-        process.exit(1);
-        return;
       }
       for (const item of scanResult.Items || []) {
         const appId = item.appId;
@@ -1295,7 +1460,46 @@ async function runCorrectiveMode(
     } while (exclusiveStartKey);
   }
 
-  const orgResolver = buildOrgResolverFromMaps(projectOrgById, agentsByAppId);
+  return buildOrgResolverFromMaps(projectOrgById, agentsByAppId);
+}
+
+/**
+ * Corrective-mode entry point. Pre-fetches the projects table (projectId ->
+ * organization) and the agents table (appId -> binding agents) once, builds
+ * a synchronous OrgResolver from those maps, then scans the agent and tool
+ * registries for ALL_ORGS+fabricator+non-seed-name records and re-stamps
+ * BOTH the registry descriptor and the DynamoDB projection row for each
+ * resolvable one. Dry-run by default; `--record-id` scopes to a single
+ * canary record; `--limit` bounds how many records get WRITTEN in apply
+ * mode (the plan/print phase is never bounded).
+ */
+async function runCorrectiveMode(
+  registry: RegistryService,
+  docClient: DynamoDBDocumentClient,
+  agentTable: string,
+  toolTable: string,
+  projectsTable: string,
+  apply: boolean,
+  limit: number | undefined,
+  recordId: string | undefined,
+  delayMs: number = CORRECTIVE_RECORD_RETRY_BASE_DELAY_MS,
+): Promise<void> {
+  log("info", `Corrective mode: ${apply ? "APPLY" : "DRY-RUN"}`);
+  if (recordId) log("info", `Scoped to single record id=${recordId} (canary)`);
+
+  let orgResolver: OrgResolver;
+  try {
+    orgResolver = await buildOrgResolverFromTables(
+      docClient,
+      projectsTable,
+      agentTable,
+    );
+  } catch (err) {
+    log("error", String(err));
+    process.exit(1);
+    return;
+  }
+
   const summary = emptySummary();
   const fullPlan: CorrectivePlanEntry[] = [];
 
@@ -1324,10 +1528,92 @@ async function runCorrectiveMode(
     delayMs,
   );
 
+  // R2: the registry-sourced scans above only find records whose CURRENT
+  // registry orgId is still ALL_ORGS. A prior partial/throttled --apply
+  // can leave a DDB projection row stuck at ALL_ORGS while its matching
+  // registry record has already diverged (corrected by another path, or
+  // simply never written) — that row would otherwise never be planned.
+  // Scan each DDB table directly for the same ALL_ORGS+fabricator+
+  // non-seed-name signature, skipping ids already covered above so no
+  // record is planned (or written) twice.
+  const registryPlannedIds = new Set<string>([
+    ...agentPlan.map((e) => e.id),
+    ...toolPlan.map((e) => e.id),
+  ]);
+  const agentDdbOnlyPlan = await findDdbOnlyCorrectiveTargets(
+    "agent",
+    agentTable,
+    docClient,
+    orgResolver,
+    registryPlannedIds,
+  );
+  const toolDdbOnlyPlan = await findDdbOnlyCorrectiveTargets(
+    "tool",
+    toolTable,
+    docClient,
+    orgResolver,
+    registryPlannedIds,
+  );
+
+  for (const entry of [...agentDdbOnlyPlan, ...toolDdbOnlyPlan]) {
+    log(
+      "info",
+      `[correct-fabricator:ddb-only:${entry.kind}] PLAN id=${entry.id} name=${entry.name ?? "<none>"} previousOrgId=${entry.previousOrgId} resolvedOrgId=${entry.resolvedOrgId ?? "<unresolved>"} reason=${entry.reason}`,
+    );
+
+    if (entry.reason === "ambiguous-multi-org") {
+      summary.ambiguousReported++;
+      continue;
+    }
+
+    const inCanaryScope = recordId === undefined || entry.id === recordId;
+    if (!apply || !inCanaryScope) continue;
+    if (
+      limit !== undefined &&
+      summary.markedTenant + summary.markedUnknown >= limit
+    ) {
+      continue;
+    }
+
+    try {
+      const type: ResourceType = entry.kind === "agent" ? "agent" : "tool";
+      const tableName = entry.kind === "agent" ? agentTable : toolTable;
+      const result = await applyCorrectiveEntry(
+        entry,
+        type,
+        registry,
+        tableName,
+        docClient,
+      );
+      if (result.error) {
+        log(
+          "error",
+          `[correct-fabricator:ddb-only:${entry.kind}] recordId=${entry.id} write failed: ${result.error}`,
+        );
+        summary.errors++;
+        continue;
+      }
+    } catch (err) {
+      log(
+        "error",
+        `[correct-fabricator:ddb-only:${entry.kind}] recordId=${entry.id} unexpected write error: ${String(err)}`,
+      );
+      summary.errors++;
+      continue;
+    }
+    if (entry.resolvedOrgId !== undefined) summary.markedTenant++;
+    else summary.markedUnknown++;
+  }
+
   fullPlan.push(
     ...(recordId
-      ? [...agentPlan, ...toolPlan].filter((e) => e.id === recordId)
-      : [...agentPlan, ...toolPlan]),
+      ? [
+          ...agentPlan,
+          ...toolPlan,
+          ...agentDdbOnlyPlan,
+          ...toolDdbOnlyPlan,
+        ].filter((e) => e.id === recordId)
+      : [...agentPlan, ...toolPlan, ...agentDdbOnlyPlan, ...toolDdbOnlyPlan]),
   );
 
   log("info", "--- Corrective mode planned set ---");

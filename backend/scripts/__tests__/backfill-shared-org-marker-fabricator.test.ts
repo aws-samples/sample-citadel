@@ -1208,3 +1208,319 @@ describe("convergence: after corrective apply, a second dry run plans zero chang
     expect(summary2.markedTenant).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 17. R1 — default (non-corrective) pass wires the OrgResolver too
+// ---------------------------------------------------------------------------
+//
+// Regression for verify finding (loop iteration 3): a blank-orgId
+// fabricator agent discovered by the DEFAULT scan (not corrective mode)
+// must resolve to its tenant org via sourceProjectId, never fall through
+// to orgUnknown, because classifyRecord was being called with no
+// orgResolver on this path.
+
+describe("R1: default pass resolves fabricator org instead of orgUnknown", () => {
+  const { applyMarkerEdit } = jest.requireMock(
+    "../../src/utils/marker-registry-edit",
+  ) as { applyMarkerEdit: jest.Mock };
+
+  beforeEach(() => {
+    applyMarkerEdit.mockReset();
+    applyMarkerEdit.mockResolvedValue({ recordId: "unused" });
+  });
+
+  const orgResolver: OrgResolver = {
+    resolveAgentOrg: (rec: RecordShape) =>
+      rec.sourceProjectId === "proj-1" ? "Default" : undefined,
+    resolveToolOrg: () => undefined,
+  };
+
+  function makeRegistry(items: RecordShape[]): RegistryService {
+    const listResources = jest.fn().mockResolvedValue(
+      items.map((i) => ({
+        recordId: i.id,
+        name: i.name,
+        status: "APPROVED",
+        customDescriptorContent: JSON.stringify({
+          orgId: i.orgId,
+          createdBy: i.createdBy,
+          sourceProjectId: i.sourceProjectId,
+        }),
+      })),
+    );
+    return { listResources } as unknown as RegistryService;
+  }
+
+  it("processRegistry marks a blank fabricator agent with sourceProjectId as mark-tenant, not mark-unknown, when given an orgResolver", async () => {
+    const { processRegistry } = jest.requireActual(
+      "../backfill-shared-org-marker",
+    ) as typeof import("../backfill-shared-org-marker");
+
+    const registry = makeRegistry([
+      {
+        id: "a-blank-1",
+        name: "fabricated-worker",
+        orgId: "",
+        createdBy: "fabricator",
+        sourceProjectId: "proj-1",
+      },
+    ]);
+
+    const summary = await processRegistry(
+      "agent",
+      registry,
+      /* apply */ true,
+      orgResolver,
+    );
+
+    expect(summary.markedTenant).toBe(1);
+    expect(summary.markedUnknown).toBe(0);
+    expect(applyMarkerEdit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recordId: "a-blank-1",
+        fieldsToSet: { orgId: "Default" },
+      }),
+      expect.anything(),
+    );
+  });
+
+  it("processRegistry falls back to mark-unknown when no orgResolver is supplied (back-compat)", async () => {
+    const { processRegistry } = jest.requireActual(
+      "../backfill-shared-org-marker",
+    ) as typeof import("../backfill-shared-org-marker");
+
+    const registry = makeRegistry([
+      {
+        id: "a-blank-2",
+        name: "fabricated-worker-2",
+        orgId: "",
+        createdBy: "fabricator",
+        sourceProjectId: "proj-1",
+      },
+    ]);
+
+    const summary = await processRegistry("agent", registry, true);
+
+    expect(summary.markedUnknown).toBe(1);
+    expect(summary.markedTenant).toBe(0);
+  });
+
+  it("processDdbTable marks a blank fabricator agent with sourceProjectId as mark-tenant when given an orgResolver", async () => {
+    const { processDdbTable } = jest.requireActual(
+      "../backfill-shared-org-marker",
+    ) as typeof import("../backfill-shared-org-marker");
+
+    const send = jest.fn().mockResolvedValue({
+      Items: [
+        {
+          agentId: "ddb-a-1",
+          name: "fabricated-ddb-worker",
+          orgId: "",
+          createdBy: "fabricator",
+          sourceProjectId: "proj-1",
+        },
+      ],
+    });
+    const docClient = {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+
+    const summary = await processDdbTable(
+      "agent",
+      "agent-table",
+      docClient,
+      true,
+      orgResolver,
+    );
+
+    expect(summary.markedTenant).toBe(1);
+    expect(summary.markedUnknown).toBe(0);
+    // Second send call is the UpdateCommand for the mark-tenant write.
+    const updateCall = send.mock.calls.find((c) =>
+      c[0]?.input?.UpdateExpression?.includes("orgId"),
+    );
+    expect(updateCall).toBeDefined();
+    expect(updateCall[0].input.ExpressionAttributeValues[":orgId"]).toBe(
+      "Default",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 18. R2 — corrective mode must catch DDB-only ALL_ORGS drift rows too
+// ---------------------------------------------------------------------------
+//
+// Regression for verify finding (loop iteration 3): two records diverged
+// because the registry write was throttled during the original --apply —
+// the DDB projection row still holds ALL_ORGS+fabricator+non-seed-name,
+// but the matching registry record's orgId is no longer ALL_ORGS (it was
+// never written, or was already corrected). Corrective mode filtered on
+// the registry listing ONLY, so these DDB-only drift rows were never
+// planned and stayed ALL_ORGS forever. The fix must select DDB rows
+// independently of what the registry currently holds.
+
+describe("R2: corrective mode catches DDB-only ALL_ORGS drift (registry/DDB disagree)", () => {
+  const { applyMarkerEdit } = jest.requireMock(
+    "../../src/utils/marker-registry-edit",
+  ) as { applyMarkerEdit: jest.Mock };
+
+  beforeEach(() => {
+    applyMarkerEdit.mockReset();
+    applyMarkerEdit.mockResolvedValue({ recordId: "unused" });
+  });
+
+  const orgResolver: OrgResolver = {
+    resolveAgentOrg: (rec: RecordShape) =>
+      rec.sourceProjectId === "proj-1" ? "Default" : undefined,
+    resolveToolOrg: () => undefined,
+  };
+
+  it("findDdbOnlyCorrectiveTargets plans a DDB row whose registry orgId is already divergent (not ALL_ORGS)", async () => {
+    const { findDdbOnlyCorrectiveTargets } = jest.requireActual(
+      "../backfill-shared-org-marker",
+    ) as typeof import("../backfill-shared-org-marker");
+
+    // The registry record for this id is NOT ALL_ORGS (e.g. orgId: "") —
+    // so the registry-sourced scan in runCorrectiveForRegistryType would
+    // never plan it. The DDB row is still ALL_ORGS+fabricator.
+    const send = jest.fn().mockResolvedValue({
+      Items: [
+        {
+          agentId: "d3RXDPrgL9t5",
+          name: "divergent-agent",
+          orgId: "All Organizations",
+          createdBy: "fabricator",
+          sourceProjectId: "proj-1",
+        },
+      ],
+    });
+    const docClient = {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+
+    const alreadyPlannedIds = new Set<string>(); // registry scan found nothing for this id
+
+    const entries = await findDdbOnlyCorrectiveTargets(
+      "agent",
+      "agent-table",
+      docClient,
+      orgResolver,
+      alreadyPlannedIds,
+    );
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toEqual(
+      expect.objectContaining({
+        id: "d3RXDPrgL9t5",
+        resolvedOrgId: "Default",
+        reason: "fabricator-agent-sourceProjectId",
+      }),
+    );
+  });
+
+  it("findDdbOnlyCorrectiveTargets skips a row already covered by the registry-sourced plan (no duplicate entry)", async () => {
+    const { findDdbOnlyCorrectiveTargets } = jest.requireActual(
+      "../backfill-shared-org-marker",
+    ) as typeof import("../backfill-shared-org-marker");
+
+    const send = jest.fn().mockResolvedValue({
+      Items: [
+        {
+          agentId: "rec-already-planned",
+          name: "covered-agent",
+          orgId: "All Organizations",
+          createdBy: "fabricator",
+          sourceProjectId: "proj-1",
+        },
+      ],
+    });
+    const docClient = {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+
+    const alreadyPlannedIds = new Set<string>(["rec-already-planned"]);
+
+    const entries = await findDdbOnlyCorrectiveTargets(
+      "agent",
+      "agent-table",
+      docClient,
+      orgResolver,
+      alreadyPlannedIds,
+    );
+
+    expect(entries).toHaveLength(0);
+  });
+
+  it("findDdbOnlyCorrectiveTargets excludes seed-name and non-fabricator rows", async () => {
+    const { findDdbOnlyCorrectiveTargets } = jest.requireActual(
+      "../backfill-shared-org-marker",
+    ) as typeof import("../backfill-shared-org-marker");
+
+    const send = jest.fn().mockResolvedValue({
+      Items: [
+        {
+          agentId: "seed-1",
+          name: "fabricator",
+          orgId: "All Organizations",
+          createdBy: "fabricator",
+        },
+        {
+          agentId: "system-1",
+          name: "system-agent",
+          orgId: "All Organizations",
+          createdBy: "system",
+        },
+      ],
+    });
+    const docClient = {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+
+    const entries = await findDdbOnlyCorrectiveTargets(
+      "agent",
+      "agent-table",
+      docClient,
+      orgResolver,
+      new Set(),
+    );
+
+    expect(entries).toHaveLength(0);
+  });
+
+  it("applyCorrectiveEntry re-stamps both stores for a DDB-only divergent entry, converging the registry to match", async () => {
+    applyMarkerEdit.mockResolvedValue({ recordId: "d3RXDPrgL9t5" });
+    const send = jest.fn().mockResolvedValue({});
+    const entry = {
+      id: "d3RXDPrgL9t5",
+      name: "divergent-agent",
+      kind: "agent" as const,
+      previousOrgId: "All Organizations",
+      resolvedOrgId: "Default",
+      reason: "fabricator-agent-sourceProjectId",
+    };
+    const docClient = {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+
+    const result = await applyCorrectiveEntry(
+      entry,
+      "agent",
+      {} as unknown as RegistryService,
+      "agent-table",
+      docClient,
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(applyMarkerEdit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recordId: "d3RXDPrgL9t5",
+        fieldsToSet: { orgId: "Default" },
+      }),
+      expect.anything(),
+    );
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0][0].input.Key).toEqual({
+      agentId: "d3RXDPrgL9t5",
+    });
+  });
+});
