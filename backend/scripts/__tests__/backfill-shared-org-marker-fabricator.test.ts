@@ -1723,7 +1723,7 @@ describe("R2: corrective mode catches DDB-only ALL_ORGS drift (registry/DDB disa
     const send = jest.fn().mockResolvedValue({
       Items: [
         {
-          agentId: "d3RXDPrgL9t5",
+          agentId: "agent-fixture-01",
           name: "divergent-agent",
           orgId: "All Organizations",
           createdBy: "fabricator",
@@ -1748,7 +1748,7 @@ describe("R2: corrective mode catches DDB-only ALL_ORGS drift (registry/DDB disa
     expect(entries).toHaveLength(1);
     expect(entries[0]).toEqual(
       expect.objectContaining({
-        id: "d3RXDPrgL9t5",
+        id: "agent-fixture-01",
         resolvedOrgId: "Default",
         reason: "fabricator-agent-sourceProjectId",
       }),
@@ -1825,10 +1825,10 @@ describe("R2: corrective mode catches DDB-only ALL_ORGS drift (registry/DDB disa
   });
 
   it("applyDdbOnlyCorrectiveEntry re-stamps both stores for a DDB-only divergent entry, converging the registry to match via a direct conditional DDB write", async () => {
-    applyMarkerEdit.mockResolvedValue({ recordId: "d3RXDPrgL9t5" });
+    applyMarkerEdit.mockResolvedValue({ recordId: "agent-fixture-01" });
     const send = jest.fn().mockResolvedValue({});
     const entry = {
-      id: "d3RXDPrgL9t5",
+      id: "agent-fixture-01",
       name: "divergent-agent",
       kind: "agent" as const,
       previousOrgId: "All Organizations",
@@ -1850,14 +1850,14 @@ describe("R2: corrective mode catches DDB-only ALL_ORGS drift (registry/DDB disa
     expect(result.error).toBeUndefined();
     expect(applyMarkerEdit).toHaveBeenCalledWith(
       expect.objectContaining({
-        recordId: "d3RXDPrgL9t5",
+        recordId: "agent-fixture-01",
         fieldsToSet: { orgId: "Default" },
       }),
       expect.anything(),
     );
     expect(send).toHaveBeenCalledTimes(1);
     expect(send.mock.calls[0][0].input.Key).toEqual({
-      agentId: "d3RXDPrgL9t5",
+      agentId: "agent-fixture-01",
     });
     expect(send.mock.calls[0][0].input.ConditionExpression).toBe(
       "#orgId = :previousOrgId",
@@ -1865,17 +1865,17 @@ describe("R2: corrective mode catches DDB-only ALL_ORGS drift (registry/DDB disa
   });
 
   it("applyDdbOnlyCorrectiveEntry treats a ConditionalCheckFailedException as success when the row is already in the desired state", async () => {
-    applyMarkerEdit.mockResolvedValue({ recordId: "d3RXDPrgL9t5" });
+    applyMarkerEdit.mockResolvedValue({ recordId: "agent-fixture-01" });
     const conditionalError = new Error("The conditional request failed");
     conditionalError.name = "ConditionalCheckFailedException";
     const send = jest
       .fn()
       .mockRejectedValueOnce(conditionalError)
       .mockResolvedValueOnce({
-        Item: { agentId: "d3RXDPrgL9t5", orgId: "Default" },
+        Item: { agentId: "agent-fixture-01", orgId: "Default" },
       });
     const entry = {
-      id: "d3RXDPrgL9t5",
+      id: "agent-fixture-01",
       name: "divergent-agent",
       kind: "agent" as const,
       previousOrgId: "All Organizations",
@@ -1899,17 +1899,17 @@ describe("R2: corrective mode catches DDB-only ALL_ORGS drift (registry/DDB disa
   });
 
   it("applyDdbOnlyCorrectiveEntry reports a genuine error when ConditionalCheckFailedException fires and the row is NOT in the desired state", async () => {
-    applyMarkerEdit.mockResolvedValue({ recordId: "d3RXDPrgL9t5" });
+    applyMarkerEdit.mockResolvedValue({ recordId: "agent-fixture-01" });
     const conditionalError = new Error("The conditional request failed");
     conditionalError.name = "ConditionalCheckFailedException";
     const send = jest
       .fn()
       .mockRejectedValueOnce(conditionalError)
       .mockResolvedValueOnce({
-        Item: { agentId: "d3RXDPrgL9t5", orgId: "SomeOtherOrg" },
+        Item: { agentId: "agent-fixture-01", orgId: "SomeOtherOrg" },
       });
     const entry = {
-      id: "d3RXDPrgL9t5",
+      id: "agent-fixture-01",
       name: "divergent-agent",
       kind: "agent" as const,
       previousOrgId: "All Organizations",
@@ -3867,7 +3867,7 @@ describe("Incident 2 regression — registry-backed path never races registry-sy
 
   it("never issues a docClient UpdateCommand for a registry-backed corrective entry, even when the registry write succeeds and the projection later converges via registry-sync", async () => {
     applyMarkerEdit.mockResolvedValue({
-      recordId: "YixBXASgDciL-synthetic",
+      recordId: "agent-fixture-02",
       priorStatus: "APPROVED",
     });
     // Simulates registry-sync's OWN concurrent projection write already
@@ -3876,7 +3876,7 @@ describe("Incident 2 regression — registry-backed path never races registry-sy
     // poll instead of raced against a competing write from this script.
     const send = jest.fn().mockResolvedValue({
       Item: {
-        agentId: "YixBXASgDciL-synthetic",
+        agentId: "agent-fixture-02",
         orgId: "SyntheticOrg",
         registryStatus: "APPROVED",
       },
@@ -3885,7 +3885,7 @@ describe("Incident 2 regression — registry-backed path never races registry-sy
       send,
     } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
     const entry = {
-      id: "YixBXASgDciL-synthetic",
+      id: "agent-fixture-02",
       name: "synthetic-fabricated-agent",
       kind: "agent" as const,
       previousOrgId: ALL_ORGS,
