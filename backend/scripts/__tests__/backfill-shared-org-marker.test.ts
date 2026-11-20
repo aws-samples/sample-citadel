@@ -129,7 +129,9 @@ describe("summary accumulation", () => {
     expect(emptySummary()).toEqual({
       scanned: 0,
       markedShared: 0,
+      markedTenant: 0,
       markedUnknown: 0,
+      markedFallback: 0,
       alreadyShared: 0,
       alreadyUnknown: 0,
       ambiguousReported: 0,
@@ -141,7 +143,9 @@ describe("summary accumulation", () => {
     const a = {
       scanned: 5,
       markedShared: 1,
+      markedTenant: 0,
       markedUnknown: 2,
+      markedFallback: 0,
       alreadyShared: 1,
       alreadyUnknown: 0,
       ambiguousReported: 1,
@@ -150,7 +154,9 @@ describe("summary accumulation", () => {
     const b = {
       scanned: 3,
       markedShared: 0,
+      markedTenant: 0,
       markedUnknown: 1,
+      markedFallback: 0,
       alreadyShared: 0,
       alreadyUnknown: 1,
       ambiguousReported: 0,
@@ -162,7 +168,9 @@ describe("summary accumulation", () => {
     expect(dst).toEqual({
       scanned: 8,
       markedShared: 1,
+      markedTenant: 0,
       markedUnknown: 3,
+      markedFallback: 0,
       alreadyShared: 1,
       alreadyUnknown: 1,
       ambiguousReported: 1,
