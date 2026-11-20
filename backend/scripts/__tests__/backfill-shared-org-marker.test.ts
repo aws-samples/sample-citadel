@@ -13,6 +13,8 @@ import {
   SEED_ALLOWLIST_NAMES,
   SEED_ALLOWLIST_CREATED_BY,
   main,
+  parseProjectionWaitMs,
+  DEFAULT_PROJECTION_WAIT_MS,
   type RecordShape,
 } from "../backfill-shared-org-marker";
 
@@ -250,5 +252,94 @@ describe("main() env guards", () => {
     process.env.AGENT_CONFIG_TABLE = "t-agents";
     delete process.env.TOOL_CONFIG_TABLE;
     await expect(main()).rejects.toThrow("TOOL_CONFIG_TABLE env var required");
+  });
+});
+
+describe("parseProjectionWaitMs — pure CLI flag parser for --projection-wait-ms", () => {
+  it("parses a valid value and returns it as a number", () => {
+    expect(parseProjectionWaitMs("90000")).toBe(90000);
+  });
+
+  it("returns DEFAULT_PROJECTION_WAIT_MS when the raw value is undefined (flag absent)", () => {
+    expect(parseProjectionWaitMs(undefined)).toBe(DEFAULT_PROJECTION_WAIT_MS);
+  });
+
+  it("accepts the minimum allowed value of 1000", () => {
+    expect(parseProjectionWaitMs("1000")).toBe(1000);
+  });
+
+  it("rejects a value below the 1000ms floor", () => {
+    expect(() => parseProjectionWaitMs("999")).toThrow(
+      '--projection-wait-ms must be an integer >= 1000, got "999"',
+    );
+  });
+
+  it("rejects a non-numeric value", () => {
+    expect(() => parseProjectionWaitMs("abc")).toThrow(
+      '--projection-wait-ms must be an integer >= 1000, got "abc"',
+    );
+  });
+
+  it("rejects a negative value", () => {
+    expect(() => parseProjectionWaitMs("-5")).toThrow(
+      '--projection-wait-ms must be an integer >= 1000, got "-5"',
+    );
+  });
+
+  it("rejects a decimal value", () => {
+    expect(() => parseProjectionWaitMs("1500.5")).toThrow(
+      '--projection-wait-ms must be an integer >= 1000, got "1500.5"',
+    );
+  });
+
+  it("rejects an empty string", () => {
+    expect(() => parseProjectionWaitMs("")).toThrow(
+      '--projection-wait-ms must be an integer >= 1000, got ""',
+    );
+  });
+});
+
+describe("main() --projection-wait-ms CLI validation", () => {
+  const originalEnv = process.env;
+  const originalArgv = process.argv;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    process.argv = [...originalArgv];
+  });
+
+  afterAll(() => {
+    process.env = originalEnv;
+    process.argv = originalArgv;
+  });
+
+  it("rejects --projection-wait-ms below the 1000ms floor before any env var is checked", async () => {
+    delete process.env.REGISTRY_ID;
+    process.argv = ["node", "script", "--projection-wait-ms", "500"];
+    await expect(main()).rejects.toThrow(
+      '--projection-wait-ms must be an integer >= 1000, got "500"',
+    );
+  });
+
+  it("rejects a non-numeric --projection-wait-ms value", async () => {
+    delete process.env.REGISTRY_ID;
+    process.argv = ["node", "script", "--projection-wait-ms", "soon"];
+    await expect(main()).rejects.toThrow(
+      '--projection-wait-ms must be an integer >= 1000, got "soon"',
+    );
+  });
+
+  it("falls through to the next validation (env guard) when --projection-wait-ms is a valid value", async () => {
+    delete process.env.REGISTRY_ID;
+    process.argv = ["node", "script", "--projection-wait-ms", "5000"];
+    // A valid flag value must not itself throw — the next failure
+    // encountered is the pre-existing, unrelated env var guard.
+    await expect(main()).rejects.toThrow("REGISTRY_ID env var required");
+  });
+
+  it("does not throw when --projection-wait-ms is omitted (default applies silently)", async () => {
+    delete process.env.REGISTRY_ID;
+    process.argv = ["node", "script"];
+    await expect(main()).rejects.toThrow("REGISTRY_ID env var required");
   });
 });
