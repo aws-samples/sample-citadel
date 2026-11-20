@@ -154,11 +154,16 @@ export function deepRedactSecrets(obj: unknown): unknown {
   if (typeof obj === "object") {
     const result: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
-      if (SECRET_FIELD_KEYS.has(key) || key === "credentials") {
-        result[key] = "[REDACTED]";
-      } else {
-        result[key] = deepRedactSecrets(value);
-      }
+      const redactedValue =
+        SECRET_FIELD_KEYS.has(key) || key === "credentials"
+          ? "[REDACTED]"
+          : deepRedactSecrets(value);
+      Object.defineProperty(result, key, {
+        value: redactedValue,
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
     }
     return result;
   }

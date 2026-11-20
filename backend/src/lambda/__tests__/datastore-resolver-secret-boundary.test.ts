@@ -160,4 +160,29 @@ describe("deepRedactSecrets — property test", () => {
       { numRuns: 200 },
     );
   });
+
+  test("own enumerable __proto__ and constructor keys are preserved as data, not prototype mutation", () => {
+    const obj = JSON.parse(
+      '{"__proto__":"a","constructor":"b","nested":{"__proto__":{"password":"x"},"ok":"y"}}',
+    );
+    const redacted = deepRedactSecrets(obj) as Record<string, unknown>;
+
+    expect(Object.getOwnPropertyDescriptor(redacted, "__proto__")?.value).toBe(
+      "a",
+    );
+    expect(Object.getPrototypeOf(redacted)).toBe(Object.prototype);
+    expect(redacted.constructor).toBe("b");
+
+    const nested = redacted.nested as Record<string, unknown>;
+    const nestedProtoDescriptor = Object.getOwnPropertyDescriptor(
+      nested,
+      "__proto__",
+    );
+    expect(typeof nestedProtoDescriptor?.value).toBe("object");
+    expect(
+      (nestedProtoDescriptor?.value as Record<string, unknown>).password,
+    ).toBe("[REDACTED]");
+    expect(Object.getPrototypeOf(nested)).toBe(Object.prototype);
+    expect(nested.ok).toBe("y");
+  });
 });
