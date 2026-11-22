@@ -1899,6 +1899,150 @@ export class ArbiterStack extends cdk.Stack {
     });
     agentActivateRule.addTarget(new targets.LambdaFunction(activatorLambda));
 
+    // ============================================================
+    // eval_judge Lambda + governance.eval.case.judge.requested rule
+    // (CIT-103 Pass B; decision 60f1fad5)
+    // ============================================================
+    //
+    // Consumes the FROZEN TS -> Py contract governance.eval.case.judge.
+    // requested (Source citadel.backend — EVENTBRIDGE_CATALOG.md,
+    // emitted by eval-case-scorer.ts/eval-sample-scorer.ts) and judges
+    // each requested dimension via Bedrock Converse, emitting one
+    // governance.eval.case.judged event per dimension (Py -> TS, FROZEN).
+    // Read-only: eval_judge never writes DynamoDB directly (TS is the
+    // single writer of eval tables, design §7) and never writes the S3
+    // replay-package artifact (GetObject only — it only ever READS the
+    // artifact eval-case-scorer/eval-run-completion already materialized).
+    const evalJudgeLambda = makePythonFunction(this, "EvalJudge", {
+      runtime: PYTHON_RUNTIME,
+      architecture: LAMBDA_ARCHITECTURE,
+      entry: path.join(ARBITER_ROOT, "eval_judge"),
+      handler: "handler",
+      layers: [catalogLayer],
+      bundling: pythonBundlingOverrides({
+        assetHashType: cdk.AssetHashType.SOURCE,
+        commandHooks: stripLayerPackagesHook,
+        assetExcludes: [...PYTHON_ASSET_EXCLUDES],
+      }),
+      timeout: cdk.Duration.seconds(60),
+      memorySize: 512,
+      environment: {
+        EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+        ENVIRONMENT: props.environment,
+        // Configurable model selection (read-only): resolves the "judge"
+        // slot via the shared pure resolver, same tables/convention as
+        // the supervisor/fabricator above.
+        MODEL_CONFIG_TABLE: `citadel-model-config-${props.environment}`,
+        MODEL_CATALOG_TABLE: `citadel-model-catalog-${props.environment}`,
+      },
+      initialPolicy: [
+        new PolicyStatement({
+          effect: Effect.ALLOW,
+          actions: [
+            "bedrock:InvokeModel",
+            "bedrock:InvokeModelWithResponseStream",
+          ],
+          resources: [
+            `arn:aws:bedrock:*::foundation-model/anthropic.claude-*`,
+            `arn:aws:bedrock:*::foundation-model/amazon.*`,
+            `arn:aws:bedrock:*:${this.account}:inference-profile/*`,
+          ],
+        }),
+      ],
+      deadLetterQueueEnabled: true,
+      deadLetterQueue: arbiterAsyncDlq,
+    });
+
+    props.agentEventBus.grantPutEventsTo(evalJudgeLambda);
+
+    const evalJudgeModelConfigTable = dynamodb.Table.fromTableName(
+      this,
+      "EvalJudgeModelConfigTableRef",
+      `citadel-model-config-${props.environment}`,
+    );
+    const evalJudgeModelCatalogTable = dynamodb.Table.fromTableName(
+      this,
+      "EvalJudgeModelCatalogTableRef",
+      `citadel-model-catalog-${props.environment}`,
+    );
+    evalJudgeModelConfigTable.grantReadData(evalJudgeLambda);
+    evalJudgeModelCatalogTable.grantReadData(evalJudgeLambda);
+
+    // F4 (CIT-102 design §6, DECISION d36fbbf7 binding): the replay-
+    // package bucket is owned by TelemetryStack, which this stack cannot
+    // hold a construct reference to (TelemetryStack instantiates AFTER
+    // ArbiterStack in bin/app.ts) — eval_judge resolves the bucket NAME at
+    // runtime via the SSM parameter TelemetryStack publishes
+    // (ReplayPackageBucketNameParam, `/citadel/eval-replay-bucket-
+    // ${environment}`), exactly mirroring governance-stack.ts's
+    // grantEvalArtifactAccess for the same reason. The parameter ARN is a
+    // synth-time literal; the bucket ARN can only absorb CloudFormation's
+    // own random bucket-name suffix (no explicit bucketName on
+    // ReplayPackageBucket), scoped to the eval-runs/ prefix and GetObject
+    // only — eval_judge is read-only on this artifact, unlike the
+    // governance Lambda's Put+Get (it never writes the case artifact).
+    const evalJudgeReplayBucketParamArn = `arn:aws:ssm:${this.region}:${this.account}:parameter/citadel/eval-replay-bucket-${props.environment}`;
+    const evalJudgeReplayBucketArnPattern = `arn:aws:s3:::citadel-telemetry-${props.environment}-replaypackagebucket*`;
+    evalJudgeLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["ssm:GetParameter"],
+        resources: [evalJudgeReplayBucketParamArn],
+      }),
+    );
+    evalJudgeLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["s3:GetObject"],
+        resources: [`${evalJudgeReplayBucketArnPattern}/eval-runs/*`],
+      }),
+    );
+    NagSuppressions.addResourceSuppressionsByPath(
+      this,
+      `/${this.stackName}/${evalJudgeLambda.node.id}/ServiceRole/DefaultPolicy/Resource`,
+      [
+        {
+          id: "AwsSolutions-IAM5",
+          reason:
+            "S3 object ARN uses a bucket-name wildcard because the " +
+            "replay-package bucket (owned by TelemetryStack, which " +
+            "instantiates AFTER this stack in bin/app.ts) is not " +
+            "referenceable as a CDK construct here; its name is " +
+            "published to SSM and resolved at RUNTIME (DECISION " +
+            "d36fbbf7, same precedent as governance-stack.ts's " +
+            "grantEvalArtifactAccess). The wildcard absorbs only " +
+            "CloudFormation's own random bucket-name suffix.",
+        },
+      ],
+      true,
+    );
+
+    const evalCaseJudgeRequestedRule = new events.Rule(
+      this,
+      "EvalCaseJudgeRequestedRule",
+      {
+        eventBus: props.agentEventBus,
+        ruleName: `citadel-eval-case-judge-requested-${props.environment}`,
+        description:
+          "CIT-103 Pass A -> Pass B: routes governance.eval.case.judge." +
+          "requested to eval-judge, which judges each requested " +
+          "dimension via Bedrock and emits governance.eval.case.judged " +
+          "(never writes DynamoDB directly, design §7).",
+        eventPattern: {
+          source: ["citadel.backend"],
+          detailType: ["governance.eval.case.judge.requested"],
+        },
+        targets: [
+          new targets.LambdaFunction(evalJudgeLambda, {
+            retryAttempts: 2,
+          }),
+        ],
+      },
+    );
+    // Referenced to satisfy lint when the rule's own construct id is the
+    // only thing needed (rule has no further post-construction config).
+    void evalCaseJudgeRequestedRule;
+
     // --- Step Runner Lambda (Task 1.6) ---
     // Collects every operational Lambda/DLQ alarm in this stack so they can
     // all be actioned to a single destination topic once it is resolved
@@ -2381,6 +2525,21 @@ export class ArbiterStack extends cdk.Stack {
           cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
         alarmDescription: "Fabricator Lambda error rate exceeded threshold",
+      }),
+    );
+
+    operationalAlarms.push(
+      new cloudwatch.Alarm(this, "EvalJudgeErrorAlarm", {
+        alarmName: `citadel-eval-judge-errors-${props.environment}`,
+        metric: evalJudgeLambda.metricErrors({
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 3,
+        evaluationPeriods: 1,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+        alarmDescription: "eval_judge Lambda error rate exceeded threshold",
       }),
     );
 

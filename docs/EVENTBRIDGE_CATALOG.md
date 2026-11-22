@@ -770,6 +770,7 @@ The consumer's write semantics make the family safe under duplicates, retries, a
 | `StepRunnerCancelRule` | detailType: `execution.cancel.requested` | Step Runner Lambda |
 | `StepRunnerResumeRule` | detailType: `execution.resume.requested` | Step Runner Lambda |
 | `WorkflowProgressFanoutRule` | source: `citadel.workflows`, 7 detail types | Fan-out Lambda |
+| `EvalCaseJudgeRequestedRule` | source: `citadel.backend`; detailType: `governance.eval.case.judge.requested` | `eval-judge` Lambda (CIT-103 Pass B; judges each requested dimension via Bedrock and emits `governance.eval.case.judged` — never writes DynamoDB directly) |
 
 ### ServicesStack Rules
 

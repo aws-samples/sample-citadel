@@ -111,7 +111,7 @@ describe("ArbiterStack — FabricatorStalePendingClaim alarm", () => {
     expect(actions.length).toBeGreaterThan(0);
   });
 
-  test("ArbiterStack (isolated, no alarmTopic prop) now synthesizes 6 alarms (5 pre-existing in this minimal harness + this one)", () => {
-    template.resourceCountIs("AWS::CloudWatch::Alarm", 6);
+  test("ArbiterStack (isolated, no alarmTopic prop) now synthesizes 7 alarms (5 pre-existing in this minimal harness + FabricatorStalePendingClaim + EvalJudgeErrorAlarm)", () => {
+    template.resourceCountIs("AWS::CloudWatch::Alarm", 7);
   });
 });
