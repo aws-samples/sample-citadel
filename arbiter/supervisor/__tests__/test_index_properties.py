@@ -190,6 +190,25 @@ class TestCreateWorkflowTrackingRecord:
             assert node in item["data"]
             assert item["data"][node] is None
 
+    def test_node_named_data_is_rejected(self):
+        """Regression (finding 679abf74): a node literally named 'data'
+        collides with the tracking item's own 'data' attribute — item['data']
+        would return the nested data map instead of the node's completion
+        flag. Reserved node ids are rejected at record creation with a
+        clear ValueError naming the reserved attribute, rather than
+        silently clobbering the tracking record."""
+        with pytest.raises(ValueError, match="data"):
+            create_workflow_tracking_record(["data"])
+
+    @given(nodes=node_names)
+    @settings(max_examples=50)
+    def test_requestId_is_also_a_reserved_node_id(self, nodes):
+        """'requestId' is the tracking item's own identity key — a node
+        named 'requestId' would collide with it the same way 'data' does.
+        Appending it to any valid node list must raise."""
+        with pytest.raises(ValueError, match="requestId"):
+            create_workflow_tracking_record(nodes + ["requestId"])
+
 
 # ---------------------------------------------------------------------------
 # update_orchestration_with_results
