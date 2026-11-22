@@ -11,6 +11,8 @@ import {
   reconcileRoleTags,
   reconcileCollectionTags,
   parseArgs,
+  exitCodeForSummary,
+  type ReconcileSummary,
 } from "../reconcile-kb-ownership";
 
 // ---------------------------------------------------------------------------
@@ -310,5 +312,156 @@ describe("reconcileCollectionTags", () => {
     await reconcileCollectionTags(oss as never, COLL_ARN, DS_ID, ORG_ID, true);
     const afterSecond = oss.getState().get(COLL_ARN)!.tags;
     expect(afterSecond).toEqual(afterFirst);
+  });
+});
+
+describe("exitCodeForSummary — process exit code decision for main()", () => {
+  function summaryWith(overrides: Partial<ReconcileSummary>): ReconcileSummary {
+    return {
+      total: 0,
+      tagged: 0,
+      alreadyPresent: 0,
+      conflict: 0,
+      recorded: 0,
+      skipped: 0,
+      errors: 0,
+      ...overrides,
+    };
+  }
+
+  it("returns 0 on a clean run with no errors and no conflicts", () => {
+    expect(exitCodeForSummary(summaryWith({ total: 5, tagged: 5 }))).toBe(0);
+  });
+
+  it("returns 3 when errors > 0", () => {
+    expect(exitCodeForSummary(summaryWith({ errors: 1 }))).toBe(3);
+  });
+
+  it("returns 3 when conflict > 0, even with zero errors", () => {
+    expect(exitCodeForSummary(summaryWith({ conflict: 2 }))).toBe(3);
+  });
+
+  it("returns 3 when both errors and conflict are > 0", () => {
+    expect(exitCodeForSummary(summaryWith({ errors: 1, conflict: 1 }))).toBe(3);
+  });
+});
+
+describe("main() — real entry point sets process.exitCode per exitCodeForSummary", () => {
+  const originalArgv = process.argv;
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    jest.resetModules();
+    process.argv = ["node", "reconcile-kb-ownership.ts", "--table", "ds-table"];
+    process.env = { ...originalEnv, AWS_REGION: "us-west-2" };
+    process.exitCode = undefined;
+    jest.spyOn(console, "log").mockImplementation(() => {});
+    jest.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    process.argv = originalArgv;
+    process.env = originalEnv;
+    process.exitCode = undefined;
+  });
+
+  it("sets process.exitCode to 3 when the scan surfaces a CONFLICT row", async () => {
+    jest.doMock("@aws-sdk/client-dynamodb", () => ({
+      DynamoDBClient: jest.fn().mockImplementation(() => ({})),
+    }));
+    jest.doMock("@aws-sdk/lib-dynamodb", () => ({
+      DynamoDBDocumentClient: {
+        from: jest.fn().mockReturnValue({
+          send: jest.fn().mockResolvedValue({
+            Items: [
+              {
+                dataStoreId: "ds-1",
+                orgId: "org-a",
+                name: "kb-1",
+                type: "KNOWLEDGE_BASE",
+                config: JSON.stringify({
+                  serviceRoleName: "role-1",
+                  collectionArn:
+                    "arn:aws:aoss:us-west-2:111111111111:collection/abc",
+                }),
+              },
+            ],
+          }),
+        }),
+      },
+      ScanCommand: jest.fn(),
+      UpdateCommand: jest.fn(),
+    }));
+    jest.doMock("@aws-sdk/client-iam", () => ({
+      IAMClient: jest.fn().mockImplementation(() => ({
+        send: jest.fn().mockResolvedValue({
+          Tags: [
+            { Key: "citadel:orgId", Value: "org-DIFFERENT" },
+            { Key: "citadel:dataStoreId", Value: "ds-1" },
+          ],
+        }),
+      })),
+      GetRoleCommand: jest.fn(),
+      ListRoleTagsCommand: jest.fn(),
+      TagRoleCommand: jest.fn(),
+    }));
+    jest.doMock("@aws-sdk/client-opensearchserverless", () => ({
+      OpenSearchServerlessClient: jest.fn().mockImplementation(() => ({
+        send: jest.fn().mockResolvedValue({ tags: [] }),
+      })),
+      BatchGetCollectionCommand: jest.fn(),
+      ListTagsForResourceCommand: jest.fn(),
+      TagResourceCommand: jest.fn(),
+    }));
+    jest.doMock("@aws-sdk/client-sts", () => ({
+      STSClient: jest.fn().mockImplementation(() => ({
+        send: jest.fn().mockResolvedValue({ Account: "111111111111" }),
+      })),
+      GetCallerIdentityCommand: jest.fn(),
+    }));
+
+    const { main } = await import("../reconcile-kb-ownership");
+    await main();
+
+    expect(process.exitCode).toBe(3);
+  });
+
+  it("leaves process.exitCode unset on a clean run with no conflicts or errors", async () => {
+    jest.doMock("@aws-sdk/client-dynamodb", () => ({
+      DynamoDBClient: jest.fn().mockImplementation(() => ({})),
+    }));
+    jest.doMock("@aws-sdk/lib-dynamodb", () => ({
+      DynamoDBDocumentClient: {
+        from: jest.fn().mockReturnValue({
+          send: jest.fn().mockResolvedValue({ Items: [] }),
+        }),
+      },
+      ScanCommand: jest.fn(),
+      UpdateCommand: jest.fn(),
+    }));
+    jest.doMock("@aws-sdk/client-iam", () => ({
+      IAMClient: jest.fn().mockImplementation(() => ({})),
+      GetRoleCommand: jest.fn(),
+      ListRoleTagsCommand: jest.fn(),
+      TagRoleCommand: jest.fn(),
+    }));
+    jest.doMock("@aws-sdk/client-opensearchserverless", () => ({
+      OpenSearchServerlessClient: jest.fn().mockImplementation(() => ({})),
+      BatchGetCollectionCommand: jest.fn(),
+      ListTagsForResourceCommand: jest.fn(),
+      TagResourceCommand: jest.fn(),
+    }));
+    jest.doMock("@aws-sdk/client-sts", () => ({
+      STSClient: jest.fn().mockImplementation(() => ({
+        send: jest.fn().mockResolvedValue({ Account: "111111111111" }),
+      })),
+      GetCallerIdentityCommand: jest.fn(),
+    }));
+
+    const { main } = await import("../reconcile-kb-ownership");
+    await main();
+
+    expect(process.exitCode).toBeUndefined();
   });
 });

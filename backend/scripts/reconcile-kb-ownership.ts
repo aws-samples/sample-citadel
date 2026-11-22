@@ -457,7 +457,19 @@ function logTagResult(
 // Entrypoint
 // ---------------------------------------------------------------------------
 
-async function main(): Promise<void> {
+/**
+ * Pure decision for the process exit code, given a completed reconcile
+ * summary. Returns 3 (non-zero) when the run surfaced something an
+ * operator must act on before the backfill can be considered clean —
+ * either a genuine per-row processing error, or a CONFLICT row that was
+ * correctly left untouched (never overwritten) but still needs manual
+ * review before strict-mode cutover. Returns 0 on a clean run.
+ */
+export function exitCodeForSummary(summary: ReconcileSummary): number {
+  return summary.errors > 0 || summary.conflict > 0 ? 3 : 0;
+}
+
+export async function main(): Promise<void> {
   const { region, rest } = resolveRegionOrExit(process.argv.slice(2));
   const { table, apply } = parseArgs(rest);
 
@@ -469,13 +481,18 @@ async function main(): Promise<void> {
   const identity = await sts.send(new GetCallerIdentityCommand({}));
   const accountId = identity.Account!;
 
-  await runReconcile(table, apply, {
+  const summary = await runReconcile(table, apply, {
     ddb,
     iam,
     oss,
     accountId,
     region,
   });
+
+  const exitCode = exitCodeForSummary(summary);
+  if (exitCode !== 0) {
+    process.exitCode = exitCode;
+  }
 }
 
 /**

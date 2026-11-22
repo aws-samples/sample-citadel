@@ -2652,8 +2652,15 @@ export async function main(): Promise<void> {
     );
   }
 
-  if (totals.errors > 0) {
-    process.exit(1);
+  // Exit code 3: the run completed but surfaced something an operator must
+  // act on before the backfill can be considered clean — either a genuine
+  // processing error, or an AMBIGUOUS row that was correctly left
+  // unresolved (never auto-assigned) but still needs an owner decision.
+  // A plain `process.exit(1)` previously covered only `errors`, so a run
+  // that found nothing but AMBIGUOUS rows exited 0 — indistinguishable
+  // from a fully clean run in CI/cron exit-code monitoring.
+  if (totals.errors > 0 || totals.ambiguousReported > 0) {
+    process.exit(3);
   }
 }
 

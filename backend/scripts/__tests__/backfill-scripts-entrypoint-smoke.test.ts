@@ -216,6 +216,72 @@ describe("backfill-org-ids.ts entrypoint", () => {
   });
 });
 
+describe("backfill-app-stage-vars.ts entrypoint", () => {
+  /** APPS_TABLE stripped, AWS_REGION supplied so the script reaches its
+   * own env-var check instead of failing earlier on region resolution. */
+  function envWithRegionOnly(): NodeJS.ProcessEnv {
+    const env = strippedEnv();
+    delete env.APPS_TABLE;
+    env.AWS_REGION = "us-west-2";
+    return env;
+  }
+
+  it("via `npx ts-node scripts/backfill-app-stage-vars.ts` (CommonJS execution) exits non-zero with a clean env-var error — verifies the dual-mode entry guard's CJS branch (require.main === module)", () => {
+    const result = spawnSync(
+      "npx",
+      ["ts-node", "scripts/backfill-app-stage-vars.ts"],
+      {
+        cwd: BACKEND_ROOT,
+        env: envWithRegionOnly(),
+        encoding: "utf8",
+        timeout: 20000,
+      },
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.status).not.toBeNull();
+    const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+    expect(output).toContain("APPS_TABLE env var required");
+    expect(output).not.toContain("Cannot find name");
+    expect(output).not.toContain("ERR_REQUIRE_ESM");
+  });
+
+  it("--dry-run arg parsing does not crash before the env-var check (ts-node/CJS execution)", () => {
+    const result = spawnSync(
+      "npx",
+      ["ts-node", "scripts/backfill-app-stage-vars.ts", "--dry-run"],
+      {
+        cwd: BACKEND_ROOT,
+        env: envWithRegionOnly(),
+        encoding: "utf8",
+        timeout: 20000,
+      },
+    );
+
+    expect(result.status).not.toBe(0);
+    const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+    expect(output).toContain("APPS_TABLE env var required");
+  });
+
+  it("via native `node scripts/backfill-app-stage-vars.ts` (ESM execution): module loading fails on the SAME pre-existing, unrelated defect documented for backfill-org-ids.ts — Node's native ESM loader cannot resolve the extensionless relative import `./lib/resolve-region` (ESM requires explicit file extensions for relative specifiers). This failure happens at import-resolution time, BEFORE the entry guard's own code ever runs, so this case cannot verify the guard fix itself (that is covered by the ts-node/CJS cases above, where the guard's `require.main === module` branch is what actually executes). Kept here only to pin down and document the known-open gap so a future fix to the import doesn't silently regress without a failing test to catch it.", () => {
+    const result = spawnSync(
+      process.execPath,
+      ["scripts/backfill-app-stage-vars.ts"],
+      {
+        cwd: BACKEND_ROOT,
+        env: envWithRegionOnly(),
+        encoding: "utf8",
+        timeout: 20000,
+      },
+    );
+
+    expect(result.status).not.toBe(0);
+    const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+    expect(output).toContain("ERR_MODULE_NOT_FOUND");
+    expect(output).not.toContain("Cannot find name");
+  });
+});
+
 describe("audit-cognito-custom-attributes.ts entrypoint", () => {
   it("via `npm run audit:cognito-custom-attributes` exits non-zero with a clean env-var error, no crash", () => {
     const result = spawnSync(
