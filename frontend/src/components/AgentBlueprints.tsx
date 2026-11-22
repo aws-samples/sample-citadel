@@ -21,8 +21,8 @@ import { useWorkflowPersistence } from '../hooks/useWorkflowPersistence';
 import { useExecutionSubscription } from '../hooks/useExecutionSubscription';
 import { useOrganization } from '../contexts/OrganizationContext';
 import { mapExecutionToNodeStatus } from '../services/mapExecutionToNodeStatus';
+import { workflowAutosaveStorageKey } from '../utils/userScopedStorage';
 
-const AUTOSAVE_KEY = 'workflow-autosave';
 const AUTOSAVE_DELAY = 2000; // 2 seconds debounce before first server create
 const VALIDATION_DELAY = 500; // 500ms debounce
 
@@ -61,6 +61,11 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
   const { currentUser, canApproveExecutions } = useOrganization();
   const orgId = currentUser?.organization || null;
   const orgMissingMessage = 'Your account has no organisation; ask an admin to assign one';
+  // Namespaced by the signed-in user so a different user on the same browser
+  // never restores this user's unsaved canvas draft. Falls back to a fixed
+  // sentinel when no user is known yet (e.g. profile still loading) so the
+  // draft is still usable within that session, never cross-user.
+  const autosaveKey = workflowAutosaveStorageKey(currentUser?.userId ?? 'anonymous');
 
   // Server-side autosave (debounced update + conflict handling + offline fallback).
   const { save, isSaving, lastSaved, conflict, workflow } = useWorkflowPersistence(workflowId);
@@ -150,7 +155,7 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
 
     (async () => {
       try {
-        const saved = localStorage.getItem(AUTOSAVE_KEY);
+        const saved = localStorage.getItem(autosaveKey);
         if (!saved) return;
 
         const { nodes: savedNodes, edges: savedEdges } = JSON.parse(saved);
@@ -202,12 +207,12 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
         }
       } catch (error) {
         console.error('Failed to restore local workflow cache:', error);
-        localStorage.removeItem(AUTOSAVE_KEY);
+        localStorage.removeItem(autosaveKey);
       }
     })();
 
     return () => { cancelled = true; };
-  }, [initialWorkflowId]);
+  }, [initialWorkflowId, autosaveKey]);
 
   /**
    * Load-by-id hydration: when opened with an existing workflowId (e.g. an
@@ -305,7 +310,7 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
         console.error('Failed to create workflow on server; keeping local fallback:', error);
         try {
           localStorage.setItem(
-            AUTOSAVE_KEY,
+            autosaveKey,
             JSON.stringify({ nodes, edges, timestamp: new Date().toISOString() })
           );
         } catch (storageError) {
@@ -317,7 +322,7 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
     }, AUTOSAVE_DELAY);
 
     return () => clearTimeout(timer);
-  }, [nodes, edges, workflowId, orgId]);
+  }, [nodes, edges, workflowId, orgId, autosaveKey]);
 
   /**
    * Subsequent autosave: once a workflowId exists, delegate to the persistence
@@ -369,8 +374,8 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
   const handleClear = useCallback(() => {
     setNodes([]);
     setEdges([]);
-    localStorage.removeItem(AUTOSAVE_KEY);
-  }, []);
+    localStorage.removeItem(autosaveKey);
+  }, [autosaveKey]);
 
   /**
    * Handle double-clicking a node to open configuration panel
