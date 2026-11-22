@@ -759,6 +759,20 @@ describe("RegistryStack — backend-stack-split phase 2", () => {
     expect(Object.keys(queues)).toHaveLength(1);
   });
 
+  test("the RegistrySync dead-letter queue pins SQS-managed encryption (unlike RegistryAsyncDlq, it set enforceSSL without `encryption`)", () => {
+    const queues = template.findResources("AWS::SQS::Queue", {
+      Properties: Match.objectLike({
+        QueueName: "citadel-registry-sync-dlq-test",
+      }),
+    });
+    const queueLogicalId = Object.keys(queues)[0];
+    expect(queueLogicalId).toBeDefined();
+    const props = (
+      queues[queueLogicalId] as { Properties?: Record<string, unknown> }
+    ).Properties;
+    expect(props?.SqsManagedSseEnabled).toBe(true);
+  });
+
   describe("RegistrySync DLQ_URL wiring (sync-diag-2026-09-26)", () => {
     function registrySyncFn(): CfnLambdaFunctionResource {
       const fns = template.findResources("AWS::Lambda::Function", {

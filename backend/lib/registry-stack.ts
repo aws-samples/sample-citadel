@@ -211,6 +211,7 @@ export class RegistryStack extends cdk.Stack {
     const registrySyncDlq = new cdk.aws_sqs.Queue(this, "RegistrySyncDLQ", {
       queueName: `citadel-registry-sync-dlq-${props.environment}`,
       retentionPeriod: cdk.Duration.days(14),
+      encryption: cdk.aws_sqs.QueueEncryption.SQS_MANAGED,
       enforceSSL: true,
     });
 
@@ -387,10 +388,7 @@ export class RegistryStack extends cdk.Stack {
     agentImportResolverFunction.addToRolePolicy(
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
-        actions: [
-          "lambda:InvokeFunction",
-          "execute-api:Invoke",
-        ],
+        actions: ["lambda:InvokeFunction", "execute-api:Invoke"],
         resources: [
           `arn:aws:lambda:*:${this.account}:function:*`,
           `arn:aws:execute-api:*:${this.account}:*`,
