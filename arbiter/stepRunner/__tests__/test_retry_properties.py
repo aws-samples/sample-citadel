@@ -19,6 +19,7 @@ from hypothesis import given, settings, assume
 from hypothesis import strategies as st
 
 from retry import calculate_backoff, should_retry
+from common.failure_taxonomy import is_retry_forbidden_by_taxonomy
 
 
 # ---------------------------------------------------------------------------
@@ -179,8 +180,19 @@ class TestShouldRetryTrue:
     )
     @settings(max_examples=100)
     def test_true_when_retryable_and_attempts_remaining(self, retryable_errors, max_retries):
-        """should_retry returns True when error is retryable and attempts not exhausted."""
+        """should_retry returns True when error is retryable and attempts not exhausted.
+
+        The shared failure taxonomy is AUTHORITATIVE over the author-supplied
+        retryable_errors list (843a959e): a listed string that the taxonomy
+        classifies to a recognised never-retry class (e.g. 'POLICY-DENIED')
+        is vetoed regardless of list membership. assume() filters such
+        vetoed picks out of the premise so the property only asserts on
+        strings should_retry can actually grant — see
+        test_policy_denied_is_never_retryable_even_when_listed below for the
+        explicit regression on the vetoed case.
+        """
         error_type = retryable_errors[0]  # Pick a known retryable error
+        assume(not is_retry_forbidden_by_taxonomy(error_type))
         attempt = max_retries - 1  # One attempt remaining
         result = should_retry(error_type, retryable_errors, attempt, max_retries)
         assert result is True, (
@@ -198,5 +210,15 @@ class TestShouldRetryTrue:
         """should_retry returns True at low attempt counts for retryable errors."""
         assume(attempt < max_retries)
         error_type = retryable_errors[0]
+        assume(not is_retry_forbidden_by_taxonomy(error_type))
         result = should_retry(error_type, retryable_errors, attempt, max_retries)
         assert result is True
+
+    def test_policy_denied_is_never_retryable_even_when_listed(self):
+        """Explicit regression (finding 956fa8f3): should_retry('POLICY-DENIED',
+        ['POLICY-DENIED'], 0, 1) is False. The taxonomy classifies
+        'POLICY-DENIED' to FailureClass.POLICY_DENIED (NEVER disposition),
+        which is authoritative over the author-supplied retryable_errors
+        list even though the string is a verbatim list member and an
+        attempt remains (0 < 1)."""
+        assert should_retry("POLICY-DENIED", ["POLICY-DENIED"], 0, 1) is False
