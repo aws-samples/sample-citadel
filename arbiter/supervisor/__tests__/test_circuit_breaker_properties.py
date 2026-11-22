@@ -23,6 +23,7 @@ from hypothesis import strategies as st
 from hypothesis.stateful import RuleBasedStateMachine, rule, invariant
 
 from circuit_breaker import CircuitBreaker, CircuitBreakerOpen, CircuitState
+from common.failure_taxonomy import FailureClass, classify, is_auto_retryable
 
 
 # ---------------------------------------------------------------------------
@@ -110,20 +111,46 @@ class TestIsRetryable:
         assert cb._is_retryable(exc) is True
 
     @given(error_code=st.text(min_size=1, max_size=50).filter(
-        lambda s: s not in (
-            "ThrottlingException",
-            "ServiceUnavailableException",
-            "ModelTimeoutException",
-            "InternalServerException",
-        )
+        lambda s: not is_auto_retryable(classify(s))
     ))
     @settings(max_examples=100)
     def test_unknown_error_codes_not_retryable(self, error_code):
-        """Unknown error codes are not retryable."""
+        """Codes the shared taxonomy does NOT classify as auto-retryable
+        are not retryable via the breaker either. The filter is derived
+        from ``is_auto_retryable(classify(...))`` — the SAME predicate
+        ``CircuitBreaker._is_retryable`` consumes internally — rather than
+        a hardcoded string list, so this test cannot drift from the
+        taxonomy the way the prior literal 4-item exclusion did (it
+        omitted 'TIMEOUT', which the taxonomy's case-insensitive fallback
+        index maps to FailureClass.TIMEOUT, an auto-retryable class)."""
         cb = CircuitBreaker()
         exc = Exception("test")
         exc.response = {"Error": {"Code": error_code}}
         assert cb._is_retryable(exc) is False
+
+    @given(fc=st.sampled_from([
+        fc for fc in FailureClass if is_auto_retryable(fc)
+    ]))
+    def test_every_auto_retryable_taxonomy_class_is_retryable(self, fc):
+        """Every FailureClass the taxonomy marks auto-retryable IS
+        retryable via the breaker, using the class's own enum value as the
+        error code (exercises the case-insensitive fallback index — the
+        exact path that let 'TIMEOUT' slip through the old hardcoded
+        exclusion list in finding 8d5e21a8)."""
+        cb = CircuitBreaker()
+        exc = Exception("test")
+        exc.response = {"Error": {"Code": fc.value}}
+        assert cb._is_retryable(exc) is True
+
+    def test_timeout_code_is_retryable(self):
+        """Explicit regression example (finding 8d5e21a8): the bare error
+        code 'TIMEOUT' (not just 'ModelTimeoutException') is retryable,
+        because it matches FailureClass.TIMEOUT.value via the taxonomy's
+        case-insensitive fallback index."""
+        cb = CircuitBreaker()
+        exc = Exception("test")
+        exc.response = {"Error": {"Code": "TIMEOUT"}}
+        assert cb._is_retryable(exc) is True
 
     def test_plain_exception_not_retryable(self):
         """Plain exceptions without response attr are not retryable."""
