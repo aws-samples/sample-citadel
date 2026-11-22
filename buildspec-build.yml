@@ -13,9 +13,13 @@ phases:
   install:
     runtime-versions:
       nodejs: 24
+      python: 3.15
     commands:
       - npm --version
       - node --version
+      - npm ci
+      - npm ci --prefix frontend
+      - pip install -r arbiter/requirements-ci.txt
 
   pre_build:
     commands:
@@ -28,14 +32,12 @@ phases:
       # Frontend build
       - echo "Building frontend..."
       - cd frontend
-      - npm ci
       - npm run build
       - cd ..
 
       # Backend build
       - echo "Building backend..."
       - cd backend
-      - npm ci
       - npm run build
       - npm run build:lambda
 

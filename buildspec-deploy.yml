@@ -13,9 +13,9 @@ phases:
   install:
     runtime-versions:
       nodejs: 24
-      python: 3.12
+      python: 3.15
     commands:
-      - cd backend && npm ci
+      - npm ci
 
   pre_build:
     commands:
