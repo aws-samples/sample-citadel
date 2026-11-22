@@ -126,6 +126,40 @@ export class FrontendStack extends cdk.Stack {
       lifecycleRules: [{ expiration: cdk.Duration.days(90) }],
     });
 
+    // Security response headers policy (finding 82997842): the SPA holds
+    // Cognito tokens, so every response from the distribution — the default
+    // S3 behaviour and the /api/* AppSync behaviour alike — must carry HSTS,
+    // X-Content-Type-Options, X-Frame-Options and Referrer-Policy. CSP is
+    // deferred: it needs an explicit allowed-origin list from the AppSync
+    // and cost-API endpoints, out of scope for this change.
+    const securityResponseHeaders = new cloudfront.ResponseHeadersPolicy(
+      this,
+      "SecurityResponseHeaders",
+      {
+        comment: "Baseline security headers for the Citadel SPA",
+        securityHeadersBehavior: {
+          strictTransportSecurity: {
+            accessControlMaxAge: cdk.Duration.days(365),
+            includeSubdomains: true,
+            override: true,
+          },
+          contentTypeOptions: { override: true },
+          // No <iframe> usage anywhere in frontend/src, so the SPA never
+          // needs to be framed (not even same-origin) — DENY is the
+          // strictest option and carries no functional cost here.
+          frameOptions: {
+            frameOption: cloudfront.HeadersFrameOption.DENY,
+            override: true,
+          },
+          referrerPolicy: {
+            referrerPolicy:
+              cloudfront.HeadersReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN,
+            override: true,
+          },
+        },
+      },
+    );
+
     const cfnDistribution = new cloudfront.CfnDistribution(
       this,
       "FrontendDistribution",
@@ -174,6 +208,8 @@ export class FrontendStack extends cdk.Stack {
             cachedMethods: ["GET", "HEAD", "OPTIONS"],
             compress: true,
             cachePolicyId: "658327ea-f89d-4fab-a63d-7e88639e58f6", // CachingOptimized
+            responseHeadersPolicyId:
+              securityResponseHeaders.responseHeadersPolicyId,
           },
           cacheBehaviors: [
             {
@@ -192,6 +228,8 @@ export class FrontendStack extends cdk.Stack {
               cachedMethods: ["GET", "HEAD"],
               cachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad", // CachingDisabled
               originRequestPolicyId: "88a5eaf4-2fd4-4709-b370-b4c650ea3fcf", // CORS-S3Origin
+              responseHeadersPolicyId:
+                securityResponseHeaders.responseHeadersPolicyId,
             },
           ],
           customErrorResponses: [
