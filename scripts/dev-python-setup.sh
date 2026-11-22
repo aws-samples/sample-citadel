@@ -28,17 +28,22 @@ echo "Target Python version (from .python-version): $PY_VERSION"
 if [ -d "$VENV_DIR" ]; then
   echo "Reusing existing virtualenv at $VENV_DIR"
 else
-  if command -v uv >/dev/null 2>&1; then
+  PYTHON_BIN="python${PY_VERSION}"
+  if command -v "$PYTHON_BIN" >/dev/null 2>&1 && \
+     "$PYTHON_BIN" -c 'import sys; sys.exit(0 if sys.version_info.releaselevel == "final" else 1)' >/dev/null 2>&1; then
+    # A final-release system interpreter wins over a uv-managed build,
+    # which may be a pre-release before the final X.Y.0 is cut upstream.
+    echo "Creating virtualenv with system $PYTHON_BIN (final release)..."
+    "$PYTHON_BIN" -m venv "$VENV_DIR"
+  elif command -v uv >/dev/null 2>&1; then
     echo "Creating virtualenv with uv (python $PY_VERSION)..."
     uv venv --python "$PY_VERSION" "$VENV_DIR"
-  else
-    PYTHON_BIN="python${PY_VERSION}"
-    if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-      echo "ERROR: neither 'uv' nor '$PYTHON_BIN' is on PATH. Install uv (https://docs.astral.sh/uv/) or Python $PY_VERSION and re-run." >&2
-      exit 1
-    fi
+  elif command -v "$PYTHON_BIN" >/dev/null 2>&1; then
     echo "Creating virtualenv with $PYTHON_BIN..."
     "$PYTHON_BIN" -m venv "$VENV_DIR"
+  else
+    echo "ERROR: neither 'uv' nor '$PYTHON_BIN' is on PATH. Install uv (https://docs.astral.sh/uv/) or Python $PY_VERSION and re-run." >&2
+    exit 1
   fi
 fi
 
@@ -47,6 +52,18 @@ VENV_PY="$VENV_DIR/bin/python"
 if [ ! -x "$VENV_PY" ]; then
   echo "ERROR: expected $VENV_PY to exist after venv creation." >&2
   exit 1
+fi
+
+if ! "$VENV_PY" -c 'import sys; sys.exit(0 if sys.version_info.releaselevel == "final" else 1)'; then
+  FOUND_VERSION="$("$VENV_PY" -c 'import sys; print("{}.{}.{}{}".format(*sys.version_info[:3], sys.version_info.releaselevel))')"
+  echo "ERROR: $VENV_PY is a pre-release build ($FOUND_VERSION), not a final release." >&2
+  echo "  Refusing to set up a dev environment on a pre-release interpreter." >&2
+  echo "  To fix:" >&2
+  echo "    - If a final Python $PY_VERSION build is listed, run: uv python install $PY_VERSION" >&2
+  echo "    - Otherwise, install a system python3.15 (final) and re-run this script" >&2
+  echo "      so it is found on PATH ahead of any uv-managed pre-release build." >&2
+  rm -rf "$VENV_DIR"
+  exit 2
 fi
 
 if command -v uv >/dev/null 2>&1; then
