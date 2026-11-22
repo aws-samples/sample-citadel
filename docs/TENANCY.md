@@ -20,6 +20,10 @@ This rule applies uniformly:
 - IAM callers that cannot resolve an org from the session's project are denied.
 - No resolver, handler, or arbiter module falls back to a hardcoded org string.
 
+## Admin tier and cross-tenant role assignment (accepted risk)
+
+There is exactly one admin tier today: membership in the single, GLOBAL Cognito `admin` group — it is not org-scoped. Because of this, `assignUserRole` / `removeUserRole` in `backend/src/lambda/user-management-resolver.ts` perform no org reconciliation between the caller and the target user; an admin may assign or remove roles for a user in any organisation. This is permitted by design while admin remains a single global tier, and is pinned by `backend/test/single-global-admin-tier-tripwire.test.ts` (finding 59e5a79c) — introducing an org-scoped admin tier requires revisiting both the test and this accepted risk.
+
 ## Guard primitives
 
 | Primitive | Location | Purpose |
