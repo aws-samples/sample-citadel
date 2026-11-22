@@ -24,6 +24,7 @@ scripts/*
 !scripts/verify-doc-claims.js
 !scripts/check-allowlist-expiry.sh
 !scripts/audit_missing_required_permissions.py
+!scripts/dev-python-setup.sh
 !scripts/__tests__/
 !scripts/__tests__/**
 scripts/__tests__/__pycache__/

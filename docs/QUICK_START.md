@@ -15,6 +15,8 @@ npm install -g aws-cdk
 aws configure
 ```
 
+For the Python test suites (arbiter, intake service), run `./scripts/dev-python-setup.sh` to create a `.venv` matching the pinned version in `.python-version` — see `docs/DEPLOYMENT.md` for details.
+
 ## 2. Configure
 
 ```bash
