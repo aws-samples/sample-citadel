@@ -40,6 +40,18 @@ was deliberately left at `>=5.0.9 <6` (unaffected chain, untouched).
 Residual allowlist scope is now exactly the one category below (bundled aws-cdk-lib copy) — the only
 remaining instance not reachable by npm `overrides`.
 
+**Verified (2026-11-22):** re-ran the `test-exclude`-chain repro against the current lockfile.
+`node_modules/test-exclude/node_modules/minimatch` no longer exists as a standalone path — the
+chain is now `test-exclude@7.0.2 → glob@10.5.0 → minimatch@9.0.9 → brace-expansion@1.1.21`
+(hoisted to `node_modules/test-exclude/node_modules/brace-expansion@1.1.21`, already above the
+GHSA-mh99 fix line and satisfying the `jest`/`glob` nested `brace-expansion` overrides below). No
+throw reproduces. The `eslint.minimatch.brace-expansion` and `test-exclude.minimatch.brace-expansion`
+nested overrides named in the 2026-08-02 entry above are historical — eslint and aws-cdk-lib have
+since moved to minimatch 10.x/11.x (which depend on brace-expansion 5.x directly), and neither
+override exists in the current root `package.json`; only `jest.minimatch.brace-expansion` and
+`glob.minimatch.brace-expansion` (both `>=1.1.21 <2`) remain, scoped to the surviving minimatch@9
+chain. No package.json or lockfile change was needed.
+
 **Why remediation is blocked:**
 1. **aws-cdk-lib bundled copy**: npm `overrides` cannot rewrite `bundleDependencies` entries. Only an upstream `aws-cdk-lib` release bumping its bundled `brace-expansion` to >=5.0.8 will fix this.
 
