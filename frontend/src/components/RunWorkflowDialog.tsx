@@ -22,8 +22,8 @@ import {
 import { Button } from './ui/button';
 import { Textarea } from './ui/textarea';
 import { Label } from './ui/label';
-
-const STORAGE_PREFIX = 'citadel:run-input:';
+import { useOrganization } from '../contexts/OrganizationContext';
+import { runInputStorageKey } from '../utils/userScopedStorage';
 
 export interface RunWorkflowDialogProps {
   open: boolean;
@@ -34,20 +34,23 @@ export interface RunWorkflowDialogProps {
   onRun: (workflowId: string, input?: string) => void;
 }
 
-function getStoredInput(workflowId: string): string {
+function getStoredInput(userId: string | undefined, workflowId: string): string {
+  if (!userId) return '';
   try {
-    return localStorage.getItem(`${STORAGE_PREFIX}${workflowId}`) ?? '';
+    return localStorage.getItem(runInputStorageKey(userId, workflowId)) ?? '';
   } catch {
     return '';
   }
 }
 
-function storeInput(workflowId: string, value: string): void {
+function storeInput(userId: string | undefined, workflowId: string, value: string): void {
+  if (!userId) return;
   try {
+    const key = runInputStorageKey(userId, workflowId);
     if (value) {
-      localStorage.setItem(`${STORAGE_PREFIX}${workflowId}`, value);
+      localStorage.setItem(key, value);
     } else {
-      localStorage.removeItem(`${STORAGE_PREFIX}${workflowId}`);
+      localStorage.removeItem(key);
     }
   } catch {
     // localStorage full or unavailable — silently ignore
@@ -77,14 +80,17 @@ export function RunWorkflowDialog({
   loading = false,
   onRun,
 }: RunWorkflowDialogProps) {
+  const { currentUser } = useOrganization();
+  const userId = currentUser?.userId;
   const [inputValue, setInputValue] = useState('');
 
-  // Restore remembered input when the dialog opens for a given workflowId
+  // Restore remembered input when the dialog opens for a given workflowId,
+  // scoped to the signed-in user so a different user never sees it.
   useEffect(() => {
     if (open && workflowId) {
-      setInputValue(getStoredInput(workflowId));
+      setInputValue(getStoredInput(userId, workflowId));
     }
-  }, [open, workflowId]);
+  }, [open, workflowId, userId]);
 
   const validationError = useMemo(() => validateJson(inputValue), [inputValue]);
   const hasInput = inputValue.trim().length > 0;
@@ -92,13 +98,13 @@ export function RunWorkflowDialog({
 
   const handleRun = useCallback(() => {
     const trimmed = inputValue.trim();
-    storeInput(workflowId, trimmed);
+    storeInput(userId, workflowId, trimmed);
     if (trimmed) {
       onRun(workflowId, trimmed);
     } else {
       onRun(workflowId);
     }
-  }, [inputValue, workflowId, onRun]);
+  }, [inputValue, workflowId, userId, onRun]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

@@ -45,6 +45,11 @@ jest.mock('../ui/label', () => ({
     React.createElement('label', { htmlFor, ...rest }, children),
 }));
 
+let mockCurrentUser: { userId: string } | null = { userId: 'user-a' };
+jest.mock('../../contexts/OrganizationContext', () => ({
+  useOrganization: () => ({ currentUser: mockCurrentUser }),
+}));
+
 import { RunWorkflowDialog } from '../RunWorkflowDialog';
 
 describe('RunWorkflowDialog', () => {
@@ -60,6 +65,7 @@ describe('RunWorkflowDialog', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     localStorage.clear();
+    mockCurrentUser = { userId: 'user-a' };
   });
 
   it('renders the dialog with workflow name', () => {
@@ -105,31 +111,31 @@ describe('RunWorkflowDialog', () => {
   });
 
   it('restores remembered input from localStorage', () => {
-    localStorage.setItem('citadel:run-input:wf-test-1', '{"remembered":true}');
+    localStorage.setItem('citadel:run-input:user-a:wf-test-1', '{"remembered":true}');
     render(<RunWorkflowDialog {...defaultProps} />);
 
     const textarea = screen.getByTestId('run-input-textarea') as HTMLTextAreaElement;
     expect(textarea.value).toBe('{"remembered":true}');
   });
 
-  it('persists input to localStorage on Run', () => {
+  it('persists input to localStorage on Run, namespaced by the signed-in user', () => {
     render(<RunWorkflowDialog {...defaultProps} />);
     const textarea = screen.getByTestId('run-input-textarea');
     fireEvent.change(textarea, { target: { value: '{"saved":1}' } });
     fireEvent.click(screen.getByTestId('run-dialog-confirm'));
 
-    expect(localStorage.getItem('citadel:run-input:wf-test-1')).toBe('{"saved":1}');
+    expect(localStorage.getItem('citadel:run-input:user-a:wf-test-1')).toBe('{"saved":1}');
   });
 
   it('removes localStorage entry when running with empty input', () => {
-    localStorage.setItem('citadel:run-input:wf-test-1', '{"old":true}');
+    localStorage.setItem('citadel:run-input:user-a:wf-test-1', '{"old":true}');
     render(<RunWorkflowDialog {...defaultProps} />);
     const textarea = screen.getByTestId('run-input-textarea');
     // Clear the textarea
     fireEvent.change(textarea, { target: { value: '' } });
     fireEvent.click(screen.getByTestId('run-dialog-confirm'));
 
-    expect(localStorage.getItem('citadel:run-input:wf-test-1')).toBeNull();
+    expect(localStorage.getItem('citadel:run-input:user-a:wf-test-1')).toBeNull();
   });
 
   it('disables Run button when loading', () => {
@@ -162,5 +168,47 @@ describe('RunWorkflowDialog', () => {
     fireEvent.change(textarea, { target: { value: '{"good":true}' } });
     expect(screen.getByTestId('run-dialog-confirm')).toBeEnabled();
     expect(screen.queryByTestId('run-input-error')).not.toBeInTheDocument();
+  });
+});
+
+describe('RunWorkflowDialog — per-user isolation', () => {
+  const baseProps = {
+    open: true,
+    onOpenChange: jest.fn(),
+    workflowId: 'wf-shared',
+    workflowName: 'Shared Workflow',
+    loading: false,
+    onRun: jest.fn(),
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    localStorage.clear();
+    mockCurrentUser = { userId: 'user-a' };
+  });
+
+  it('does not restore user A\'s remembered input while signed in as user B', () => {
+    mockCurrentUser = { userId: 'user-a' };
+    localStorage.setItem('citadel:run-input:user-a:wf-shared', '{"userA":true}');
+
+    mockCurrentUser = { userId: 'user-b' };
+    render(<RunWorkflowDialog {...baseProps} />);
+
+    const textarea = screen.getByTestId('run-input-textarea') as HTMLTextAreaElement;
+    expect(textarea.value).toBe('');
+  });
+
+  it('persisting input as user B does not overwrite or leak into user A\'s key', () => {
+    mockCurrentUser = { userId: 'user-a' };
+    localStorage.setItem('citadel:run-input:user-a:wf-shared', '{"userA":true}');
+
+    mockCurrentUser = { userId: 'user-b' };
+    render(<RunWorkflowDialog {...baseProps} />);
+    const textarea = screen.getByTestId('run-input-textarea');
+    fireEvent.change(textarea, { target: { value: '{"userB":true}' } });
+    fireEvent.click(screen.getByTestId('run-dialog-confirm'));
+
+    expect(localStorage.getItem('citadel:run-input:user-a:wf-shared')).toBe('{"userA":true}');
+    expect(localStorage.getItem('citadel:run-input:user-b:wf-shared')).toBe('{"userB":true}');
   });
 });

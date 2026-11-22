@@ -44,6 +44,7 @@ import { OrganizationProvider } from './contexts/OrganizationContext';
 import { GovernanceModeProvider } from './contexts/GovernanceModeContext';
 import { Toaster } from './components/ui/sonner';
 import { TooltipProvider } from '@/components/ui/tooltip';
+import { clearSignedOutUserStorage } from './utils/userScopedStorage';
 
 function AppDetailViewRoute() {
   const navigate = useNavigate();
@@ -192,6 +193,11 @@ function App() {
     try {
       await serverService.signOut();
       setCurrentUser(null);
+      // Remove every remembered run-input / canvas-autosave key so a
+      // different user signing in on this browser never restores this
+      // user's data (finding: both were previously keyed only by
+      // workflowId / a fixed string, with nothing clearing them on sign-out).
+      clearSignedOutUserStorage();
       navigate('/');
     } catch (error) {
       console.error('Logout failed:', error);

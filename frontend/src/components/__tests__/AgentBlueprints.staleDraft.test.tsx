@@ -94,7 +94,7 @@ import { agentConfigService } from '../../services/agentConfigService';
 import { toast } from 'sonner';
 import serverService from '../../services/server';
 
-const AUTOSAVE_KEY = 'workflow-autosave';
+const AUTOSAVE_KEY = 'workflow-autosave:anonymous';
 
 const flush = async () => {
   await act(async () => {
