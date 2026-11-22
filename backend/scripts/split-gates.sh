@@ -32,6 +32,19 @@ BACKEND_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 ENV="${1:-dev}"
 STACK_NAME="citadel-backend-${ENV}"
 
+# --- Environment guard (move-manifest.ts hardcoded the `-dev` suffix on
+# every satellite stack name / MOVED_RESOLVERS / MOVED_LAMBDA_ROLES key;
+# TypeScript callers now derive the suffix via satelliteStackNamesFor(env)
+# etc., but the per-Lambda allowed-added-statement baseline data in
+# ALLOWED_SATELLITE_ADDED_STATEMENTS was captured from a single real `dev`
+# synth and has no equivalent for other environments). Fail loudly here,
+# before the slow rebuild/synth below, so a non-dev run is never mistaken
+# for baseline staleness (decision 453d1acc forbids regenerating the
+# committed baseline to "fix" that). ---
+if [ "${ENV}" != "dev" ]; then
+  die "test-env runs are unsupported for environment \"${ENV}\" (only \"dev\" is supported). Any rail violations you might see for a non-dev environment are NOT baseline staleness — do not regenerate the committed baseline (decision 453d1acc)."
+fi
+
 cd "${BACKEND_DIR}"
 
 OVERALL_STATUS=0

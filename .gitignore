@@ -26,6 +26,7 @@ scripts/*
 !scripts/audit_missing_required_permissions.py
 !scripts/__tests__/
 !scripts/__tests__/**
+scripts/__tests__/__pycache__/
 !scripts/smoke/
 !scripts/smoke/**
 scripts/smoke/**/node_modules
