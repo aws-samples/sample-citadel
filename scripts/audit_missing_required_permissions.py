@@ -3,9 +3,12 @@
 AGENT records whose ``requiredPermissions`` is absent or empty
 (PR-4 §3, owner decision 5750aeec: FAIL CLOSED, no grandfathering).
 
-Audits AGENT records only, matching the type filter that
-backend/scripts/stamp-agent-permissions.ts applies via listResources('agent').
-Records whose kind infers to 'tool' or 'app' are skipped.
+Audits the same record set backend/scripts/stamp-agent-permissions.ts
+touches via ``registry.listResources("agent")``: 'agent' AND 'app' kinds
+are both included (they group together because both carry a `manifest` in
+customDescriptorContent — see RegistryService.listResourcesChecked's
+`isAgentOrApp` check in backend/src/services/registry-service.ts). Only
+records whose kind infers to 'tool' are skipped.
 
 A record is **satisfied** when:
   - ``requiredPermissions`` has non-empty ``models`` OR ``integrations``
@@ -38,7 +41,51 @@ import sys
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_REPO_ROOT, "arbiter"))
 
-from catalog.registry_client import get_agent_record, list_agent_records  # noqa: E402
+from catalog import registry_client
+from catalog.registry_client import get_agent_record  # noqa: E402
+
+
+def _list_agent_records_or_raise(registry_id: str) -> list[dict]:
+    """Like ``catalog.registry_client.list_agent_records``, but RAISES on a
+    registry call failure instead of swallowing it.
+
+    ``list_agent_records`` deliberately never raises — it catches
+    ``ClientError`` internally and returns ``[]`` so that other callers
+    (e.g. arbiter/seedConfig/index.py) can gracefully degrade on a
+    transient registry outage. That contract is exactly what hides a
+    genuine registry failure from this audit: a throttled/failed call and
+    a truly empty, healthy registry both come back as ``[]``, so the
+    audit would otherwise report "0 findings" (a clean bill of health) for
+    an infrastructure error (PR-4 §3 open item: registry errors must exit
+    2, never look like a clean estate).
+
+    Replicates the same pagination loop as
+    ``catalog.registry_client.list_agent_records`` (see that function for
+    the authoritative shape/field mapping), but calls the shared, lazily
+    constructed boto3 client directly via the module's own ``_get_client()``
+    so a ``ClientError`` propagates to this script's caller instead of
+    being caught.
+    """
+    client = registry_client._get_client()
+    kwargs: dict = {"registryId": registry_id}
+    items: list[dict] = []
+    while True:
+        response = client.list_registry_records(**kwargs)
+        summaries = response.get("registryRecords")
+        if summaries is None:
+            summaries = response.get("records", [])
+        for summary in summaries:
+            items.append({
+                "recordId": summary.get("recordId"),
+                "name": summary.get("displayName"),
+                "status": summary.get("status"),
+                "updatedAt": summary.get("updatedAt"),
+            })
+        next_token = response.get("nextToken")
+        if not next_token:
+            break
+        kwargs["nextToken"] = next_token
+    return items
 
 
 def _is_absent_or_empty_permissions(required_permissions: object) -> bool:
@@ -104,18 +151,20 @@ def _infer_kind(descriptor: dict) -> str:
 
 def audit_missing_required_permissions(registry_id: str) -> list[dict]:
     """Return a list of {recordId, name, orgId, createdBy, status} dicts for
-    every AGENT registry record whose requiredPermissions is absent/empty and
-    which has NOT opted into the explicit credentialMode: "none" sentinel.
+    every agent-or-app registry record whose requiredPermissions is
+    absent/empty and which has NOT opted into the explicit
+    credentialMode: "none" sentinel.
 
-    Only AGENT records are audited (same type filter as
-    backend/scripts/stamp-agent-permissions.ts via listResources('agent')).
-    Tool and app records are excluded.
+    Agent AND app records are audited (same grouping
+    backend/scripts/stamp-agent-permissions.ts applies via
+    listResources('agent') — see RegistryService's isAgentOrApp check).
+    Only tool records are excluded.
 
     Raises on registry call failure so the caller can distinguish
     infrastructure errors from an empty estate.
     """
     findings: list[dict] = []
-    summaries = list_agent_records(registry_id)
+    summaries = _list_agent_records_or_raise(registry_id)
     for summary in summaries:
         record_id = summary.get("recordId")
         if not record_id:
@@ -127,9 +176,17 @@ def audit_missing_required_permissions(registry_id: str) -> list[dict]:
         if descriptor is None:
             continue
 
-        # Type filter: agents only (exclude tools and apps)
+        # Type filter: matches backend/scripts/stamp-agent-permissions.ts's
+        # registry.listResources("agent") grouping exactly — agent AND app
+        # kinds both count (see RegistryService.listResourcesChecked's
+        # `isAgentOrApp` check in backend/src/services/registry-service.ts,
+        # which groups 'agent' and 'app' together because both carry a
+        # `manifest` in customDescriptorContent; only 'tool' records lack
+        # one). Excluding apps here would under-report records the stamp
+        # script — and therefore the worker's fail-closed dispatch gate —
+        # actually treats as agent-shaped.
         kind = _infer_kind(descriptor)
-        if kind != "agent":
+        if kind not in ("agent", "app"):
             continue
 
         raw_config = descriptor.get("config")
