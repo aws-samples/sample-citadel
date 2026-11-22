@@ -299,6 +299,32 @@ Your goal is to behave as a highly autonomous supervisory system that can manage
 
 
 def create_workflow_tracking_record(nodes: list[str]):
+    """Create a DynamoDB tracking item for a set of dispatched agent nodes.
+
+    Reserved attribute names (finding 679abf74): the tracking item carries
+    two fixed, non-node attributes at the top level — ``requestId`` (its
+    own identity key) and ``data`` (the nested per-node payload map written
+    at the end of this function and read by update_orchestration_with_results
+    via ``results['Attributes']['data']``). A node literally named ``data``
+    would collide with the nested map ('data': False then overwritten
+    silently by 'data': {...}), and a node named ``requestId`` would
+    overwrite the record's own identity key — both scoped to this single
+    writer/reader pair (create_workflow_tracking_record,
+    update_workflow_tracking, update_orchestration_with_results, all within
+    this module and covered by tests here), so rejecting the collision
+    outright at creation is simpler and safer than namespacing every node
+    flag under a nested 'nodes' map and updating every reader.
+    """
+    reserved = {"requestId", "data"}
+    collisions = reserved.intersection(nodes)
+    if collisions:
+        raise ValueError(
+            f"Node id(s) {sorted(collisions)} collide with reserved "
+            f"workflow tracking record attribute(s) {sorted(reserved)}; "
+            "rename the agent/tool so its node id does not shadow a "
+            "reserved tracking-record key."
+        )
+
     request_id = str(uuid.uuid4())
     if len(nodes) == 0:
         return
