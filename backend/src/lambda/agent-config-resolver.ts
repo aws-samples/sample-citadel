@@ -1790,6 +1790,12 @@ export async function activateProjectAgents(
     throw err;
   }
 
+  if (records.length === 0) {
+    throw new Error(
+      `ValidationError: No agents found for project ${projectId}`,
+    );
+  }
+
   /** Inter-agent delay to stay below registry rate limits (250 ms). */
   const INTER_CALL_DELAY_MS = 250;
 

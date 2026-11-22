@@ -974,6 +974,16 @@ def activate_agents() -> str:
     try:
         data = appsync_client.execute(_ACTIVATE_MUTATION, {"sessionId": session_id}, session_id)
     except AppSyncError as err:
+        # Map the zero-records ValidationError to a retryable user message.
+        if "No agents found" in str(err):
+            return _result(
+                False, "no_agents_yet",
+                "No agents found for this project yet; they may still be syncing.",
+                "Try again in a minute.",
+                [_action("Try again", "Yes, activate the agents"),
+                 _action("Not now", "Not now")],
+                retryable=True,
+            )
         return _error_return(session_id, err, "activating the agents")
 
     # Consume consent AFTER the privileged mutation succeeds.

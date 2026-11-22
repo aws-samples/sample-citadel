@@ -152,3 +152,26 @@ def test_appsync_error_returns_nothing_changed_copy(execute, marker_store):
     labels = [a["label"] for a in result["actions"]]
     assert "Try again" in labels and "Stop here" in labels
     _contract(result)
+
+
+def test_no_agents_found_validation_error_returns_retryable(execute, marker_store):
+    """When the backend raises ValidationError because zero agent records exist,
+    the tool returns a clear, retryable message instead of the generic error."""
+    execute.side_effect = AppSyncError(
+        "ValidationError: No agents found for project proj-1",
+        retryable=False,
+        error_type="ValidationError",
+    )
+
+    result = json.loads(postfab.activate_agents())
+
+    assert result["ok"] is False
+    assert result["status"] == "no_agents_yet"
+    assert result["retryable"] is True
+    assert "no agents found" in result["summary"].lower()
+    assert "syncing" in result["summary"].lower()
+    assert "try again" in result["consent_question"].lower()
+    assert marker_store["sess-1"].get("stage") == "built"
+    labels = [a["label"] for a in result["actions"]]
+    assert "Try again" in labels
+    _contract(result)

@@ -21,6 +21,13 @@ const VALID_FIELDS = new Set([
   "implementation",
 ]);
 
+/**
+ * Ordered phase list: each phase is strictly later than the ones before it.
+ * Used by the backfill step to set earlier phases to 100 when a later phase
+ * arrives, so the frontend phase bars render them as complete.
+ */
+const PHASE_ORDER = ["assessment", "design", "planning", "implementation"];
+
 /** EventBridge fabrication-progress event slice this handler reads. */
 interface ProgressUpdateEvent {
   id: string;
@@ -200,6 +207,62 @@ export const handler = async (event: ProgressUpdateEvent) => {
           `No project row for ${sessionId}, skipping progress update`,
         );
         return;
+      }
+
+      // ── Backfill earlier phases to 100 ───────────────────────────────
+      // When a later phase arrives (e.g. implementation at 50%), any
+      // earlier phase that isn't already at 100 gets forced there. This
+      // keeps the frontend phase bars green for completed phases instead
+      // of pulsing orange because the LLM wrote a non-100 estimate.
+      const phaseIdx = PHASE_ORDER.indexOf(phase);
+      if (phaseIdx > 0) {
+        const getForBackfill = await client.send(
+          new GetCommand({
+            TableName: projectsTable,
+            Key: { id: sessionId },
+          }),
+        );
+        const currentProgress = getForBackfill.Item?.progress || {};
+        for (let bi = 0; bi < phaseIdx; bi++) {
+          const earlier = PHASE_ORDER[bi];
+          if ((currentProgress[earlier] || 0) < 100) {
+            try {
+              await client.send(
+                new UpdateCommand({
+                  TableName: projectsTable,
+                  Key: { id: sessionId },
+                  UpdateExpression:
+                    "SET #progress.#field = :pct, updatedAt = :now",
+                  ConditionExpression:
+                    "attribute_not_exists(#progress.#field) OR #progress.#field < :pct",
+                  ExpressionAttributeNames: {
+                    "#progress": "progress",
+                    "#field": earlier,
+                  },
+                  ExpressionAttributeValues: {
+                    ":pct": 100,
+                    ":now": new Date().toISOString(),
+                  },
+                }),
+              );
+              console.log(
+                `Backfilled ${sessionId}: ${earlier}=100% (earlier than ${phase})`,
+              );
+            } catch (err: unknown) {
+              if (
+                err instanceof Error &&
+                err.name === "ConditionalCheckFailedException"
+              ) {
+                // Already at 100 or higher — skip silently.
+              } else {
+                console.error(
+                  `Failed to backfill ${earlier} for ${sessionId}:`,
+                  err,
+                );
+              }
+            }
+          }
+        }
       }
 
       // Recompute overall from the now-updated record
