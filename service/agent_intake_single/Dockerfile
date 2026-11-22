@@ -1,4 +1,18 @@
-FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+# Official Python base image: ghcr.io/astral-sh/uv has no python3.15 tag yet
+# (confirmed via `docker manifest inspect ghcr.io/astral-sh/uv:latest` —
+# the image only ships python3.9 through python3.13 variants), so this
+# Dockerfile uses the official `python:3.15-slim-bookworm` base and copies
+# the `uv`/`uvx` binaries in from astral-sh's dedicated uv-only image
+# instead. uv version resolved from `curl -s
+# https://api.github.com/repos/astral-sh/uv/releases/latest` (tag_name
+# "0.13.9") on 2026-11-22, and cross-checked that
+# `ghcr.io/astral-sh/uv:0.13.9` and `ghcr.io/astral-sh/uv:latest` resolve to
+# the identical linux/amd64 manifest digest via `docker manifest inspect`,
+# so pinning the tag below is equivalent to pinning the digest at the time
+# this was written.
+FROM python:3.15-slim-bookworm
+COPY --from=ghcr.io/astral-sh/uv:0.13.9@sha256:49fe3c925d4b7a84ba2ef19883307bba2bbcf929a22040afb46f2dd092d13aeb /uv /uvx /bin/
+
 WORKDIR /app
 
 # All environment variables in one layer
