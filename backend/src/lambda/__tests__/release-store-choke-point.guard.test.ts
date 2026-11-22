@@ -68,6 +68,27 @@
  * in scope. This decision is re-verified by the "bites: a literal
  * table-name string combined with a write command is still detected"
  * test below.
+ *
+ * WRITE_COMMAND_RE coverage (finding: batch/transact/PartiQL blind spot):
+ * the single-item commands (Put/Update/Delete, both document-client and
+ * low-level client-dynamodb spellings) were the only write shapes
+ * matched, so a planted BatchWriteCommand/BatchWriteItemCommand,
+ * TransactWriteCommand/TransactWriteItemsCommand, or a PartiQL
+ * ExecuteStatementCommand/ExecuteTransactionCommand bypass against
+ * AGENT_RELEASES_TABLE passed the guard silently — proven by the
+ * must-bite fixtures below for each of those six command names.
+ * ExecuteStatementCommand and ExecuteTransactionCommand issue arbitrary
+ * PartiQL, which can be a SELECT (read) or an INSERT/UPDATE/DELETE
+ * (write); the guard cannot statically tell which without parsing the
+ * PartiQL statement string, so matching the command name OVER-BLOCKS a
+ * legitimate PartiQL read (a file doing `ExecuteStatementCommand` with a
+ * `SELECT` against this table would also be flagged) BY DESIGN. This is
+ * the same over-blocking tradeoff this project already accepts elsewhere
+ * (see steering: `hooks/audit-command.js`'s accepted over-blocking of
+ * `grep -rn shutdown`) — a false positive here is a one-line fixture
+ * fix (route the read through release-store.ts, which is already the
+ * sole legitimate owner of all AgentReleasesTable access), whereas a
+ * false negative is an undetected production write bypass.
  */
 import * as fs from "fs";
 import * as os from "os";
@@ -84,7 +105,7 @@ const OWNING_FILE = path.join("src", "lambda", "release-store.ts");
 const TABLE_ENV_VAR = "AGENT_RELEASES_TABLE";
 const TABLE_NAME_LITERAL_RE = /citadel-agent-releases-/;
 const WRITE_COMMAND_RE =
-  /\b(PutCommand|UpdateCommand|DeleteCommand|PutItemCommand|UpdateItemCommand|DeleteItemCommand)\b/;
+  /\b(PutCommand|UpdateCommand|DeleteCommand|PutItemCommand|UpdateItemCommand|DeleteItemCommand|BatchWriteCommand|BatchWriteItemCommand|TransactWriteCommand|TransactWriteItemsCommand|ExecuteStatementCommand|ExecuteTransactionCommand)\b/;
 
 /**
  * Strips line comments (//...) and block comments (/* ... *\/, including
@@ -250,6 +271,183 @@ describe("release-store choke-point guard — static scan", () => {
       // Guards against a "quieter, not smarter" regression: a comment
       // that trips a naive lexer must not blind the scanner to a real
       // write elsewhere in the same file.
+      expect(referencesTable && issuesWriteCommand).toBe(true);
+    } finally {
+      fs.rmSync(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  it("bites: a planted BatchWriteCommand bypass is detected", () => {
+    const scratchDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "release-choke-point-guard-batch-"),
+    );
+    const scratchFile = path.join(scratchDir, "planted-batch-write-bypass.ts");
+    try {
+      fs.writeFileSync(
+        scratchFile,
+        [
+          "// simulated seeder/healer bypass via batch write",
+          'import { BatchWriteCommand } from "@aws-sdk/lib-dynamodb";',
+          "const TABLE = process.env.AGENT_RELEASES_TABLE!;",
+          "docClient.send(new BatchWriteCommand({ RequestItems: { [TABLE]: [] } }));",
+        ].join("\n"),
+      );
+
+      const content = stripComments(fs.readFileSync(scratchFile, "utf-8"));
+      const referencesTable =
+        content.includes(TABLE_ENV_VAR) || TABLE_NAME_LITERAL_RE.test(content);
+      const issuesWriteCommand = WRITE_COMMAND_RE.test(content);
+
+      expect(referencesTable && issuesWriteCommand).toBe(true);
+    } finally {
+      fs.rmSync(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  it("bites: a planted BatchWriteItemCommand (low-level client-dynamodb) bypass is detected", () => {
+    const scratchDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "release-choke-point-guard-batch-item-"),
+    );
+    const scratchFile = path.join(
+      scratchDir,
+      "planted-batch-write-item-bypass.ts",
+    );
+    try {
+      fs.writeFileSync(
+        scratchFile,
+        [
+          "// simulated seeder/healer bypass via low-level batch write",
+          'import { BatchWriteItemCommand } from "@aws-sdk/client-dynamodb";',
+          "const TABLE = process.env.AGENT_RELEASES_TABLE!;",
+          "ddbClient.send(new BatchWriteItemCommand({ RequestItems: { [TABLE]: [] } }));",
+        ].join("\n"),
+      );
+
+      const content = stripComments(fs.readFileSync(scratchFile, "utf-8"));
+      const referencesTable =
+        content.includes(TABLE_ENV_VAR) || TABLE_NAME_LITERAL_RE.test(content);
+      const issuesWriteCommand = WRITE_COMMAND_RE.test(content);
+
+      expect(referencesTable && issuesWriteCommand).toBe(true);
+    } finally {
+      fs.rmSync(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  it("bites: a planted TransactWriteCommand bypass is detected", () => {
+    const scratchDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "release-choke-point-guard-transact-"),
+    );
+    const scratchFile = path.join(
+      scratchDir,
+      "planted-transact-write-bypass.ts",
+    );
+    try {
+      fs.writeFileSync(
+        scratchFile,
+        [
+          "// simulated seeder/healer bypass via transact write",
+          'import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";',
+          "const TABLE = process.env.AGENT_RELEASES_TABLE!;",
+          "docClient.send(new TransactWriteCommand({ TransactItems: [{ Put: { TableName: TABLE, Item: {} } }] }));",
+        ].join("\n"),
+      );
+
+      const content = stripComments(fs.readFileSync(scratchFile, "utf-8"));
+      const referencesTable =
+        content.includes(TABLE_ENV_VAR) || TABLE_NAME_LITERAL_RE.test(content);
+      const issuesWriteCommand = WRITE_COMMAND_RE.test(content);
+
+      expect(referencesTable && issuesWriteCommand).toBe(true);
+    } finally {
+      fs.rmSync(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  it("bites: a planted TransactWriteItemsCommand (low-level client-dynamodb) bypass is detected", () => {
+    const scratchDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "release-choke-point-guard-transact-items-"),
+    );
+    const scratchFile = path.join(
+      scratchDir,
+      "planted-transact-write-items-bypass.ts",
+    );
+    try {
+      fs.writeFileSync(
+        scratchFile,
+        [
+          "// simulated seeder/healer bypass via low-level transact write",
+          'import { TransactWriteItemsCommand } from "@aws-sdk/client-dynamodb";',
+          "const TABLE = process.env.AGENT_RELEASES_TABLE!;",
+          "ddbClient.send(new TransactWriteItemsCommand({ TransactItems: [{ Put: { TableName: TABLE, Item: {} } }] }));",
+        ].join("\n"),
+      );
+
+      const content = stripComments(fs.readFileSync(scratchFile, "utf-8"));
+      const referencesTable =
+        content.includes(TABLE_ENV_VAR) || TABLE_NAME_LITERAL_RE.test(content);
+      const issuesWriteCommand = WRITE_COMMAND_RE.test(content);
+
+      expect(referencesTable && issuesWriteCommand).toBe(true);
+    } finally {
+      fs.rmSync(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  it("bites: a planted ExecuteStatementCommand (PartiQL write) bypass is detected", () => {
+    const scratchDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "release-choke-point-guard-partiql-statement-"),
+    );
+    const scratchFile = path.join(
+      scratchDir,
+      "planted-execute-statement-bypass.ts",
+    );
+    try {
+      fs.writeFileSync(
+        scratchFile,
+        [
+          "// simulated seeder/healer bypass via PartiQL INSERT",
+          'import { ExecuteStatementCommand } from "@aws-sdk/client-dynamodb";',
+          "const TABLE = process.env.AGENT_RELEASES_TABLE!;",
+          'ddbClient.send(new ExecuteStatementCommand({ Statement: `INSERT INTO "${TABLE}" VALUE {}` }));',
+        ].join("\n"),
+      );
+
+      const content = stripComments(fs.readFileSync(scratchFile, "utf-8"));
+      const referencesTable =
+        content.includes(TABLE_ENV_VAR) || TABLE_NAME_LITERAL_RE.test(content);
+      const issuesWriteCommand = WRITE_COMMAND_RE.test(content);
+
+      expect(referencesTable && issuesWriteCommand).toBe(true);
+    } finally {
+      fs.rmSync(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  it("bites: a planted ExecuteTransactionCommand (PartiQL transaction write) bypass is detected", () => {
+    const scratchDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "release-choke-point-guard-partiql-transaction-"),
+    );
+    const scratchFile = path.join(
+      scratchDir,
+      "planted-execute-transaction-bypass.ts",
+    );
+    try {
+      fs.writeFileSync(
+        scratchFile,
+        [
+          "// simulated seeder/healer bypass via PartiQL transaction",
+          'import { ExecuteTransactionCommand } from "@aws-sdk/client-dynamodb";',
+          "const TABLE = process.env.AGENT_RELEASES_TABLE!;",
+          'ddbClient.send(new ExecuteTransactionCommand({ TransactStatements: [{ Statement: `INSERT INTO "${TABLE}" VALUE {}` }] }));',
+        ].join("\n"),
+      );
+
+      const content = stripComments(fs.readFileSync(scratchFile, "utf-8"));
+      const referencesTable =
+        content.includes(TABLE_ENV_VAR) || TABLE_NAME_LITERAL_RE.test(content);
+      const issuesWriteCommand = WRITE_COMMAND_RE.test(content);
+
       expect(referencesTable && issuesWriteCommand).toBe(true);
     } finally {
       fs.rmSync(scratchDir, { recursive: true, force: true });
