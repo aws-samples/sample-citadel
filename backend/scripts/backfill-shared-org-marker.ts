@@ -104,14 +104,41 @@
  *                                 whose org marker is already correct but
  *                                 whose registry status was left DRAFT by
  *                                 a partial write (see `needsReapproval`
- *                                 in the corrective-mode summary). Runs
- *                                 wait-stable -> submitForApproval ->
- *                                 decide(APPROVED) and verifies the final
- *                                 status. Dry-run by default (prints the
- *                                 plan); no-op for an already-APPROVED
- *                                 record; exits non-zero if restoration
- *                                 fails. Valid ONLY together with
- *                                 --correct-fabricator-shared.
+ *                                 in the corrective-mode summary). REQUIRES
+ *                                 --prior-status-evidence (see below) —
+ *                                 there is no --force flag, and it is an
+ *                                 error to supply --restore-approval
+ *                                 without it. Runs wait-stable ->
+ *                                 submitForApproval -> decide(APPROVED) and
+ *                                 verifies the final status. Dry-run by
+ *                                 default (prints the plan); no-op for an
+ *                                 already-APPROVED record (checked AFTER
+ *                                 the evidence check, so an already-
+ *                                 APPROVED id still needs valid evidence to
+ *                                 reach the no-op); exits non-zero if
+ *                                 restoration fails. Valid ONLY together
+ *                                 with --correct-fabricator-shared.
+ *   --prior-status-evidence <file> REQUIRED alongside --restore-approval
+ *                                 (finding d202861e: --restore-approval
+ *                                 used to submit+approve any id
+ *                                 unconditionally, with no record of which
+ *                                 ids the script itself had demoted or
+ *                                 what their prior status was — an
+ *                                 operator could not tell a legitimate
+ *                                 restore target from a record that was
+ *                                 never approved in the first place). Path
+ *                                 to a sidecar JSON file (see
+ *                                 writeRunEvidence below) listing
+ *                                 `needsReapproval` entries with
+ *                                 `{ id, kind, priorStatus }`. For EACH id
+ *                                 passed to --restore-approval, the id
+ *                                 MUST appear in this file with
+ *                                 `priorStatus === "APPROVED"`; otherwise
+ *                                 the script refuses — naming the id, the
+ *                                 evidence file path, and the found
+ *                                 priorStatus (or "absent") — exits
+ *                                 non-zero, and makes NO registry calls
+ *                                 for that id. There is no override flag.
  *
  * Required env (same convention as backfill-org-ids.ts):
  *   REGISTRY_ID           – AgentCore Registry id
@@ -125,6 +152,25 @@
  *                            their binding agents' sourceProjectId)
  *   AWS_REGION             – optional, defaults to us-west-2
  *
+ *   --evidence-out <file>           Path for the per-run evidence sidecar
+ *                                 JSON (see writeRunEvidence). Defaults to
+ *                                 `<cwd>/backfill-shared-org-marker.evidence.json`.
+ *                                 Written ONLY by an APPLY run of
+ *                                 --correct-fabricator-shared, after the
+ *                                 end-of-run re-approval pass, listing
+ *                                 every record still needsReapproval as
+ *                                 `{ id, kind, priorStatus }` alongside a
+ *                                 runId/timestamp and mode. A DRY-RUN
+ *                                 writes nothing (no apply occurred, so
+ *                                 there is nothing to attest to) — this
+ *                                 matches the script's existing dry-run
+ *                                 convention of never touching external
+ *                                 state. The default (non-corrective) pass
+ *                                 and plain --apply likewise never demote
+ *                                 approval, so they do not write this file
+ *                                 either; only the corrective path can
+ *                                 produce a needsReapproval entry.
+ *
  * Constraints:
  *   - Dry-run by default. `--apply` flips to write mode.
  *   - Idempotent — re-running finds nothing left to update.
@@ -136,6 +182,8 @@
  *     is still unfetched after the targeted per-record retry — never a
  *     silent partial apply.
  */
+import * as fs from "fs";
+import * as path from "path";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
@@ -1427,6 +1475,129 @@ export async function resyncProjectionIds(
   return results;
 }
 
+// ---------------------------------------------------------------------------
+// Run evidence sidecar (finding d202861e)
+// ---------------------------------------------------------------------------
+
+/**
+ * One record flagged `needsReapproval` by a corrective APPLY run, with the
+ * status it held BEFORE this run's write demoted/left it needing
+ * re-approval — this is the evidence `--restore-approval` now requires.
+ */
+export interface NeedsReapprovalEvidenceEntry {
+  id: string;
+  kind: "agent" | "tool";
+  priorStatus: string;
+}
+
+/** Shape of the sidecar JSON written by {@link writeRunEvidence}. */
+export interface RunEvidence {
+  runId: string;
+  mode: "APPLY" | "DRY-RUN";
+  needsReapproval: NeedsReapprovalEvidenceEntry[];
+}
+
+/**
+ * Default path for the per-run evidence sidecar when `--evidence-out` is
+ * not supplied — a fixed filename in the current working directory,
+ * mirroring other scripts' convention of writing run artifacts relative
+ * to `cwd` rather than next to the script source.
+ */
+export const DEFAULT_EVIDENCE_PATH = path.join(
+  process.cwd(),
+  "backfill-shared-org-marker.evidence.json",
+);
+
+/**
+ * Writes the run-evidence sidecar atomically (temp file + rename, same
+ * pattern as `writeExportAtomically` in audit-cognito-custom-attributes.ts)
+ * so a run that is killed mid-write never leaves a partial/corrupt
+ * evidence file behind — a half-written file would be worse than no file,
+ * since `loadPriorStatusEvidence` could otherwise be fed truncated JSON.
+ */
+export function writeRunEvidence(
+  targetPath: string,
+  evidence: RunEvidence,
+): void {
+  const contents = JSON.stringify(evidence, null, 2);
+  const tmp = `${targetPath}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(tmp, contents, { encoding: "utf8" });
+    fs.renameSync(tmp, targetPath);
+  } catch (err) {
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch (cleanupErr) {
+      log(
+        "warn",
+        `could not remove temp evidence file ${tmp}: ${String(cleanupErr)}`,
+      );
+    }
+    throw err;
+  }
+}
+
+/**
+ * Validates that `id` is present in the `--prior-status-evidence` file
+ * with `priorStatus === "APPROVED"` — the sole positive signal
+ * `--restore-approval` now accepts (finding d202861e: previously nothing
+ * enforced that a restore target was a record the script itself had
+ * demoted, so a never-approved DRAFT record could be submitted+approved
+ * unconditionally). Throws a clear, exit-triggering error naming the id,
+ * the evidence file path, and the found priorStatus (or "absent") on any
+ * failure: missing `evidencePath`, unreadable/malformed file, id absent
+ * from `needsReapproval`, or a non-APPROVED `priorStatus`. There is no
+ * `--force` override — this check cannot be bypassed.
+ */
+export function loadPriorStatusEvidence(
+  evidencePath: string | undefined,
+  id: string,
+): RunEvidence {
+  if (evidencePath === undefined) {
+    throw new Error(
+      `--restore-approval requires --prior-status-evidence <file> (id=${id}): no evidence file was supplied`,
+    );
+  }
+
+  let raw: string;
+  try {
+    raw = fs.readFileSync(evidencePath, "utf8");
+  } catch (err) {
+    throw new Error(
+      `--restore-approval id=${id}: could not read --prior-status-evidence file "${evidencePath}": ${String(err)}`,
+    );
+  }
+
+  let parsed: RunEvidence;
+  try {
+    parsed = JSON.parse(raw) as RunEvidence;
+  } catch (err) {
+    throw new Error(
+      `--restore-approval id=${id}: --prior-status-evidence file "${evidencePath}" is not valid JSON: ${String(err)}`,
+    );
+  }
+
+  const entries = Array.isArray(parsed.needsReapproval)
+    ? parsed.needsReapproval
+    : [];
+  const match = entries.find((e) => e.id === id);
+  const foundStatus = match?.priorStatus ?? "absent";
+
+  if (match === undefined) {
+    throw new Error(
+      `--restore-approval refused for id=${id}: not found in --prior-status-evidence file "${evidencePath}" (priorStatus=absent)`,
+    );
+  }
+
+  if (match.priorStatus !== "APPROVED") {
+    throw new Error(
+      `--restore-approval refused for id=${id}: --prior-status-evidence file "${evidencePath}" records priorStatus=${foundStatus}, not APPROVED`,
+    );
+  }
+
+  return parsed;
+}
+
 export interface RestoreApprovalResult {
   recordId: string;
   wouldRestore?: boolean;
@@ -1691,6 +1862,14 @@ export const defaultCallPacer: CallPacer = (delayMs) => sleep(delayMs);
 export interface NeedsReapprovalEntry {
   id: string;
   type: ResourceType;
+  /**
+   * The registry status this record held BEFORE this run's write — always
+   * "APPROVED" in practice, since {@link editResultNeedsReapproval} only
+   * flags needsReapproval when `priorStatus === "APPROVED"`. Carried
+   * explicitly (rather than re-derived) so the evidence sidecar
+   * (see {@link writeRunEvidence}) never has to guess it.
+   */
+  priorStatus: string;
 }
 
 /**
@@ -1821,7 +2000,11 @@ export async function runCorrectiveForRegistryType(
         }
         if (result.needsReapproval) {
           summary.needsReapproval++;
-          needsReapprovalEntries.push({ id: entry.id, type });
+          needsReapprovalEntries.push({
+            id: entry.id,
+            type,
+            priorStatus: "APPROVED",
+          });
           log(
             "warn",
             `[correct-fabricator:${type}] recordId=${entry.id} org marker updated but approval restoration failed — bucketed into needsReapproval, continuing with next record`,
@@ -2199,6 +2382,37 @@ export async function main(): Promise<void> {
         .filter((s) => s.length > 0)
     : undefined;
 
+  const priorStatusEvidenceIdx = args.indexOf("--prior-status-evidence");
+  const priorStatusEvidencePath =
+    priorStatusEvidenceIdx !== -1 &&
+    args[priorStatusEvidenceIdx + 1] !== undefined
+      ? args[priorStatusEvidenceIdx + 1]
+      : undefined;
+  if (priorStatusEvidenceIdx !== -1 && priorStatusEvidencePath === undefined) {
+    throw new Error("--prior-status-evidence requires a file path");
+  }
+  if (
+    restoreApprovalIds !== undefined &&
+    priorStatusEvidencePath === undefined
+  ) {
+    log(
+      "error",
+      "--restore-approval requires --prior-status-evidence <file> — there is no --force override; run --correct-fabricator-shared --apply first to produce the evidence sidecar",
+    );
+    process.exit(1);
+    return;
+  }
+
+  const evidenceOutIdx = args.indexOf("--evidence-out");
+  const evidenceOutRaw =
+    evidenceOutIdx !== -1 && args[evidenceOutIdx + 1] !== undefined
+      ? args[evidenceOutIdx + 1]
+      : undefined;
+  if (evidenceOutIdx !== -1 && evidenceOutRaw === undefined) {
+    throw new Error("--evidence-out requires a file path");
+  }
+  const evidenceOutPath = evidenceOutRaw ?? DEFAULT_EVIDENCE_PATH;
+
   const resyncProjectionIdx = args.indexOf("--resync-projection");
   const resyncProjectionRaw =
     resyncProjectionIdx !== -1 && args[resyncProjectionIdx + 1] !== undefined
@@ -2302,6 +2516,17 @@ export async function main(): Promise<void> {
     );
     let anyFailed = false;
     for (const id of restoreApprovalIds) {
+      // Evidence check happens BEFORE any registry call for this id
+      // (finding d202861e) — a missing/absent/non-APPROVED evidence
+      // entry refuses here and never reaches getResource/submitForApproval.
+      try {
+        loadPriorStatusEvidence(priorStatusEvidencePath, id);
+      } catch (err) {
+        log("error", String(err));
+        anyFailed = true;
+        continue;
+      }
+
       // Try agent first, then tool — a wrong-type getResource failure on
       // the agent attempt is retried as a tool before giving up, since
       // the CLI does not require the caller to know the record's kind.
@@ -2345,6 +2570,9 @@ export async function main(): Promise<void> {
       callDelayMs,
       defaultCallPacer,
       projectionWaitMs,
+      DEFAULT_PROJECTION_POLL_INTERVAL_MS,
+      defaultClock,
+      evidenceOutPath,
     );
     return;
   }
@@ -2607,6 +2835,7 @@ export async function runCorrectiveMode(
   projectionWaitMs: number = DEFAULT_PROJECTION_WAIT_MS,
   projectionPollIntervalMs: number = DEFAULT_PROJECTION_POLL_INTERVAL_MS,
   projectionClock: Clock = defaultClock,
+  evidencePath: string = DEFAULT_EVIDENCE_PATH,
 ): Promise<void> {
   log("info", `Corrective mode: ${apply ? "APPLY" : "DRY-RUN"}`);
   if (recordId) log("info", `Scoped to single record id=${recordId} (canary)`);
@@ -2767,6 +2996,7 @@ export async function runCorrectiveMode(
         needsReapprovalEntries.push({
           id: entry.id,
           type: entry.kind === "agent" ? "agent" : "tool",
+          priorStatus: "APPROVED",
         });
         log(
           "warn",
@@ -2841,13 +3071,22 @@ export async function runCorrectiveMode(
   // `summary.needsReapproval++` sites above — never `fullPlan`, which
   // holds every planned target regardless of whether it was ever
   // attempted under --limit.
+  // Tracks, after the end-of-run re-approval pass below, exactly which
+  // needsReapproval entries are STILL outstanding — this is what the
+  // evidence sidecar (writeRunEvidence, further below) records, so
+  // --restore-approval only ever sees ids that genuinely still need it.
+  let finalNeedsReapprovalEntries: NeedsReapprovalEntry[] =
+    needsReapprovalEntries;
+
   if (apply && summary.needsReapproval > 0) {
     log(
       "info",
       `--- End-of-run re-approval pass (${summary.needsReapproval} record(s) flagged needsReapproval) ---`,
     );
     let stillNeedsReapproval = 0;
-    for (const { id, type: flaggedType } of needsReapprovalEntries) {
+    const stillOutstanding: NeedsReapprovalEntry[] = [];
+    for (const entry of needsReapprovalEntries) {
+      const { id, type: flaggedType } = entry;
       const restoreResult = await restoreApprovalForRecord(
         id,
         flaggedType,
@@ -2860,6 +3099,7 @@ export async function runCorrectiveMode(
         // Already fine — nothing to do.
       } else {
         stillNeedsReapproval++;
+        stillOutstanding.push(entry);
         log(
           "error",
           `[restore-approval] id=${id} still not APPROVED after end-of-run pass: ${restoreResult.error ?? "unknown"}`,
@@ -2867,6 +3107,7 @@ export async function runCorrectiveMode(
       }
     }
     summary.needsReapproval = stillNeedsReapproval;
+    finalNeedsReapprovalEntries = stillOutstanding;
     log(
       "info",
       `--- End-of-run re-approval pass complete: ${stillNeedsReapproval} still needsReapproval ---`,
@@ -2913,6 +3154,25 @@ export async function runCorrectiveMode(
       "info",
       `--- End-of-run resync pass complete: ${stillProjectionLag} still projectionLag ---`,
     );
+  }
+
+  // Evidence sidecar (finding d202861e): written ONLY on an APPLY run, so
+  // --restore-approval has a durable record of exactly which ids THIS run
+  // demoted/left needing re-approval and what their prior status was. A
+  // DRY-RUN never writes — nothing was actually demoted, so there is
+  // nothing to attest to, matching the script's existing convention that
+  // dry-run touches no external state.
+  if (apply) {
+    writeRunEvidence(evidencePath, {
+      runId: new Date().toISOString(),
+      mode: "APPLY",
+      needsReapproval: finalNeedsReapprovalEntries.map((e) => ({
+        id: e.id,
+        kind: e.type === "agent" ? "agent" : "tool",
+        priorStatus: e.priorStatus,
+      })),
+    });
+    log("info", `Evidence written: ${evidencePath}`);
   }
 
   // Exit code counts only real errors: `errors` (pre-write/genuine write
