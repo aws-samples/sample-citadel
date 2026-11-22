@@ -32,10 +32,11 @@ import {
   REMOVAL_ALLOWLIST,
   ADDITION_ALLOWLIST,
   ALLOWED_SATELLITE_ADDED_STATEMENTS,
-  MOVED_RESOLVERS,
-  MOVED_LAMBDA_ROLES,
-  SATELLITE_STACK_NAMES,
+  movedResolversFor,
+  movedLambdaRolesFor,
+  satelliteStackNamesFor,
   EXPECTED_NEW_FIELDS,
+  assertDevOnlyGateEnvironment,
 } from "./move-manifest";
 import { RailResult, StackBaseline } from "./types";
 
@@ -88,6 +89,16 @@ export function loadBaseline(baselinePath: string): StackBaseline {
 
 function main(): void {
   const { env, cdkOutDir } = parseArgs(process.argv.slice(2));
+
+  // Loud guard (finding: dev-suffixed manifest data diffed against a
+  // non-dev synth produced spurious rail failures indistinguishable from
+  // baseline staleness). Must run BEFORE any baseline/cdk.out file lookup.
+  assertDevOnlyGateEnvironment(env);
+
+  const SATELLITE_STACK_NAMES = satelliteStackNamesFor(env);
+  const MOVED_RESOLVERS = movedResolversFor(env);
+  const MOVED_LAMBDA_ROLES = movedLambdaRolesFor(env);
+
   const backendDir = path.resolve(__dirname, "..", "..");
   const stackName = `citadel-backend-${env}`;
   const baselinePath = path.join(

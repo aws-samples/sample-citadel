@@ -1206,8 +1206,8 @@ export const REMOVAL_ALLOWLIST: AllowlistEntry[] = [
   },
 ];
 
-/** Resolver fields moved to a satellite stack, for rail 3 parity + rail 7 equivalence. */
-export const MOVED_RESOLVERS: MovedResolverMapping[] = [
+/** Resolver fields moved to a satellite stack, for rail 3 parity + rail 7 equivalence. Dev-suffixed; use movedResolversFor(environment) or the MOVED_RESOLVERS alias below. */
+const MOVED_RESOLVERS_DEV: MovedResolverMapping[] = [
   { fieldKey: "Query.getProject", satelliteStackName: "citadel-projects-dev" },
   {
     fieldKey: "Query.listProjects",
@@ -1451,8 +1451,8 @@ export const MOVED_RESOLVERS: MovedResolverMapping[] = [
   },
 ];
 
-/** Lambda logical-ID name-mapping (backend baseline -> satellite) for rail 6 IAM equivalence. */
-export const MOVED_LAMBDA_ROLES: MovedLambdaMapping[] = [
+/** Lambda logical-ID name-mapping (backend baseline -> satellite) for rail 6 IAM equivalence. Dev-suffixed; use movedLambdaRolesFor(environment) or the MOVED_LAMBDA_ROLES alias below. */
+const MOVED_LAMBDA_ROLES_DEV: MovedLambdaMapping[] = [
   {
     baselineLogicalId: "ProjectResolverFunction1AB69E16",
     satelliteLogicalId: "ProjectResolverFunction1AB69E16",
@@ -1569,11 +1569,111 @@ export const MOVED_LAMBDA_ROLES: MovedLambdaMapping[] = [
   },
 ];
 
-/** Satellite stack names participating in the split, for rail 3's merged-set computation. */
-export const SATELLITE_STACK_NAMES: string[] = [
+/** Satellite stack names participating in the split, for rail 3's merged-set computation. Dev-suffixed; use satelliteStackNamesFor(environment) or the SATELLITE_STACK_NAMES alias below. */
+const SATELLITE_STACK_NAMES_DEV: string[] = [
   "citadel-projects-dev",
   "citadel-registry-dev",
 ];
+
+/**
+ * Environment-suffix derivation (finding: move-manifest.ts hardcoded the
+ * `-dev` suffix on every satellite stack name and MOVED_RESOLVERS /
+ * MOVED_LAMBDA_ROLES key, so a gate run with ENVIRONMENT=test silently
+ * diffed a fresh test-env synth against dev-suffixed manifest data —
+ * producing large spurious rail 3/6/7 "violations" indistinguishable from
+ * real baseline staleness, which decision 453d1acc forbids fixing by
+ * regenerating the committed baseline).
+ *
+ * Full parameterisation of every literal in this file (including the
+ * account/region-scoped ALLOWED_SATELLITE_ADDED_STATEMENTS ARNs, which are
+ * baseline comparison data captured from one real `dev` synth, not stack
+ * names) is not safely feasible in this change. Instead:
+ *   - The three stack-name-bearing manifests below are now DERIVED from a
+ *     given environment via a plain string substitution of the `-dev`
+ *     suffix, so "dev" and "test" (and any other value) both produce a
+ *     correctly-suffixed manifest.
+ *   - assertDevOnlyGateEnvironment() is the loud guard: every gate
+ *     entrypoint (run-rails.ts, split-gates.sh) calls it immediately after
+ *     parsing the requested environment and BEFORE touching any
+ *     baseline/cdk.out file, so a non-dev run fails fast with an explicit
+ *     message instead of silently producing misleading rail output.
+ */
+
+/** Replace the literal `-dev` suffix on every dev-pinned stack name with the given environment's suffix. */
+function withEnvironmentSuffix(
+  devStackName: string,
+  environment: string,
+): string {
+  if (!devStackName.endsWith("-dev")) {
+    return devStackName;
+  }
+  return `${devStackName.slice(0, -"-dev".length)}-${environment}`;
+}
+
+/** Satellite stack names participating in the split, for rail 3's merged-set computation, suffixed for the given environment (default "dev"). */
+export function satelliteStackNamesFor(environment: string = "dev"): string[] {
+  return SATELLITE_STACK_NAMES_DEV.map((name) =>
+    withEnvironmentSuffix(name, environment),
+  );
+}
+
+/** Resolver fields moved to a satellite stack, for rail 3 parity + rail 7 equivalence, suffixed for the given environment (default "dev"). */
+export function movedResolversFor(
+  environment: string = "dev",
+): MovedResolverMapping[] {
+  return MOVED_RESOLVERS_DEV.map((entry) => ({
+    ...entry,
+    satelliteStackName: withEnvironmentSuffix(
+      entry.satelliteStackName,
+      environment,
+    ),
+  }));
+}
+
+/** Lambda logical-ID name-mapping (backend baseline -> satellite) for rail 6 IAM equivalence, suffixed for the given environment (default "dev"). */
+export function movedLambdaRolesFor(
+  environment: string = "dev",
+): MovedLambdaMapping[] {
+  return MOVED_LAMBDA_ROLES_DEV.map((entry) => ({
+    ...entry,
+    satelliteStackName: withEnvironmentSuffix(
+      entry.satelliteStackName,
+      environment,
+    ),
+  }));
+}
+
+/**
+ * Loud guard for every split-gates entrypoint: the move manifest's
+ * account/region-scoped baseline-comparison data (ALLOWED_SATELLITE_ADDED_STATEMENTS)
+ * was captured from a single real `dev` synth and is not safely derivable
+ * for other environments, so only `dev` gate runs are supported. Call this
+ * immediately after parsing the requested environment, before any
+ * baseline/cdk.out file lookup — a failure here must never be mistaken for
+ * baseline staleness.
+ */
+export function assertDevOnlyGateEnvironment(environment: string): void {
+  if (environment !== "dev") {
+    throw new Error(
+      `split-gates: test-env runs are unsupported for environment "${environment}" ` +
+        `(only "dev" is supported). Any rail violations you might see for a non-dev ` +
+        `environment are NOT baseline staleness — do not regenerate the committed ` +
+        `baseline (decision 453d1acc). The move manifest's per-Lambda allowed-added-` +
+        `statement data (ALLOWED_SATELLITE_ADDED_STATEMENTS) was captured from a single ` +
+        `real "dev" synth and has no equivalent for other environments.`,
+    );
+  }
+}
+
+/** @deprecated Use satelliteStackNamesFor(environment) for non-dev environments; this alias is pinned to "dev" for backward compatibility. */
+export const SATELLITE_STACK_NAMES: string[] = satelliteStackNamesFor("dev");
+
+/** @deprecated Use movedResolversFor(environment) for non-dev environments; this alias is pinned to "dev" for backward compatibility. */
+export const MOVED_RESOLVERS: MovedResolverMapping[] = movedResolversFor("dev");
+
+/** @deprecated Use movedLambdaRolesFor(environment) for non-dev environments; this alias is pinned to "dev" for backward compatibility. */
+export const MOVED_LAMBDA_ROLES: MovedLambdaMapping[] =
+  movedLambdaRolesFor("dev");
 
 /**
  * Rail 3 has no addition-allowlist mechanism of its own (unlike rail 1's
