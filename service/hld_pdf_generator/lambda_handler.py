@@ -8,6 +8,59 @@ import hashlib
 
 s3 = boto3.client('s3')
 
+# ---------- Security: subprocess timeout budgeting ----------
+# Lambda's own invocation timeout is the hard backstop, but an unbounded
+# subprocess.run() can still consume the entire remaining budget on a
+# malformed/adversarial document, leaving no time to upload partial
+# results or log a clean error. PANDOC_UPLOAD_MARGIN_SECONDS reserves time
+# at the end of the invocation for the S3 upload + structured logging.
+PANDOC_UPLOAD_MARGIN_SECONDS = 5
+PANDOC_DEFAULT_TIMEOUT_SECONDS = 50  # used when no Lambda context is available
+PANDOC_MIN_TIMEOUT_SECONDS = 1  # floor so a near-exhausted budget still yields a positive timeout
+
+
+class PdfGenerationTimeoutError(Exception):
+    """Raised when a subprocess (dot or pandoc) exceeds its bounded timeout."""
+
+
+def _pandoc_timeout_seconds(context):
+    """Derive the pandoc/xelatex subprocess timeout from the Lambda
+    context's remaining time budget, minus an upload margin.
+
+    Falls back to PANDOC_DEFAULT_TIMEOUT_SECONDS when no context (or a
+    context without get_remaining_time_in_millis) is supplied. Never
+    returns a value below PANDOC_MIN_TIMEOUT_SECONDS, so a nearly
+    exhausted budget still produces a small positive timeout rather than
+    zero/negative (which subprocess.run would reject immediately).
+    """
+    if context is None or not hasattr(context, 'get_remaining_time_in_millis'):
+        return PANDOC_DEFAULT_TIMEOUT_SECONDS
+
+    remaining_seconds = context.get_remaining_time_in_millis() / 1000.0
+    budget = remaining_seconds - PANDOC_UPLOAD_MARGIN_SECONDS
+    return max(budget, PANDOC_MIN_TIMEOUT_SECONDS)
+
+
+def run_pandoc_with_timeout(cmd, env, context=None):
+    """Run the pandoc/xelatex subprocess with a bounded timeout derived
+    from the Lambda context's remaining time budget.
+
+    Maps subprocess.TimeoutExpired to PdfGenerationTimeoutError so callers
+    get a structured, document-content-free error instead of a raw
+    TimeoutExpired (whose .stdout/.stderr may contain partial document
+    text pulled in by pandoc's error context).
+    """
+    timeout = _pandoc_timeout_seconds(context)
+    try:
+        return subprocess.run(
+            cmd, capture_output=True, text=True, check=True, env=env, timeout=timeout
+        )
+    except subprocess.TimeoutExpired as e:
+        print(f"Pandoc timed out after {timeout:.1f}s")
+        raise PdfGenerationTimeoutError(
+            f"pandoc exceeded {timeout:.1f}s timeout"
+        ) from e
+
 # ---------- Security: Pandoc markdown input format ----------
 # Disable raw_tex, raw_html, and raw_attribute extensions so LLM-generated
 # markdown cannot inject TeX commands (\input, \write18) or HTML into the
@@ -89,18 +142,26 @@ def build_pandoc_env():
 def extract_and_render_dot_diagrams(markdown_content, tmp_dir):
     """
     Extract DOT code blocks, render to SVG using graphviz, and replace with image references.
+
+    Defence: each `dot` invocation runs with a bounded timeout (30s) so a
+    malformed or adversarial diagram cannot hang the Lambda invocation, and
+    with GV_FILE_PATH restricted to tmp_dir so graphviz cannot resolve file
+    references (e.g. via image/include attributes) outside the working tree.
     """
     dot_pattern = r'```dot\n(.*?)\n```'
     matches = re.findall(dot_pattern, markdown_content, re.DOTALL)
-    
+
     for i, dot_code in enumerate(matches):
         dot_file = os.path.join(tmp_dir, f'diagram_{i}.dot')
         svg_file = os.path.join(tmp_dir, f'diagram_{i}.svg')
-        
+
         # Write DOT code to file
         with open(dot_file, 'w') as f:
             f.write(dot_code)
-        
+
+        dot_env = os.environ.copy()
+        dot_env['GV_FILE_PATH'] = tmp_dir
+
         # Render to SVG using graphviz
         try:
             subprocess.run([
@@ -108,8 +169,8 @@ def extract_and_render_dot_diagrams(markdown_content, tmp_dir):
                 '-Tsvg',
                 dot_file,
                 '-o', svg_file
-            ], check=True, capture_output=True, text=True)
-            
+            ], check=True, capture_output=True, text=True, timeout=30, env=dot_env)
+
             # Replace DOT code block with image reference
             markdown_content = markdown_content.replace(
                 f'```dot\n{dot_code}\n```',
@@ -118,7 +179,9 @@ def extract_and_render_dot_diagrams(markdown_content, tmp_dir):
             )
         except subprocess.CalledProcessError as e:
             print(f"Warning: Failed to render diagram {i}: {e.stderr}")
-    
+        except subprocess.TimeoutExpired:
+            print(f"Warning: Rendering diagram {i} timed out after 30s; skipping")
+
     return markdown_content
 
 def handler(event, context):
@@ -165,9 +228,7 @@ def handler(event, context):
         cmd = build_pandoc_command(tmp_md_path, tmp_pdf_path, lua_filter_path, tmp_dir)
         env = build_pandoc_env()
         
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, check=True, env=env
-        )
+        result = run_pandoc_with_timeout(cmd, env, context=context)
         
         # E23-c: log only exit code, not stdout/stderr which may contain
         # document text.
