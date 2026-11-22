@@ -5,7 +5,55 @@
  * Only the classifier/decision helpers and summary accumulation are tested
  * here — the AWS-client call sites (Registry update, DDB UpdateCommand) are
  * integration-level and exercised separately in the orchestration test.
+ *
+ * The module-level mocks below (RegistryService + AWS DDB clients) back the
+ * "main() default-pass exit code" describe block further down, which drives
+ * a real `main()` invocation end to end with a fake registry/table so the
+ * process-exit-code behavior is verified against the actual entry point,
+ * not just a helper. No AWS calls are made — every client is a jest mock.
  */
+jest.mock("@aws-sdk/client-dynamodb", () => ({
+  DynamoDBClient: jest.fn().mockImplementation(() => ({})),
+}));
+
+const ddbSend = jest.fn();
+class FakeScanCommand {
+  input: Record<string, unknown>;
+  constructor(input: Record<string, unknown>) {
+    this.input = input;
+  }
+}
+class FakeGetCommand {
+  input: Record<string, unknown>;
+  constructor(input: Record<string, unknown>) {
+    this.input = input;
+  }
+}
+class FakeUpdateCommand {
+  input: Record<string, unknown>;
+  constructor(input: Record<string, unknown>) {
+    this.input = input;
+  }
+}
+jest.mock("@aws-sdk/lib-dynamodb", () => ({
+  DynamoDBDocumentClient: {
+    from: jest
+      .fn()
+      .mockReturnValue({ send: (...args: unknown[]) => ddbSend(...args) }),
+  },
+  GetCommand: FakeGetCommand,
+  ScanCommand: FakeScanCommand,
+  UpdateCommand: FakeUpdateCommand,
+}));
+
+const registryListResources = jest.fn();
+jest.mock("../../src/services/registry-service", () => ({
+  RegistryService: jest.fn().mockImplementation(() => ({
+    listResources: (...args: unknown[]) => registryListResources(...args),
+  })),
+  RegistryRecordStatusValues: { APPROVED: "APPROVED" },
+}));
+
 import {
   classifyRecord,
   emptySummary,
@@ -341,5 +389,130 @@ describe("main() --projection-wait-ms CLI validation", () => {
     delete process.env.REGISTRY_ID;
     process.argv = ["node", "script"];
     await expect(main()).rejects.toThrow("REGISTRY_ID env var required");
+  });
+});
+
+describe("main() default-pass exit code — errors / ambiguous rows", () => {
+  const originalEnv = process.env;
+  const originalArgv = process.argv;
+  let exitSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    process.env = {
+      ...originalEnv,
+      REGISTRY_ID: "reg-1",
+      AGENT_CONFIG_TABLE: "agents-table",
+      TOOL_CONFIG_TABLE: "tools-table",
+    };
+    delete process.env.PROJECTS_TABLE;
+    process.argv = ["node", "script"];
+    registryListResources.mockReset();
+    ddbSend.mockReset();
+    ddbSend.mockResolvedValue({ Items: [] });
+    exitSpy = jest.spyOn(process, "exit").mockImplementation(((
+      code?: number,
+    ) => {
+      throw new Error(`process.exit(${code})`);
+    }) as never);
+    jest.spyOn(console, "log").mockImplementation(() => {});
+    jest.spyOn(console, "warn").mockImplementation(() => {});
+    jest.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    process.env = originalEnv;
+    process.argv = originalArgv;
+  });
+
+  it("exits with code 3 when the registry listing fails (summary.errors > 0)", async () => {
+    registryListResources.mockRejectedValue(new Error("throttled"));
+
+    await expect(main()).rejects.toThrow("process.exit(3)");
+    expect(exitSpy).toHaveBeenCalledWith(3);
+  });
+
+  it("exits with code 3 when a DDB scan fails (summary.errors > 0)", async () => {
+    registryListResources.mockResolvedValue([]);
+    ddbSend.mockRejectedValueOnce(new Error("scan failed"));
+
+    await expect(main()).rejects.toThrow("process.exit(3)");
+    expect(exitSpy).toHaveBeenCalledWith(3);
+  });
+
+  it("exits with code 3 when a blank-orgId agent record resolves to AMBIGUOUS via createdBy (ambiguousReported > 0)", async () => {
+    // PROJECTS_TABLE is set so the default pass builds a real orgResolver;
+    // a fabricator-created agent whose sourceProjectId maps to a project
+    // that itself has >1 distinct org in the (synthetic) index will not
+    // occur via resolveAgentOrg (that path returns a single org or
+    // undefined, never "AMBIGUOUS") — AMBIGUOUS is reachable for a TOOL
+    // whose name is referenced by two agents resolving to different orgs.
+    process.env.PROJECTS_TABLE = "projects-table";
+
+    registryListResources.mockImplementation(async (type: string) => {
+      if (type === "tool") {
+        return [
+          {
+            recordId: "tool-rec-1",
+            name: "shared-tool",
+            customDescriptorContent: JSON.stringify({
+              createdBy: "fabricator",
+            }),
+          },
+        ];
+      }
+      return [];
+    });
+
+    // Agent DDB scan (used to build the toolName -> org index) returns two
+    // agents referencing the same tool name but resolving to different
+    // orgs via sourceProjectId -> projects table.
+    ddbSend.mockImplementation(
+      async (cmd: {
+        constructor: { name: string };
+        input: Record<string, unknown>;
+      }) => {
+        const isScan = cmd.constructor.name === "FakeScanCommand";
+        if (isScan && cmd.input.TableName === "projects-table") {
+          return {
+            Items: [
+              { projectId: "proj-a", organization: "org-a" },
+              { projectId: "proj-b", organization: "org-b" },
+            ],
+          };
+        }
+        if (isScan && cmd.input.TableName === "agents-table") {
+          return {
+            Items: [
+              {
+                agentId: "agent-a",
+                name: "agent-a",
+                sourceProjectId: "proj-a",
+                config: { schema: { tools: ["shared-tool"] } },
+              },
+              {
+                agentId: "agent-b",
+                name: "agent-b",
+                sourceProjectId: "proj-b",
+                config: { schema: { tools: ["shared-tool"] } },
+              },
+            ],
+          };
+        }
+        return { Items: [] };
+      },
+    );
+
+    await expect(main()).rejects.toThrow("process.exit(3)");
+    expect(exitSpy).toHaveBeenCalledWith(3);
+  });
+
+  it("exits with code 0 (does not call process.exit) on a clean run with no errors or ambiguous rows", async () => {
+    registryListResources.mockResolvedValue([]);
+    ddbSend.mockResolvedValue({ Items: [] });
+
+    await main();
+
+    expect(exitSpy).not.toHaveBeenCalled();
   });
 });

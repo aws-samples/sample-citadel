@@ -18,6 +18,20 @@
  *   ts-node backend/scripts/backfill-org-ids.ts --dry-run   (default)
  *   ts-node backend/scripts/backfill-org-ids.ts --apply
  *
+ * Supported invocation: ts-node ONLY. This script imports a local project
+ * module (../src/services/registry-service) without a file extension,
+ * which Node's native TypeScript execution (native ESM, which requires
+ * explicit extensions for relative specifiers) cannot resolve — running it
+ * via `node backend/scripts/backfill-org-ids.ts` fails with
+ * ERR_MODULE_NOT_FOUND before main() ever runs. Fixing the import for
+ * native ESM would break resolution under ts-node/ts-jest (which resolve
+ * against the .ts source, not a compiled .js sibling), so this is a known,
+ * accepted limitation rather than a defect to patch here. Always invoke
+ * via `ts-node` (or `npm run backfill:org-ids`, which wraps ts-node) — see
+ * the entrypoint smoke test in
+ * backend/scripts/__tests__/backfill-scripts-entrypoint-smoke.test.ts for
+ * the verified-working ts-node invocation and the documented ESM gap.
+ *
  * Required env:
  *   REGISTRY_ID           – AgentCore Registry id
  *   USER_POOL_ID          – Cognito user pool id (for AdminGetUser)
