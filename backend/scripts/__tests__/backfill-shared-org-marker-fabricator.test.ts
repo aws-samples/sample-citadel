@@ -3152,6 +3152,8 @@ describe("runCorrectiveMode — needsReapproval exit code and end-of-run re-appr
   ) as { applyMarkerEdit: jest.Mock };
 
   let exitSpy: jest.SpyInstance;
+  let tmpDir: string;
+  let evidencePath: string;
 
   beforeEach(() => {
     applyMarkerEdit.mockReset();
@@ -3160,10 +3162,19 @@ describe("runCorrectiveMode — needsReapproval exit code and end-of-run re-appr
     ) => {
       throw new Error(`process.exit(${code})`);
     }) as never);
+    const os = jest.requireActual("os") as typeof import("os");
+    const path = jest.requireActual("path") as typeof import("path");
+    const fs = jest.requireActual("fs") as typeof import("fs");
+    tmpDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "evidence-reapproval-test-"),
+    );
+    evidencePath = path.join(tmpDir, "evidence.json");
   });
 
   afterEach(() => {
     exitSpy.mockRestore();
+    const fs = jest.requireActual("fs") as typeof import("fs");
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
   function makeDocClient(): import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient {
@@ -3272,6 +3283,7 @@ describe("runCorrectiveMode — needsReapproval exit code and end-of-run re-appr
       5000,
       1000,
       fastClock(),
+      evidencePath,
     );
 
     expect(exitSpy).not.toHaveBeenCalled();
@@ -3341,6 +3353,7 @@ describe("runCorrectiveMode — needsReapproval exit code and end-of-run re-appr
       5000,
       1000,
       fastClock(),
+      evidencePath,
     );
     expect(
       (registry as unknown as { submitForApproval: jest.Mock })
@@ -3403,6 +3416,7 @@ describe("runCorrectiveMode — needsReapproval exit code and end-of-run re-appr
         5000,
         1000,
         fastClock(),
+        evidencePath,
       ),
     ).rejects.toThrow("process.exit(1)");
 
@@ -3930,6 +3944,8 @@ describe("runCorrectiveMode — end-of-run resync pass for projectionLag (Requir
   ) as { applyMarkerEdit: jest.Mock };
 
   let exitSpy: jest.SpyInstance;
+  let tmpDir: string;
+  let evidencePath: string;
 
   beforeEach(() => {
     applyMarkerEdit.mockReset();
@@ -3938,10 +3954,17 @@ describe("runCorrectiveMode — end-of-run resync pass for projectionLag (Requir
     ) => {
       throw new Error(`process.exit(${code})`);
     }) as never);
+    const os = jest.requireActual("os") as typeof import("os");
+    const path = jest.requireActual("path") as typeof import("path");
+    const fs = jest.requireActual("fs") as typeof import("fs");
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "evidence-resync-test-"));
+    evidencePath = path.join(tmpDir, "evidence.json");
   });
 
   afterEach(() => {
     exitSpy.mockRestore();
+    const fs = jest.requireActual("fs") as typeof import("fs");
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
   function makeRegistry(
@@ -4040,6 +4063,7 @@ describe("runCorrectiveMode — end-of-run resync pass for projectionLag (Requir
       3000,
       1000,
       fastClock(),
+      evidencePath,
     );
 
     expect(exitSpy).not.toHaveBeenCalled();
@@ -4088,6 +4112,7 @@ describe("runCorrectiveMode — end-of-run resync pass for projectionLag (Requir
         3000,
         1000,
         fastClock(),
+        evidencePath,
       ),
     ).rejects.toThrow("process.exit(1)");
 
@@ -4573,5 +4598,28 @@ describe("restoreApprovalForRecord — already-APPROVED id with valid evidence i
     expect(result.alreadyApproved).toBe(true);
     expect(registry.submitForApproval).not.toHaveBeenCalled();
     expect(registry.updateResourceStatus).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 29. Test-hygiene guard: no `runCorrectiveMode` apply-mode test in this file
+//     may write the default evidence sidecar into the package directory.
+//     Every apply-mode call above now threads a tmpdir `evidencePath`
+//     through to `runCorrectiveMode` instead of relying on
+//     `DEFAULT_EVIDENCE_PATH` (`<cwd>/backfill-shared-org-marker.evidence.json`),
+//     which previously left a stray untracked artifact in `backend/` after
+//     every jest run. This test asserts the writer itself honours an
+//     injected output path (already covered above) AND that the default
+//     path is left untouched by this suite.
+// ---------------------------------------------------------------------------
+
+describe("test hygiene — evidence sidecar never lands in the package directory", () => {
+  it("DEFAULT_EVIDENCE_PATH is not created as a side effect of this test suite", () => {
+    const { DEFAULT_EVIDENCE_PATH } = jest.requireActual(
+      "../backfill-shared-org-marker",
+    ) as typeof import("../backfill-shared-org-marker");
+    const fs = jest.requireActual("fs") as typeof import("fs");
+
+    expect(fs.existsSync(DEFAULT_EVIDENCE_PATH)).toBe(false);
   });
 });
