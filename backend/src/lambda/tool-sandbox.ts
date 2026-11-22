@@ -72,13 +72,11 @@ export interface SandboxToolConfig {
 
 /**
  * Shape of the module.exports a sandboxed tool may provide: either a
- * callable handler, or an object exposing a `.handler` function.
+ * callable handler, or an object exposing a `.handler` function. The
+ * export shape is now checked from inside the vm context (see
+ * sandboxExecuteCode) rather than typed on a host-side reference, so
+ * no host-realm-typed value is held outside the sandbox.
  */
-type SandboxToolFn = (
-  inputs: unknown,
-  credentials: Record<string, unknown>,
-) => unknown;
-type SandboxToolExports = SandboxToolFn | { handler?: SandboxToolFn };
 
 export interface ExecuteToolDeps {
   loadToolConfig: (toolId: string) => Promise<SandboxToolConfig | null>;
@@ -190,9 +188,8 @@ export async function executeTool(
       // caused by the fail-closed flip (tools with absent orgId that were
       // previously silently allowed).
       try {
-        const { CloudWatchClient, PutMetricDataCommand } = await import(
-          "@aws-sdk/client-cloudwatch"
-        );
+        const { CloudWatchClient, PutMetricDataCommand } =
+          await import("@aws-sdk/client-cloudwatch");
         const cw = new CloudWatchClient({});
         await cw.send(
           new PutMetricDataCommand({
@@ -354,6 +351,18 @@ function defaultDeps(): ExecuteToolDeps {
  * references, prototype pollution) but does NOT defeat a deliberately
  * crafted escape (e.g. ({}).constructor.constructor('return this')()).
  *
+ * Host-realm isolation: `module`, `exports`, and the injected
+ * `inputs`/`credentials` values are never assigned onto the context as
+ * host-side object references. They are created (module/exports) or
+ * parsed from JSON text (inputs/credentials) via `vm.runInContext` so
+ * their prototype chain is rooted in the VM's own realm, not the
+ * host's. This closes the `inputs.constructor.constructor('return
+ * process')()` class of escape, where a host-realm object's
+ * constructor chain resolves to the host's Function constructor and
+ * can compile code that closes over the real `process` global —
+ * independent of the `process: undefined` context property, because
+ * that compiled code never runs inside the vm context.
+ *
  * Memory guard via --max-old-space-size is NOT applicable — it's a
  * process-level V8 flag, not per-context. The 512 MB Lambda memory
  * limit is the ceiling.
@@ -376,8 +385,6 @@ export async function sandboxExecuteCode(
   timeoutMs: number = 30_000,
 ): Promise<{ output: unknown }> {
   const sandbox: Record<string, unknown> = {
-    module: { exports: {} as SandboxToolExports },
-    exports: {} as SandboxToolExports,
     // Explicitly undefined — blocks trivial escape paths:
     process: undefined,
     require: (() => {
@@ -405,13 +412,25 @@ export async function sandboxExecuteCode(
     // Freeze failure is non-fatal — proceed with unfrozen prototype.
   }
 
+  // `module`/`exports` are created WITH `vm.runInContext` so they are
+  // sandbox-realm objects (their `constructor` resolves to the vm
+  // context's own Object/Function, not the host's). Creating them as
+  // host-side object literals and assigning them onto the context (the
+  // prior approach) made them host-realm values: any host-realm object's
+  // `.constructor.constructor(src)` compiles `src` as a HOST function
+  // that can close over the real `process` global — the `process:
+  // undefined` context property never enters into it, because the
+  // compiled function doesn't run inside the vm context at all.
+  vm.runInContext(
+    "var module = { exports: {} }; var exports = module.exports;",
+    context,
+  );
+
   const VM_TIMEOUT_MS = timeoutMs;
   const MAX_CODE_SIZE = 5 * 1024 * 1024; // 5 MB
 
   if (code.length > MAX_CODE_SIZE) {
-    throw new Error(
-      `Tool code exceeds maximum size (${MAX_CODE_SIZE} bytes)`,
-    );
+    throw new Error(`Tool code exceeds maximum size (${MAX_CODE_SIZE} bytes)`);
   }
 
   const script = new vm.Script(code);
@@ -419,16 +438,33 @@ export async function sandboxExecuteCode(
   script.runInContext(context, { timeout: VM_TIMEOUT_MS });
   const defElapsed = Date.now() - defStart;
 
-  const handler = sandbox.module as { exports: SandboxToolExports };
-  const exp = handler.exports;
-  if (typeof exp !== "function" && !(exp && typeof (exp as { handler?: SandboxToolFn }).handler === "function")) {
+  const moduleExportsSrc = vm.runInContext(
+    "(function(){ return typeof module.exports; })()",
+    context,
+  ) as string;
+  const exportsHandlerSrc = vm.runInContext(
+    "(function(){ return module.exports && typeof module.exports.handler; })()",
+    context,
+  ) as string | undefined;
+  const isFunctionExport = moduleExportsSrc === "function";
+  if (!isFunctionExport && exportsHandlerSrc !== "function") {
     throw new Error("Tool code does not export a valid handler function");
   }
 
-  // Inject inputs/credentials into the sandbox so the invoker script
-  // can reference them. These are host-provided values, not user code.
-  context.__inputs = inputs;
-  context.__creds = credentials;
+  // Pass inputs/credentials into the sandbox as JSON TEXT, then parse
+  // them INSIDE the context. The parsed result (`__inputs`/`__creds`)
+  // is a sandbox-realm object — its constructor chain is rooted in the
+  // vm context, not the host — so `__inputs.constructor.constructor(...)`
+  // can no longer reach the host's `process` via closure. The JSON text
+  // itself is a primitive string and carries no realm, so assigning it
+  // onto the context is safe; it is deleted immediately after parsing.
+  context.__inputsJson = JSON.stringify(inputs === undefined ? null : inputs);
+  context.__credsJson = JSON.stringify(credentials ?? {});
+  vm.runInContext(
+    "var __inputs = JSON.parse(__inputsJson); delete __inputsJson;" +
+      "var __creds = JSON.parse(__credsJson); delete __credsJson;",
+    context,
+  );
 
   // Build an invoker script that calls the exported handler INSIDE
   // the VM context with a timeout. This bounds synchronous spin-loops
@@ -439,14 +475,11 @@ export async function sandboxExecuteCode(
   // bounds the synchronous preamble; the async tail is bounded by the
   // outer Promise.race in executeTool. This is documented: vm timeout
   // bounds synchronous work; async work is bounded by the race.
-  const invokerSrc = typeof exp === "function"
+  const invokerSrc = isFunctionExport
     ? "(function(){ return module.exports(__inputs, __creds); })()"
     : "(function(){ return module.exports.handler(__inputs, __creds); })()";
 
-  const remainingMs = Math.max(
-    100,
-    VM_TIMEOUT_MS - defElapsed,
-  );
+  const remainingMs = Math.max(100, VM_TIMEOUT_MS - defElapsed);
   const invoker = new vm.Script(invokerSrc);
   const invokeResult = invoker.runInContext(context, {
     timeout: remainingMs,

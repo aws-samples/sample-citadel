@@ -15,14 +15,14 @@ import { sandboxExecuteCode } from "../tool-sandbox";
 describe("H18 — vm hardening: sandboxExecuteCode (production)", () => {
   it("executes a simple handler and returns output", async () => {
     const code =
-      'module.exports = function(inputs) { return { echo: inputs.msg }; };';
+      "module.exports = function(inputs) { return { echo: inputs.msg }; };";
     const result = await sandboxExecuteCode(code, { msg: "hello" }, {});
     expect(result.output).toEqual({ echo: "hello" });
   });
 
   it("executes a handler exported as module.exports.handler", async () => {
     const code =
-      'module.exports.handler = function(inputs) { return { ok: true }; };';
+      "module.exports.handler = function(inputs) { return { ok: true }; };";
     const result = await sandboxExecuteCode(code, {}, {});
     expect(result.output).toEqual({ ok: true });
   });
@@ -58,38 +58,58 @@ describe("H18 — vm hardening: sandboxExecuteCode (production)", () => {
     expect(result.output).toBe("blocked");
   });
 
-  it("blocks constructor chain escape attempt (this.constructor.constructor)", async () => {
-    // The classic vm escape: this.constructor.constructor('return process')()
-    // In strict mode or when 'this' is the sandbox (which has process: undefined),
-    // this may return undefined rather than throwing. Either way, it must NOT
-    // return the real process object.
-    const code = `module.exports = function() {
-      try {
-        var p = this.constructor.constructor('return process')();
-        if (p && p.env) return { leaked: true, keys: Object.keys(p.env).slice(0, 3) };
-        return { leaked: false };
-      } catch (e) {
-        return { leaked: false, error: e.message };
+  it("blocks constructor chain escape attempt through host-realm objects", async () => {
+    // Host-realm objects passed into the vm context (module, exports,
+    // __inputs, __creds) have a constructor chain rooted in the HOST's
+    // Function, not the sandbox's. `x.constructor.constructor(src)()` on
+    // any of them compiles and runs `src` as a HOST-realm function,
+    // which can see the real `process` global via closure — regardless
+    // of `process: undefined` on the vm context object, because the
+    // compiled function never executes inside the vm context at all.
+    //
+    // This test probes every host-realm object the sandbox exposes and
+    // asserts none of them leak a working `process` reference. It also
+    // asserts `typeof process === "undefined"` from inside the sandbox's
+    // own scope, which was already true and must remain true.
+    const code = `module.exports = function(inputs, creds) {
+      function probe(obj) {
+        try {
+          var p = obj.constructor.constructor('return process')();
+          return !!(p && p.env);
+        } catch (e) {
+          return false;
+        }
       }
+      var results = {
+        viaInputs: probe(inputs),
+        viaModule: probe(module),
+        viaExports: probe(exports),
+        viaCreds: creds ? probe(creds) : false,
+        processUndefined: typeof process === 'undefined',
+      };
+      results.leaked = results.viaInputs || results.viaModule ||
+        results.viaExports || results.viaCreds;
+      return results;
     };`;
-    const result = await sandboxExecuteCode(code, {}, {});
-    const output = result.output as { leaked: boolean };
-    // The hardening may not fully block this path (vm is not a security
-    // boundary), but we assert that if the escape succeeds, this test
-    // documents the gap. The accident guard's goal is to block the trivial
-    // path; a successful escape here is expected to be caught by the
-    // follow-up process-isolation work.
-    // If the prototype freeze blocks it, leaked will be false.
-    // If it doesn't, we still document the result.
-    expect(output).toBeDefined();
-    // At minimum, process should be undefined in the sandbox's scope:
-    if (output.leaked) {
-      // Document that the constructor chain escape is a known gap.
-      console.warn(
-        "H18: constructor chain escape reached a process-like object — " +
-          "process isolation (deferred) is required for a true security boundary.",
-      );
-    }
+    const result = await sandboxExecuteCode(
+      code,
+      { foo: "bar" },
+      { myKey: { token: "abc" } },
+    );
+    const output = result.output as {
+      viaInputs: boolean;
+      viaModule: boolean;
+      viaExports: boolean;
+      viaCreds: boolean;
+      processUndefined: boolean;
+      leaked: boolean;
+    };
+    expect(output.processUndefined).toBe(true);
+    expect(output.viaInputs).toBe(false);
+    expect(output.viaModule).toBe(false);
+    expect(output.viaExports).toBe(false);
+    expect(output.viaCreds).toBe(false);
+    expect(output.leaked).toBe(false);
   });
 
   it("enforces timeout on infinite loop in handler body", async () => {
