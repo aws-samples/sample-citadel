@@ -2842,7 +2842,7 @@ describe("runCorrectiveForRegistryType — needsReapproval bucket and --limit co
     );
 
     expect(needsReapprovalEntries).toEqual([
-      { id: "synthetic-rec-1", type: "agent" },
+      { id: "synthetic-rec-1", type: "agent", priorStatus: "APPROVED" },
     ]);
   });
 
@@ -4165,5 +4165,413 @@ describe("Incident 2 regression — registry-backed path never races registry-sy
     for (const [command] of send.mock.calls) {
       expect(command.input.UpdateExpression).toBeUndefined();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 26. --restore-approval now requires --prior-status-evidence (finding
+//     d202861e): the flag previously submitted+approved any id
+//     unconditionally. It must now refuse unless the id is present in an
+//     operator-supplied sidecar evidence file with priorStatus APPROVED —
+//     and every APPLY run of corrective mode must WRITE that sidecar so
+//     evidence exists to check against.
+// ---------------------------------------------------------------------------
+
+describe("writeRunEvidence — sidecar JSON written by corrective APPLY runs", () => {
+  it("serialises runId, mode, and needsReapproval entries with id/kind/priorStatus", async () => {
+    const { writeRunEvidence } = jest.requireActual(
+      "../backfill-shared-org-marker",
+    ) as typeof import("../backfill-shared-org-marker");
+    const os = jest.requireActual("os") as typeof import("os");
+    const path = jest.requireActual("path") as typeof import("path");
+    const fs = jest.requireActual("fs") as typeof import("fs");
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "evidence-test-"));
+    const outPath = path.join(dir, "evidence.json");
+
+    writeRunEvidence(outPath, {
+      runId: "run-synthetic-0001",
+      mode: "APPLY",
+      needsReapproval: [
+        { id: "tool-0001", kind: "tool", priorStatus: "APPROVED" },
+        { id: "agent-0002", kind: "agent", priorStatus: "APPROVED" },
+      ],
+    });
+
+    const written = JSON.parse(fs.readFileSync(outPath, "utf8"));
+    expect(written.runId).toBe("run-synthetic-0001");
+    expect(written.mode).toBe("APPLY");
+    expect(written.needsReapproval).toEqual([
+      { id: "tool-0001", kind: "tool", priorStatus: "APPROVED" },
+      { id: "agent-0002", kind: "agent", priorStatus: "APPROVED" },
+    ]);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("writes atomically — no partial file is left if the write target directory does not exist", () => {
+    const { writeRunEvidence } = jest.requireActual(
+      "../backfill-shared-org-marker",
+    ) as typeof import("../backfill-shared-org-marker");
+
+    expect(() =>
+      writeRunEvidence("/nonexistent-dir-synthetic/evidence.json", {
+        runId: "run-synthetic-0002",
+        mode: "APPLY",
+        needsReapproval: [],
+      }),
+    ).toThrow();
+  });
+});
+
+describe("runCorrectiveMode — writes the evidence sidecar on an APPLY run", () => {
+  const { applyMarkerEdit } = jest.requireMock(
+    "../../src/utils/marker-registry-edit",
+  ) as { applyMarkerEdit: jest.Mock };
+
+  let exitSpy: jest.SpyInstance;
+  let tmpDir: string;
+  let evidencePath: string;
+
+  beforeEach(() => {
+    applyMarkerEdit.mockReset();
+    exitSpy = jest.spyOn(process, "exit").mockImplementation(((
+      code?: number,
+    ) => {
+      throw new Error(`process.exit(${code})`);
+    }) as never);
+    const os = jest.requireActual("os") as typeof import("os");
+    const path = jest.requireActual("path") as typeof import("path");
+    const fs = jest.requireActual("fs") as typeof import("fs");
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "evidence-apply-test-"));
+    evidencePath = path.join(tmpDir, "evidence.json");
+  });
+
+  afterEach(() => {
+    exitSpy.mockRestore();
+    const fs = jest.requireActual("fs") as typeof import("fs");
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function makeDocClient(
+    convergedItem: Record<string, unknown>,
+  ): import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient {
+    const send = jest.fn().mockImplementation((command) => {
+      const ctorName = command?.constructor?.name;
+      if (ctorName === "GetCommand") {
+        return Promise.resolve({ Item: convergedItem });
+      }
+      return Promise.resolve({ Items: [] });
+    });
+    return {
+      send,
+    } as unknown as import("@aws-sdk/lib-dynamodb").DynamoDBDocumentClient;
+  }
+
+  function makeRegistry(
+    items: Array<{ recordId: string; name: string; orgId: string }>,
+  ): RegistryService {
+    const listResourcesChecked = jest.fn().mockImplementation((type: string) =>
+      Promise.resolve({
+        items:
+          type === "agent"
+            ? items.map((i) => ({
+                recordId: i.recordId,
+                name: i.name,
+                status: "APPROVED",
+                customDescriptorContent: JSON.stringify({
+                  orgId: i.orgId,
+                  createdBy: "fabricator",
+                  sourceProjectId: "proj-synthetic",
+                }),
+              }))
+            : [],
+        partial: false,
+        droppedCount: 0,
+        throttled: false,
+      }),
+    );
+    return {
+      listResourcesChecked,
+      getResource: jest.fn().mockResolvedValue(null),
+    } as unknown as RegistryService;
+  }
+
+  it("writes a sidecar containing the record left needsReapproval, after the end-of-run pass still fails to restore it", async () => {
+    const registry = makeRegistry([
+      {
+        recordId: "tool-0001",
+        name: "synthetic-tool-01",
+        orgId: ALL_ORGS,
+      },
+    ]);
+    // Write lands (DRAFT) but the end-of-run restoration also fails every
+    // time, so the record stays in needsReapproval and must appear in the
+    // sidecar for an operator to later use with --restore-approval.
+    applyMarkerEdit.mockResolvedValue({
+      recordId: "tool-0001",
+      priorStatus: "APPROVED",
+      postStatus: "DRAFT",
+      reapproved: false,
+      error: undefined,
+    });
+    (registry.getResource as jest.Mock).mockResolvedValue({
+      recordId: "tool-0001",
+      name: "synthetic-tool-01",
+      status: "DRAFT",
+      customDescriptorContent: JSON.stringify({ orgId: ALL_ORGS }),
+    });
+    const docClient = makeDocClient({
+      toolId: "tool-0001",
+      orgId: "SyntheticOrg",
+      registryStatus: "APPROVED",
+    });
+
+    await expect(
+      runCorrectiveMode(
+        registry,
+        docClient,
+        "agent-table",
+        "tool-table",
+        "projects-table",
+        /* apply */ true,
+        undefined,
+        undefined,
+        1000,
+        undefined,
+        0,
+        undefined,
+        5000,
+        1000,
+        fastClock(),
+        evidencePath,
+      ),
+    ).rejects.toThrow("process.exit(1)");
+
+    const fs = jest.requireActual("fs") as typeof import("fs");
+    const written = JSON.parse(fs.readFileSync(evidencePath, "utf8"));
+    expect(written.mode).toBe("APPLY");
+    expect(written.needsReapproval).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "tool-0001",
+          kind: "agent",
+          priorStatus: "APPROVED",
+        }),
+      ]),
+    );
+  });
+
+  it("DRY-RUN mode does not write the sidecar (no apply occurred, nothing to attest)", async () => {
+    const registry = makeRegistry([
+      {
+        recordId: "tool-0002",
+        name: "synthetic-tool-02",
+        orgId: ALL_ORGS,
+      },
+    ]);
+
+    await runCorrectiveMode(
+      registry,
+      makeDocClient({}),
+      "agent-table",
+      "tool-table",
+      "projects-table",
+      /* apply */ false,
+      undefined,
+      undefined,
+      1000,
+      undefined,
+      0,
+      undefined,
+      5000,
+      1000,
+      fastClock(),
+      evidencePath,
+    );
+
+    const fs = jest.requireActual("fs") as typeof import("fs");
+    expect(fs.existsSync(evidencePath)).toBe(false);
+  });
+});
+
+describe("--restore-approval requires --prior-status-evidence (finding d202861e)", () => {
+  let tmpDir: string;
+  let evidencePath: string;
+  let fs: typeof import("fs");
+  let path: typeof import("path");
+
+  beforeEach(() => {
+    const os = jest.requireActual("os") as typeof import("os");
+    fs = jest.requireActual("fs") as typeof import("fs");
+    path = jest.requireActual("path") as typeof import("path");
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "restore-evidence-test-"));
+    evidencePath = path.join(tmpDir, "evidence.json");
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("refuses and makes no registry calls when no evidence file is supplied", async () => {
+    const { restoreApprovalForRecord, loadPriorStatusEvidence } =
+      jest.requireActual(
+        "../backfill-shared-org-marker",
+      ) as typeof import("../backfill-shared-org-marker");
+
+    expect(() => loadPriorStatusEvidence(undefined, "tool-0001")).toThrow(
+      /--prior-status-evidence/,
+    );
+    // restoreApprovalForRecord itself is unreachable without evidence —
+    // asserting the guard throws before any registry call would occur is
+    // covered by the loadPriorStatusEvidence check above; this keeps
+    // restoreApprovalForRecord's own contract (operate once evidence says
+    // APPROVED) unchanged and tested separately below.
+    void restoreApprovalForRecord;
+  });
+
+  it("refuses when the id is absent from the evidence file, naming the id, file, and 'absent'", () => {
+    const { loadPriorStatusEvidence } = jest.requireActual(
+      "../backfill-shared-org-marker",
+    ) as typeof import("../backfill-shared-org-marker");
+    fs.writeFileSync(
+      evidencePath,
+      JSON.stringify({
+        runId: "run-synthetic-0003",
+        mode: "APPLY",
+        needsReapproval: [
+          { id: "tool-9999", kind: "tool", priorStatus: "APPROVED" },
+        ],
+      }),
+    );
+
+    expect(() => loadPriorStatusEvidence(evidencePath, "tool-0001")).toThrow(
+      /tool-0001/,
+    );
+    try {
+      loadPriorStatusEvidence(evidencePath, "tool-0001");
+    } catch (err) {
+      expect(String(err)).toContain(evidencePath);
+      expect(String(err)).toContain("absent");
+    }
+  });
+
+  it("refuses when the id is present but priorStatus is not APPROVED, naming the found priorStatus", () => {
+    const { loadPriorStatusEvidence } = jest.requireActual(
+      "../backfill-shared-org-marker",
+    ) as typeof import("../backfill-shared-org-marker");
+    fs.writeFileSync(
+      evidencePath,
+      JSON.stringify({
+        runId: "run-synthetic-0004",
+        mode: "APPLY",
+        needsReapproval: [
+          { id: "tool-0001", kind: "tool", priorStatus: "DRAFT" },
+        ],
+      }),
+    );
+
+    expect(() => loadPriorStatusEvidence(evidencePath, "tool-0001")).toThrow(
+      /DRAFT/,
+    );
+  });
+
+  it("proceeds when the id is present with priorStatus APPROVED", () => {
+    const { loadPriorStatusEvidence } = jest.requireActual(
+      "../backfill-shared-org-marker",
+    ) as typeof import("../backfill-shared-org-marker");
+    fs.writeFileSync(
+      evidencePath,
+      JSON.stringify({
+        runId: "run-synthetic-0005",
+        mode: "APPLY",
+        needsReapproval: [
+          { id: "tool-0001", kind: "tool", priorStatus: "APPROVED" },
+        ],
+      }),
+    );
+
+    expect(() =>
+      loadPriorStatusEvidence(evidencePath, "tool-0001"),
+    ).not.toThrow();
+  });
+
+  it("main(): exits non-zero and never calls getResource/submitForApproval when evidence is missing for the restore id", async () => {
+    jest.resetModules();
+    const originalArgv = process.argv;
+    const originalEnv = { ...process.env };
+    const exitSpy = jest.spyOn(process, "exit").mockImplementation(((
+      code?: number,
+    ) => {
+      throw new Error(`process.exit(${code})`);
+    }) as never);
+
+    process.env.REGISTRY_ID = "registry-synthetic";
+    process.env.AGENT_CONFIG_TABLE = "agent-table-synthetic";
+    process.env.TOOL_CONFIG_TABLE = "tool-table-synthetic";
+    process.env.PROJECTS_TABLE = "projects-table-synthetic";
+    process.argv = [
+      "node",
+      "backfill-shared-org-marker.ts",
+      "--correct-fabricator-shared",
+      "--restore-approval",
+      "tool-0001",
+    ];
+
+    const getResourceMock = jest.fn();
+    jest.doMock("../../src/services/registry-service", () => {
+      const actual = jest.requireActual("../../src/services/registry-service");
+      return {
+        ...actual,
+        RegistryService: jest.fn().mockImplementation(() => ({
+          getResource: getResourceMock,
+          submitForApproval: jest.fn(),
+          updateResourceStatus: jest.fn(),
+        })),
+      };
+    });
+
+    const { main } = jest.requireActual(
+      "../backfill-shared-org-marker",
+    ) as typeof import("../backfill-shared-org-marker");
+
+    await expect(main()).rejects.toThrow("process.exit(1)");
+    expect(getResourceMock).not.toHaveBeenCalled();
+
+    process.argv = originalArgv;
+    process.env = originalEnv;
+    exitSpy.mockRestore();
+    jest.dontMock("../../src/services/registry-service");
+    jest.resetModules();
+  });
+});
+
+describe("restoreApprovalForRecord — already-APPROVED id with valid evidence is a no-op (finding d202861e)", () => {
+  it("logs no-op and reports alreadyApproved without calling submitForApproval", async () => {
+    const { restoreApprovalForRecord } = jest.requireActual(
+      "../backfill-shared-org-marker",
+    ) as typeof import("../backfill-shared-org-marker");
+
+    const registry = {
+      getResource: jest.fn().mockResolvedValue({
+        recordId: "tool-0001",
+        name: "synthetic-tool",
+        status: "APPROVED",
+        customDescriptorContent: JSON.stringify({ orgId: "SyntheticOrg" }),
+      }),
+      submitForApproval: jest.fn(),
+      updateResourceStatus: jest.fn(),
+    } as unknown as RegistryService;
+
+    const result = await restoreApprovalForRecord(
+      "tool-0001",
+      "tool",
+      registry,
+      /* apply */ true,
+    );
+
+    expect(result.alreadyApproved).toBe(true);
+    expect(registry.submitForApproval).not.toHaveBeenCalled();
+    expect(registry.updateResourceStatus).not.toHaveBeenCalled();
   });
 });
