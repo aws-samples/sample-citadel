@@ -68,13 +68,20 @@ def query_knowledge_base(query: str) -> str:
 
 app = BedrockAgentCoreApp()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
-)
+# This runtime is invoked server-to-server by agent-message-handler using
+# SigV4 — there is no browser client in production, so no CORS middleware
+# is installed by default. CITADEL_DEV_CORS_ORIGINS is an explicit, opt-in
+# escape hatch for local development against a browser-based frontend; it
+# never combines an origin allowlist with allow_credentials=True.
+_dev_cors_origins = os.getenv("CITADEL_DEV_CORS_ORIGINS", "").strip()
+if _dev_cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[o.strip() for o in _dev_cors_origins.split(",") if o.strip()],
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["*"],
+    )
 
 SYSTEM_PROMPT = """You are an agentification consultant at the Agentic AI Factory.
 Your job is to determine whether a business process is worth agentifying, and if so, produce a technical design for it.
