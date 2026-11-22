@@ -237,10 +237,7 @@ export class FrontendStack extends cdk.Stack {
 
     const invitationEmailTemplate = fs
       .readFileSync(
-        path.join(
-          BACKEND_SRC,
-          "cognito-email-templates/invitation-email.html",
-        ),
+        path.join(BACKEND_SRC, "cognito-email-templates/invitation-email.html"),
         "utf-8",
       )
       .replace(/https:\/\/your-domain\.com/g, hostUrl);
@@ -364,7 +361,11 @@ export class FrontendStack extends cdk.Stack {
       this,
       "AssetsDeployment",
       {
-        sources: [s3deploy.Source.asset(frontendBuildPath, { exclude: ["index.html", "aws-exports.json"] })],
+        sources: [
+          s3deploy.Source.asset(frontendBuildPath, {
+            exclude: ["index.html", "aws-exports.json"],
+          }),
+        ],
         destinationBucket: this.bucket,
         distribution: this.distribution,
         cacheControl: [
@@ -382,7 +383,9 @@ export class FrontendStack extends cdk.Stack {
       "IndexDeployment",
       {
         sources: [
-          s3deploy.Source.asset(frontendBuildPath, { exclude: ["assets", "assets/**"] }),
+          s3deploy.Source.asset(frontendBuildPath, {
+            exclude: ["assets", "assets/**"],
+          }),
           s3deploy.Source.jsonData("aws-exports.json", frontendConfig),
         ],
         destinationBucket: this.bucket,
@@ -401,12 +404,15 @@ export class FrontendStack extends cdk.Stack {
     // present when the new index.html becomes live.
     indexDeployment.node.addDependency(assetsDeployment);
 
-    // (3) Lifecycle rule: expire stale hashed chunks after 30 days.
-    // With prune: false, old chunks accumulate; this ages them out while
-    // keeping them available long enough for open tabs to finish loading.
+    // (3) Lifecycle rule: bound growth of superseded (noncurrent) hashed
+    // chunks. With prune: false, old chunks accumulate as noncurrent
+    // versions on each redeploy; this ages those out after 30 days.
+    // Current-version expiration must NOT be used here: S3 Expiration acts
+    // on the CURRENT version by age, so it would delete-mark every live,
+    // index.html-referenced bundle 30 days after upload — breaking any
+    // environment not redeployed within that window.
     this.bucket.addLifecycleRule({
       prefix: "assets/",
-      expiration: cdk.Duration.days(30),
       noncurrentVersionExpiration: cdk.Duration.days(30),
       enabled: true,
     });

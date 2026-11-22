@@ -7,7 +7,8 @@
  * 3. Index/non-hashed files get `no-cache, no-store, must-revalidate`
  * 4. Both deployments have Prune: false
  * 5. Assets deployment is a dependency of the index deployment
- * 6. S3 lifecycle rule expires `assets/` objects after 30 days
+ * 6. S3 lifecycle rule expires noncurrent `assets/` object versions after 30
+ *    days, but never expires CURRENT versions (CIT-d966a7ec)
  */
 import * as cdk from "aws-cdk-lib";
 import { Template, Match } from "aws-cdk-lib/assertions";
@@ -132,14 +133,13 @@ describe("FrontendStack — CIT-307 cache-control split deployment", () => {
     );
   });
 
-  test("site bucket has a lifecycle rule expiring assets/ after 30 days", () => {
+  test("site bucket has a lifecycle rule expiring noncurrent assets/ versions after 30 days", () => {
     template.hasResourceProperties("AWS::S3::Bucket", {
       BucketName: Match.stringLikeRegexp("^citadel-frontend-test-"),
       LifecycleConfiguration: {
         Rules: Match.arrayWith([
           Match.objectLike({
             Prefix: "assets/",
-            ExpirationInDays: 30,
             NoncurrentVersionExpiration: Match.objectLike({
               NoncurrentDays: 30,
             }),
@@ -148,5 +148,47 @@ describe("FrontendStack — CIT-307 cache-control split deployment", () => {
         ]),
       },
     });
+  });
+
+  test("no assets/ lifecycle rule expires current object versions (CIT-d966a7ec)", () => {
+    // S3 Expiration ages out CURRENT versions. Every live, index.html-referenced
+    // bundle under assets/ would get a delete marker 30 days after upload, so an
+    // environment not redeployed within 30 days would serve a blank page. Only
+    // NoncurrentVersionExpiration (bounding growth of superseded, overwritten
+    // keys) is permitted on the assets/ prefix — current-version Expiration is
+    // never allowed there.
+    const buckets = template.findResources("AWS::S3::Bucket");
+    const siteBucketEntry = Object.entries(buckets).find(([, res]) => {
+      const name: unknown = res.Properties?.BucketName;
+      return (
+        typeof name === "string" && name.startsWith("citadel-frontend-test-")
+      );
+    });
+    expect(siteBucketEntry).toBeDefined();
+    const [, siteBucket] = siteBucketEntry!;
+
+    const rules: Array<Record<string, unknown>> =
+      siteBucket.Properties?.LifecycleConfiguration?.Rules ?? [];
+
+    const assetsRules = rules.filter((rule) => {
+      const prefix = rule.Prefix;
+      const filterPrefix = (rule.Filter as { Prefix?: string } | undefined)
+        ?.Prefix;
+      return prefix === "assets/" || filterPrefix === "assets/";
+    });
+
+    expect(assetsRules.length).toBeGreaterThan(0);
+
+    for (const rule of assetsRules) {
+      expect(rule.ExpirationInDays).toBeUndefined();
+      expect(rule.ExpirationDate).toBeUndefined();
+    }
+
+    const hasNoncurrentExpiration = assetsRules.some(
+      (rule) =>
+        (rule.NoncurrentVersionExpiration as { NoncurrentDays?: number })
+          ?.NoncurrentDays === 30,
+    );
+    expect(hasNoncurrentExpiration).toBe(true);
   });
 });
