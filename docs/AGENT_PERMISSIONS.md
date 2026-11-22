@@ -117,7 +117,7 @@ The `agent_runner.py` script:
 
 ### 5. Backward compatibility
 
-Agents without `requiredPermissions` in their config continue to run in a subprocess using the Lambda's ambient IAM role (credential env vars are removed from the child env so boto3 falls back to the metadata service). No changes are needed to existing agent configs.
+There is no ambient-credential fallback. The former behavior — an agent without `requiredPermissions` running in a subprocess under the Lambda's ambient IAM role — was deleted (owner decision 5750aeec, fail closed, no grandfathering). The child subprocess env is always built by scrubbing every ambient AWS credential env var from the parent's environment first, then injecting exactly one of two explicit sources: scoped STS credentials for `credentialMode: "scoped"` (requires `requiredPermissions`), or nothing at all for the `credentialMode: "none"` no-cloud sentinel used by genuinely credential-less, pure-compute agents. An agent that declares neither is refused at the dispatch gate before a subprocess is ever spawned.
 
 ## IAM Role Naming
 

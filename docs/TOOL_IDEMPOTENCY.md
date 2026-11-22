@@ -9,6 +9,19 @@ race, using an org-scoped, TTL'd DynamoDB ledger, a worker
 > fence, the S3 result offload, and client-token passthrough — completing the
 > capability. The guarantee below is the current, post-fence statement.
 
+## Scope: governed workflow-node calls only
+
+Everything above describes the governed path: a tool call dispatched as a
+**workflow-node call through the step runner / worker wrapper**, which is the
+only path that reserves against the ledger and can be fenced by
+`dispatchGeneration`. It does not apply to `backend/src/lambda/tool-sandbox.ts`
+(`testTool`/`executeTool`), which runs a tool's code directly in a Node `vm`
+sandbox for ad-hoc testing, gated by the `tool:execute` permission
+(architect/admin only, via `hasPermission`). That sandbox is out of scope **by
+construction** — it never reserves a ledger row, so it carries no idempotency
+guarantee at all: a retried or duplicated sandbox invocation re-executes the
+tool's code every time.
+
 ## What is guaranteed — stated precisely
 
 - **Exactly-once execution of a side effect is GUARANTEED for calls that resolve
