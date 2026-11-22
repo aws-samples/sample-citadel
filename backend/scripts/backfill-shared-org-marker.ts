@@ -89,6 +89,17 @@
  *                                 backoff. Defaults to 300 when --apply is
  *                                 set and the flag is omitted (0 in
  *                                 dry-run, which never writes).
+ *   --projection-wait-ms <ms>      Integer >= 1000 bounding how long the
+ *                                 corrective path polls for the DDB
+ *                                 projection to converge on a marker edit
+ *                                 (orgId/registryStatus), per record.
+ *                                 Defaults to 60000. Rejects non-numeric
+ *                                 or sub-1000ms values with a non-zero
+ *                                 exit. A record not converged within the
+ *                                 wait is bucketed into projectionLag
+ *                                 (not errors) and repaired by the
+ *                                 end-of-run resync pass / the standalone
+ *                                 --resync-projection flag.
  *   --restore-approval <id,...>    Comma-separated registry recordId(s)
  *                                 whose org marker is already correct but
  *                                 whose registry status was left DRAFT by
@@ -926,6 +937,32 @@ export const defaultClock: Clock = {
 export const DEFAULT_PROJECTION_WAIT_MS = 60000;
 /** Default poll interval (ms) for projection convergence. */
 export const DEFAULT_PROJECTION_POLL_INTERVAL_MS = 2000;
+/** Spec floor for `--projection-wait-ms` — below this the wait window is rejected. */
+export const MIN_PROJECTION_WAIT_MS = 1000;
+
+/**
+ * Parses and validates the `--projection-wait-ms` CLI flag value (pure,
+ * exported for direct unit testing — see the `--call-delay-ms` /
+ * `--limit` parsing blocks in `main()` for the same inline-validation
+ * style this mirrors).
+ *
+ * `raw` is the string immediately following the flag on argv, or
+ * `undefined` when the flag was omitted, in which case the default
+ * {@link DEFAULT_PROJECTION_WAIT_MS} applies unchanged. Any other value
+ * must be a non-negative integer >= {@link MIN_PROJECTION_WAIT_MS}
+ * (ms); anything else (non-numeric, decimal, negative, or below the
+ * floor) throws a clear, non-zero-exit-triggering error identifying the
+ * offending raw value.
+ */
+export function parseProjectionWaitMs(raw: string | undefined): number {
+  if (raw === undefined) return DEFAULT_PROJECTION_WAIT_MS;
+  if (!/^\d+$/.test(raw) || Number(raw) < MIN_PROJECTION_WAIT_MS) {
+    throw new Error(
+      `--projection-wait-ms must be an integer >= ${MIN_PROJECTION_WAIT_MS}, got "${raw}"`,
+    );
+  }
+  return Number(raw);
+}
 
 /**
  * The desired post-edit projection state a convergence wait polls for.
@@ -1249,10 +1286,14 @@ export interface ResyncProjectionResult {
  *
  * Dry-run by default (`apply: false`): reads the registry record and
  * reports whether a rebuild would change anything, without writing. No-op
- * when the current DDB row already matches what the mapper would produce
- * (compares `orgId`, `orgUnknown`, `registryStatus`). Never throws —
- * returns `error` on failure so the caller (CLI `--resync-projection` or
- * the end-of-run resync pass) decides on exit code / retry.
+ * only when the current DDB row already matches EVERY field the mapper
+ * would produce (`orgId`, `orgUnknown`, `registryStatus`, `state`) — the
+ * comparison is derived from `mappedRow`, the exact same builder output
+ * the apply path writes, so it cannot drift from the writer. When any
+ * field diverges the PLAN log line lists the differing field names. Never
+ * throws — returns `error` on failure so the caller (CLI
+ * `--resync-projection` or the end-of-run resync pass) decides on exit
+ * code / retry.
  */
 export async function resyncProjectionForId(
   id: string,
@@ -1300,11 +1341,25 @@ export async function resyncProjectionForId(
 
   const existing = current.Item as Record<string, unknown> | undefined;
   const mapped = mappedRow as unknown as Record<string, unknown>;
-  const alreadyMatches =
-    existing !== undefined &&
-    existing.orgId === mapped.orgId &&
-    existing.orgUnknown === mapped.orgUnknown &&
-    existing.registryStatus === mapped.registryStatus;
+
+  // Compare every field the rebuild would write — at minimum orgId,
+  // orgUnknown, registryStatus, and state — derived from `mapped`
+  // (the same row builder the apply path uses below) so this check can
+  // never drift from the writer. Previously this only compared orgId,
+  // orgUnknown, and registryStatus, so a row left with the wrong `state`
+  // by an earlier buggy rebuild (e.g. registryStatus APPROVED but state
+  // still inactive) was reported as a no-op and never repaired.
+  const COMPARED_FIELDS = [
+    "orgId",
+    "orgUnknown",
+    "registryStatus",
+    "state",
+  ] as const;
+  const diffFields =
+    existing === undefined
+      ? [...COMPARED_FIELDS]
+      : COMPARED_FIELDS.filter((field) => existing[field] !== mapped[field]);
+  const alreadyMatches = existing !== undefined && diffFields.length === 0;
 
   if (alreadyMatches) {
     log("info", `[resync-projection] id=${id} already matches — no-op`);
@@ -1312,9 +1367,15 @@ export async function resyncProjectionForId(
   }
 
   if (!apply) {
+    const diffDetail = diffFields
+      .map(
+        (field) =>
+          `${field}: ${JSON.stringify(existing?.[field] ?? "<absent>")} -> ${JSON.stringify(mapped[field] ?? "<absent>")}`,
+      )
+      .join(", ");
     log(
       "info",
-      `[resync-projection] PLAN id=${id} type=${type} currentOrgId=${existing?.orgId ?? "<absent>"} currentRegistryStatus=${existing?.registryStatus ?? "<absent>"} -> orgId=${mapped.orgId ?? "<absent>"} orgUnknown=${mapped.orgUnknown ?? false} registryStatus=${mapped.registryStatus}`,
+      `[resync-projection] PLAN id=${id} type=${type} diff=[${diffDetail}]`,
     );
     return { id, type, wouldRebuild: true };
   }
@@ -2116,6 +2177,13 @@ export async function main(): Promise<void> {
         ? MIN_APPLY_CALL_DELAY_MS
         : DEFAULT_CALL_DELAY_MS;
 
+  const projectionWaitMsIdx = args.indexOf("--projection-wait-ms");
+  const projectionWaitMsRaw =
+    projectionWaitMsIdx !== -1 && args[projectionWaitMsIdx + 1] !== undefined
+      ? args[projectionWaitMsIdx + 1]
+      : undefined;
+  const projectionWaitMs = parseProjectionWaitMs(projectionWaitMsRaw);
+
   const restoreApprovalIdx = args.indexOf("--restore-approval");
   const restoreApprovalRaw =
     restoreApprovalIdx !== -1 && args[restoreApprovalIdx + 1] !== undefined
@@ -2276,6 +2344,7 @@ export async function main(): Promise<void> {
       fallbackOrg,
       callDelayMs,
       defaultCallPacer,
+      projectionWaitMs,
     );
     return;
   }
