@@ -127,11 +127,74 @@ export class FrontendStack extends cdk.Stack {
     });
 
     // Security response headers policy (finding 82997842): the SPA holds
-    // Cognito tokens, so every response from the distribution — the default
-    // S3 behaviour and the /api/* AppSync behaviour alike — must carry HSTS,
-    // X-Content-Type-Options, X-Frame-Options and Referrer-Policy. CSP is
-    // deferred: it needs an explicit allowed-origin list from the AppSync
-    // and cost-API endpoints, out of scope for this change.
+    // Cognito tokens, so every response from the distribution must carry
+    // HSTS, X-Content-Type-Options, X-Frame-Options and Referrer-Policy.
+    //
+    // Finding 68019420 (PR #598 follow-up): adds a Content-Security-Policy
+    // as REPORT-ONLY first (Content-Security-Policy-Report-Only custom
+    // header, not the enforcing header), built entirely from stack values —
+    // no hard-coded account id, API id, or region literal. Origin
+    // inventory and evidence live in the file header comment of
+    // backend/test/frontend-stack-security-headers.test.ts; summary:
+    //   - connect-src: 'self' (same-origin fetches, e.g. /aws-exports.json)
+    //     plus the AppSync GraphQL host and its paired realtime host
+    //     (Amplify talks to AppSync directly from the browser — the SPA
+    //     never proxies through this distribution), the Cognito IDP host
+    //     (aws-amplify/auth calls cognito-idp directly for sign-in/session),
+    //     and the cost/trace/replay-metadata API host (costApiUrl).
+    //   - execute-api (published Agent App endpoints) is deliberately
+    //     OMITTED: the UI only displays/copies endpointUrl to the
+    //     clipboard, no browser fetch/XHR targets it.
+    //   - style-src needs 'unsafe-inline' (Tailwind/Radix inline `style={{}}`
+    //     usage across ~25 files) plus the Google Fonts stylesheet host.
+    //   - font-src needs the Google Fonts asset host.
+    //   - img-src needs 'data:' for inline base64 SVG backgrounds.
+    //   - script-src does NOT get 'unsafe-inline' — index.html has no
+    //     inline scripts, only the bundled module entrypoint.
+    //   - frame-ancestors 'none' / object-src 'none' / base-uri 'self' are
+    //     unconditional hardening with no functional cost (no iframes,
+    //     confirmed by PR #598's FrameOptions: DENY).
+    //
+    // Promotion path: this ships as Content-Security-Policy-Report-Only so
+    // violations are observed (browser console + any configured
+    // report-uri/report-to collector) for at least one full deploy cycle
+    // before anything is blocked. Once a deploy shows zero unexpected
+    // violation reports, promote by renaming the header below from
+    // "Content-Security-Policy-Report-Only" to "Content-Security-Policy".
+    const appSyncGraphqlHost = cdk.Fn.select(
+      2,
+      cdk.Fn.split("/", props.appSyncApi.graphqlUrl),
+    );
+    // AppSync's realtime (wss) endpoint is the same host with the
+    // "appsync-api" segment swapped for "appsync-realtime-api" — Amplify
+    // derives this internally. CloudFormation has no string-replace
+    // intrinsic, so this is split-on-the-literal then re-joined with the
+    // replacement (the standard CFN "replace" idiom).
+    const appSyncRealtimeHost = cdk.Fn.join("appsync-realtime-api", [
+      cdk.Fn.select(0, cdk.Fn.split("appsync-api", appSyncGraphqlHost)),
+      cdk.Fn.select(1, cdk.Fn.split("appsync-api", appSyncGraphqlHost)),
+    ]);
+    const costApiHost = cdk.Fn.select(2, cdk.Fn.split("/", props.costApiUrl));
+    const cognitoIdpHost = `cognito-idp.${this.region}.amazonaws.com`;
+
+    const contentSecurityPolicyReportOnly = cdk.Fn.join("", [
+      "default-src 'self'; ",
+      "frame-ancestors 'none'; ",
+      "object-src 'none'; ",
+      "base-uri 'self'; ",
+      "img-src 'self' data:; ",
+      "font-src 'self' https://fonts.gstatic.com; ",
+      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; ",
+      "script-src 'self'; ",
+      "connect-src 'self' https://",
+      appSyncGraphqlHost,
+      " wss://",
+      appSyncRealtimeHost,
+      ` https://${cognitoIdpHost} https://`,
+      costApiHost,
+      ";",
+    ]);
+
     const securityResponseHeaders = new cloudfront.ResponseHeadersPolicy(
       this,
       "SecurityResponseHeaders",
@@ -156,6 +219,15 @@ export class FrontendStack extends cdk.Stack {
               cloudfront.HeadersReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN,
             override: true,
           },
+        },
+        customHeadersBehavior: {
+          customHeaders: [
+            {
+              header: "Content-Security-Policy-Report-Only",
+              value: contentSecurityPolicyReportOnly,
+              override: true,
+            },
+          ],
         },
       },
     );
@@ -187,19 +259,6 @@ export class FrontendStack extends cdk.Stack {
                 originAccessIdentity: `origin-access-identity/cloudfront/${oai.originAccessIdentityId}`,
               },
             },
-            {
-              id: "appsync-origin",
-              domainName: cdk.Fn.select(
-                2,
-                cdk.Fn.split("/", props.appSyncApi.graphqlUrl),
-              ),
-              customOriginConfig: {
-                httpPort: 80,
-                httpsPort: 443,
-                originProtocolPolicy: "https-only",
-                originSslProtocols: ["TLSv1.2"],
-              },
-            },
           ],
           defaultCacheBehavior: {
             targetOriginId: "s3-origin",
@@ -211,27 +270,10 @@ export class FrontendStack extends cdk.Stack {
             responseHeadersPolicyId:
               securityResponseHeaders.responseHeadersPolicyId,
           },
-          cacheBehaviors: [
-            {
-              pathPattern: "/api/*",
-              targetOriginId: "appsync-origin",
-              viewerProtocolPolicy: "https-only",
-              allowedMethods: [
-                "GET",
-                "HEAD",
-                "OPTIONS",
-                "PUT",
-                "POST",
-                "PATCH",
-                "DELETE",
-              ],
-              cachedMethods: ["GET", "HEAD"],
-              cachePolicyId: "4135ea2d-6df8-44a3-9df3-4b5a84be39ad", // CachingDisabled
-              originRequestPolicyId: "88a5eaf4-2fd4-4709-b370-b4c650ea3fcf", // CORS-S3Origin
-              responseHeadersPolicyId:
-                securityResponseHeaders.responseHeadersPolicyId,
-            },
-          ],
+          // Finding 68019420: the /api/* behaviour + appsync-origin were
+          // unused — the SPA calls AppSync directly from the browser via
+          // Amplify (frontend/src/services/server.ts), never through this
+          // distribution — removed along with the now-unreferenced origin.
           customErrorResponses: [
             {
               errorCode: 404,
