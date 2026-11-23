@@ -39,7 +39,7 @@ The data store and integration subsystem provides a unified interface for regist
     - [Optimistic Locking](#optimistic-locking)
     - [Idempotent Creation](#idempotent-creation)
     - [Health Monitor Resilience](#health-monitor-resilience)
-    - [Tool Sandbox Resilience](#tool-sandbox-resilience)
+    - [Run Tool Resilience](#run-tool-resilience)
     - [Build Tool Wizard Resilience](#build-tool-wizard-resilience)
     - [Credential Resolution](#credential-resolution)
     - [Operations Registry Resilience](#operations-registry-resilience)
@@ -290,7 +290,7 @@ Each integration gets a dedicated IAM role: `citadel-int-{integrationId}`. When 
 | Integration Resolver | `backend/src/lambda/integration-resolver.ts` | CRUD for integrations (create, connect, disconnect, test) |
 | ToolConfig Resolver | `backend/src/lambda/tool-config-resolver.ts` | CRUD for tool configs with direction field and integration bindings |
 | Health Monitor | `backend/src/lambda/health-monitor.ts` | Scheduled health checks on CONNECTED/ERROR stores |
-| Tool Sandbox | `backend/src/lambda/tool-sandbox.ts` | Isolated tool execution with scoped credentials |
+| Tool Run Resolver | `backend/src/lambda/tool-run-resolver.ts` | Governed tool execution via synchronous worker-wrapper invoke (`{kind:'tool-run'}`) |
 | Operations Registry | `backend/src/utils/operations-registry.ts` | Static mapping of types to operation descriptors |
 | Adapter Registry | `backend/src/lambda/adapters/registry.ts` | Type → adapter instance mapping (27 data store adapters + 13 integration adapters) |
 | PolicyManager | `backend/src/utils/policy-manager.ts` | Scoped IAM role creation and assumption; creates `citadel-int-{id}` IAM roles |
@@ -485,7 +485,8 @@ SQS → Worker_Wrapper
 | Scoped IAM role (integration) | `citadel-int-{integrationId}` | `citadel-int-int-abc123` |
 | Scoped IAM role (agent) | `citadel-agent-{agentId}` | `citadel-agent-agent-001` |
 | Health Monitor Lambda | `citadel-health-monitor-{env}` | `citadel-health-monitor-dev` |
-| Tool Sandbox Lambda | `citadel-tool-sandbox-{env}` | `citadel-tool-sandbox-dev` |
+| Tool Run Resolver Lambda | `citadel-tool-run-resolver-{env}` | `citadel-tool-run-resolver-dev` |
+| Smoke Echo Lambda (non-prod fixture) | `citadel-smoke-echo-{env}` | `citadel-smoke-echo-dev` |
 | EventBridge rule | `citadel-health-check-{env}` | `citadel-health-check-dev` |
 | GraphQL enums | PascalCase | `DataStoreUsage`, `BindingDirection` |
 | GraphQL enum values | UPPER_SNAKE_CASE | `KNOWLEDGE`, `OPERATIONAL`, `BOTH`, `INPUT`, `OUTPUT`, `BIDIRECTIONAL` |
@@ -509,12 +510,12 @@ All state-mutating operations use version-based optimistic locking. DynamoDB con
 - If the Lambda times out, already-processed stores retain their updated status
 - DynamoDB throttling causes the store to retain its previous status; the next run retries
 
-### Tool Sandbox Resilience
+### Run Tool Resilience
 
-- 30-second execution timeout prevents runaway tools
-- 512MB memory limit prevents excessive resource consumption
-- Tool not found, code not found, and credential failures return structured error responses
-- Runtime errors in tool code are caught and returned as `ToolTestResult` with `success: false`
+- A bounded client-side timeout (~25s) on the resolver's `RequestResponse` invoke of the worker wrapper ensures `testTool` never hangs past AppSync's 30s ceiling
+- Tool not found, cross-org mismatch, unsupported binding, and credential failures all return structured error responses (`UNSUPPORTED_BINDING`, `BINDING_ERROR`, etc.) rather than throwing
+- Runtime errors in the worker's binding dispatch are caught and returned as `ToolTestResult` with `success: false`
+- The worker re-checks the caller org against the tool's own org row as a second, independent tenancy gate
 
 ### Build Tool Wizard Resilience
 
@@ -686,7 +687,7 @@ All implementation follows strict Test-Driven Development (TDD). Property-based 
 | 8 | Pipeline Directional Bindings | `frontend/src/components/__tests__/pipeline-wizard.property.test.ts` | Input=INPUT, Output=OUTPUT bindings; integration input/output bindings constructed correctly |
 | 9 | Health Monitor Idempotency | `backend/src/lambda/__tests__/health-monitor.property.test.ts` | Running twice produces same status |
 | 10 | Integration Picker Filtering | `frontend/src/components/__tests__/integration-picker.property.test.ts` | `filterTypes` filters integrations correctly |
-| 11 | Sandbox Execution Isolation | `backend/src/lambda/__tests__/tool-sandbox.property.test.ts` | Timeout enforcement, credential scoping, history eviction |
+| 11 | Run Tool Execution | `backend/src/lambda/__tests__/smoke-echo-lambda.test.ts` | The `lambda`-binding smoke fixture echoes inputs; governance/idempotency for Run tool now live in the worker's `tool_run_handler` tests (board task 10c3bf48) |
 
 ### Additional Test Coverage
 
@@ -731,7 +732,7 @@ backend/src/lambda/__tests__/
 ├── datastore-resolver.property.test.ts    # Properties 1, 2, 5 + adapter tests
 ├── tool-config-resolver.property.test.ts  # Properties 3, 4 + binding tests
 ├── health-monitor.property.test.ts        # Property 9
-└── tool-sandbox.property.test.ts          # Property 11
+└── smoke-echo-lambda.test.ts              # Property 11 (Run tool smoke fixture)
 
 backend/src/utils/__tests__/
 ├── operations-registry.property.test.ts   # Operations registry coverage
