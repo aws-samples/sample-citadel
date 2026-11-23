@@ -353,6 +353,23 @@ interface ArbiterStackProps extends cdk.StackProps {
    * absent is treated as 'none'.
    */
   alarmDelivery?: AlarmDeliveryConfig;
+  /**
+   * The smoke echo fixture's runnable Lambda (ServicesStack's
+   * SmokeEchoLambdaFunction, board task 10c3bf48 Slice 2 follow-up). The
+   * seeded tool record declares `credentialMode: 'none'`, so
+   * tool_run_handler.py's `_invoke_lambda_binding` calls it under the
+   * worker's OWN execution role (no scoped STS session) — this requires an
+   * explicit `lambda:InvokeFunction` grant scoped to exactly this
+   * function's ARN, applied below. Optional and non-prod-only: ServicesStack
+   * only constructs the fixture when `environment !== 'prod'`, and some test
+   * paths construct ArbiterStack without it; when absent, the grant is
+   * simply skipped (prod never has the fixture to invoke). A real construct
+   * reference — not a deterministic-ARN string — is safe here because
+   * ServicesStack is instantiated BEFORE ArbiterStack in app.ts and
+   * ArbiterStack already depends on it
+   * (arbiterStack.addStackDependency(servicesStack)).
+   */
+  smokeEchoLambdaFunction?: lambda.Function;
 }
 
 export class ArbiterStack extends cdk.Stack {
@@ -1152,6 +1169,13 @@ export class ArbiterStack extends cdk.Stack {
     props.agentConfigTable.grantReadData(workerAgentWrapperLambda);
     props.codeBucket.grantRead(workerAgentWrapperLambda);
     credentialVenderLambda.grantInvoke(workerAgentWrapperLambda);
+    // Smoke echo fixture (board task 10c3bf48 Slice 2 follow-up): the
+    // seeded tool declares credentialMode: 'none', so the worker invokes
+    // this Lambda under its own execution role rather than vended STS
+    // credentials — grant it directly, scoped to this one function's ARN.
+    // Non-prod only; absent in prod where ServicesStack never builds the
+    // fixture.
+    props.smokeEchoLambdaFunction?.grantInvoke(workerAgentWrapperLambda);
     // read-only access to ExecutionSpecifications for dispatch-time
     // status checks. Never written to from the worker.
     props.executionSpecificationsTable.grantReadData(workerAgentWrapperLambda);

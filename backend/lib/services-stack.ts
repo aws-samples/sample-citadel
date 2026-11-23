@@ -133,6 +133,15 @@ export interface ServicesStackProps extends cdk.StackProps {
 export class ServicesStack extends cdk.Stack {
   public readonly sessionMemoryTable: dynamodb.Table;
   public readonly sessionBucket: s3.Bucket;
+  /**
+   * The smoke echo fixture's runnable Lambda (board task 10c3bf48 Slice 2
+   * follow-up). Only constructed when `environment !== 'prod'` — undefined
+   * in prod. Exposed so ArbiterStack can grant the worker's execution role
+   * `lambda:InvokeFunction` on it (the seeded tool record declares
+   * `credentialMode: 'none'`, so the worker invokes it under its own role
+   * rather than vended STS credentials).
+   */
+  public smokeEchoLambdaFunction?: lambda.Function;
 
   constructor(scope: Construct, id: string, props: ServicesStackProps) {
     super(scope, id, props);
@@ -1081,6 +1090,10 @@ def handler(event, context):
           memorySize: 128,
         },
       );
+      // Exposed publicly so ArbiterStack can grant the worker's execution
+      // role lambda:InvokeFunction on it (see smokeEchoLambdaFunction prop
+      // doc comment on ArbiterStackProps).
+      this.smokeEchoLambdaFunction = smokeEchoLambdaFunction;
 
       // Content digest: any edit to the seeder source triggers a re-run.
       // Resolve the source path regardless of whether __dirname is

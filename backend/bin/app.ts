@@ -306,6 +306,18 @@ const arbiterStack = new ArbiterStack(app, `citadel-arbiter-${environment}`, {
   // agentReleasesTable/environmentReleasePointersTable prop doc comment).
   agentReleasesTable: backendStack.agentReleasesTable,
   environmentReleasePointersTable: backendStack.environmentReleasePointersTable,
+  // Smoke echo fixture invoke grant (board task 10c3bf48 Slice 2
+  // follow-up): the seeded tool declares credentialMode: 'none', so the
+  // worker invokes SmokeEchoLambdaFunction under its own execution role
+  // rather than vended STS credentials — ArbiterStack grants
+  // lambda:InvokeFunction scoped to exactly this function's ARN. A real
+  // construct reference (not a deterministic-ARN string) is safe here:
+  // ServicesStack is instantiated BEFORE ArbiterStack below and
+  // ArbiterStack already depends on it
+  // (arbiterStack.addStackDependency(servicesStack)). Undefined in prod,
+  // where ServicesStack never constructs the fixture — the grant is
+  // then simply skipped.
+  smokeEchoLambdaFunction: servicesStack.smokeEchoLambdaFunction,
   // G3 — named org seam for release-aware dispatch. Resolved from env or
   // CDK context; defaults to 'Default' (the platform default organisation
   // used by the agent cache — 33 of 49 rows in dev) so the release gate

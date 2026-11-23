@@ -225,6 +225,14 @@ async function upsertRegistryRecord(
     inputSchema: INPUT_SCHEMA,
     contentHash,
     createdBy: "SYSTEM_SEED",
+    // No-cloud-credential sentinel (resolve_tool_credential_mode in
+    // tool_run_handler.py): without this, an undeclared mode fails closed
+    // to 'scoped' and the worker tries to vend STS credentials for a
+    // nonexistent integration record, which always fails. This fixture's
+    // lambda binding is invoked directly under the worker's own execution
+    // role (see the SmokeEchoLambdaFunction grantInvoke in
+    // arbiter-stack.ts) — it never needs vended credentials of its own.
+    credentialMode: "none",
     integrationBindings: [
       {
         integrationId: "smoke-echo-lambda",

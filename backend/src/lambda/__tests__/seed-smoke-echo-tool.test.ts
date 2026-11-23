@@ -198,6 +198,14 @@ describe("seed-smoke-echo-tool", () => {
         functionArn: ECHO_FUNCTION_ARN,
       },
     ]);
+    // The worker's resolve_tool_credential_mode (tool_run_handler.py) reads
+    // this sentinel directly off the tool record and fails closed to
+    // 'scoped' (triggering a credential vend against a non-existent
+    // integration record) when it is absent. This fixture is invoked under
+    // the worker's own execution role (see the SmokeEchoLambdaFunction
+    // grantInvoke in arbiter-stack.ts) and vends no cloud credentials of
+    // its own, so it must declare the explicit no-vend sentinel.
+    expect(metadata.credentialMode).toBe("none");
 
     expect(mockRegistrySubmitForApproval).toHaveBeenCalledWith("rec-001");
   });
