@@ -21,6 +21,7 @@ import {
   AdminGetUserCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
 import { mockClient } from "aws-sdk-client-mock";
+import { OrgUnresolvedError } from "../../utils/auth-event";
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 const ebMock = mockClient(EventBridgeClient);
@@ -311,6 +312,28 @@ describe("workflow-resolver", () => {
       await expect(
         invoke(makeEvent("listWorkflows", { orgId: "org-real" })),
       ).rejects.toThrow();
+      expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
+    });
+
+    // Pins the fail-closed error TYPE (not just "rejects"), mirroring the
+    // listProjects CIT-252 C15 guard in project-resolver.test.ts: an
+    // org-less caller must get OrgUnresolvedError, never a different
+    // error class (e.g. CrossOrgAccessError/PermissionError), even when a
+    // client-supplied orgId is present — the unresolved-caller-org check
+    // must run and fail closed before any orgId comparison happens.
+    test("listWorkflows throws OrgUnresolvedError (not a generic/PermissionError) when caller org is unresolvable, even with a client orgId supplied", async () => {
+      cognitoMock.reset();
+      callerOrg = undefined;
+      mockCallerOrgUnresolvable();
+      ddbMock.on(QueryCommand).resolves({
+        Items: [
+          { workflowId: "wf-1", orgId: "org-real", isBlueprint: "false" },
+        ],
+      });
+
+      await expect(
+        invoke(makeEvent("listWorkflows", { orgId: "org-real" })),
+      ).rejects.toBeInstanceOf(OrgUnresolvedError);
       expect(ddbMock.commandCalls(QueryCommand)).toHaveLength(0);
     });
 
