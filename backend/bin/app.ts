@@ -156,6 +156,18 @@ const registryStack = new RegistryStack(
 );
 registryStack.addStackDependency(backendStack);
 
+// Deterministic ARN of the arbiter worker wrapper Lambda (board task
+// 10c3bf48, Slice 1). ArbiterStack is instantiated AFTER ServicesStack
+// below and already depends on it (arbiterStack.addStackDependency(
+// servicesStack)), so ServicesStack's ToolRunResolverFunction cannot take
+// a direct construct reference to the worker without introducing a
+// dependency cycle. Built from the worker's fixed `functionName`
+// (`citadel-worker-wrapper-${environment}`, set in arbiter-stack.ts),
+// mirroring the existing `publishHandlerArn`/`evalSamplingConfigResolverArn`
+// deterministic-ARN pattern used elsewhere in this file for the same class
+// of ordering constraint.
+const workerWrapperFunctionArn = `arn:aws:lambda:${env.region}:${env.account}:function:citadel-worker-wrapper-${environment}`;
+
 // Services stack (depends on backend)
 const servicesStack = new ServicesStack(
   app,
@@ -180,6 +192,9 @@ const servicesStack = new ServicesStack(
     // CIT-216: owner-org lookup now reads the membership table by the
     // owner's `sub` (AdminGetUser retained for username→sub mapping only).
     userOrgMembershipTable: backendStack.userOrgMembershipTable,
+    // Board task 10c3bf48 (Slice 1): testTool's ToolRunResolverFunction
+    // invokes the worker wrapper Lambda synchronously with this ARN.
+    workerWrapperFunctionArn,
   },
 );
 
@@ -838,6 +853,15 @@ if (app.node.tryGetContext("nag") !== "false") {
       registryStack,
       "RegistryAgentRecordResolverFunction/ServiceRole/DefaultPolicy/Resource",
     ],
+    // Board task 10c3bf48: residual Resource::* on ToolRunResolverFunction
+    // is only the un-scopable xray:PutTraceSegments/PutTelemetryRecords
+    // from `tracing: lambda.Tracing.ACTIVE` (services-stack.ts) — the
+    // registry grant is resource-scoped (see registryArnPaths below) and
+    // lambda:InvokeFunction is scoped to the worker wrapper's exact ARN.
+    [
+      servicesStack,
+      "ToolRunResolverFunction/ServiceRole/DefaultPolicy/Resource",
+    ],
   ];
   for (const [stack, path] of resourceStarPaths) {
     NagSuppressions.addResourceSuppressionsByPath(
@@ -1104,6 +1128,16 @@ if (app.node.tryGetContext("nag") !== "false") {
           ] as [cdk.Stack, string],
         ]
       : []),
+    // Board task 10c3bf48: ToolRunResolverFunction's registry grant was
+    // narrowed to GetRegistryRecord only (ListRegistryRecords removed —
+    // resolveToolConfig's registry path never calls it, see
+    // services-stack.ts). The residual /* wildcard is the record
+    // sub-resource GetRegistryRecord always addresses; registryArn itself
+    // comes from SSM, so this grants read on exactly one registry.
+    [
+      servicesStack,
+      "ToolRunResolverFunction/ServiceRole/DefaultPolicy/Resource",
+    ],
   ];
   for (const [stack, path] of registryArnPaths) {
     NagSuppressions.addResourceSuppressionsByPath(

@@ -1020,6 +1020,16 @@ export class ArbiterStack extends cdk.Stack {
       this,
       "WorkerAgentWrapper",
       {
+        // Deterministic name (board task 10c3bf48, Slice 1): ServicesStack's
+        // ToolRunResolverFunction needs an `lambda:InvokeFunction` grant
+        // scoped to exactly this function's ARN, but ServicesStack is
+        // instantiated BEFORE ArbiterStack in app.ts (and ArbiterStack
+        // already depends on ServicesStack) — a direct construct reference
+        // the other direction would create a cycle. app.ts instead builds
+        // this ARN as a plain string from the fixed name, mirroring the
+        // existing `publishHandlerArn` pattern used for the same
+        // BackendStack/GatewayStack ordering constraint.
+        functionName: `citadel-worker-wrapper-${props.environment}`,
         runtime: PYTHON_RUNTIME,
         architecture: LAMBDA_ARCHITECTURE,
         entry: path.join(ARBITER_ROOT, "workerWrapper"),
@@ -1061,6 +1071,14 @@ export class ArbiterStack extends cdk.Stack {
           // idempotency hook is itself gated on per-node execution/node
           // context, so a missing key context is a back-compat no-op.
           TOOL_EXECUTION_LEDGER_TABLE: toolExecutionLedgerTable.tableName,
+          // Governed single-tool-run request path (board task 10c3bf48,
+          // Slice 1): per-binding execution budget for the console/testTool
+          // "Run tool" direct-invoke path (tool_run_handler.py). Documented
+          // risk, NOT a concurrency change — this bounds one binding call,
+          // leaving headroom inside the resolver's 25s client timeout and
+          // AppSync's 30s ceiling; it does not touch the worker function's
+          // reserved/provisioned concurrency.
+          TOOL_RUN_BINDING_TIMEOUT_SECONDS: "20",
           // Tool-result offload (PR2): oversized results are written here
           // (SSE-KMS, org-prefixed) instead of being truncated; the worker
           // no-ops offload when unset and small results always stay inline.

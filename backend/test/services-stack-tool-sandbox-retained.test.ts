@@ -1,9 +1,9 @@
 /**
- * Asserts that ServicesStack wires Mutation.testTool to the
- * ToolSandboxFunction via the L1 CfnDataSource/CfnResolver cross-stack
- * pattern (same as the intake-orchestration resolvers).
- *
- * Mirrors the structure of services-stack-intake-orchestration.test.ts.
+ * ToolSandboxFunction itself (env vars, IAM grants) is UNCHANGED and still
+ * present — board task 10c3bf48 Slice 1 only stops routing Mutation.testTool
+ * to it (see services-stack-tool-run-resolver.test.ts for the new routing).
+ * Slice 2 deletes ToolSandboxFunction entirely; until then this guard pins
+ * that the function definition itself was not touched.
  */
 import * as cdk from "aws-cdk-lib";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
@@ -59,25 +59,26 @@ function buildStack(): cdk.assertions.Template {
   return cdk.assertions.Template.fromStack(stack);
 }
 
-describe("ServicesStack — Mutation.testTool resolver wiring", () => {
+describe("ServicesStack — ToolSandboxFunction definition (retired from testTool routing, not yet deleted)", () => {
   let template: cdk.assertions.Template;
 
   beforeAll(() => {
     template = buildStack();
   });
 
-  test("creates a ToolSandboxLambdaDataSource of type AWS_LAMBDA", () => {
-    template.hasResourceProperties("AWS::AppSync::DataSource", {
-      Type: "AWS_LAMBDA",
-      Name: "ToolSandboxLambdaDataSource",
+  test("ToolSandboxFunction's own AppSync datasource is no longer used by testTool, but the function still exists", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      FunctionName: "citadel-tool-sandbox-test",
     });
-  });
-
-  test("attaches a Mutation.testTool resolver to the API", () => {
+    // testTool now targets ToolRunResolverLambdaDataSource — see
+    // services-stack-tool-run-resolver.test.ts.
     template.hasResourceProperties("AWS::AppSync::Resolver", {
       ApiId: APPSYNC_API_ID,
       TypeName: "Mutation",
       FieldName: "testTool",
+      DataSourceName: cdk.assertions.Match.not(
+        cdk.assertions.Match.stringLikeRegexp("ToolSandbox"),
+      ),
     });
   });
 

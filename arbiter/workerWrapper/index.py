@@ -54,6 +54,11 @@ from credential_guard import (
     build_agent_credential_env,
 )
 
+# Governed single-tool-run request path (board task 10c3bf48, Slice 1):
+# bundle-sibling module, always co-deployed with index.py (same convention
+# as credential_guard.py above) — no try/except fallback needed.
+import tool_run_handler
+
 # Shared workflow node dispatch/result contract (source of truth co-owned with
 # the step runner). Imported defensively: a workflow-node message only appears
 # once the step runner's dispatch path is live, and the shared module is
@@ -2081,6 +2086,15 @@ def _process_workflow_node(event, message_attributes=None):
 def process_event(event, context, message_attributes=None):
     print("processing...")
 
+    # Direct-invoke single-tool-run request (board task 10c3bf48, Slice 1):
+    # checked FIRST and returns its result — this is a synchronous
+    # RequestResponse call from the testTool resolver, not a fire-and-forget
+    # dispatch, so process_event must hand the caller a value instead of
+    # falling through to the SQS-oriented branches below (which all `return`
+    # None having already emitted their own completion side effects).
+    if tool_run_handler.is_tool_run_message(event):
+        return tool_run_handler.process_tool_run(event)
+
     # Discriminated shared queue: the step runner dispatches workflow-node
     # execution over the same SQS queue the supervisor uses for task messages.
     # A workflow-node message carries the contract's message_type discriminator;
@@ -2400,6 +2414,17 @@ def process_event(event, context, message_attributes=None):
 
 def lambda_handler(event, context):
     print(f"processing event {event}")
+
+    # Direct-invoke single-tool-run request (board task 10c3bf48, Slice 1):
+    # the testTool resolver calls this function with InvocationType
+    # 'RequestResponse' and no 'Records' envelope — return process_event's
+    # result directly instead of draining an SQS batch. Checked by the
+    # ABSENCE of 'Records' (every SQS-triggered invocation always carries
+    # one, even an empty list) so a malformed/legacy SQS event can never be
+    # misrouted here.
+    if "Records" not in event and tool_run_handler.is_tool_run_message(event):
+        return process_event(event, context)
+
     batch_item_failures = []
 
     for record in event['Records']:
