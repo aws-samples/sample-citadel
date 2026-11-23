@@ -204,6 +204,46 @@ def test_happy_path_emits_scored_with_all_stamps():
     assert bedrock.calls[0]["inferenceConfig"]["temperature"] == 0
 
 
+def test_redelivery_same_event_twice_yields_one_effective_result():
+    """EventBridge is at-least-once delivery, and eval_judge has no
+    durable dedupe table (it never writes DynamoDB — single-writer
+    invariant, design §7). Idempotency here is by DETERMINISM, not by a
+    claim row: handling the identical governance.eval.case.judge.requested
+    event twice, against the identical artifact, with the identical
+    (mocked, temperature=0) Bedrock response, must produce two
+    byte-identical `governance.eval.case.judged` payloads — same
+    judgePromptHash, same verdict, same reproducibility stamp. A
+    downstream consumer applying either copy via an idempotent SET (as
+    eval-case-scorer does) sees ONE effective result; this test pins the
+    emitter-side half of that guarantee (DLQ_REDRIVE.md's eval-judge SAFE
+    row depends on this)."""
+    bedrock = _FakeBedrockClient(_well_formed_verdict_text(0.42))
+    events_client = MagicMock()
+    event = _requested_event()
+
+    with patch.object(ej, "_bedrock_client", return_value=bedrock), \
+         patch.object(ej, "_ddb_resource", return_value=_mock_ddb_resource()), \
+         patch.object(ej, "_ssm_client", return_value=_mock_ssm_client()), \
+         patch.object(ej, "_s3_client", return_value=_mock_s3_client()), \
+         patch.object(ej, "_events_client", return_value=events_client):
+        ej.handle_judge_requested(event)
+        ej.handle_judge_requested(event)  # simulated redelivery
+
+    assert events_client.put_events.call_count == 2
+    first_entries = events_client.put_events.call_args_list[0].kwargs["Entries"]
+    second_entries = events_client.put_events.call_args_list[1].kwargs["Entries"]
+    first_detail = json.loads(first_entries[0]["Detail"])
+    second_detail = json.loads(second_entries[0]["Detail"])
+
+    assert first_detail == second_detail
+    assert first_detail["judgePromptHash"] == second_detail["judgePromptHash"]
+    # Each redelivery still only invokes Bedrock once per requested
+    # dimension (no fan-out from the redelivery itself) — the DLQ_REDRIVE
+    # runbook's caveat ("burns a Bedrock Converse call per requested
+    # dimension") is exactly one call per handle_judge_requested, not N.
+    assert len(bedrock.calls) == 2
+
+
 def test_judged_event_source_matches_the_backend_routing_rule_convention():
     """B2 (taskId 316427f2, HIGH): EvalCaseJudgedRule and
     EvalSampleJudgedRule (telemetry-stack.ts) both match

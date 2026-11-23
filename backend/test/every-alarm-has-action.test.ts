@@ -121,8 +121,8 @@ describe("every CloudWatch alarm has at least one action (muted-alarm regression
     );
   });
 
-  test("ArbiterStack: 8 alarms, none actionless", () => {
-    arbiterTemplate.resourceCountIs("AWS::CloudWatch::Alarm", 8);
+  test("ArbiterStack: 9 alarms, none actionless", () => {
+    arbiterTemplate.resourceCountIs("AWS::CloudWatch::Alarm", 9);
     expect(findActionlessAlarms(arbiterTemplate.toJSON().Resources)).toEqual(
       [],
     );

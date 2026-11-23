@@ -291,6 +291,7 @@ function coverageEdge(d: DiscoveredDlq): string {
 const PINNED_COVERED_CONSUMERS: Record<string, readonly string[]> = {
   arbiter: [
     "DeadLetterConfig:ActivatorAgent74A6D68E->citadel-arbiter-async-dlq",
+    "DeadLetterConfig:EvalJudge3060C623->citadel-arbiter-async-dlq",
     "DeadLetterConfig:GovernanceGraphSnapshotFn8BC19523->citadel-arbiter-async-dlq",
     "DeadLetterConfig:GovernanceModeRefresherFn8358D228->citadel-arbiter-async-dlq",
     "DeadLetterConfig:StepRunnerFunctionBE4DB8E6->citadel-arbiter-async-dlq",
