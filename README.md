@@ -108,7 +108,7 @@ export AWS_PROFILE="your-aws-profile"
 ./deploy.sh --profile your-aws-profile
 ```
 
-Prerequisites: AWS CLI, Node.js 24+, Python 3.14+, CDK 2.100+, and Finch (or Docker). See `docs/DEPLOYMENT.md` for the full guide.
+Prerequisites: AWS CLI, Node.js 24+, Python 3.15, CDK 2.100+, and Finch (or Docker). See `docs/DEPLOYMENT.md` for the full guide.
 
 ## Documentation
 

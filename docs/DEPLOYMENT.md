@@ -19,11 +19,23 @@ That's it! The Gateway ID is automatically configured from the Services Stack.
 ## Prerequisites
 
 - **Node.js** 24+ installed
-- **Python** 3.14+ installed
+- **Python** 3.15 installed
 - **AWS CLI** configured with credentials
 - **AWS CDK** CLI installed: `npm install -g aws-cdk`
 - **Container runtime** — Docker or Finch (for Lambda bundling, see below)
 - **AWS Account** with appropriate permissions
+
+### Python Dev Environment Setup
+
+The Python version used across CI, the intake service's Docker image, and the CodeBuild buildspecs is pinned once in `.python-version` at the repo root. To set up a matching local virtualenv for running the arbiter and service Python test suites (`pytest arbiter/`, `pytest service/`):
+
+```bash
+./scripts/dev-python-setup.sh
+```
+
+The script creates (or reuses) `.venv/` at the repo root targeting the `.python-version` version, preferring `uv venv` if `uv` is installed and falling back to `python3.15 -m venv` otherwise, then installs `arbiter/requirements-ci.txt` and the intake service's `requirements.txt` + `requirements-dev.txt` — the same dependency sets `ci.yml` installs for the Arbiter and Service test jobs. It is idempotent: re-running it reuses the existing virtualenv and reinstalls the pinned requirement sets in place. After it finishes, activate the virtualenv with `source .venv/bin/activate` and run `pytest arbiter/ -v --tb=short` or `pytest service/ -v --tb=short`.
+
+Note: while Python 3.15 is still pre-release, a standalone interpreter build downloaded on demand by `uv venv --python 3.15` may be an early alpha whose C ABI has not yet stabilized, which can cause compiled dependencies (e.g. `pydantic-core`) to fail to import with an `undefined symbol` error even though a `cp315`-tagged wheel exists on PyPI. This is independent of the intake Docker image, which uses the official `python:3.15-slim-bookworm` base and is verified separately via the image build probe in CI.
 
 ### Container Runtime (Finch instead of Docker Desktop)
 

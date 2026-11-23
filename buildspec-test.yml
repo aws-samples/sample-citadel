@@ -10,14 +10,13 @@ phases:
   install:
     runtime-versions:
       nodejs: 24
-      python: 3.12  # CodeBuild may not yet support 3.14; use latest available
+      python: 3.15
     commands:
       - echo "Installing root + backend dependencies (single workspace lockfile)..."
       - npm ci
       - echo "Installing frontend dependencies (own lockfile)..."
-      - cd frontend && npm ci
-      - cd ..
-      - pip install pytest hypothesis boto3
+      - npm ci --prefix frontend
+      - pip install -r arbiter/requirements-ci.txt
 
   build:
     commands:
@@ -44,7 +43,7 @@ phases:
       # Security audit (blocking, with justified allowlist)
       - echo "Dependency audit..."
       - npx audit-ci --config .audit-ci.json
-      - cd frontend && npx audit-ci --config ../.audit-ci.json
+      - cd frontend && npx audit-ci --config .audit-ci.json
       - cd ..
 
 reports:
