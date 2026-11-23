@@ -26,6 +26,24 @@
  *     {@link validateExternalScoreVector}) a malformed or oversized
  *     top-level response rejects everything in it.
  *
+ *     WIRE-PATH NULL COERCION (non-finite measurement vs. non-finite
+ *     verdict score): on the real wire path, {@link validateExternalScoreVector}
+ *     runs {@link sanitizeUntrustedJson} BEFORE field-level validation ever
+ *     sees the payload. That sanitizer coerces non-finite numbers
+ *     (NaN / +-Infinity, which have no valid JSON representation) to
+ *     `null`, matching JSON.stringify semantics. Consequently a
+ *     non-finite `measurement` is silently accepted on the wire as
+ *     `null` ("not measured") rather than rejected, because `null` is
+ *     already a valid measurement value. A non-finite verdict `score`,
+ *     by contrast, is still rejected on the wire path: the sanitizer
+ *     coerces it to `null` too, but a `score`-kind verdict requires a
+ *     finite numeric `score` field, so a null score fails that check.
+ *     The in-process rejection branch in
+ *     {@link validateExternalDimensionScore} that reports "measurement
+ *     must be a finite number or null" for a raw NaN/Infinity only fires
+ *     for callers that invoke it DIRECTLY, skipping sanitization — never
+ *     for a response that went through the real wire path.
+ *
  * Reserved dimension names (DIMENSION_ORDER, eval-scoring.ts) are refused
  * for EXTERNAL evaluators — a custom evaluator can only contribute a
  * dimension name that does not collide with a built-in canonical name,
