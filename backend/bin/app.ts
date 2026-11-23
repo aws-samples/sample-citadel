@@ -853,6 +853,15 @@ if (app.node.tryGetContext("nag") !== "false") {
       registryStack,
       "RegistryAgentRecordResolverFunction/ServiceRole/DefaultPolicy/Resource",
     ],
+    // Board task 10c3bf48: residual Resource::* on ToolRunResolverFunction
+    // is only the un-scopable xray:PutTraceSegments/PutTelemetryRecords
+    // from `tracing: lambda.Tracing.ACTIVE` (services-stack.ts) — the
+    // registry grant is resource-scoped (see registryArnPaths below) and
+    // lambda:InvokeFunction is scoped to the worker wrapper's exact ARN.
+    [
+      servicesStack,
+      "ToolRunResolverFunction/ServiceRole/DefaultPolicy/Resource",
+    ],
   ];
   for (const [stack, path] of resourceStarPaths) {
     NagSuppressions.addResourceSuppressionsByPath(
@@ -1119,6 +1128,16 @@ if (app.node.tryGetContext("nag") !== "false") {
           ] as [cdk.Stack, string],
         ]
       : []),
+    // Board task 10c3bf48: ToolRunResolverFunction's registry grant was
+    // narrowed to GetRegistryRecord only (ListRegistryRecords removed —
+    // resolveToolConfig's registry path never calls it, see
+    // services-stack.ts). The residual /* wildcard is the record
+    // sub-resource GetRegistryRecord always addresses; registryArn itself
+    // comes from SSM, so this grants read on exactly one registry.
+    [
+      servicesStack,
+      "ToolRunResolverFunction/ServiceRole/DefaultPolicy/Resource",
+    ],
   ];
   for (const [stack, path] of registryArnPaths) {
     NagSuppressions.addResourceSuppressionsByPath(

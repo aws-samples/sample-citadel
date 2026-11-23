@@ -1856,14 +1856,18 @@ def handler(event, context):
 
       // Grant read-only access to the AgentCore Registry (same dual-source
       // tool-config lookup as the former sandbox — resolveToolConfig).
+      // Scoped to GetRegistryRecord only: resolveToolConfig's registry path
+      // calls registryService.getResource(), which issues exactly one
+      // GetRegistryRecordCommand per invocation (backend/src/services/
+      // registry-service.ts). It never calls ListRegistryRecords — that API
+      // backs only the name-keyed lookup / enumeration-fallback paths in
+      // RegistryService, neither of which tool-run-resolver.ts exercises —
+      // so ListRegistryRecords is dropped rather than suppressed.
       if (registryArn) {
         toolRunResolverFunction.addToRolePolicy(
           new iam.PolicyStatement({
             effect: iam.Effect.ALLOW,
-            actions: [
-              "agent-registry:GetRegistryRecord",
-              "agent-registry:ListRegistryRecords",
-            ],
+            actions: ["agent-registry:GetRegistryRecord"],
             resources: [registryArn, `${registryArn}/*`],
           }),
         );

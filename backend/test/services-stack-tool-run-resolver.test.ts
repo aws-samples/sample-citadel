@@ -107,6 +107,66 @@ describe("ServicesStack — testTool cutover to the worker wrapper", () => {
     });
   });
 
+  test("ToolRunResolverFunction's policy grants exactly the expected statements (lambda:InvokeFunction on the worker ARN, GetRegistryRecord on the registry + record sub-resource, dynamodb:GetItem on the legacy tools table, X-Ray write) — nothing else", () => {
+    const policies = template.findResources("AWS::IAM::Policy", {
+      Properties: {
+        PolicyName: cdk.assertions.Match.stringLikeRegexp(
+          "ToolRunResolverFunctionServiceRoleDefaultPolicy",
+        ),
+      },
+    });
+    const policyIds = Object.keys(policies);
+    expect(policyIds).toHaveLength(1);
+    const statements = policies[policyIds[0]].Properties.PolicyDocument
+      .Statement as Array<Record<string, unknown>>;
+
+    // Exactly 4 statements: no silent scope widening.
+    expect(statements).toHaveLength(4);
+
+    const byAction = (action: string) =>
+      statements.find((s) => {
+        const a = s.Action;
+        return Array.isArray(a) ? a.includes(action) : a === action;
+      });
+
+    // lambda:InvokeFunction scoped to exactly the worker wrapper ARN.
+    expect(byAction("lambda:InvokeFunction")).toMatchObject({
+      Effect: "Allow",
+      Action: "lambda:InvokeFunction",
+      Resource: WORKER_FUNCTION_ARN,
+    });
+
+    // Registry read scoped to GetRegistryRecord only — ListRegistryRecords
+    // removed, resolveToolConfig's registry path never calls it. Resource
+    // is [registryArn, `${registryArn}/*`], both resolved via SSM lookup.
+    const registryStmt = byAction("agent-registry:GetRegistryRecord");
+    expect(registryStmt).toMatchObject({
+      Effect: "Allow",
+      Action: "agent-registry:GetRegistryRecord",
+    });
+    expect(Array.isArray(registryStmt?.Resource)).toBe(true);
+    expect((registryStmt?.Resource as unknown[]).length).toBe(2);
+
+    // Legacy DynamoDB fallback read.
+    expect(byAction("dynamodb:GetItem")).toMatchObject({
+      Effect: "Allow",
+      Action: "dynamodb:GetItem",
+      Resource:
+        "arn:aws:dynamodb:us-west-2:123456789012:table/citadel-tools-test",
+    });
+
+    // X-Ray write, granted by `tracing: lambda.Tracing.ACTIVE` (CDK-native,
+    // auto-attaches the un-scopable Put*/GetSampling* statement).
+    expect(byAction("xray:PutTraceSegments")).toMatchObject({
+      Effect: "Allow",
+      Action: ["xray:PutTraceSegments", "xray:PutTelemetryRecords"],
+      Resource: "*",
+    });
+
+    // No statement grants agent-registry:ListRegistryRecords.
+    expect(byAction("agent-registry:ListRegistryRecords")).toBeUndefined();
+  });
+
   test("testTool resolver's datasource now targets ToolRunResolverFunction", () => {
     template.hasResourceProperties("AWS::AppSync::DataSource", {
       Type: "AWS_LAMBDA",
