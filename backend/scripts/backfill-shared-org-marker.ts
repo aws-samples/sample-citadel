@@ -33,6 +33,29 @@
  *     resolves (via the caller-supplied `resolveCreatedByOrg` lookup) to
  *     exactly one tenant org. REPORTED, never auto-resolved — the caller
  *     (an owner) must decide.
+ *
+ *     The default pass's `resolveCreatedByOrg` is built by
+ *     `buildCreatedByOrgResolver`, which pre-fetches a createdBy -> org
+ *     index via `lookupOwnerOrganization` (../src/utils/org-membership.ts)
+ *     — the SAME UserOrgMembership-table-backed helper the GraphQL
+ *     resolvers already use to map a user to their organisation. This
+ *     never auto-assigns a tenant org: a record flagged AMBIGUOUS is only
+ *     ever counted in `ambiguousReported` and logged with its candidate
+ *     org, never written.
+ *
+ *     OPERATOR ACTION for AMBIGUOUS rows: review each `AMBIGUOUS` log line
+ *     (format: `recordId=<id> AMBIGUOUS — createdBy=<owner> resolves to
+ *     org=<candidateOrg>`) and, once satisfied the candidate org is
+ *     correct, assign it explicitly through the normal tenant-ownership
+ *     write path for that record (NOT this script, which never writes an
+ *     AMBIGUOUS outcome). A `createdBy` that resolves to zero orgs, or to
+ *     two or more distinct orgs, is NOT reported as AMBIGUOUS — it falls
+ *     through to `orgUnknown=true` like any other unresolvable record,
+ *     since there is no single safe candidate to show the operator. The
+ *     run exits non-zero (code 3) whenever any AMBIGUOUS row was found, so
+ *     a clean (exit 0) run means every blank-orgId record was either
+ *     resolved unambiguously, legitimately shared, or explicitly marked
+ *     orgUnknown — never left silently ambiguous.
  *   - Already-shared / already-unknown / already-tenant-owned records are
  *     no-ops — re-running the script finds nothing left to do
  *     (idempotent).
@@ -206,6 +229,7 @@ import {
   buildToolProjectionRow,
   writeProjectionRow,
 } from "../src/lambda/registry-sync";
+import { lookupOwnerOrganization } from "../src/utils/org-membership";
 
 // ---------------------------------------------------------------------------
 // Allowlists — the ONLY positive signals for "legitimately shared"
@@ -476,6 +500,7 @@ async function processRegistryRecord(
   apply: boolean,
   summary: BackfillSummary,
   orgResolver?: OrgResolver,
+  resolveCreatedByOrg?: (createdBy: string) => string | undefined,
 ): Promise<void> {
   summary.scanned++;
   const recordId = record.recordId;
@@ -506,7 +531,7 @@ async function processRegistryRecord(
         : undefined,
   };
 
-  const classification = classifyRecord(rec, undefined, orgResolver);
+  const classification = classifyRecord(rec, resolveCreatedByOrg, orgResolver);
 
   switch (classification.outcome) {
     case "already-shared":
@@ -651,6 +676,7 @@ export async function processRegistry(
   registry: RegistryService,
   apply: boolean,
   orgResolver?: OrgResolver,
+  resolveCreatedByOrg?: (createdBy: string) => string | undefined,
 ): Promise<BackfillSummary> {
   const summary = emptySummary();
   log("info", `--- Processing registry '${type}' records ---`);
@@ -673,6 +699,7 @@ export async function processRegistry(
         apply,
         summary,
         orgResolver,
+        resolveCreatedByOrg,
       );
     } catch (err) {
       log(
@@ -696,6 +723,7 @@ export async function processDdbTable(
   docClient: DynamoDBDocumentClient,
   apply: boolean,
   orgResolver?: OrgResolver,
+  resolveCreatedByOrg?: (createdBy: string) => string | undefined,
 ): Promise<BackfillSummary> {
   const summary = emptySummary();
   log("info", `--- Processing DDB '${kind}' table: ${tableName} ---`);
@@ -735,7 +763,11 @@ export async function processDdbTable(
               : undefined,
         };
 
-        const classification = classifyRecord(rec, undefined, orgResolver);
+        const classification = classifyRecord(
+          rec,
+          resolveCreatedByOrg,
+          orgResolver,
+        );
 
         switch (classification.outcome) {
           case "already-shared":
@@ -2292,8 +2324,160 @@ export function buildOrgResolverFromMaps(
 }
 
 // ---------------------------------------------------------------------------
+// createdBy -> org resolver (AMBIGUOUS classification for ordinary users)
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds the synchronous `resolveCreatedByOrg` callback {@link
+ * classifyRecord} accepts, backing the AMBIGUOUS outcome for an ordinary
+ * (non-fabricator) blank-orgId record: blank orgId + `createdBy` resolves
+ * to exactly one tenant org. This was previously never populated by the
+ * default scan pass, so every such record fell through to `mark-unknown`
+ * regardless of whether its creator had a real, resolvable tenant org.
+ *
+ * Reuses `lookupOwnerOrganization` (`src/utils/org-membership.ts`) — the
+ * SAME UserOrgMembership-table-backed helper the GraphQL resolvers already
+ * use to map a user to their organisation (see release-resolver.ts,
+ * intake-orchestration-resolver.ts, intake-consent-resolver.ts). Never a
+ * second definition of user-to-org resolution.
+ *
+ * `lookupOwnerOrganization` is async (one DynamoDB GetItem per owner,
+ * occasionally a Cognito AdminGetUser fallback for non-UUID owners), but
+ * `classifyRecord`'s `resolveCreatedByOrg` contract is synchronous — so,
+ * mirroring {@link buildOrgResolverFromTables}'s pre-fetch-into-a-map
+ * pattern, this resolves every distinct `createdBy` value ONCE up front
+ * into a `createdBy -> Set<org>` index, then returns a pure lookup over
+ * that index.
+ *
+ * A `createdBy` resolving to zero orgs (`lookupOwnerOrganization` returns
+ * `null`) or to two or more distinct orgs yields `undefined` from the
+ * returned callback, so {@link classifyRecord} falls through to
+ * `mark-unknown` — only an exact single-org match is reported as
+ * AMBIGUOUS. (The live UserOrgMembership table is one row per `sub`, so a
+ * 2+-org result does not occur in practice today; the index is still
+ * keyed by `Set<string>` — not a single value — so the multi-org case is
+ * handled correctly if the membership model ever changes, exactly like
+ * {@link resolveToolOrgFromIndex}'s existing multi-org defense for tool
+ * names.) Lookup failures inside `lookupOwnerOrganization` are already
+ * swallowed to `null` by that helper (console.warn + null) — never
+ * propagated here.
+ */
+export async function buildCreatedByOrgResolver(
+  createdByValues: readonly string[],
+): Promise<(createdBy: string) => string | undefined> {
+  const index = new Map<string, Set<string>>();
+  const distinct = [...new Set(createdByValues)];
+
+  await Promise.all(
+    distinct.map(async (createdBy) => {
+      const org = await lookupOwnerOrganization(createdBy);
+      if (org === null || org === undefined) return;
+      let orgs = index.get(createdBy);
+      if (!orgs) {
+        orgs = new Set<string>();
+        index.set(createdBy, orgs);
+      }
+      orgs.add(org);
+    }),
+  );
+
+  return (createdBy: string): string | undefined => {
+    const orgs = index.get(createdBy);
+    if (!orgs || orgs.size !== 1) return undefined;
+    return [...orgs][0];
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
+
+/**
+ * Collects every distinct, in-scope `createdBy` value across both
+ * registry resource types and both DDB legacy tables, for the SOLE
+ * purpose of pre-resolving {@link buildCreatedByOrgResolver}'s index once
+ * up front — mirrors the existing `buildOrgResolverFromTables` pre-fetch
+ * pattern (one scan, not one lookup per record). Only candidates actually
+ * in scope for the AMBIGUOUS classification are worth resolving: a blank
+ * orgId, not already `orgUnknown`, and not already ALL_ORGS/tenant-owned
+ * — the same shape `classifyRecord` itself checks before ever consulting
+ * `resolveCreatedByOrg`. Read-only; never writes. Failures scanning any
+ * one source are logged and skipped rather than failing the whole
+ * collection — this is a best-effort optimisation input, not a
+ * correctness-critical read (a missed `createdBy` simply yields
+ * `mark-unknown` instead of `ambiguous` for that record, the same
+ * conservative fallback as today).
+ */
+async function collectCreatedByValues(
+  type: ResourceType,
+  registry: RegistryService,
+): Promise<string[]> {
+  const values: string[] = [];
+  let records: RegistryRecord[];
+  try {
+    records = await registry.listResources(type);
+  } catch (err) {
+    log(
+      "warn",
+      `createdBy pre-scan: failed to list ${type} registry records: ${String(err)}`,
+    );
+    return values;
+  }
+  for (const record of records) {
+    let meta: Record<string, unknown>;
+    try {
+      meta = record.customDescriptorContent
+        ? JSON.parse(record.customDescriptorContent)
+        : {};
+    } catch {
+      continue;
+    }
+    const orgId = typeof meta.orgId === "string" ? meta.orgId : undefined;
+    const orgUnknown = meta.orgUnknown === true;
+    const createdBy =
+      typeof meta.createdBy === "string" ? meta.createdBy : undefined;
+    const inScope =
+      !orgUnknown && (orgId === undefined || orgId === "") && createdBy;
+    if (inScope) values.push(createdBy as string);
+  }
+  return values;
+}
+
+async function collectCreatedByValuesFromDdb(
+  tableName: string,
+  docClient: DynamoDBDocumentClient,
+): Promise<string[]> {
+  const values: string[] = [];
+  let exclusiveStartKey: Record<string, NativeAttributeValue> | undefined;
+  do {
+    let scanResult;
+    try {
+      scanResult = await docClient.send(
+        new ScanCommand({
+          TableName: tableName,
+          ExclusiveStartKey: exclusiveStartKey,
+        }),
+      );
+    } catch (err) {
+      log(
+        "warn",
+        `createdBy pre-scan: DDB scan failed for ${tableName}: ${String(err)}`,
+      );
+      return values;
+    }
+    for (const item of scanResult.Items || []) {
+      const orgId = typeof item.orgId === "string" ? item.orgId : undefined;
+      const orgUnknown = item.orgUnknown === true;
+      const createdBy =
+        typeof item.createdBy === "string" ? item.createdBy : undefined;
+      const inScope =
+        !orgUnknown && (orgId === undefined || orgId === "") && createdBy;
+      if (inScope) values.push(createdBy as string);
+    }
+    exclusiveStartKey = scanResult.LastEvaluatedKey;
+  } while (exclusiveStartKey);
+  return values;
+}
 
 export async function main(): Promise<void> {
   const args = process.argv.slice(2);
@@ -2603,15 +2787,51 @@ export async function main(): Promise<void> {
     );
   }
 
+  // createdBy -> org resolver for the AMBIGUOUS classification (ordinary,
+  // non-fabricator blank-orgId records whose creator maps to exactly one
+  // tenant org via the same UserOrgMembership-backed helper the resolvers
+  // already use). Pre-fetched once from every in-scope createdBy value
+  // across both registry types and both DDB tables — best-effort, like
+  // defaultPassOrgResolver above: a failure here falls back to the
+  // pre-existing mark-unknown behaviour rather than failing the run.
+  let resolveCreatedByOrg:
+    ((createdBy: string) => string | undefined) | undefined;
+  try {
+    const createdByValues = [
+      ...(await collectCreatedByValues("agent", registry)),
+      ...(await collectCreatedByValues("tool", registry)),
+      ...(await collectCreatedByValuesFromDdb(agentTable, docClient)),
+      ...(await collectCreatedByValuesFromDdb(toolTable, docClient)),
+    ];
+    resolveCreatedByOrg = await buildCreatedByOrgResolver(createdByValues);
+  } catch (err) {
+    log(
+      "warn",
+      `createdBy org resolver setup failed — blank-orgId records with a resolvable owner org will be marked orgUnknown instead of reported ambiguous: ${String(err)}`,
+    );
+  }
+
   const totals = emptySummary();
 
   addSummary(
     totals,
-    await processRegistry("agent", registry, apply, defaultPassOrgResolver),
+    await processRegistry(
+      "agent",
+      registry,
+      apply,
+      defaultPassOrgResolver,
+      resolveCreatedByOrg,
+    ),
   );
   addSummary(
     totals,
-    await processRegistry("tool", registry, apply, defaultPassOrgResolver),
+    await processRegistry(
+      "tool",
+      registry,
+      apply,
+      defaultPassOrgResolver,
+      resolveCreatedByOrg,
+    ),
   );
   addSummary(
     totals,
@@ -2621,6 +2841,7 @@ export async function main(): Promise<void> {
       docClient,
       apply,
       defaultPassOrgResolver,
+      resolveCreatedByOrg,
     ),
   );
   addSummary(
@@ -2631,6 +2852,7 @@ export async function main(): Promise<void> {
       docClient,
       apply,
       defaultPassOrgResolver,
+      resolveCreatedByOrg,
     ),
   );
 
