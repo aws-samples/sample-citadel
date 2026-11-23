@@ -12,6 +12,7 @@ import {
   MAX_EXTERNAL_DIMENSION_NAME_LENGTH,
   MAX_EXTERNAL_SCORES_PER_RESPONSE,
 } from "../eval-external-evaluator";
+import { sanitizeUntrustedJson } from "../../../utils/sanitize-untrusted-json";
 
 function validScore(overrides: Record<string, unknown> = {}) {
   return {
@@ -170,6 +171,39 @@ describe("validateExternalDimensionScore", () => {
     expect(
       validateExternalDimensionScore(validScore({ measurement: null })).ok,
     ).toBe(true);
+  });
+
+  it("on the WIRE path, a non-finite measurement is coerced to null by sanitizeUntrustedJson first and accepted as 'not measured' — this directly-called in-process rejection branch only fires for callers that skip sanitization", () => {
+    const rawEntry = validScore({ measurement: NaN });
+
+    // Direct call (no sanitizer): rejected, per the test above this one.
+    expect(validateExternalDimensionScore(rawEntry).ok).toBe(false);
+
+    // Wire path: validateExternalScoreVector runs sanitizeUntrustedJson
+    // first, same as it does internally. NaN has no valid JSON
+    // representation, so the sanitizer coerces it to null before
+    // field-level validation ever sees it.
+    const sanitized = sanitizeUntrustedJson([rawEntry]);
+    expect(sanitized.truncated).toBe(false);
+    const sanitizedEntry = (sanitized.value as unknown[])[0] as {
+      measurement: unknown;
+    };
+    expect(sanitizedEntry.measurement).toBeNull();
+
+    const result = validateExternalScoreVector([rawEntry]);
+    expect(result.accepted).toHaveLength(1);
+    expect(result.rejected).toHaveLength(0);
+    expect(result.accepted[0].measurement).toBeNull();
+  });
+
+  it("by contrast, a verdict score coerced to null by the same sanitizer IS rejected on the wire path — null is not a valid score", () => {
+    const rawEntry = validScore({
+      verdict: { kind: "score", score: Infinity },
+    });
+
+    const result = validateExternalScoreVector([rawEntry]);
+    expect(result.accepted).toHaveLength(0);
+    expect(result.rejected).toHaveLength(1);
   });
 
   it("rejects a missing detail field", () => {
