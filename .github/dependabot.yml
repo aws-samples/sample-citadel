@@ -101,6 +101,50 @@ updates:
     labels:
       - dependencies
 
+  # ── pip: service images (agent_intake_single, hld_pdf_generator) ──
+  - package-ecosystem: pip
+    directories:
+      - /service/agent_intake_single
+      - /service/hld_pdf_generator
+    schedule:
+      interval: weekly
+    groups:
+      pip-service-minor-patch:
+        update-types:
+          - minor
+          - patch
+    labels:
+      - dependencies
+
+  # ── npm: smoke release-path client ──
+  - package-ecosystem: npm
+    directory: /scripts/smoke/release-path
+    schedule:
+      interval: weekly
+    groups:
+      npm-smoke-release-path-minor-patch:
+        update-types:
+          - minor
+          - patch
+    labels:
+      - dependencies
+
+  # ── docker: service images + shared python build image ──
+  - package-ecosystem: docker
+    directories:
+      - /service/agent_intake_single
+      - /service/hld_pdf_generator
+      - /backend/lib/python-build-image
+    schedule:
+      interval: weekly
+    groups:
+      docker-minor-patch:
+        update-types:
+          - minor
+          - patch
+    labels:
+      - dependencies
+
   # ── GitHub Actions ──
   - package-ecosystem: github-actions
     directory: /
