@@ -48,6 +48,7 @@ from botocore.exceptions import ClientError
 # EventBridge client at module scope) so patch_all() instruments botocore
 # ahead of any client creation.
 import common.tracing as tracing  # import activates tracing as a side effect
+from common.dynamo_pagination import collect_items
 
 import events
 
@@ -144,21 +145,17 @@ def _scan_running() -> list:
     Scan is the correct access pattern for this low-frequency sweep. Terminal
     executions (completed/failed/cancelled) are excluded at the source by the
     filter, so they are never even considered for timeout.
+
+    Pagination uses the shared ``common.dynamo_pagination.collect_items``
+    helper (finding: PR213 CI hang) instead of a bare loop that never
+    terminates against a MagicMock table stub. Behaviour unchanged.
     """
-    items: list = []
     scan_kwargs = {
         'FilterExpression': '#s = :running',
         'ExpressionAttributeNames': {'#s': 'status'},
         'ExpressionAttributeValues': {':running': 'running'},
     }
-    while True:
-        resp = _executions_table.scan(**scan_kwargs)
-        items.extend(resp.get('Items', []))
-        last_key = resp.get('LastEvaluatedKey')
-        if not last_key:
-            break
-        scan_kwargs['ExclusiveStartKey'] = last_key
-    return items
+    return collect_items(_executions_table.scan, **scan_kwargs)
 
 
 def _fail_stuck(execution: dict, now: datetime, timeout: int) -> bool:
@@ -587,22 +584,15 @@ def handler(event, context):
 def _scan_compensating() -> list:
     """Scan the executions table for items with compensationStatus == 'running'.
 
-    Mirrors ``_scan_running``'s pagination pattern exactly.
+    Mirrors ``_scan_running``'s pagination pattern exactly — both now share
+    ``common.dynamo_pagination.collect_items`` (finding: PR213 CI hang).
     """
-    items: list = []
     scan_kwargs = {
         'FilterExpression': '#cs = :running',
         'ExpressionAttributeNames': {'#cs': 'compensationStatus'},
         'ExpressionAttributeValues': {':running': 'running'},
     }
-    while True:
-        resp = _executions_table.scan(**scan_kwargs)
-        items.extend(resp.get('Items', []))
-        last_key = resp.get('LastEvaluatedKey')
-        if not last_key:
-            break
-        scan_kwargs['ExclusiveStartKey'] = last_key
-    return items
+    return collect_items(_executions_table.scan, **scan_kwargs)
 
 
 def _find_stalled_compensation(execution: dict, now: datetime, node_stall: int):
