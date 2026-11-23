@@ -1,54 +1,37 @@
 /**
  * Seed Smoke Echo Tool — CloudFormation Custom Resource Lambda.
  *
- * When SMOKE_FIXTURES_ENABLED is set and ENVIRONMENT !== 'prod':
- *   (a) Uploads tools/smoke-echo-tool/index.js to TOOLS_BUCKET
- *   (b) Creates a registry record via RegistryService and submits it for
- *       approval. With autoApproval configured, the record lands APPROVED
- *       immediately. Without autoApproval, it lands on PENDING_APPROVAL
- *       (documented below).
+ * When SMOKE_FIXTURES_ENABLED is set and ENVIRONMENT !== 'prod': creates a
+ * registry record for the smoke echo tool with a `lambda` integration
+ * binding pointed at `SmokeEchoLambdaFunction` (see
+ * `smoke-echo-lambda.ts`), and submits it for approval. With autoApproval
+ * configured, the record lands APPROVED immediately. Without autoApproval,
+ * it lands on PENDING_APPROVAL (documented below).
  *
- * Idempotent: content hash of the tool module is compared to the existing
- * S3 object's metadata tag — if unchanged, both S3 and registry writes
- * are skipped.
+ * Replaces the retired vm-sandbox fixture (board task 10c3bf48 Slice 2):
+ * `deployed-smoke.mjs`'s `test-tool` check runs `testTool` against this
+ * tool, so a runnable fixture is still required — it is now a real
+ * Lambda invoked through the worker's governed `invoke_binding("lambda")`
+ * path instead of JS uploaded to an S3 bucket and run in-process.
+ *
+ * Idempotent: re-runs are detected by a content hash of the binding
+ * descriptor (toolId + function ARN) compared against the existing
+ * registry record's stored hash — if unchanged, the registry write is
+ * skipped.
  */
 
-import * as https from "https";
-import * as url from "url";
-import {
-  S3Client,
-  PutObjectCommand,
-  HeadObjectCommand,
-} from "@aws-sdk/client-s3";
 import type {
   CloudFormationCustomResourceEvent,
   CloudFormationCustomResourceHandler,
   Context,
 } from "aws-lambda";
 import { createHash } from "crypto";
+import * as https from "https";
+import * as url from "url";
 import { RegistryService } from "../../services/registry-service";
 
 const TOOL_ID = "smoke-echo-tool";
 const ORG_ID = "Default";
-const S3_KEY = `tools/${TOOL_ID}/index.js`;
-
-// ---------------------------------------------------------------------------
-// Tool module source — a minimal echo tool for the Node VM sandbox.
-// ---------------------------------------------------------------------------
-const TOOL_MODULE_SOURCE = `/**
- * Smoke Echo Tool — returns its inputs plus a diagnostic timestamp.
- * Loaded by tool-sandbox as tools/smoke-echo-tool/index.js from TOOLS_BUCKET.
- */
-module.exports = (inputs, credentials) => ({
-  ...inputs,
-  tool: '${TOOL_ID}',
-  ts: new Date().toISOString(),
-});
-`;
-
-const CONTENT_HASH = createHash("sha256")
-  .update(TOOL_MODULE_SOURCE)
-  .digest("hex");
 
 const INPUT_SCHEMA = JSON.stringify({
   type: "object",
@@ -58,15 +41,13 @@ const INPUT_SCHEMA = JSON.stringify({
   required: ["message"],
 });
 
+function contentHashFor(functionArn: string): string {
+  return createHash("sha256").update(`${TOOL_ID}:${functionArn}`).digest("hex");
+}
+
 // ---------------------------------------------------------------------------
 // Lazy singletons
 // ---------------------------------------------------------------------------
-let s3Client: S3Client | null = null;
-function getS3(): S3Client {
-  if (!s3Client) s3Client = new S3Client({});
-  return s3Client;
-}
-
 let registryService: RegistryService | null = null;
 function getRegistryService(): RegistryService {
   if (!registryService) {
@@ -114,7 +95,7 @@ export const handler: CloudFormationCustomResourceHandler = async (
 
     const environment = process.env.ENVIRONMENT ?? "";
     const smokeEnabled = process.env.SMOKE_FIXTURES_ENABLED === "true";
-    const toolsBucket = process.env.TOOLS_BUCKET;
+    const echoFunctionArn = process.env.SMOKE_ECHO_FUNCTION_ARN;
 
     if (environment === "prod") {
       console.log("Production environment — skipping smoke tool seed.");
@@ -132,20 +113,22 @@ export const handler: CloudFormationCustomResourceHandler = async (
       return;
     }
 
-    if (!toolsBucket) {
-      throw new Error("TOOLS_BUCKET environment variable is required");
+    if (!echoFunctionArn) {
+      throw new Error(
+        "SMOKE_ECHO_FUNCTION_ARN environment variable is required",
+      );
     }
 
-    // --- (a) Upload tool module to S3 (idempotent via content hash) --------
-    const uploaded = await uploadToolModule(toolsBucket);
-
-    // --- (b) Upsert registry record ----------------------------------------
-    const registryResult = await upsertRegistryRecord(context);
+    const contentHash = contentHashFor(echoFunctionArn);
+    const registryResult = await upsertRegistryRecord(
+      context,
+      echoFunctionArn,
+      contentHash,
+    );
 
     await sendCfnResponse(event, context, "SUCCESS", {
       toolId: TOOL_ID,
-      contentHash: CONTENT_HASH,
-      s3Uploaded: String(uploaded),
+      contentHash,
       registryStatus: registryResult.status,
       registryRecordId: registryResult.recordId,
     });
@@ -158,78 +141,6 @@ export const handler: CloudFormationCustomResourceHandler = async (
 };
 
 // ---------------------------------------------------------------------------
-// S3 upload with content-hash idempotency
-// ---------------------------------------------------------------------------
-async function uploadToolModule(bucket: string): Promise<boolean> {
-  // Check existing object's content hash tag
-  try {
-    const head = await getS3().send(
-      new HeadObjectCommand({
-        Bucket: bucket,
-        Key: S3_KEY,
-      }),
-    );
-    if (head.Metadata?.["content-hash"] === CONTENT_HASH) {
-      console.log(`S3 ${S3_KEY}: content hash unchanged — skipping upload.`);
-      return false;
-    }
-  } catch (err: unknown) {
-    // Object doesn't exist yet — proceed with upload.
-    const code = (err as { name?: string })?.name;
-    if (code !== "NotFound" && code !== "NoSuchKey") {
-      console.warn("HeadObject check failed (proceeding with upload):", err);
-    }
-  }
-
-  await getS3().send(
-    new PutObjectCommand({
-      Bucket: bucket,
-      Key: S3_KEY,
-      Body: TOOL_MODULE_SOURCE,
-      ContentType: "application/javascript",
-      Metadata: { "content-hash": CONTENT_HASH },
-    }),
-  );
-  console.log(`S3 ${S3_KEY}: uploaded (hash=${CONTENT_HASH}).`);
-  return true;
-}
-
-/**
- * Upload a copy of the tool module under `tools/<recordId>/index.js` so the
- * sandbox fallback (`tools/${toolId}/index.js` where toolId = recordId) also
- * resolves.
- */
-async function uploadToolModuleByRecordId(
-  bucket: string,
-  recordId: string,
-): Promise<void> {
-  const key = `tools/${recordId}/index.js`;
-  // Skip when recordId matches the friendly name (no copy needed).
-  if (key === S3_KEY) return;
-  try {
-    const head = await getS3().send(
-      new HeadObjectCommand({ Bucket: bucket, Key: key }),
-    );
-    if (head.Metadata?.["content-hash"] === CONTENT_HASH) {
-      console.log(`S3 ${key}: content hash unchanged — skipping copy.`);
-      return;
-    }
-  } catch {
-    // Object doesn't exist yet — proceed.
-  }
-  await getS3().send(
-    new PutObjectCommand({
-      Bucket: bucket,
-      Key: key,
-      Body: TOOL_MODULE_SOURCE,
-      ContentType: "application/javascript",
-      Metadata: { "content-hash": CONTENT_HASH },
-    }),
-  );
-  console.log(`S3 ${key}: uploaded recordId copy (hash=${CONTENT_HASH}).`);
-}
-
-// ---------------------------------------------------------------------------
 // Registry record upsert + submit for approval
 // ---------------------------------------------------------------------------
 interface RegistryResult {
@@ -237,7 +148,11 @@ interface RegistryResult {
   status: string;
 }
 
-async function upsertRegistryRecord(context: Context): Promise<RegistryResult> {
+async function upsertRegistryRecord(
+  context: Context,
+  functionArn: string,
+  contentHash: string,
+): Promise<RegistryResult> {
   const svc = getRegistryService();
 
   // Idempotent: find existing record by name so re-runs don't create
@@ -276,11 +191,6 @@ async function upsertRegistryRecord(context: Context): Promise<RegistryResult> {
     console.log(
       `Registry record for ${TOOL_ID} already exists (recordId=${existing.recordId}, status=${existing.status}).`,
     );
-    // Upload the recordId copy so the sandbox fallback works.
-    const toolsBucket = process.env.TOOLS_BUCKET;
-    if (toolsBucket) {
-      await uploadToolModuleByRecordId(toolsBucket, existing.recordId);
-    }
     if (existing.status === "APPROVED") {
       return { recordId: existing.recordId, status: existing.status };
     }
@@ -304,16 +214,32 @@ async function upsertRegistryRecord(context: Context): Promise<RegistryResult> {
     };
   }
 
-  // Create the record — include codeKey so the sandbox can resolve code by
-  // the original upload key rather than the registry-assigned recordId.
+  // Create the record with a `lambda` integration binding pointed at the
+  // echo function — this is what the worker's `invoke_binding("lambda")`
+  // dispatches on (`resolve_binding_type` reads `integrationType`,
+  // `_invoke_lambda_binding` reads `functionArn`).
   const metadata = JSON.stringify({
     citadelKind: "tool" as const,
     toolId: TOOL_ID,
     orgId: ORG_ID,
     inputSchema: INPUT_SCHEMA,
-    contentHash: CONTENT_HASH,
+    contentHash,
     createdBy: "SYSTEM_SEED",
-    codeKey: `tools/${TOOL_ID}`,
+    // No-cloud-credential sentinel (resolve_tool_credential_mode in
+    // tool_run_handler.py): without this, an undeclared mode fails closed
+    // to 'scoped' and the worker tries to vend STS credentials for a
+    // nonexistent integration record, which always fails. This fixture's
+    // lambda binding is invoked directly under the worker's own execution
+    // role (see the SmokeEchoLambdaFunction grantInvoke in
+    // arbiter-stack.ts) — it never needs vended credentials of its own.
+    credentialMode: "none",
+    integrationBindings: [
+      {
+        integrationId: "smoke-echo-lambda",
+        integrationType: "lambda",
+        functionArn,
+      },
+    ],
   });
 
   const created = await svc.createResource("tool", TOOL_ID, {
@@ -326,13 +252,6 @@ async function upsertRegistryRecord(context: Context): Promise<RegistryResult> {
   console.log(
     `Registry record created: recordId=${created.recordId}, status=${created.status}`,
   );
-
-  // Upload a copy under tools/<recordId>/index.js so the sandbox fallback
-  // (`tools/${toolId}/index.js` where toolId = recordId) also resolves.
-  const toolsBucket = process.env.TOOLS_BUCKET;
-  if (toolsBucket) {
-    await uploadToolModuleByRecordId(toolsBucket, created.recordId);
-  }
 
   // Poll until the record leaves CREATING — submitForApproval on a
   // CREATING record throws ConflictException.
@@ -436,17 +355,7 @@ async function sendCfnResponse(
 // Test-only reset
 // ---------------------------------------------------------------------------
 export function _resetSeedSmokeEchoTool(): void {
-  s3Client = null;
   registryService = null;
 }
 
-export {
-  TOOL_ID,
-  ORG_ID,
-  CONTENT_HASH,
-  TOOL_MODULE_SOURCE,
-  INPUT_SCHEMA,
-  S3_KEY,
-  SAFETY_MARGIN_MS,
-  MAX_POLL_BUDGET_MS,
-};
+export { TOOL_ID, ORG_ID, INPUT_SCHEMA, SAFETY_MARGIN_MS, MAX_POLL_BUDGET_MS };

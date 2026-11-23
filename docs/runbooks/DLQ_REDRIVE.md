@@ -439,7 +439,7 @@ cost-budget-evaluator, eval-case-scorer, eval-run-aggregator,
 eval-sampling-selector, eval-sample-scorer, eval-sampling-config-resolver,
 eval-drift-detector, eval-drift-finding-writer (all `telemetry-stack.ts`);
 pdf-generator, document-ingest-start, document-ingest-poller,
-health-monitor, tool-sandbox (`services-stack.ts`);
+health-monitor (`services-stack.ts`);
 agent-release-rollback-evaluator (`governance-stack.ts`);
 registry-agent-record-resolver (`registry-stack.ts`);
 app-publish-handler (`gateway-stack.ts`); pre-token-gen (`backend-stack.ts`).

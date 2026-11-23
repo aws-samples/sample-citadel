@@ -9,18 +9,22 @@ race, using an org-scoped, TTL'd DynamoDB ledger, a worker
 > fence, the S3 result offload, and client-token passthrough — completing the
 > capability. The guarantee below is the current, post-fence statement.
 
-## Scope: governed workflow-node calls only
+## Scope: governed workflow-node calls and the worker-dispatched Run-tool path
 
 Everything above describes the governed path: a tool call dispatched as a
 **workflow-node call through the step runner / worker wrapper**, which is the
 only path that reserves against the ledger and can be fenced by
-`dispatchGeneration`. It does not apply to `backend/src/lambda/tool-sandbox.ts`
-(`testTool`/`executeTool`), which runs a tool's code directly in a Node `vm`
-sandbox for ad-hoc testing, gated by the `tool:execute` permission
-(architect/admin only, via `hasPermission`). That sandbox is out of scope **by
-construction** — it never reserves a ledger row, so it carries no idempotency
-guarantee at all: a retried or duplicated sandbox invocation re-executes the
-tool's code every time.
+`dispatchGeneration`. `testTool` (the console "Run tool" mutation) is now
+**inside this guarantee**: it is backed by `tool-run-resolver.ts`, a thin
+resolver that synchronously `RequestResponse`-invokes the arbiter worker
+wrapper with a `{kind: 'tool-run'}` request. The worker's
+`tool_run_handler.process_tool_run` reuses the SAME governance
+(`record_governance_decision`) and idempotency (`execute_idempotent`
+reserve→execute→finalize) seams as an in-agent tool call, so a console "Run
+tool" and an autonomous agent's tool call can never diverge on auditability
+(board task 10c3bf48). This replaced the ungoverned in-Lambda `vm` sandbox
+(`backend/src/lambda/tool-sandbox.ts`, deleted in Slice 2), which ran a
+tool's code directly in a Node `vm` with no ledger reservation at all.
 
 ## What is guaranteed — stated precisely
 

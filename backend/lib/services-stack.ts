@@ -133,6 +133,15 @@ export interface ServicesStackProps extends cdk.StackProps {
 export class ServicesStack extends cdk.Stack {
   public readonly sessionMemoryTable: dynamodb.Table;
   public readonly sessionBucket: s3.Bucket;
+  /**
+   * The smoke echo fixture's runnable Lambda (board task 10c3bf48 Slice 2
+   * follow-up). Only constructed when `environment !== 'prod'` — undefined
+   * in prod. Exposed so ArbiterStack can grant the worker's execution role
+   * `lambda:InvokeFunction` on it (the seeded tool record declares
+   * `credentialMode: 'none'`, so the worker invokes it under its own role
+   * rather than vended STS credentials).
+   */
+  public smokeEchoLambdaFunction?: lambda.Function;
 
   constructor(scope: Construct, id: string, props: ServicesStackProps) {
     super(scope, id, props);
@@ -1048,114 +1057,44 @@ def handler(event, context):
       }),
     );
 
-    // --- Tools S3 Bucket ---
-    // Stores tool code bundles (tools/<toolId>/index.js) referenced by the
-    // sandbox Lambda and seeded by the smoke-tool custom resource.
-    const toolsBucket = new s3.Bucket(this, "ToolsBucket", {
-      bucketName: `citadel-tools-${props.environment}-${this.account}-${this.region}`,
-      encryption: s3.BucketEncryption.S3_MANAGED,
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-      enforceSSL: true,
-      versioned: true,
-      serverAccessLogsBucket: accessLogsBucket,
-      serverAccessLogsPrefix: "tools/",
-      removalPolicy:
-        props.environment === "prod"
-          ? cdk.RemovalPolicy.RETAIN
-          : cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: props.environment !== "prod",
-    });
-    NagSuppressions.addResourceSuppressions(toolsBucket, [
-      {
-        id: "AwsSolutions-S1",
-        reason:
-          "ToolsBucket already logs to the shared AccessLogsBucket under " +
-          "the tools/ prefix — this suppression is for the access-logs " +
-          "bucket itself (S1 flags the logs bucket for not logging itself).",
-      },
-    ]);
-
-    // --- Tool Testing Sandbox Lambda (DS-11) ---
-    // Isolated Lambda for executing tools with scoped credentials (Req 7.3, 7.4, 7.5, 7.8, 10.9)
-    const toolSandboxFunction = new lambda.Function(
-      this,
-      "ToolSandboxFunction",
-      {
-        functionName: `citadel-tool-sandbox-${props.environment}`,
-        runtime: NODE_RUNTIME,
-        architecture: LAMBDA_ARCHITECTURE,
-        handler: "tool-sandbox.handler",
-        code: lambda.Code.fromAsset("dist/lambda"),
-        environment: {
-          TOOLS_CONFIG_TABLE: `citadel-tools-${props.environment}`,
-          TOOLS_BUCKET: toolsBucket.bucketName,
-          REGISTRY_ENABLED: "true",
-          REGISTRY_ID: registryId,
-          REGISTRY_GENERATION,
-          POWERTOOLS_SERVICE_NAME: "citadel",
-          POWERTOOLS_LOG_LEVEL: "INFO",
-        },
-        timeout: cdk.Duration.seconds(30),
-        memorySize: 512,
-        tracing: lambda.Tracing.ACTIVE,
-      },
-    );
-
-    // Grant DynamoDB read on TOOLS_CONFIG_TABLE
-    toolSandboxFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["dynamodb:GetItem"],
-        resources: [
-          `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/citadel-tools-${props.environment}`,
-        ],
-      }),
-    );
-
-    // Grant S3 read on TOOLS_BUCKET
-    toolsBucket.grantRead(toolSandboxFunction, "tools/*");
-
-    // Grant STS assume role for scoped credentials — scoped to the
-    // datastore and integration role prefixes that the credential vender
-    // creates (citadel-ds-{id}, citadel-int-{id}).  Same-account only.
-    toolSandboxFunction.addToRolePolicy(
-      new iam.PolicyStatement({
-        effect: iam.Effect.ALLOW,
-        actions: ["sts:AssumeRole"],
-        resources: [
-          `arn:aws:iam::${this.account}:role/citadel-ds-*`,
-          `arn:aws:iam::${this.account}:role/citadel-int-*`,
-        ],
-      }),
-    );
-
-    // Grant read-only access to the AgentCore Registry so the sandbox can
-    // resolve tool configs via the same dual-source lookup (registry-first,
-    // DynamoDB fallback) used by tool-config-resolver. Least privilege:
-    // Get + List only — the sandbox never mutates registry records.
-    if (registryArn) {
-      toolSandboxFunction.addToRolePolicy(
-        new iam.PolicyStatement({
-          effect: iam.Effect.ALLOW,
-          actions: [
-            "agent-registry:GetRegistryRecord",
-            "agent-registry:ListRegistryRecords",
-          ],
-          resources: [registryArn, `${registryArn}/*`],
-        }),
-      );
-    }
-
     // ================================================================
     // Seed Smoke Echo Tool — non-prod only
     // ================================================================
-    // Uploads tools/smoke-echo-tool/index.js to TOOLS_BUCKET and upserts
-    // a registry record, then submits for approval (auto-approved when
-    // the registry has autoApproval configured). Gated identically to the
-    // arbiter smoke agent: ENVIRONMENT !== 'prod'.
+    // Registers a registry record for the smoke echo tool with a `lambda`
+    // integration binding pointed at SmokeEchoLambdaFunction, then submits
+    // it for approval (auto-approved when the registry has autoApproval
+    // configured). Gated identically to the arbiter smoke agent:
+    // ENVIRONMENT !== 'prod'.
+    //
+    // Replaces the retired vm-sandbox fixture (board task 10c3bf48 Slice 2
+    // — ToolSandboxFunction/ToolsBucket deleted): `deployed-smoke.mjs`'s
+    // `test-tool` check runs `testTool` against this tool, so a runnable
+    // fixture is still required. `testTool` now dispatches through the
+    // worker's governed `invoke_binding("lambda", ...)` path (see
+    // `tool-run-resolver.ts`), which invokes SmokeEchoLambdaFunction
+    // directly — no code-upload bucket needed.
     const isNonProdSmokeEnv = props.environment !== "prod";
 
     if (isNonProdSmokeEnv) {
+      // --- Smoke Echo Lambda — the lambda-binding target itself ---------
+      const smokeEchoLambdaFunction = new lambda.Function(
+        this,
+        "SmokeEchoLambdaFunction",
+        {
+          functionName: `citadel-smoke-echo-${props.environment}`,
+          runtime: NODE_RUNTIME,
+          architecture: LAMBDA_ARCHITECTURE,
+          handler: "smoke-echo-lambda.handler",
+          code: lambda.Code.fromAsset("dist/lambda"),
+          timeout: cdk.Duration.seconds(10),
+          memorySize: 128,
+        },
+      );
+      // Exposed publicly so ArbiterStack can grant the worker's execution
+      // role lambda:InvokeFunction on it (see smokeEchoLambdaFunction prop
+      // doc comment on ArbiterStackProps).
+      this.smokeEchoLambdaFunction = smokeEchoLambdaFunction;
+
       // Content digest: any edit to the seeder source triggers a re-run.
       // Resolve the source path regardless of whether __dirname is
       // backend/lib/ (source, ts-jest) or backend/dist/lib/ (compiled, CDK).
@@ -1203,29 +1142,12 @@ def handler(event, context):
           environment: {
             ENVIRONMENT: props.environment,
             SMOKE_FIXTURES_ENABLED: "true",
-            TOOLS_BUCKET: toolsBucket.bucketName,
+            SMOKE_ECHO_FUNCTION_ARN: smokeEchoLambdaFunction.functionArn,
             REGISTRY_ID: registryId,
             REGISTRY_ENABLED: "true",
             REGISTRY_GENERATION,
           },
         },
-      );
-
-      // S3: PutObject + GetObject (HeadObject for idempotency check)
-      // on tools/* prefix only.
-      toolsBucket.grantReadWrite(seedSmokeToolFn, "tools/*");
-      NagSuppressions.addResourceSuppressions(
-        seedSmokeToolFn.role!,
-        [
-          {
-            id: "AwsSolutions-IAM5",
-            reason:
-              "Seed S3 read/write is path-scoped to tools/* (writes only " +
-              "tools/smoke-echo-tool/index.js). The residual wildcard is " +
-              "the object-key prefix inherent to any S3 PutObject.",
-          },
-        ],
-        true,
       );
 
       // Registry: Create + Get + List + SubmitForApproval
@@ -1250,9 +1172,10 @@ def handler(event, context):
         {
           serviceToken: seedSmokeToolFn.functionArn,
           properties: {
-            Version: "v1.0.0",
+            Version: "v2.0.0",
             ContentDigest: seedSmokeToolDigest,
             RegistryGeneration: REGISTRY_GENERATION,
+            SmokeEchoFunctionArn: smokeEchoLambdaFunction.functionArn,
           },
         },
       );
@@ -1817,14 +1740,12 @@ def handler(event, context):
       }
 
       // --- Mutation.testTool → ToolRunResolverFunction → worker wrapper ---
-      // Board task 10c3bf48 (Slice 1): the sandbox-backed wiring below this
-      // comment is RETIRED for testTool. The mutation's signature and
-      // ToolTestResult shape are unchanged — only the backing Lambda
-      // changes, from the ungoverned in-Lambda `vm` sandbox
-      // (ToolSandboxFunction, left in place for Slice 2 to delete) to a
-      // thin resolver that invokes the arbiter worker wrapper Lambda
-      // synchronously with a {kind:'tool-run'} request. ToolSandboxFunction
-      // is no longer referenced by any AppSync resolver after this change.
+      // Board task 10c3bf48 (Slice 1 cutover, Slice 2 sandbox deletion):
+      // the mutation's signature and ToolTestResult shape are unchanged —
+      // only the backing Lambda changed, from the ungoverned in-Lambda
+      // `vm` sandbox (ToolSandboxFunction, deleted in Slice 2) to a thin
+      // resolver that invokes the arbiter worker wrapper Lambda
+      // synchronously with a {kind:'tool-run'} request.
       const toolRunResolverFunction = new lambda.Function(
         this,
         "ToolRunResolverFunction",

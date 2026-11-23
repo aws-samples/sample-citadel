@@ -306,6 +306,18 @@ const arbiterStack = new ArbiterStack(app, `citadel-arbiter-${environment}`, {
   // agentReleasesTable/environmentReleasePointersTable prop doc comment).
   agentReleasesTable: backendStack.agentReleasesTable,
   environmentReleasePointersTable: backendStack.environmentReleasePointersTable,
+  // Smoke echo fixture invoke grant (board task 10c3bf48 Slice 2
+  // follow-up): the seeded tool declares credentialMode: 'none', so the
+  // worker invokes SmokeEchoLambdaFunction under its own execution role
+  // rather than vended STS credentials — ArbiterStack grants
+  // lambda:InvokeFunction scoped to exactly this function's ARN. A real
+  // construct reference (not a deterministic-ARN string) is safe here:
+  // ServicesStack is instantiated BEFORE ArbiterStack below and
+  // ArbiterStack already depends on it
+  // (arbiterStack.addStackDependency(servicesStack)). Undefined in prod,
+  // where ServicesStack never constructs the fixture — the grant is
+  // then simply skipped.
+  smokeEchoLambdaFunction: servicesStack.smokeEchoLambdaFunction,
   // G3 — named org seam for release-aware dispatch. Resolved from env or
   // CDK context; defaults to 'Default' (the platform default organisation
   // used by the agent cache — 33 of 49 rows in dev) so the release gate
@@ -821,7 +833,6 @@ if (app.node.tryGetContext("nag") !== "false") {
       "HldPdfCreatedNotifierV2/ServiceRole/DefaultPolicy/Resource",
     ],
     [servicesStack, "HealthMonitorFunction/ServiceRole/DefaultPolicy/Resource"],
-    [servicesStack, "ToolSandboxFunction/ServiceRole/DefaultPolicy/Resource"],
     // Phase 1 server-side ingestion: residual Resource::* is only the
     // un-scopable xray:Put* (tracing ACTIVE) + cloudwatch:PutMetricData
     // (namespace-conditioned to Citadel/DocumentIngestion). All
@@ -1089,10 +1100,6 @@ if (app.node.tryGetContext("nag") !== "false") {
       servicesStack,
       "IntakeOrchestrationResolverFunction/ServiceRole/DefaultPolicy/Resource",
     ],
-    // ToolSandboxFunction (services-stack.ts): read-only registry lookup
-    // (Get + List) for dual-source tool-config resolution, same grant
-    // shape as ToolConfigResolverFunction above.
-    [servicesStack, "ToolSandboxFunction/ServiceRole/DefaultPolicy/Resource"],
     // AgentReleaseWriterRole (backend-stack.ts): assumed by
     // AgentReleaseResolverFunction (governance-stack.ts) to read the
     // AgentCore registry record being released via GetRegistryRecord
@@ -1259,29 +1266,6 @@ if (app.node.tryGetContext("nag") !== "false") {
         appliesTo: [
           {
             regex: "/^Resource::<CodeBucket[A-F0-9]+\\.Arn>\\/agents\\/\\*$/g",
-          },
-        ],
-      },
-    ],
-  );
-
-  // IAM5 — ToolSandboxFunction: CDK grantRead(toolsBucket, "tools/*")
-  // generates <ToolsBucket.Arn>/tools/* — the minimum scope for reading
-  // tool code bundles (tools/<toolId>/index.js). Must run AFTER all other
-  // suppressions for the same path to avoid metadata being overwritten.
-  NagSuppressions.addResourceSuppressionsByPath(
-    servicesStack,
-    `/${servicesStack.stackName}/ToolSandboxFunction/ServiceRole/DefaultPolicy/Resource`,
-    [
-      {
-        id: "AwsSolutions-IAM5",
-        reason:
-          "Sandbox S3 grantRead is path-scoped to tools/* (reads only " +
-          "tools/<toolId>/index.js). The residual wildcard is the " +
-          "object-key prefix inherent to any S3 GetObject grant.",
-        appliesTo: [
-          {
-            regex: "/^Resource::<.+\\.Arn>\\/tools\\/\\*$/g",
           },
         ],
       },

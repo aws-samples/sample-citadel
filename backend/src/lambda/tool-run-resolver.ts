@@ -63,7 +63,7 @@ interface WorkerToolRunResult {
   durationMs: number;
 }
 
-interface ToolSandboxEventIdentity {
+interface ToolRunEventIdentity {
   sub?: string;
   username?: string;
   ["custom:role"]?: string;
@@ -72,7 +72,7 @@ interface ToolSandboxEventIdentity {
 }
 
 function authContextFromEvent(
-  identity: ToolSandboxEventIdentity | undefined,
+  identity: ToolRunEventIdentity | undefined,
 ): AuthContext {
   return {
     userId: identity?.sub || identity?.username || "anonymous",
@@ -149,7 +149,7 @@ async function invokeWorkerToolRun(
 
 export async function handler(
   event: {
-    identity?: ToolSandboxEventIdentity;
+    identity?: ToolRunEventIdentity;
     arguments: {
       toolId: string;
       inputs: string | Record<string, unknown>;
