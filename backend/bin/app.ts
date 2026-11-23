@@ -821,7 +821,6 @@ if (app.node.tryGetContext("nag") !== "false") {
       "HldPdfCreatedNotifierV2/ServiceRole/DefaultPolicy/Resource",
     ],
     [servicesStack, "HealthMonitorFunction/ServiceRole/DefaultPolicy/Resource"],
-    [servicesStack, "ToolSandboxFunction/ServiceRole/DefaultPolicy/Resource"],
     // Phase 1 server-side ingestion: residual Resource::* is only the
     // un-scopable xray:Put* (tracing ACTIVE) + cloudwatch:PutMetricData
     // (namespace-conditioned to Citadel/DocumentIngestion). All
@@ -1089,10 +1088,6 @@ if (app.node.tryGetContext("nag") !== "false") {
       servicesStack,
       "IntakeOrchestrationResolverFunction/ServiceRole/DefaultPolicy/Resource",
     ],
-    // ToolSandboxFunction (services-stack.ts): read-only registry lookup
-    // (Get + List) for dual-source tool-config resolution, same grant
-    // shape as ToolConfigResolverFunction above.
-    [servicesStack, "ToolSandboxFunction/ServiceRole/DefaultPolicy/Resource"],
     // AgentReleaseWriterRole (backend-stack.ts): assumed by
     // AgentReleaseResolverFunction (governance-stack.ts) to read the
     // AgentCore registry record being released via GetRegistryRecord
@@ -1259,29 +1254,6 @@ if (app.node.tryGetContext("nag") !== "false") {
         appliesTo: [
           {
             regex: "/^Resource::<CodeBucket[A-F0-9]+\\.Arn>\\/agents\\/\\*$/g",
-          },
-        ],
-      },
-    ],
-  );
-
-  // IAM5 — ToolSandboxFunction: CDK grantRead(toolsBucket, "tools/*")
-  // generates <ToolsBucket.Arn>/tools/* — the minimum scope for reading
-  // tool code bundles (tools/<toolId>/index.js). Must run AFTER all other
-  // suppressions for the same path to avoid metadata being overwritten.
-  NagSuppressions.addResourceSuppressionsByPath(
-    servicesStack,
-    `/${servicesStack.stackName}/ToolSandboxFunction/ServiceRole/DefaultPolicy/Resource`,
-    [
-      {
-        id: "AwsSolutions-IAM5",
-        reason:
-          "Sandbox S3 grantRead is path-scoped to tools/* (reads only " +
-          "tools/<toolId>/index.js). The residual wildcard is the " +
-          "object-key prefix inherent to any S3 GetObject grant.",
-        appliesTo: [
-          {
-            regex: "/^Resource::<.+\\.Arn>\\/tools\\/\\*$/g",
           },
         ],
       },

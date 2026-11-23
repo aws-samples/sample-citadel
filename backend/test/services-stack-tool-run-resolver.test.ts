@@ -9,8 +9,9 @@
  *  - Its WORKER_WRAPPER_FUNCTION_ARN env var carries that same ARN.
  *  - The testTool AppSync resolver's datasource now targets
  *    ToolRunResolverFunction, not ToolSandboxFunction.
- *  - ToolSandboxFunction itself is UNCHANGED/still present (Slice 2 deletes
- *    it later) — this slice only stops routing to it.
+ *  - ToolSandboxFunction itself is ABSENT (deleted in Slice 2, board task
+ *    10c3bf48) — this stack now carries only the governed worker-wrapper
+ *    path for testTool.
  */
 import * as cdk from "aws-cdk-lib";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
@@ -180,10 +181,22 @@ describe("ServicesStack — testTool cutover to the worker wrapper", () => {
     });
   });
 
-  test("ToolSandboxFunction is still present (Slice 2 removes it, not this slice)", () => {
-    template.hasResourceProperties("AWS::Lambda::Function", {
-      FunctionName: "citadel-tool-sandbox-test",
+  test("ToolSandboxFunction is absent (Slice 2 removed it)", () => {
+    const lambdas = template.findResources("AWS::Lambda::Function", {
+      Properties: {
+        FunctionName: "citadel-tool-sandbox-test",
+      },
     });
+    expect(Object.keys(lambdas)).toHaveLength(0);
+  });
+
+  test("ToolsBucket is absent (Slice 2 removed it along with the sandbox)", () => {
+    const buckets = template.findResources("AWS::S3::Bucket", {
+      Properties: {
+        BucketName: cdk.assertions.Match.stringLikeRegexp("citadel-tools-"),
+      },
+    });
+    expect(Object.keys(buckets)).toHaveLength(0);
   });
 
   test("the old ToolSandboxLambdaDataSource is no longer wired to testTool", () => {
