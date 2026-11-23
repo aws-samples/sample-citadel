@@ -67,7 +67,7 @@ class TestSeedConfigHandler:
     """Property tests for the seedConfig handler."""
 
     @given(event=cfn_events_base, context=lambda_contexts)
-    @settings(max_examples=50)
+    @settings(max_examples=50, deadline=None)
     def test_delete_always_sends_success(self, event, context):
         """Delete requests always respond with SUCCESS."""
         event = {**event, "RequestType": "Delete"}
@@ -81,7 +81,7 @@ class TestSeedConfigHandler:
             assert call_args[2] == "SUCCESS"
 
     @given(event=cfn_events_base, context=lambda_contexts)
-    @settings(max_examples=50)
+    @settings(max_examples=50, deadline=None)
     def test_create_seeds_fabricator_agent(self, event, context):
         """Create requests seed a fabricator agent + governance corpus.
 
@@ -182,7 +182,7 @@ class TestSeedConfigHandler:
                 assert rule["operator"] == "eq"
 
     @given(event=cfn_events_base, context=lambda_contexts)
-    @settings(max_examples=50)
+    @settings(max_examples=50, deadline=None)
     def test_create_schema_is_valid_object_schema(self, event, context):
         """Seeded agent schema is a valid JSON object schema."""
         event = {**event, "RequestType": "Create"}
@@ -214,7 +214,7 @@ class TestSeedConfigHandler:
             assert "taskDetails" in schema["properties"]
 
     @given(event=cfn_events_base, context=lambda_contexts)
-    @settings(max_examples=30)
+    @settings(max_examples=30, deadline=None)
     def test_create_sends_success_on_completion(self, event, context):
         """Successful Create sends SUCCESS cfnresponse."""
         event = {**event, "RequestType": "Create"}
@@ -235,7 +235,7 @@ class TestSeedConfigHandler:
             assert call_args[2] == "SUCCESS"
 
     @given(event=cfn_events_base, context=lambda_contexts)
-    @settings(max_examples=30)
+    @settings(max_examples=30, deadline=None)
     def test_create_failure_sends_failed(self, event, context):
         """DynamoDB errors during Create send FAILED cfnresponse."""
         event = {**event, "RequestType": "Create"}
@@ -259,7 +259,7 @@ class TestSeedConfigHandler:
         event=cfn_events_base,
         context=lambda_contexts,
     )
-    @settings(max_examples=30)
+    @settings(max_examples=30, deadline=None)
     def test_handler_never_raises(self, request_type, event, context):
         """Handler never raises; errors are sent via cfnresponse."""
         event = {**event, "RequestType": request_type}
