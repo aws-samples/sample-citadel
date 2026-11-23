@@ -116,6 +116,18 @@ export interface ServicesStackProps extends cdk.StackProps {
   // lookup. ServicesStack already consumes BackendStack constructs
   // (agentEventBus, documentBucket), so this adds no new cycle.
   userOrgMembershipTable: dynamodb.ITable;
+  // Board task 10c3bf48 (Slice 1): the ARN of the arbiter worker wrapper
+  // Lambda (ArbiterStack's WorkerAgentWrapper — fixed functionName
+  // `citadel-worker-wrapper-${environment}`). Plain string, not a
+  // construct reference: ArbiterStack is instantiated AFTER ServicesStack
+  // in app.ts and already depends on it
+  // (arbiterStack.addStackDependency(servicesStack)) — a reverse
+  // construct reference would create a cycle. app.ts builds this ARN from
+  // the fixed name, mirroring the existing `publishHandlerArn` pattern.
+  // Optional so test paths without a worker Lambda still synthesize (the
+  // testTool resolver wiring below is skipped when absent, identically to
+  // the appSyncApiId-gated block it lives beside).
+  workerWrapperFunctionArn?: string;
 }
 
 export class ServicesStack extends cdk.Stack {
@@ -1804,29 +1816,100 @@ def handler(event, context):
         resolver.addResourceDependency(intakeOrchestrationDataSource);
       }
 
-      // --- Mutation.testTool → ToolSandboxFunction ---
-      // Wires the schema's testTool field to the existing ToolSandboxFunction
-      // (L1 CfnDataSource/CfnResolver cross-stack pattern, same as the
-      // intake-orchestration resolvers above). The ToolSandboxFunction is
-      // defined earlier in this stack; we attach it to BackendStack's API via
-      // the appSyncApiId/appSyncApiArn props passed from app.ts.
-      const toolSandboxDataSourceRole = new iam.Role(
+      // --- Mutation.testTool → ToolRunResolverFunction → worker wrapper ---
+      // Board task 10c3bf48 (Slice 1): the sandbox-backed wiring below this
+      // comment is RETIRED for testTool. The mutation's signature and
+      // ToolTestResult shape are unchanged — only the backing Lambda
+      // changes, from the ungoverned in-Lambda `vm` sandbox
+      // (ToolSandboxFunction, left in place for Slice 2 to delete) to a
+      // thin resolver that invokes the arbiter worker wrapper Lambda
+      // synchronously with a {kind:'tool-run'} request. ToolSandboxFunction
+      // is no longer referenced by any AppSync resolver after this change.
+      const toolRunResolverFunction = new lambda.Function(
         this,
-        "ToolSandboxDataSourceRole",
+        "ToolRunResolverFunction",
+        {
+          functionName: `citadel-tool-run-resolver-${props.environment}`,
+          runtime: NODE_RUNTIME,
+          architecture: LAMBDA_ARCHITECTURE,
+          handler: "tool-run-resolver.handler",
+          code: lambda.Code.fromAsset("dist/lambda"),
+          environment: {
+            TOOLS_CONFIG_TABLE: `citadel-tools-${props.environment}`,
+            REGISTRY_ENABLED: "true",
+            REGISTRY_ID: registryId,
+            REGISTRY_GENERATION,
+            ...(props.workerWrapperFunctionArn && {
+              WORKER_WRAPPER_FUNCTION_ARN: props.workerWrapperFunctionArn,
+            }),
+            POWERTOOLS_SERVICE_NAME: "citadel",
+            POWERTOOLS_LOG_LEVEL: "INFO",
+          },
+          // 25s client-side worker-invoke timeout (tool-run-resolver.ts) +
+          // headroom for the resolver's own org/auth gate work, still under
+          // AppSync's 30s ceiling.
+          timeout: cdk.Duration.seconds(28),
+          memorySize: 512,
+          tracing: lambda.Tracing.ACTIVE,
+        },
+      );
+
+      // Grant read-only access to the AgentCore Registry (same dual-source
+      // tool-config lookup as the former sandbox — resolveToolConfig).
+      if (registryArn) {
+        toolRunResolverFunction.addToRolePolicy(
+          new iam.PolicyStatement({
+            effect: iam.Effect.ALLOW,
+            actions: [
+              "agent-registry:GetRegistryRecord",
+              "agent-registry:ListRegistryRecords",
+            ],
+            resources: [registryArn, `${registryArn}/*`],
+          }),
+        );
+      }
+      toolRunResolverFunction.addToRolePolicy(
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["dynamodb:GetItem"],
+          resources: [
+            `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/citadel-tools-${props.environment}`,
+          ],
+        }),
+      );
+
+      // lambda:InvokeFunction SCOPED to exactly the worker wrapper's ARN —
+      // no wildcard. This is the only new IAM surface this slice grants on
+      // the resolver side; it never gains the sandbox's S3/AssumeRole
+      // grants (it invokes the worker, which already vends its own scoped
+      // creds — see tool_run_handler.py).
+      if (props.workerWrapperFunctionArn) {
+        toolRunResolverFunction.addToRolePolicy(
+          new iam.PolicyStatement({
+            effect: iam.Effect.ALLOW,
+            actions: ["lambda:InvokeFunction"],
+            resources: [props.workerWrapperFunctionArn],
+          }),
+        );
+      }
+
+      const toolRunResolverDataSourceRole = new iam.Role(
+        this,
+        "ToolRunResolverDataSourceRole",
         { assumedBy: new iam.ServicePrincipal("appsync.amazonaws.com") },
       );
-      toolSandboxFunction.grantInvoke(toolSandboxDataSourceRole);
+      toolRunResolverFunction.grantInvoke(toolRunResolverDataSourceRole);
 
-      const toolSandboxDataSource = new appsyncCfn.CfnDataSource(
+      const toolRunResolverDataSource = new appsyncCfn.CfnDataSource(
         this,
-        "ToolSandboxLambdaDataSource",
+        "ToolRunResolverLambdaDataSource",
         {
           apiId: props.appSyncApiId,
-          name: "ToolSandboxLambdaDataSource",
+          name: "ToolRunResolverLambdaDataSource",
           type: "AWS_LAMBDA",
-          serviceRoleArn: toolSandboxDataSourceRole.roleArn,
+          serviceRoleArn: toolRunResolverDataSourceRole.roleArn,
           lambdaConfig: {
-            lambdaFunctionArn: toolSandboxFunction.functionArn,
+            lambdaFunctionArn: toolRunResolverFunction.functionArn,
           },
         },
       );
@@ -1838,12 +1921,12 @@ def handler(event, context):
           apiId: props.appSyncApiId,
           typeName: "Mutation",
           fieldName: "testTool",
-          dataSourceName: toolSandboxDataSource.attrName,
+          dataSourceName: toolRunResolverDataSource.attrName,
           requestMappingTemplate: LAMBDA_REQUEST_MAPPING,
           responseMappingTemplate: LAMBDA_RESPONSE_MAPPING,
         },
       );
-      testToolResolver.addResourceDependency(toolSandboxDataSource);
+      testToolResolver.addResourceDependency(toolRunResolverDataSource);
     }
 
     // ── Outputs ──────────────────────────────────────────────────────────────

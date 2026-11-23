@@ -156,6 +156,18 @@ const registryStack = new RegistryStack(
 );
 registryStack.addStackDependency(backendStack);
 
+// Deterministic ARN of the arbiter worker wrapper Lambda (board task
+// 10c3bf48, Slice 1). ArbiterStack is instantiated AFTER ServicesStack
+// below and already depends on it (arbiterStack.addStackDependency(
+// servicesStack)), so ServicesStack's ToolRunResolverFunction cannot take
+// a direct construct reference to the worker without introducing a
+// dependency cycle. Built from the worker's fixed `functionName`
+// (`citadel-worker-wrapper-${environment}`, set in arbiter-stack.ts),
+// mirroring the existing `publishHandlerArn`/`evalSamplingConfigResolverArn`
+// deterministic-ARN pattern used elsewhere in this file for the same class
+// of ordering constraint.
+const workerWrapperFunctionArn = `arn:aws:lambda:${env.region}:${env.account}:function:citadel-worker-wrapper-${environment}`;
+
 // Services stack (depends on backend)
 const servicesStack = new ServicesStack(
   app,
@@ -180,6 +192,9 @@ const servicesStack = new ServicesStack(
     // CIT-216: owner-org lookup now reads the membership table by the
     // owner's `sub` (AdminGetUser retained for username→sub mapping only).
     userOrgMembershipTable: backendStack.userOrgMembershipTable,
+    // Board task 10c3bf48 (Slice 1): testTool's ToolRunResolverFunction
+    // invokes the worker wrapper Lambda synchronously with this ARN.
+    workerWrapperFunctionArn,
   },
 );
 
