@@ -31,6 +31,8 @@ from typing import Any
 
 import boto3
 
+from common.dynamo_pagination import collect_items
+
 from .models import (
     ArbitrationDecision,
     AuthorityScope,
@@ -150,35 +152,20 @@ _SCAN_ALL_MAX_PAGES = 10000
 def _scan_all(table: Any) -> list[dict]:
     """Scan a DDB table and collect every page into a single list.
 
-    Defensive termination (finding: PR213 CI hang): a real DynamoDB
-    response's ``LastEvaluatedKey`` is either absent or a non-empty dict —
-    but in unit tests that stub ``table`` with a bare ``MagicMock``,
-    ``response.get("LastEvaluatedKey")`` returns a fresh (truthy)
-    ``MagicMock`` forever, so the original ``if not last_key: break`` never
-    fires and this loops indefinitely. Real tables are unaffected by either
-    guard below: a well-formed paginated scan always yields a non-empty dict
-    key until the final page, and legitimate scans stay far below
-    ``_SCAN_ALL_MAX_PAGES``.
+    Defensive termination (finding: PR213 CI hang) is now shared across the
+    arbiter tree via ``common.dynamo_pagination.collect_items`` rather than
+    re-derived here: a real DynamoDB response's ``LastEvaluatedKey`` is
+    either absent or a non-empty dict, but in unit tests that stub ``table``
+    with a bare ``MagicMock``, ``response.get("LastEvaluatedKey")`` returns
+    a fresh (truthy) ``MagicMock`` forever, so a naive ``if not last_key:
+    break`` never fires and loops indefinitely. Real tables are unaffected
+    by the guards in ``collect_items``: a well-formed paginated scan always
+    yields a non-empty dict key until the final page, and legitimate scans
+    stay far below ``_SCAN_ALL_MAX_PAGES``. Behaviour for callers is
+    unchanged — same return type, same cap, same log-and-stop-rather-than-
+    raise semantics (``raise_on_cap`` defaults to ``False``).
     """
-    items: list[dict] = []
-    kwargs: dict[str, Any] = {}
-    pages = 0
-    while True:
-        response = table.scan(**kwargs)
-        items.extend(response.get("Items", []))
-        last_key = response.get("LastEvaluatedKey")
-        if not isinstance(last_key, dict) or not last_key:
-            break
-        pages += 1
-        if pages >= _SCAN_ALL_MAX_PAGES:
-            logger.warning(
-                "Governance loader: _scan_all hit the %d-page cap; "
-                "aborting pagination with a possibly-incomplete result.",
-                _SCAN_ALL_MAX_PAGES,
-            )
-            break
-        kwargs["ExclusiveStartKey"] = last_key
-    return items
+    return collect_items(table.scan, max_pages=_SCAN_ALL_MAX_PAGES)
 
 
 def _maybe_json(value: Any, default: Any) -> Any:
