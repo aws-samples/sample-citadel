@@ -44,7 +44,7 @@ node backend/scripts/smoke/deployed-smoke.mjs
 | 1 | `auth` | Cognito admin-initiate-auth returns a valid ID token (user pool client configured, user exists, password correct). |
 | 2 | `subscription-negative` | Subscribing to `onConversationMessage` with a zero-UUID project triggers a refusal or completes without data — validates the project-subscription-authorizer Lambda. |
 | 3 | `chat-roundtrip` | `sendMessage` + `onConversationMessage` subscription: a TURN_ACCEPTED arrives within 8 s and an agent response within 90 s — proves the intake agent, EventBridge routing, and the AppSync publish pipeline are operational. |
-| 4 | `test-tool` | `testTool` mutation succeeds — validates Lambda tool execution and the tool-sandbox path. |
+| 4 | `test-tool` | `testTool` mutation succeeds — validates the governed worker tool-run path (the `lambda`-binding smoke echo fixture). |
 | 5 | `workflow-execution` | `startExecution` of the Echo Demo workflow + `onWorkflowProgress` reaches a terminal COMPLETED status with all nodes done — proves the StepRunner, node dispatch, and progress subscriptions work end to end. |
 | 6 | `list-blueprints` | `listBlueprints` returns a non-empty list containing the Echo Demo — validates the blueprint catalog and the seeded data. |
 
