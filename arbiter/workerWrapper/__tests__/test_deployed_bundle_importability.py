@@ -1,35 +1,28 @@
-"""Deployed-layout importability guard for the worker agent_runner chain.
+"""Deployed-layout checks specific to the worker bundle's layer-provided
+pip packages (boto3 / aws_xray_sdk) — NOT covered by the generic
+cross-bundle importability test.
 
-Why this test exists
---------------------
-The first real idempotency smoke run failed with
+Why this file still exists
+---------------------------
+``arbiter/__tests__/test_deployed_bundle_importability.py`` now covers the
+generic "does the handler module chain import from the deployed bundle
+root + /opt/python layer" question for EVERY catalogLayer consumer
+(including workerWrapper), closing the original gap this file was written
+for (``tool_idempotency_hook`` / ``governed_tool_handler`` importing via an
+``arbiter.*`` prefix that doesn't exist in the deployed layout).
 
-    [agent_runner] WARN idempotency hook skipped — tool_idempotency_hook
-    unavailable: No module named arbiter
-
-— i.e. the whole fail-closed idempotency capability (and the governance/usage
-siblings) was inert because ``tool_idempotency_hook`` / ``governed_tool_handler``
-imported shared code via an ``arbiter.*`` prefix that exists in NEITHER the
-deployed worker bundle NOR the ``ArbiterCatalogLayer``. Every other worker
-test resolves those names via ``arbiter/conftest.py`` (which puts the repo /
-arbiter roots on ``sys.path``), so they passed against the REPO layout while
-the DEPLOYED layout was broken. This test closes that exact gap: it
-reconstructs the deployed layout and imports the chain in a subprocess with
-the repo root REMOVED from ``sys.path``, so an ``arbiter.*`` import (or a
-missing bundled/layered module) fails here the way it failed in production.
-
-Deployed layout modelled
-------------------------
-* bundle root  (== Lambda task root, ``entry: arbiter/workerWrapper``):
-  ``agent_runner.py``, ``tool_idempotency_hook.py``, ``tool_idempotency.py``,
-  ``governed_tool_handler.py``, ``worker_governance.py`` — imported as
-  top-level modules.
-* layer  (``ArbiterCatalogLayer`` at ``/opt/python``): the ``common`` /
-  ``governance`` / ``catalog`` packages — imported as top-level packages.
-
-The subprocess ``sys.path`` is EXACTLY ``[bundle_root, layer_python]`` (plus
-the stdlib/site-packages the fresh interpreter adds) — the repo root is never
-on it, so ``import arbiter`` is impossible, mirroring the real Lambda.
+What remains here is strictly the worker-specific pip-package-resolution
+behavior that the generic test does not exercise: after
+``workerWrapper/requirements.txt`` dropped its explicit boto3/aws-xray-sdk
+pins (they are provided solely by ``arbiter/layers/common/requirements.txt``
+via the shared ``ArbiterCatalogLayer``), these two tests prove (a) the
+packages resolve from the LAYER directory, not the bundle root, when
+actually pip-installed into a staged layer, and (b) removing the
+``governance`` package from the layer makes the hook chain's import fail —
+the bundle-regression signal this file was built to detect never applied
+to a package-resolution-source question, so it stays local here rather
+than being generalised into the cross-bundle file (which only imports
+already-installed site-packages, never runs ``pip install``).
 """
 from __future__ import annotations
 
@@ -106,33 +99,6 @@ def _run_import(bundle_root, layer_python, import_body):
 
 
 class TestDeployedBundleImportability:
-    def test_import_chain_resolves_in_deployed_layout(self, tmp_path):
-        """The worker's agent_runner import chain must resolve with ONLY the
-        bundle root + layer on sys.path (no arbiter package anywhere)."""
-        bundle_root, layer_python = _stage_deployed_layout(str(tmp_path))
-        result = _run_import(
-            bundle_root,
-            layer_python,
-            "import agent_runner\n"
-            "import tool_idempotency_hook\n"
-            "import governed_tool_handler\n"
-            "import credential_guard\n",
-        )
-        assert result.returncode == 0, (
-            "deployed-layout import FAILED (bundle regression?):\n"
-            f"stdout={result.stdout}\nstderr={result.stderr}"
-        )
-        assert "IMPORT_OK" in result.stdout
-
-    def test_arbiter_prefix_is_not_importable_in_deployed_layout(self, tmp_path):
-        """Guard-the-guard: prove the deployed sandbox genuinely lacks an
-        ``arbiter`` package, so a regression back to ``from arbiter.governance
-        import ...`` would fail here rather than silently pass."""
-        bundle_root, layer_python = _stage_deployed_layout(str(tmp_path))
-        result = _run_import(bundle_root, layer_python, "import arbiter")
-        assert result.returncode != 0
-        assert "No module named 'arbiter'" in result.stderr
-
     def test_layer_provided_packages_resolve_from_layer_not_bundle(self, tmp_path):
         """boto3 and aws_xray_sdk must resolve from the layer (/opt/python),
         NOT from the bundle root.  After removing the explicit pins from
