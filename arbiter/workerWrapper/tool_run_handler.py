@@ -34,14 +34,36 @@ error — never a silent no-op.
 
 Nothing is persisted beyond the tool-execution ledger (idempotency) and
 telemetry — this module writes no new DynamoDB table and uploads no code.
+
+Follow-up (board task a25de3f2): the ``mcp`` binding path
+(``_invoke_mcp_binding``) is now implemented — it opens a short-lived MCP
+client session (streamable-HTTP or SSE, per the binding's ``transport``
+field), optionally resolves a Secrets-Manager-backed auth header from the
+binding's ``secretRef``, issues one bounded ``call_tool``, and maps the
+result through a local mirror of the fabricator's untrusted-content fencing
+(``fence_untrusted`` below) before returning. The fabricator's
+``fence.py`` is NOT importable here — cross-bundle import (see that
+module's own docstring on why it mirrors, rather than imports,
+``service/agent_intake_single``'s original) — so this module carries its
+own minimal mirror of the two defenses that apply to a single bounded
+tool-output string (control-character stripping, role-marker
+neutralisation); it deliberately omits the nonce-delimiter and
+injection-metric machinery, which only make sense for the fabricator's
+long-form task-text injection surface.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import logging
 import os
+import re
 import time
+from contextlib import asynccontextmanager
 from typing import Any, Callable
+
+import boto3
 
 # ---------------------------------------------------------------------------
 # Collaborators reused verbatim from the existing governed tool-call path.
@@ -55,6 +77,8 @@ from governance import tool_execution_ledger as ledger  # noqa: E402
 from common.tenant_guard import require_same_org, OrgMismatchError  # noqa: E402
 
 execute_idempotent = ledger.execute_idempotent
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +100,26 @@ class CredentialVendError(Exception):
     credentialMode tool. Mirrors ``credential_guard.CredentialRefusal``'s
     fail-closed contract but is local to the tool-run path so a vend
     failure here never gets confused with an agent-dispatch refusal."""
+
+
+class McpBindingError(Exception):
+    """Raised by :func:`_invoke_mcp_binding` for every MCP-path failure.
+
+    ``code`` is one of ``MCP_UNREACHABLE`` (transport/connection failure
+    opening the client session), ``MCP_TOOL_ERROR`` (the remote tool ran
+    but returned ``isError``, or the binding is missing a required field),
+    ``TIMEOUT`` (the call exceeded the per-binding budget), or
+    ``AUTH_SECRET_MISSING`` (a configured ``secretRef`` could not be
+    resolved). ``invoke_binding``'s caller (``process_tool_run``) catches
+    this via the generic ``except Exception`` -> ``BINDING_ERROR`` path
+    today, but the structured ``code``/``message`` are kept on the
+    exception itself for a future caller that wants to pass the specific
+    code through."""
+
+    def __init__(self, code: str, message: str):
+        self.code = code
+        self.message = message
+        super().__init__(f"{code}: {message}")
 
 
 # ---------------------------------------------------------------------------
@@ -173,14 +217,185 @@ def _invoke_http_binding(binding: dict, inputs: Any, credentials: dict | None) -
 
 
 def _invoke_mcp_binding(binding: dict, inputs: Any, credentials: dict | None) -> Any:
-    """Single MCP tool-call against the binding's declared server. Kept
-    minimal for Slice 1 — a full MCP client session lifecycle is out of
-    scope; this issues one call and returns its result."""
-    raise NotImplementedError(
-        "mcp binding dispatch requires an MCP client session; not wired in "
-        "this deployment — treat as UNSUPPORTED_BINDING until a client is "
-        "configured"
+    """Single MCP tool-call against the binding's declared server.
+
+    Binding fields consumed:
+      - ``serverUrl`` (required) — the MCP server endpoint.
+      - ``transport`` (optional, default ``"streamable_http"``; or
+        ``"sse"``) — selects the MCP client transport, mirroring the
+        ``transport`` field on the agent-import invocation block.
+      - ``toolName`` (required) — the remote tool to call.
+      - ``secretRef`` (optional) — a Secrets Manager ARN/name resolved via
+        :func:`_resolve_mcp_secret`. Never logged.
+      - ``authHeader`` (optional, default ``"Authorization"``) — header
+        name the resolved secret is attached under, as
+        ``Bearer <value>`` for the default header or the raw value for a
+        custom header name (e.g. ``x-api-key``), mirroring
+        ``backend/src/adapters/agent-source/mcp-adapter.ts``'s
+        ``resolveAuthHeader``.
+
+    ``credentials`` (scoped STS creds from credential vending) is accepted
+    for signature parity with the other ``_invoke_*_binding`` executors but
+    is unused here — an MCP server is authenticated via its own
+    ``secretRef``-backed header, not AWS SigV4/STS; the scoped-credential
+    vend still runs upstream in ``process_tool_run`` for any AWS-side
+    bindings a tool might also carry, it just has nothing to do on this
+    path.
+
+    Raises :class:`McpBindingError` with a structured ``code`` for every
+    failure mode: ``MCP_UNREACHABLE`` (missing/invalid ``serverUrl`` or a
+    transport-level connection failure), ``MCP_TOOL_ERROR`` (missing
+    ``toolName`` or the remote tool returned ``isError``), ``TIMEOUT``
+    (the call exceeded :func:`_binding_timeout_seconds`), or
+    ``AUTH_SECRET_MISSING`` (a configured ``secretRef`` could not be
+    resolved — checked BEFORE opening the client session, so a bad secret
+    never triggers a network call).
+    """
+    server_url = binding.get("serverUrl")
+    if not isinstance(server_url, str) or not server_url:
+        raise McpBindingError("MCP_UNREACHABLE", "binding is missing a serverUrl")
+
+    tool_name = binding.get("toolName")
+    if not isinstance(tool_name, str) or not tool_name:
+        raise McpBindingError("MCP_TOOL_ERROR", "binding is missing a toolName")
+
+    transport = binding.get("transport") or "streamable_http"
+
+    headers: dict[str, str] = {}
+    secret_ref = binding.get("secretRef")
+    if secret_ref:
+        # Resolved BEFORE opening any session — a missing/unreadable secret
+        # must never cause a network call to the MCP server.
+        secret_value = _resolve_mcp_secret(secret_ref)
+        header_name = binding.get("authHeader") or "Authorization"
+        headers[header_name] = (
+            f"Bearer {secret_value}" if header_name == "Authorization" else secret_value
+        )
+
+    timeout_seconds = _binding_timeout_seconds()
+
+    async def _call() -> Any:
+        async with _open_mcp_session(server_url, transport, headers, timeout_seconds) as session:
+            await session.initialize()
+            return await asyncio.wait_for(
+                session.call_tool(tool_name, inputs or {}), timeout=timeout_seconds,
+            )
+
+    try:
+        result = asyncio.run(_call())
+    except asyncio.TimeoutError as exc:
+        raise McpBindingError("TIMEOUT", f"mcp call_tool exceeded {timeout_seconds}s") from exc
+    except McpBindingError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — any transport/connection failure maps here
+        raise McpBindingError("MCP_UNREACHABLE", str(exc)) from exc
+
+    content_texts = [
+        fence_untrusted(getattr(part, "text", ""), source="mcp-tool-output")
+        for part in (result.content or [])
+        if getattr(part, "type", None) == "text"
+    ]
+    is_error = bool(getattr(result, "isError", False))
+    if is_error:
+        message = content_texts[0] if content_texts else "remote tool reported an error"
+        raise McpBindingError("MCP_TOOL_ERROR", message)
+
+    return {"content": content_texts, "isError": False}
+
+
+@asynccontextmanager
+async def _open_mcp_session(server_url: str, transport: str, headers: dict, timeout_seconds: int):
+    """Open the MCP transport (streamable-HTTP or SSE) and yield an
+    initialized-but-not-yet-``initialize()``-called :class:`mcp.ClientSession`.
+
+    Kept as its own async context manager (rather than inlined in
+    ``_invoke_mcp_binding``) so tests can monkeypatch this single seam with
+    a fake transport/session and exercise the surrounding dispatch,
+    timeout, and error-mapping logic with no real network or `mcp` package
+    behaviour involved.
+    """
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+    from mcp.client.sse import sse_client
+
+    client_cm = (
+        sse_client(server_url, headers=headers, timeout=timeout_seconds)
+        if transport == "sse"
+        else streamablehttp_client(server_url, headers=headers, timeout=timeout_seconds)
     )
+    async with client_cm as streams:
+        read_stream, write_stream = streams[0], streams[1]
+        async with ClientSession(read_stream, write_stream) as session:
+            yield session
+
+
+def _resolve_mcp_secret(secret_ref: str) -> str:
+    """Fetch the raw secret value for *secret_ref* via boto3 Secrets
+    Manager. Lazy client construction (mirrors the lazy-client convention
+    used elsewhere in this bundle, e.g.
+    ``tool_execution_ledger._get_dynamodb_resource``) — no AWS call is made
+    unless a binding actually declares a ``secretRef``.
+
+    The resolved value is returned to the caller and NEVER logged here;
+    callers must likewise avoid logging it (see
+    ``_invoke_mcp_binding``'s header construction, which builds the
+    Authorization value but logs only that an auth header was applied).
+
+    Raises :class:`McpBindingError` with code ``AUTH_SECRET_MISSING`` for
+    any resolution failure (missing secret, access denied, malformed
+    response) — never propagates the underlying boto3 exception, which
+    could embed request metadata.
+    """
+    try:
+        client = boto3.client("secretsmanager")
+        response = client.get_secret_value(SecretId=secret_ref)
+    except Exception as exc:  # noqa: BLE001 — any failure is AUTH_SECRET_MISSING, not retried
+        logger.warning("mcp binding: failed to resolve secretRef (reason redacted)")
+        raise McpBindingError("AUTH_SECRET_MISSING", f"could not resolve secretRef: {secret_ref}") from exc
+
+    secret_string = response.get("SecretString")
+    if not secret_string:
+        raise McpBindingError("AUTH_SECRET_MISSING", f"secretRef resolved to an empty value: {secret_ref}")
+    return secret_string
+
+
+# ---------------------------------------------------------------------------
+# Untrusted-output sanitization — local mirror of
+# arbiter/fabricator/fence.py's control-character stripping and
+# role-marker neutralisation (see module docstring for why this is a
+# mirror, not an import).
+# ---------------------------------------------------------------------------
+
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+_ROLE_MARKER_RE = re.compile(
+    r"^(\s*)"
+    r"("
+    r"(?:Assistant|System|Human|User)\s*:"
+    r"|</?tool_(?:use|result)"
+    r'|\{\s*"tool_(?:name|use)"'
+    r")",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+_ROLE_MARKER_PREFIX = "[DATA] "
+
+
+def fence_untrusted(text: str, source: str) -> str:
+    """Strip control characters and neutralise role-marker / protocol-line
+    prefixes in *text* so it cannot be mis-parsed as a model protocol
+    boundary when placed into downstream context. ``source`` is a
+    human-readable origin label, logged (never the content) when a
+    role-marker line is neutralised."""
+    if not text:
+        return text
+    cleaned = _CONTROL_RE.sub("", text)
+    neutralised, count = _ROLE_MARKER_RE.subn(
+        lambda m: f"{m.group(1)}{_ROLE_MARKER_PREFIX}{m.group(2)}", cleaned,
+    )
+    if count:
+        logger.info("fence_untrusted: neutralised %d role-marker line(s) in %s content", count, source)
+    return neutralised
 
 
 def _invoke_aws_service_binding(binding: dict, inputs: Any, credentials: dict | None) -> Any:
