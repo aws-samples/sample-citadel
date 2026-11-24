@@ -293,6 +293,32 @@ export class RegistryStack extends cdk.Stack {
     );
     registrySyncDlq.grantSendMessages(registrySyncLambda);
 
+    // finding (production evidence, 2026-11-20T05:27Z): the sync role
+    // lacked cloudwatch:PutMetricData, so emitSyncFailureMetric()'s
+    // PutMetricDataCommand (Namespace: "RegistrySync" — see registry-sync.ts)
+    // logged AccessDenied on every DLQ-routed failure instead of landing the
+    // SyncFailure metric alarms depend on. PutMetricData has no ARN (it is
+    // not resource-scopable: https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazoncloudwatch.html),
+    // so Resource must be "*"; the condition narrows the grant to only the
+    // namespaces this handler actually writes. registry-sync.ts has a
+    // second PutMetricDataCommand call site (emitNameKeyCollisionMetric,
+    // Namespace: "Citadel/RegistrySync") that was still denied under the
+    // single-namespace condition — StringEquals accepts a list, which
+    // CloudFormation evaluates as a logical OR, so both namespaces are
+    // covered and no other namespace is allowed.
+    registrySyncLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["cloudwatch:PutMetricData"],
+        resources: ["*"],
+        conditions: {
+          StringEquals: {
+            "cloudwatch:namespace": ["RegistrySync", "Citadel/RegistrySync"],
+          },
+        },
+      }),
+    );
+
     registrySyncRule.addTarget(
       new targets.LambdaFunction(registrySyncLambda, {
         deadLetterQueue: registrySyncDlq,

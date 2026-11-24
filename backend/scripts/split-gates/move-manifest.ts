@@ -2686,6 +2686,20 @@ export const ALLOWED_SATELLITE_ADDED_STATEMENTS: Record<
       ],
       conditionKeys: [],
     },
+    // Production evidence 2026-11-20T05:27Z: the sync role lacked
+    // cloudwatch:PutMetricData, so emitSyncFailureMetric()'s
+    // PutMetricDataCommand (Namespace: "RegistrySync") logged AccessDenied
+    // on every DLQ-routed failure. PutMetricData has no resource-level
+    // scoping (Resource must be "*"); the handler narrows the call to the
+    // RegistrySync namespace via a condition key, which rail 6 normalizes
+    // away (conditionKeys: []) the same way the Citadel/Registry
+    // PutMetricData statement above does.
+    {
+      effect: "Allow",
+      actions: ["cloudwatch:PutMetricData"],
+      resources: ["*"],
+      conditionKeys: [],
+    },
   ],
 
   // ═══════════════════════════════════════════════════════════════════════
