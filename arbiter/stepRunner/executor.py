@@ -37,7 +37,7 @@ from dag import (
     topological_sort,
     propagate_skips,
 )
-from approval_requests import AWAITING_APPROVAL, EXECUTION_SENTINEL, build_approval_request, is_awaiting
+from common.approval_requests import AWAITING_APPROVAL, EXECUTION_SENTINEL, build_approval_request, is_awaiting
 from condition import evaluate_condition, resolve_field_path, diagnose_resolution_failure
 from retry import calculate_backoff, should_retry
 from common import workflow_contract

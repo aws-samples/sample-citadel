@@ -105,6 +105,11 @@ if [ ! -f "${ASSET_ROOT}/common/region.py" ]; then
   MISSING=1
 fi
 
+if [ ! -f "${ASSET_ROOT}/common/approval_requests.py" ]; then
+  log "MISSING: common/approval_requests.py not found in the bundled asset (index.py imports 'from common.approval_requests import build_approval_request' directly)."
+  MISSING=1
+fi
+
 if [ "${MISSING}" -ne 0 ]; then
   log ""
   log "FAIL: the SupervisorAgent asset at ${ASSET_ROOT} is missing required supervisor/governance/common package files."

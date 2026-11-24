@@ -19,7 +19,7 @@ from botocore.exceptions import ClientError
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from approval_requests import AWAITING_APPROVAL, build_approval_request
+from common.approval_requests import AWAITING_APPROVAL, build_approval_request
 
 
 # ---------------------------------------------------------------------------

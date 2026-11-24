@@ -28,7 +28,8 @@ from datetime import datetime, timezone, timedelta
 import boto3
 from botocore.exceptions import ClientError
 
-# Ensure stepRunner is importable (executor, approval_requests live there).
+# Ensure stepRunner is importable (executor.py lives there); approval_requests
+# is a shared common/ (layer) module, resolved via the layer on sys.path.
 _step_runner_dir = os.path.join(os.path.dirname(__file__), '..', 'stepRunner')
 if _step_runner_dir not in sys.path:
     sys.path.insert(0, _step_runner_dir)
@@ -37,7 +38,7 @@ import common.tracing as tracing  # noqa: E402  — activate tracing before clie
 from common.dynamo_pagination import collect_items  # noqa: E402
 
 import executor  # noqa: E402
-from approval_requests import AWAITING_APPROVAL  # noqa: E402
+from common.approval_requests import AWAITING_APPROVAL  # noqa: E402
 
 EXECUTIONS_TABLE = os.environ.get('EXECUTIONS_TABLE', 'citadel-executions-dev')
 DEFAULT_APPROVAL_TIMEOUT_SECONDS = 86_400  # 24 hours
