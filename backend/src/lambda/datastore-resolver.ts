@@ -834,14 +834,56 @@ async function createDataStore(
     let records: number | undefined;
 
     if (input.provisionMode === "CREATE_NEW") {
-      // Continuum C3 (PR-2): provisioning runs on the PLATFORM path BEFORE
-      // any tenant-assumable role exists. Adapters build their own
-      // ambient/named platform clients internally for provision/deprovision
+      // Fix (post-#634 regression): most adapters
       // (DynamoDBAdapter.platformProvisionClient, RdsAdapter.platformProvisionClient,
-      // KnowledgeBaseAdapter.platformBedrockProvisionClient) — no scoped
-      // credentials are passed here, and none are needed: `ensureRole` for
-      // this data store has not run yet, so there is no role to assume.
-      //
+      // KnowledgeBaseAdapter.platformBedrockProvisionClient) provision via an
+      // AMBIENT platform client and never call requireScopedCredentials in
+      // provision() — for those, no scoped role is needed yet. S3Adapter is
+      // the exception: S3Adapter.provision routes through makeClient() ->
+      // requireScopedCredentials() like every other S3 data-plane call, so
+      // passing `undefined` credentials (as this code used to, unconditionally)
+      // throws CredentialMissingError for every CREATE_NEW S3 datastore. Fix:
+      // gate on the adapter's own explicit opt-in flag
+      // (`provisionRequiresScopedCredentials`), not on whether its `provision`
+      // policy set happens to be non-empty — DynamoDB/RDS/KnowledgeBase all
+      // declare non-empty `provision` policies for IAM purposes even though
+      // their provision() call never consumes scoped credentials, so gating
+      // on policy-set size wrongly roped the platform-path adapters into this
+      // branch too. When the flag is set, assume a role scoped to the
+      // adapter's provision policies BEFORE calling provision(), and pass the
+      // resulting scoped credentials through unmodified (no spread) so the
+      // retry wrapper never strips the scoped marker. Adapters that don't set
+      // the flag are unaffected — `provisionScopedCredentials` stays
+      // undefined and provision() is called exactly as before.
+      let provisionScopedCredentials: ScopedCredentials | undefined;
+      if (adapter.provisionRequiresScopedCredentials === true) {
+        const provisionPolicies = adapter.requiredPolicies(
+          config,
+          accountId,
+          region,
+        ).provision;
+        const provisionCrossAccountExternalId =
+          await validateCrossAccountConfig(config, policyManager);
+        await policyManager.ensureRole(
+          dataStoreId,
+          provisionPolicies,
+          accountId,
+          "datastore",
+          config.crossAccountRoleArn,
+          await getAdditionalTrustedPrincipals(),
+          provisionCrossAccountExternalId,
+          { orgId: callerOrgId, agentId: dataStoreId },
+        );
+        roleCreated = true;
+        provisionScopedCredentials = await policyManager.assumeScopedRole(
+          dataStoreId,
+          accountId,
+          "datastore",
+          config.crossAccountRoleArn,
+          provisionCrossAccountExternalId,
+        );
+      }
+
       // Update status to PROVISIONING
       await dynamodb.send(
         new UpdateCommand({
@@ -856,7 +898,11 @@ async function createDataStore(
         }),
       );
 
-      const provisionResult = await adapter.provision!(config, undefined);
+      const provisionResult = provisionScopedCredentials
+        ? await retryFirstScopedCallOnAccessDenied(() =>
+            adapter.provision!(config, provisionScopedCredentials),
+          )
+        : await adapter.provision!(config, undefined);
       resourceArn = provisionResult.resourceArn;
       size = provisionResult.size;
       records = provisionResult.records;

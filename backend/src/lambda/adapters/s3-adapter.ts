@@ -44,6 +44,11 @@ const BUCKET_NAME_PATTERN = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/;
 
 export class S3Adapter implements ConnectorAdapter {
   readonly category: ConnectorCategory = "datastore";
+  // provision() routes through makeClient() -> requireScopedCredentials,
+  // unlike the ambient-client datastore adapters (DynamoDB, RDS,
+  // KnowledgeBase), so the resolver must assume a scoped role before
+  // calling provision() for a CREATE_NEW S3 datastore.
+  readonly provisionRequiresScopedCredentials = true;
   readonly spec: ConnectorSpec = {
     type: "S3",
     provider: "Amazon Web Services",
