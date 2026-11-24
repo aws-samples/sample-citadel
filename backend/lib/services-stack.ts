@@ -11,7 +11,6 @@ import * as bedrockagentcore from "aws-cdk-lib/aws-bedrockagentcore";
 import * as cognito from "aws-cdk-lib/aws-cognito";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import * as lambda from "aws-cdk-lib/aws-lambda";
-import * as agentcore from "@aws-cdk/aws-bedrock-agentcore-alpha";
 import * as ssm from "aws-cdk-lib/aws-ssm";
 import * as cr from "aws-cdk-lib/custom-resources";
 import * as events from "aws-cdk-lib/aws-events";
@@ -1194,12 +1193,12 @@ def handler(event, context):
     });
 
     // Agent Intake Single - Runtime
-    const agentIntakeSingleRuntime = new agentcore.Runtime(
+    const agentIntakeSingleRuntime = new bedrockagentcore.Runtime(
       this,
       "AgentIntakeSingleRuntime",
       {
         runtimeName: `agent_intake_single_${props.environment}`,
-        agentRuntimeArtifact: agentcore.AgentRuntimeArtifact.fromAsset(
+        agentRuntimeArtifact: bedrockagentcore.AgentRuntimeArtifact.fromAsset(
           path.join(SERVICE_ROOT, "agent_intake_single"),
           {
             platform: ECR_PLATFORM,

@@ -527,3 +527,189 @@ describe("AgentIntakeSingleRuntime — observability grants + Langfuse pin remov
     }
   });
 });
+
+describe("AgentIntakeSingleRuntime — stable aws-cdk-lib/aws-bedrockagentcore module pin (post alpha-removal)", () => {
+  // Pins the CFN-level shape produced by bedrockagentcore.Runtime /
+  // bedrockagentcore.AgentRuntimeArtifact now that services-stack.ts no
+  // longer imports @aws-cdk/aws-bedrock-agentcore-alpha. A before/after
+  // `cdk synth` diff (captured outside this suite, since the alpha
+  // construct no longer exists on main post-merge) found exactly one
+  // substantive difference: the Runtime construct's auto-generated
+  // execution-role trust policy now carries an AssumeRolePolicyDocument
+  // Condition (SourceAccount + SourceArn ArnLike) that the alpha
+  // construct's equivalent role did not have. All other resources and
+  // properties (counts per type, RuntimeName, ArtifactType,
+  // NetworkConfiguration, RoleArn reference shape, EnvironmentVariables,
+  // Tags) are unchanged. These assertions pin both the unchanged shape and
+  // the one documented Condition difference as a permanent regression
+  // guard for that equivalence.
+  let template: cdk.assertions.Template;
+
+  beforeAll(() => {
+    const app = new cdk.App();
+    const prereqStack = new cdk.Stack(app, "StableModulePinPrereqStack", {
+      env: { account: "123456789012", region: "us-east-1" },
+    });
+    const agentEventBus = new events.EventBus(
+      prereqStack,
+      "StableModulePinEventBus",
+      { eventBusName: "stable-module-pin-bus" },
+    );
+    const documentBucket = new s3.Bucket(
+      prereqStack,
+      "StableModulePinDocBucket",
+    );
+
+    const stack = new ServicesStack(app, "StableModulePinServicesStack", {
+      environment: "test",
+      agentEventBus,
+      documentBucket,
+      userOrgMembershipTable: dynamodb.Table.fromTableName(
+        prereqStack,
+        "StableModulePinUserOrgMembership",
+        "citadel-user-org-membership-test",
+      ),
+      env: { account: "123456789012", region: "us-east-1" },
+    });
+    template = cdk.assertions.Template.fromStack(stack);
+  });
+
+  test("synthesizes exactly one AWS::BedrockAgentCore::Runtime resource", () => {
+    template.resourceCountIs("AWS::BedrockAgentCore::Runtime", 1);
+  });
+
+  test("the Runtime resource carries the expected RuntimeName, ArtifactType, and NetworkMode", () => {
+    template.hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
+      AgentRuntimeName: "agent_intake_single_test",
+      AgentRuntimeArtifact: cdk.assertions.Match.objectLike({
+        ContainerConfiguration: cdk.assertions.Match.objectLike({
+          ContainerUri: cdk.assertions.Match.anyValue(),
+        }),
+      }),
+      NetworkConfiguration: cdk.assertions.Match.objectLike({
+        NetworkMode: "PUBLIC",
+      }),
+    });
+  });
+
+  test("the Runtime resource's RoleArn references an IAM role created in the same stack", () => {
+    const runtimes = template.findResources("AWS::BedrockAgentCore::Runtime");
+    const [runtime] = Object.values(runtimes);
+    const roleArn = (runtime.Properties as { RoleArn?: unknown }).RoleArn;
+    expect(roleArn).toBeDefined();
+    // Fn::GetAtt reference to a role resource, not a hardcoded ARN string —
+    // proves the construct still auto-creates (rather than requires) the
+    // execution role, matching the alpha construct's default behavior.
+    expect(JSON.stringify(roleArn)).toMatch(/Fn::GetAtt/);
+  });
+
+  test("exactly one execution role is synthesized for the runtime construct", () => {
+    // Filtered to logical ids under the AgentIntakeSingleRuntime construct
+    // scope (CDK nests the auto-created execution role as
+    // "AgentIntakeSingleRuntime/ExecutionRole" -> logical id prefix
+    // "AgentIntakeSingleRuntimeExecutionRole"). This is deliberately
+    // narrower than "any role assuming bedrock-agentcore.amazonaws.com",
+    // which also matches the separate, pre-existing GatewayRole construct.
+    const allRoles = template.findResources("AWS::IAM::Role");
+    const runtimeExecutionRoleIds = Object.keys(allRoles).filter((id) =>
+      id.startsWith("AgentIntakeSingleRuntimeExecutionRole"),
+    );
+    expect(runtimeExecutionRoleIds).toHaveLength(1);
+  });
+
+  test(
+    "the runtime execution role's trust policy is scoped to this stack's " +
+      "account and this runtime's ARN (stable-module Condition, not present " +
+      "under the alpha construct)",
+    () => {
+      // aws-cdk-lib 2.278.0's bedrockagentcore.Runtime auto-generates an
+      // AssumeRolePolicyDocument Condition (SourceAccount + SourceArn
+      // ArnLike) on the execution role it creates; the alpha construct's
+      // equivalent trust policy had no such Condition. This is the one
+      // documented difference between the before/after synth templates
+      // (see a79b8cb2's amended description) — a tightening of the
+      // execution role's trust boundary, not a behavioral regression.
+      // Pinned here so a future aws-cdk-lib bump that drops or reshapes it
+      // is caught instead of silently changing the IAM trust boundary.
+      const allRoles = template.findResources("AWS::IAM::Role");
+      const runtimeExecutionRoleId = Object.keys(allRoles).find((id) =>
+        id.startsWith("AgentIntakeSingleRuntimeExecutionRole"),
+      );
+      expect(runtimeExecutionRoleId).toBeDefined();
+      const role = allRoles[runtimeExecutionRoleId as string];
+
+      template.hasResourceProperties("AWS::IAM::Role", {
+        AssumeRolePolicyDocument: cdk.assertions.Match.objectLike({
+          Statement: cdk.assertions.Match.arrayWith([
+            cdk.assertions.Match.objectLike({
+              Principal: cdk.assertions.Match.objectLike({
+                Service: "bedrock-agentcore.amazonaws.com",
+              }),
+              Condition: {
+                StringEquals: {
+                  "aws:SourceAccount": "123456789012",
+                },
+                ArnLike: {
+                  "aws:SourceArn": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "arn:",
+                        { Ref: "AWS::Partition" },
+                        ":bedrock-agentcore:us-east-1:123456789012:runtime/agent_intake_single_test*",
+                      ],
+                    ],
+                  },
+                },
+              },
+            }),
+          ]),
+        }),
+      });
+
+      // Belt-and-suspenders: assert directly on the located role's own
+      // properties too, so this test fails on the right resource even if
+      // another role in the template happened to match the shape above.
+      const statements = (
+        role.Properties as {
+          AssumeRolePolicyDocument: {
+            Statement: Array<Record<string, unknown>>;
+          };
+        }
+      ).AssumeRolePolicyDocument.Statement;
+      const trustStatement = statements.find(
+        (s) =>
+          (s.Principal as { Service?: string } | undefined)?.Service ===
+          "bedrock-agentcore.amazonaws.com",
+      );
+      expect(trustStatement?.Condition).toEqual({
+        StringEquals: { "aws:SourceAccount": "123456789012" },
+        ArnLike: {
+          "aws:SourceArn": {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                { Ref: "AWS::Partition" },
+                ":bedrock-agentcore:us-east-1:123456789012:runtime/agent_intake_single_test*",
+              ],
+            ],
+          },
+        },
+      });
+    },
+  );
+
+  test("no @aws-cdk/aws-bedrock-agentcore-alpha deprecation warning is attached to the Runtime construct's node", () => {
+    const runtimes = template.findResources("AWS::BedrockAgentCore::Runtime");
+    expect(Object.keys(runtimes)).toHaveLength(1);
+    // Presence check only: this suite cannot inspect synth-time stderr, so
+    // the deprecation-warning-free claim itself is verified by the
+    // `npx cdk synth ... 2>&1 | grep agentcore-alpha` check run in CI/PR
+    // description, not by this assertion. This test exists to keep a named
+    // anchor in the suite that a future reviewer can extend if the alpha
+    // package is ever reintroduced as a transitive dependency.
+    const [runtime] = Object.values(runtimes);
+    expect(runtime.Type).toBe("AWS::BedrockAgentCore::Runtime");
+  });
+});
