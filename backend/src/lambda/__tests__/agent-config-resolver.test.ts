@@ -287,6 +287,47 @@ describe("agent-config-resolver", () => {
         ),
       ).rejects.toThrow("config must be valid JSON");
     });
+
+    // Finding 679abf74: config.name becomes the Bedrock tool name, which the
+    // arbiter supervisor uses as a node id in create_workflow_tracking_record
+    // (arbiter/supervisor/index.py). "requestId" and "data" are reserved
+    // top-level attributes of that record; a node id equal to either one
+    // raises an opaque ValueError deep in orchestration. Reject it here, at
+    // the earliest write boundary, instead.
+    test.each(["requestId", "data"])(
+      "rejects reserved agent name %p",
+      async (reservedName) => {
+        dynamoMock.on(PutCommand).resolves({});
+
+        await expect(
+          handler(
+            makeEvent("createAgentConfig", {
+              input: {
+                agentId: "reserved-name-agent",
+                config: JSON.stringify({ name: reservedName }),
+                state: "active",
+              },
+            }),
+          ),
+        ).rejects.toThrow(/reserved/i);
+      },
+    );
+
+    test("allows a name that is merely a superstring of a reserved key", async () => {
+      dynamoMock.on(PutCommand).resolves({});
+
+      const result = await handler(
+        makeEvent("createAgentConfig", {
+          input: {
+            agentId: "metadata-agent",
+            config: JSON.stringify({ name: "metadata" }),
+            state: "active",
+          },
+        }),
+      );
+
+      expect(JSON.parse(result.config)).toEqual({ name: "metadata" });
+    });
   });
 
   describe("updateAgentConfig", () => {
@@ -320,6 +361,34 @@ describe("agent-config-resolver", () => {
       expect(result.agentId).toBe("a1");
       expect(JSON.parse(result.config)).toEqual({ new: true });
     });
+
+    // Finding 679abf74: same reserved-key guard as createAgentConfig, applied
+    // on the update path (whichever config the merge logic ends up with).
+    test.each(["requestId", "data"])(
+      "rejects reserved agent name %p on update",
+      async (reservedName) => {
+        dynamoMock.on(GetCommand).resolves({
+          Item: {
+            agentId: "a1",
+            config: '{"old":true}',
+            state: "active",
+            createdAt: "2025-01-01",
+          },
+        });
+        dynamoMock.on(PutCommand).resolves({});
+
+        await expect(
+          handler(
+            makeEvent("updateAgentConfig", {
+              input: {
+                agentId: "a1",
+                config: JSON.stringify({ name: reservedName }),
+              },
+            }),
+          ),
+        ).rejects.toThrow(/reserved/i);
+      },
+    );
 
     test("accepts config passed as an object", async () => {
       dynamoMock.on(GetCommand).resolves({
@@ -483,9 +552,7 @@ describe("agent-config-resolver", () => {
       dynamoMock.on(QueryCommand).resolves({ Items: [] });
 
       await expect(
-        handler(
-          makeEvent("activateProjectAgents", { projectId: "proj-1" }),
-        ),
+        handler(makeEvent("activateProjectAgents", { projectId: "proj-1" })),
       ).rejects.toThrow("ValidationError: No agents found for project proj-1");
 
       expect(mockUpdateResourceStatus).not.toHaveBeenCalled();
@@ -497,9 +564,7 @@ describe("agent-config-resolver", () => {
       dynamoMock.on(QueryCommand).resolves({ Items: [] });
 
       await expect(
-        handler(
-          makeEvent("activateProjectAgents", { projectId: "proj-1" }),
-        ),
+        handler(makeEvent("activateProjectAgents", { projectId: "proj-1" })),
       ).rejects.toThrow("ValidationError: No agents found for project proj-1");
 
       expect(mockSubmitForApproval).not.toHaveBeenCalled();
