@@ -14,8 +14,11 @@ import { loadDotenvIfPresent } from "../lib/load-dotenv";
 loadDotenvIfPresent(path.join(__dirname, "..", "..", ".env"));
 
 import * as cdk from "aws-cdk-lib";
-// (Aspects accessed via cdk.Aspects)
-import { AwsSolutionsChecks, NagSuppressions } from "cdk-nag";
+// Registered via aws-cdk-lib's Validations.of(app).addPlugins(...)
+// (cdk-nag v3 rewrote NagPacks as IPolicyValidationPlugin; see
+// node_modules/cdk-nag/MIGRATION.md).
+import { AwsSolutionsChecks } from "cdk-nag";
+import { NagSuppressions } from "../lib/nag-suppressions-compat";
 import { EnableLambdaTracing } from "../lib/tracing-aspect";
 import { SuppressNodejsL1Nag } from "../lib/nag-l1-suppression-aspect";
 import { ServicesStack } from "../lib/services-stack";
@@ -586,8 +589,17 @@ applyGitProvenanceTags(
 
 // cdk-nag: AwsSolutions pack. Errors fail `cdk synth`. Escape hatch: -c nag=false
 if (app.node.tryGetContext("nag") !== "false") {
-  cdk.Aspects.of(app).add(
-    new AwsSolutionsChecks({ verbose: true, reports: true }),
+  // writeSuppressionsToCloudFormation is deliberately OFF: the compat
+  // shim (lib/nag-suppressions-compat.ts) already writes `cdk_nag`
+  // metadata directly, scoped to exactly the resources each call site
+  // targets — matching v2's own behavior byte-for-byte. Enabling cdk-nag
+  // v3's own WriteNagSuppressionsToCloudFormationAspect here would ALSO
+  // run (it walks every CfnResource and copies every ancestor's
+  // acknowledgment onto it), producing a strictly larger, divergent
+  // metadata set. See the shim's module doc comment for the measured
+  // before/after diff that caught this.
+  cdk.Validations.of(app).addPlugins(
+    new AwsSolutionsChecks(app, { verbose: true }),
   );
 
   // Framework-generated constructs (CDK-owned). Scoped to exact paths, not stack-wide.

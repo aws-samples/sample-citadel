@@ -1,7 +1,7 @@
 import * as cdk from "aws-cdk-lib";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as iam from "aws-cdk-lib/aws-iam";
-import { NagSuppressions } from "cdk-nag";
+import { NagSuppressions } from "./nag-suppressions-compat";
 import { IConstruct } from "constructs";
 
 /**

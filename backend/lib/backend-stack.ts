@@ -23,7 +23,7 @@ import * as path from "path";
 import * as fs from "fs";
 import * as crypto from "crypto";
 import { Construct } from "constructs";
-import { NagSuppressions } from "cdk-nag";
+import { NagSuppressions } from "./nag-suppressions-compat";
 import { REGISTRY_GENERATION } from "./registry-generation";
 import {
   PYTHON_RUNTIME,
