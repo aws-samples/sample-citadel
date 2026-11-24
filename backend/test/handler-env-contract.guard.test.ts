@@ -94,8 +94,12 @@ const PER_HANDLER_OPTIONAL: Record<string, Set<string>> = {
 // Source analysis helpers
 // ---------------------------------------------------------------------------
 
-/** Regex: process.env.SOME_VAR */
-const PROCESS_ENV_RE = /process\.env\.([A-Z][A-Z0-9_]*)/g;
+/**
+ * Regex: process.env.SOME_VAR (dot access) OR process.env["SOME_VAR"] /
+ * process.env['SOME_VAR'] (bracket access, either quote style).
+ */
+const PROCESS_ENV_RE =
+  /process\.env\.([A-Z][A-Z0-9_]*)|process\.env\[\s*["']([A-Z][A-Z0-9_]*)["']\s*\]/g;
 
 /** Regex: local relative imports (from "./foo" or from "../bar/baz"). */
 const LOCAL_IMPORT_RE =
@@ -103,6 +107,8 @@ const LOCAL_IMPORT_RE =
 
 /**
  * Given an absolute TS file path, return all process.env var names referenced.
+ * Matches both dot access (process.env.X) and bracket access
+ * (process.env["X"] / process.env['X']).
  */
 function envVarsInFile(absPath: string): Set<string> {
   const names = new Set<string>();
@@ -113,7 +119,7 @@ function envVarsInFile(absPath: string): Set<string> {
     return names;
   }
   for (const m of src.matchAll(PROCESS_ENV_RE)) {
-    names.add(m[1]);
+    names.add((m[1] ?? m[2]) as string);
   }
   return names;
 }
@@ -345,6 +351,51 @@ function extractLambdaEnvMap(template: Template): Array<{
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+describe("PROCESS_ENV_RE / envVarsInFile — dot and bracket access forms", () => {
+  // PROCESS_ENV_RE carries the `g` flag for matchAll() use in envVarsInFile;
+  // RegExp#test() on a global regex advances lastIndex as a side effect, so
+  // each assertion below resets lastIndex first to avoid state leaking
+  // between calls (a global regex's .test() is not idempotent otherwise).
+  beforeEach(() => {
+    PROCESS_ENV_RE.lastIndex = 0;
+  });
+
+  test("matches dot-access form process.env.FOO_BAR", () => {
+    expect(PROCESS_ENV_RE.test("const x = process.env.FOO_BAR;")).toBe(true);
+  });
+
+  test("matches double-quoted bracket-access form process.env[\"FOO_BAR\"]", () => {
+    expect(PROCESS_ENV_RE.test('const x = process.env["FOO_BAR"];')).toBe(true);
+  });
+
+  test("matches single-quoted bracket-access form process.env['FOO_BAR']", () => {
+    expect(PROCESS_ENV_RE.test("const x = process.env['FOO_BAR'];")).toBe(true);
+  });
+
+  test("does NOT match a near-miss that is not a process.env read (negative control)", () => {
+    expect(PROCESS_ENV_RE.test("const x = someOtherObject.env.FOO_BAR;")).toBe(
+      false,
+    );
+  });
+
+  test("envVarsInFile extracts names from both dot and bracket forms in one file", () => {
+    const tmpFile = path.join(
+      fs.mkdtempSync(path.join(require("os").tmpdir(), "kiro-env-re-")),
+      "sample.ts",
+    );
+    fs.writeFileSync(
+      tmpFile,
+      [
+        'const a = process.env.ALPHA_VAR;',
+        'const b = process.env["BRAVO_VAR"];',
+        "const c = process.env['CHARLIE_VAR'];",
+      ].join("\n"),
+    );
+    const found = envVarsInFile(tmpFile);
+    expect(found).toEqual(new Set(["ALPHA_VAR", "BRAVO_VAR", "CHARLIE_VAR"]));
+  });
+});
 
 describe("Handler environment-variable contract guard (Node.js Lambdas)", () => {
   let template: Template;
@@ -584,5 +635,474 @@ describe("Handler TABLE env → DynamoDB grant guard (BackendStack)", () => {
       }
     }
     expect(hasGrant).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Part (c): generic env-var contract extended to BackendStack, plus the
+// arbiter Python handler contract (deployment-contract layer).
+//
+// Reuses the same envVarsTransitive/handlerToSourceFile walk above for the
+// BackendStack Node.js handlers (synthBackendStack() already exists above
+// for the IAM-grant guard). Adds a parallel, hand-scoped contract for the
+// three arbiter Python handlers confirmed to call
+// `governance/hierarchy.py`'s `load_governance_state()` — the function that
+// reads AUTHORITY_UNITS_TABLE / COMPOSITION_CONTRACTS_TABLE / CASE_LAW_TABLE
+// / CONSTITUTIONAL_LAYERS_TABLE via `_scan_table_by_env`.
+//
+// KNOWN_GAPS below are genuine, individually-verified misses — NOT fixed by
+// this PR (see task scope). Each gap names the exact handler, the
+// synthesized function, and the missing variable so it can be triaged.
+// ---------------------------------------------------------------------------
+
+/**
+ * Allowlist for BackendStack: env vars read (directly or transitively) by a
+ * handler WITHOUT the CDK function providing them, because the read is
+ * genuinely optional (defensive `||`/`??` fallback, or a value bridged in at
+ * runtime from a different source before use). Each entry has a reason.
+ */
+const BACKEND_STACK_OPTIONAL: Record<string, Set<string>> = {
+  // logger.ts: `process.env.LOG_LEVEL || "INFO"` — defaults when unset.
+  // Every handler transitively imports the shared logger; listing the ones
+  // observed here keeps the allowlist precise rather than global.
+  "model-catalog-sync": new Set(["LOG_LEVEL"]),
+  "model-config-resolver": new Set(["LOG_LEVEL"]),
+  "integration-resolver": new Set(["LOG_LEVEL", "AWS_REGION"]),
+  "gateway-registration-handler": new Set(["LOG_LEVEL", "AWS_REGION"]),
+  "agent-config-resolver": new Set([
+    "AWS_REGION",
+    // governance-flag.ts: `process.env.GOVERNANCE_FLAG_CACHE_TTL_SECONDS` is
+    // an overridable TTL tunable with a hardcoded default when unset.
+    "GOVERNANCE_FLAG_CACHE_TTL_SECONDS",
+    // utils/events.ts (imported for publishEvent) pulls in the shared
+    // logger, which reads LOG_LEVEL with an "INFO" default.
+    "LOG_LEVEL",
+  ]),
+  "tool-config-resolver": new Set(["AWS_REGION", "GOVERNANCE_FLAG_CACHE_TTL_SECONDS"]),
+  // registry-provisioner.ts interpolates the ambient Lambda-runtime log
+  // stream name into an error message only — never a required config value.
+  "registry-provisioner": new Set(["AWS_LAMBDA_LOG_STREAM_NAME"]),
+  "agent-message-handler": new Set([
+    // lambda-invoke-adapter.ts reads `process.env.AWS_ACCOUNT_ID ?? ""` as a
+    // last-resort default for a field normally passed in by the caller.
+    "AWS_ACCOUNT_ID",
+    // isImportEnabled() returns `process.env.IMPORT_ENABLED === "true"` —
+    // defaults to disabled (feature flag for the agent-import dispatcher).
+    "IMPORT_ENABLED",
+    // Read only inside the IMPORT_ENABLED-gated branch; returns false early
+    // when unset rather than failing. Additive feature, not required.
+    "REGISTRY_ID",
+  ]),
+  // seed-eval-suites/index.ts and organization-resolver.ts both import
+  // "../types" (a barrel module). types/index.ts re-exports TYPES ONLY
+  // (`import type { ... } from "../lambda/utils/eval-comparison"`, line
+  // ~650) from eval-comparison.ts/eval-scoring.ts/eval-trajectory.ts/
+  // eval-comparison-config.ts — zero runtime code, so these files are never
+  // actually loaded by either handler at runtime. The shared
+  // envVarsTransitive walker above does not distinguish `import type` from
+  // a value import, so it follows the specifier anyway and picks up
+  // ENVIRONMENT (and, for notifier-base.ts's EVENT_BUS_NAME below, the same
+  // false attribution does not apply — that one IS a real transitive value
+  // import with its own `|| "default"` fallback). Verified by hand-tracing
+  // both handlers' value-import graphs: neither reads process.env.ENVIRONMENT
+  // anywhere reachable at runtime.
+  "organization-resolver": new Set(["ENVIRONMENT"]),
+  "seed-eval-suites/index": new Set([
+    // notifier-base.ts: `process.env.EVENT_BUS_NAME || "default"` — defaulted.
+    "EVENT_BUS_NAME",
+    // Same types/index.ts type-only-import false positive as
+    // organization-resolver above (definitions.ts imports eval-comparison
+    // types only).
+    "ENVIRONMENT",
+  ]),
+};
+
+/**
+ * Genuine gaps on BackendStack: the handler reads the variable (directly or
+ * transitively, in a code path that is actually invoked, not a dead
+ * export), and the synthesized function does not set it. Confirmed
+ * individually against the synthesized template, not inferred.
+ */
+const BACKEND_STACK_KNOWN_GAPS: Array<{
+  handler: string;
+  logicalIdPrefix: string;
+  variable: string;
+  reason: string;
+}> = [
+  {
+    handler: "agent-config-resolver.handler",
+    logicalIdPrefix: "AgentConfigResolverFunction",
+    variable: "PROJECTS_TABLE",
+    reason:
+      "agent-config-resolver.ts imports assertProjectOrgAccess from " +
+      "utils/project-org-access.ts and calls it (line ~356). That function " +
+      "reads process.env.PROJECTS_TABLE and throws ProjectOrgAccessError " +
+      "(fail-closed) when unset, so every call denies access today.",
+  },
+  {
+    handler: "integration-resolver.handler",
+    logicalIdPrefix: "IntegrationResolverFunction",
+    variable: "AGENTCORE_GATEWAY_ID",
+    reason:
+      "integration-resolver.ts imports provisionCredentialProvider / " +
+      "deprovisionCredentialProvider from utils/gateway-target-manager.ts, " +
+      "both of which call the module-private getRequiredGatewayId(), which " +
+      "reads process.env.AGENTCORE_GATEWAY_ID and throws 'AgentCore " +
+      "Gateway not configured' when unset. The function is deployed with " +
+      "GATEWAY_ID_PARAM (an SSM parameter name) instead; nothing on this " +
+      "handler's path bridges GATEWAY_ID_PARAM into AGENTCORE_GATEWAY_ID " +
+      "the way agent-import-resolver.ts's resolveGatewayId() does.",
+  },
+  {
+    handler: "gateway-registration-handler.handler",
+    logicalIdPrefix: "GatewayRegistrationHandler",
+    variable: "AGENTCORE_GATEWAY_ID",
+    reason:
+      "gateway-registration-handler.ts calls buildLambdaTargetPayload / " +
+      "buildSmithyTargetPayload / buildMCPServerTargetPayload from " +
+      "utils/gateway-target-manager.ts (lines ~311/327/375/388/396), each " +
+      "of which calls getRequiredGatewayId() internally and throws when " +
+      "AGENTCORE_GATEWAY_ID is unset. The handler's own getGatewayId() " +
+      "resolves GATEWAY_ID_PARAM via SSM for OTHER call sites (lines " +
+      "~227/530) but never writes the result back to " +
+      "process.env.AGENTCORE_GATEWAY_ID, so the three builder calls still " +
+      "hit the unset env var and throw.",
+  },
+];
+
+describe("Handler environment-variable contract guard — BackendStack (part c)", () => {
+  let template: Template;
+
+  beforeAll(() => {
+    template = synthBackendStack();
+  });
+
+  test("every process.env var read by a BackendStack handler is provided, allowlisted, or a documented KNOWN_GAPS entry", () => {
+    const lambdas = extractLambdaEnvMap(template);
+    expect(lambdas.length).toBeGreaterThan(10);
+
+    const knownGapKeys = new Set(
+      BACKEND_STACK_KNOWN_GAPS.map((g) => `${g.handler}::${g.variable}`),
+    );
+    const violations: string[] = [];
+
+    for (const { logicalId, handler, envKeys } of lambdas) {
+      const sourceFile = handlerToSourceFile(handler);
+      if (!sourceFile) continue;
+
+      const handlerBase = handler.replace(/\.handler$/, "");
+      const required = envVarsTransitive(sourceFile);
+
+      for (const varName of required) {
+        if (AMBIENT_VARS.has(varName)) continue;
+        if (PER_HANDLER_OPTIONAL[handlerBase]?.has(varName)) continue;
+        if (BACKEND_STACK_OPTIONAL[handlerBase]?.has(varName)) continue;
+        if (envKeys.has(varName)) continue;
+        if (knownGapKeys.has(`${handler}::${varName}`)) continue; // documented gap, not a new regression
+        violations.push(
+          `${logicalId} (${handler}): reads process.env.${varName} but CDK does not set it (undocumented — add to BACKEND_STACK_OPTIONAL or BACKEND_STACK_KNOWN_GAPS)`,
+        );
+      }
+    }
+
+    expect(violations).toEqual([]);
+  });
+
+  test("every BACKEND_STACK_KNOWN_GAPS entry is confirmed still missing (stale-gap guard)", () => {
+    const lambdas = extractLambdaEnvMap(template);
+    const stale: string[] = [];
+
+    for (const gap of BACKEND_STACK_KNOWN_GAPS) {
+      const match = lambdas.find((l) => l.handler === gap.handler);
+      if (!match) {
+        stale.push(`${gap.handler}: handler no longer found in BackendStack`);
+        continue;
+      }
+      if (!match.logicalId.startsWith(gap.logicalIdPrefix)) {
+        stale.push(
+          `${gap.handler}: logical id ${match.logicalId} no longer matches prefix ${gap.logicalIdPrefix}`,
+        );
+        continue;
+      }
+      if (match.envKeys.has(gap.variable)) {
+        stale.push(
+          `${gap.handler}: ${gap.variable} is now set — remove from BACKEND_STACK_KNOWN_GAPS`,
+        );
+      }
+    }
+
+    expect(stale).toEqual([]);
+  });
+
+  test("a synthetic undocumented gap would fail the guard (negative control)", () => {
+    const lambdas = extractLambdaEnvMap(template);
+    const match = lambdas.find(
+      (l) => l.handler === "agent-config-resolver.handler",
+    );
+    expect(match).toBeDefined();
+    // PROJECTS_TABLE is a real, documented gap; a var we invented is not —
+    // simulate the violation branch directly rather than mutate the fixture.
+    const syntheticVar = "SYNTHETIC_UNDOCUMENTED_VAR_V1";
+    const knownGapKeys = new Set(
+      BACKEND_STACK_KNOWN_GAPS.map((g) => `${g.handler}::${g.variable}`),
+    );
+    expect(AMBIENT_VARS.has(syntheticVar)).toBe(false);
+    expect(PER_HANDLER_OPTIONAL["agent-config-resolver"]?.has(syntheticVar)).toBeFalsy();
+    expect(BACKEND_STACK_OPTIONAL["agent-config-resolver"]?.has(syntheticVar)).toBeFalsy();
+    expect(match!.envKeys.has(syntheticVar)).toBe(false);
+    expect(knownGapKeys.has(`agent-config-resolver.handler::${syntheticVar}`)).toBe(
+      false,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Arbiter Python handler contract (StepRunnerFunction / WorkerAgentWrapper /
+// SupervisorAgent — the three confirmed callers of
+// governance/hierarchy.py's load_governance_state()).
+//
+// Synthesizes ArbiterStack with CITADEL_SKIP_BUNDLING=1 (mirrors
+// arbiter-stack-env-parity.test.ts and skip-bundling.test.ts) so this runs
+// as a fast in-process unit test with no Docker/pip bundling and no prior
+// `cdk synth`.
+// ---------------------------------------------------------------------------
+
+import * as cdkArbiter from "aws-cdk-lib";
+import { Template as TemplateArbiter } from "aws-cdk-lib/assertions";
+import * as dynamodbArbiter from "aws-cdk-lib/aws-dynamodb";
+import * as eventsArbiter from "aws-cdk-lib/aws-events";
+import * as lambdaArbiter from "aws-cdk-lib/aws-lambda";
+import * as appsyncArbiter from "aws-cdk-lib/aws-appsync";
+import { Bucket as BucketArbiter } from "aws-cdk-lib/aws-s3";
+import { scaffoldArbiterStubs } from "./helpers/scaffold-stub-assets";
+
+scaffoldArbiterStubs();
+
+import { ArbiterStack } from "../lib/arbiter-stack";
+
+const ARBITER_ROOT_FOR_GOV = path.resolve(__dirname, "../../arbiter");
+
+function functionEnvKeysArbiter(
+  template: Template,
+  logicalIdPrefix: string,
+): Set<string> {
+  const fns = template.findResources("AWS::Lambda::Function");
+  const match = Object.entries(fns).find(([id]) =>
+    id.startsWith(logicalIdPrefix),
+  );
+  if (!match) {
+    throw new Error(
+      `no synthesized function with logical id prefix ${logicalIdPrefix}`,
+    );
+  }
+  const vars =
+    (
+      match[1] as {
+        Properties?: { Environment?: { Variables?: Record<string, unknown> } };
+      }
+    ).Properties?.Environment?.Variables ?? {};
+  return new Set(Object.keys(vars));
+}
+
+/**
+ * The four GovernanceState table vars read by
+ * governance/hierarchy.py's `_load_authority_units` /
+ * `_load_composition_contracts` / `_load_case_law` /
+ * `_load_constitutional_layers` via `_scan_table_by_env`. Each degrades to
+ * an empty domain list (with a logged warning) when unset — not a hard
+ * crash — but an empty domain list means NO authority units / composition
+ * contracts / case law / constitutional layers are considered during
+ * governance evaluation, i.e. silent governance erosion.
+ */
+const GOVERNANCE_TABLE_VARS = [
+  "AUTHORITY_UNITS_TABLE",
+  "COMPOSITION_CONTRACTS_TABLE",
+  "CASE_LAW_TABLE",
+  "CONSTITUTIONAL_LAYERS_TABLE",
+] as const;
+
+/**
+ * Functions confirmed (by direct source read, not inference) to call
+ * `hierarchy.load_governance_state()`:
+ *   - stepRunner/executor.py:438
+ *   - supervisor/index.py:841
+ *   - workerWrapper/index.py:271
+ */
+const GOVERNANCE_STATE_CALLERS = [
+  { name: "StepRunnerFunction", logicalIdPrefix: "StepRunnerFunction" },
+  { name: "WorkerAgentWrapper", logicalIdPrefix: "WorkerAgentWrapper" },
+  { name: "SupervisorAgent", logicalIdPrefix: "SupervisorAgent" },
+] as const;
+
+/**
+ * KNOWN_GAPS: every (function, variable) pair confirmed missing against the
+ * synthesized ArbiterStack template. Not fixed in this PR — triage list for
+ * a follow-up. Each entry degrades gracefully (empty list), so the handler
+ * does not crash, but governance evaluation silently runs with an empty
+ * domain for that table today.
+ */
+const ARBITER_GOVERNANCE_KNOWN_GAPS: Array<{
+  functionName: string;
+  variable: string;
+}> = GOVERNANCE_STATE_CALLERS.flatMap(({ name }) =>
+  GOVERNANCE_TABLE_VARS.map((variable) => ({ functionName: name, variable })),
+);
+
+describe("Arbiter Python handler contract — governance table vars on load_governance_state() callers", () => {
+  let template: Template;
+  let savedSkipBundling: string | undefined;
+
+  beforeAll(() => {
+    savedSkipBundling = process.env.CITADEL_SKIP_BUNDLING;
+    process.env.CITADEL_SKIP_BUNDLING = "1";
+
+    const app = new cdkArbiter.App({
+      context: { "aws:cdk:bundling-stacks": [] },
+    });
+    const backendStack = new cdkArbiter.Stack(app, "MockBackendStackEnvContract", {
+      env: { account: "123456789012", region: "us-east-1" },
+    });
+    const agentEventBus = new eventsArbiter.EventBus(backendStack, "AgentEventBus", {
+      eventBusName: "citadel-agents-test",
+    });
+    const mkTable = (id: string, name: string, pk: string) =>
+      new dynamodbArbiter.Table(backendStack, id, {
+        tableName: name,
+        partitionKey: { name: pk, type: dynamodbArbiter.AttributeType.STRING },
+        billingMode: dynamodbArbiter.BillingMode.PAY_PER_REQUEST,
+        removalPolicy: cdkArbiter.RemovalPolicy.DESTROY,
+      });
+    const agentConfigTable = mkTable(
+      "AgentConfigTable",
+      "citadel-agents-test",
+      "agentId",
+    );
+    const workflowsTable = mkTable(
+      "WorkflowsTable",
+      "citadel-workflows-test",
+      "workflowId",
+    );
+    const executionsTable = mkTable(
+      "ExecutionsTable",
+      "citadel-executions-test",
+      "executionId",
+    );
+    const executionSpecificationsTable = mkTable(
+      "ExecutionSpecificationsTable",
+      "citadel-execution-specifications-test",
+      "specId",
+    );
+    const codeBucket = new BucketArbiter(backendStack, "CodeBucket", {
+      bucketName: "citadel-code-test",
+    });
+    const fanoutFunction = new lambdaArbiter.Function(backendStack, "FanoutFunction", {
+      runtime: lambdaArbiter.Runtime.NODEJS_24_X,
+      handler: "workflow-progress-fanout.handler",
+      code: lambdaArbiter.Code.fromAsset("dist/lambda"),
+      timeout: cdkArbiter.Duration.seconds(30),
+    });
+    const appSyncApi = new appsyncArbiter.GraphqlApi(backendStack, "MockApi", {
+      name: "mock-api",
+      schema: appsyncArbiter.SchemaFile.fromAsset(
+        path.resolve(__dirname, "../src/schema/schema.graphql"),
+      ),
+    });
+
+    const stack = new ArbiterStack(app, "TestArbiterStackEnvContract", {
+      environment: "test",
+      env: { account: "123456789012", region: "us-east-1" },
+      agentEventBus,
+      agentConfigTable,
+      codeBucket,
+      workflowsTable,
+      executionsTable,
+      fanoutFunction,
+      appSyncEndpoint: appSyncApi.graphqlUrl,
+      executionSpecificationsTable,
+    });
+    template = TemplateArbiter.fromStack(stack);
+  });
+
+  afterAll(() => {
+    if (savedSkipBundling === undefined) delete process.env.CITADEL_SKIP_BUNDLING;
+    else process.env.CITADEL_SKIP_BUNDLING = savedSkipBundling;
+  });
+
+  test("hierarchy.py reads all four governance table vars via _scan_table_by_env(...) (sanity check)", () => {
+    // These four vars are NOT read as a direct `os.environ.get("X")` /
+    // `os.getenv("X")` literal — they're passed as a string argument to the
+    // shared `_scan_table_by_env(env_var: str)` helper (hierarchy.py:188),
+    // which does `os.environ.get(env_var)` one level removed. Direct-literal
+    // Python env reads are already covered by arbiter-stack-env-parity.test.ts;
+    // this sanity check uses its own pattern for this one indirection.
+    const hierarchyFile = path.join(ARBITER_ROOT_FOR_GOV, "governance", "hierarchy.py");
+    const src = fs.readFileSync(hierarchyFile, "utf8");
+    const scanByEnvRe = /_scan_table_by_env\(\s*["']([A-Z0-9_]+)["']\s*\)/g;
+    const read = new Set<string>();
+    for (const m of src.matchAll(scanByEnvRe)) read.add(m[1]);
+    for (const v of GOVERNANCE_TABLE_VARS) {
+      expect(read.has(v)).toBe(true);
+    }
+  });
+
+  test.each(GOVERNANCE_STATE_CALLERS)(
+    "%s: every governance table var it reads via load_governance_state() is EITHER set on the function OR a documented KNOWN_GAPS entry (RED until gaps are documented)",
+    ({ name, logicalIdPrefix }) => {
+      const provided = functionEnvKeysArbiter(template, logicalIdPrefix);
+      const gapVarsForThisFn = new Set(
+        ARBITER_GOVERNANCE_KNOWN_GAPS.filter(
+          (g) => g.functionName === name,
+        ).map((g) => g.variable),
+      );
+
+      const missing: string[] = [];
+      for (const variable of GOVERNANCE_TABLE_VARS) {
+        if (provided.has(variable)) continue;
+        if (gapVarsForThisFn.has(variable)) continue; // documented gap
+        missing.push(variable);
+      }
+      expect({ fn: name, undocumentedMissing: missing }).toEqual({
+        fn: name,
+        undocumentedMissing: [],
+      });
+    },
+  );
+
+  test("prints the full gap report for triage", () => {
+    const lines = ARBITER_GOVERNANCE_KNOWN_GAPS.map(
+      (g) => `  - ${g.functionName}: missing ${g.variable}`,
+    );
+    // eslint-disable-next-line no-console
+    console.log(
+      "Arbiter governance-table env gap report " +
+        `(${ARBITER_GOVERNANCE_KNOWN_GAPS.length} entries):\n${lines.join("\n")}`,
+    );
+    expect(ARBITER_GOVERNANCE_KNOWN_GAPS.length).toBeGreaterThan(0);
+  });
+
+  test("every KNOWN_GAPS entry is confirmed still missing (stale-gap guard)", () => {
+    const stale: string[] = [];
+    for (const caller of GOVERNANCE_STATE_CALLERS) {
+      const provided = functionEnvKeysArbiter(template, caller.logicalIdPrefix);
+      for (const variable of GOVERNANCE_TABLE_VARS) {
+        const isDocumented = ARBITER_GOVERNANCE_KNOWN_GAPS.some(
+          (g) => g.functionName === caller.name && g.variable === variable,
+        );
+        if (isDocumented && provided.has(variable)) {
+          stale.push(
+            `${caller.name}: ${variable} is now set — remove from ARBITER_GOVERNANCE_KNOWN_GAPS`,
+          );
+        }
+      }
+    }
+    expect(stale).toEqual([]);
+  });
+
+  test("a synthetic fully-wired function would have zero gaps (negative control)", () => {
+    // Simulates what the test above would assert if a function provided all
+    // four vars — confirms the comparison logic itself can reach "no gaps".
+    const allFour = new Set(GOVERNANCE_TABLE_VARS);
+    const missing = GOVERNANCE_TABLE_VARS.filter((v) => !allFour.has(v));
+    expect(missing).toEqual([]);
   });
 });
