@@ -86,7 +86,7 @@ export class S3Adapter implements ConnectorAdapter {
     _accountId: string,
     _region: string,
   ): RequiredPolicies {
-    const bucketName = config.bucketName as string | undefined;
+    const bucketName = (config.bucketName as string | undefined)?.toLowerCase();
     const bucketArn = `arn:aws:s3:::${bucketName}`;
 
     return {
@@ -102,7 +102,6 @@ export class S3Adapter implements ConnectorAdapter {
             "s3:PutBucketVersioning",
             "s3:DeleteBucket",
             "s3:ListBucket",
-            "s3:ListObjectsV2",
             "s3:GetBucketTagging",
             "s3:PutBucketTagging",
           ],
@@ -119,7 +118,6 @@ export class S3Adapter implements ConnectorAdapter {
           actions: [
             "s3:HeadBucket",
             "s3:ListBucket",
-            "s3:ListObjectsV2",
             "s3:GetObject",
             "s3:PutObject",
             "s3:GetBucketTagging",
@@ -141,8 +139,13 @@ export class S3Adapter implements ConnectorAdapter {
       throw new ProvisioningError("Missing required config field: bucketName");
     }
 
-    // S3 bucket names must be lowercase, 3-63 chars, no uppercase
+    // S3 bucket names must be lowercase, 3-63 chars, no uppercase.
+    // Persist the normalised value onto config so every later read
+    // (requiredPolicies, the record the resolver stores) uses the exact
+    // name that was actually created instead of re-deriving it from the
+    // raw (possibly mixed-case) input.
     const bucketName = rawBucketName.toLowerCase();
+    config.bucketName = bucketName;
 
     // Citadel-managed buckets must use the platform prefix
     if (!bucketName.startsWith(CITADEL_BUCKET_PREFIX)) {

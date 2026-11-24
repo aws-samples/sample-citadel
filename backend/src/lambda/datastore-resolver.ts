@@ -372,6 +372,56 @@ async function retryOptimisticLock<T>(
 }
 
 /**
+ * Error names AWS SDK v3 clients use for an IAM AccessDenied rejection.
+ * Any other error name/shape is NOT retried — it propagates immediately.
+ */
+const ACCESS_DENIED_ERROR_NAMES = new Set([
+  "AccessDenied",
+  "AccessDeniedException",
+]);
+
+function isAccessDeniedError(error: unknown): boolean {
+  return error instanceof Error && ACCESS_DENIED_ERROR_NAMES.has(error.name);
+}
+
+/**
+ * Bounded retry for the FIRST scoped call made with a freshly assumed IAM
+ * role (connect or getMetrics in createDataStore). Replaces a fixed 10s
+ * sleep after `PolicyManager.ensureRole`: IAM is eventually consistent, so
+ * the inline policy may not have propagated yet, producing an AccessDenied
+ * on the very first scoped call. Retries ONLY on AccessDenied/
+ * AccessDeniedException, up to `maxAttempts` total attempts, with the given
+ * backoff schedule (ms) between attempts. Any other error is rethrown
+ * immediately without retrying. Total worst-case wait (2+4+6+8 = 20s) stays
+ * well inside the 10-minute resolver timeout (backend-stack.ts
+ * DataStoreResolverFunction).
+ */
+async function retryFirstScopedCallOnAccessDenied<T>(
+  fn: () => Promise<T>,
+  options: { maxAttempts?: number; backoffMs?: number[] } = {},
+): Promise<T> {
+  const maxAttempts = options.maxAttempts ?? 5;
+  const backoffMs = options.backoffMs ?? [2000, 4000, 6000, 8000];
+
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (!isAccessDeniedError(error)) {
+        throw error;
+      }
+      lastError = error;
+      if (attempt < maxAttempts) {
+        const delay = backoffMs[attempt - 1] ?? backoffMs[backoffMs.length - 1];
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+  }
+  throw lastError;
+}
+
+/**
  * H4: dispatch credentials for an adapter call. Replaces the
  * `scopedCredentials || credentials` idiom, which fell back to the
  * CALLER-SUPPLIED `credentials` (parsed from `input.credentials`, an
@@ -881,8 +931,6 @@ async function createDataStore(
           );
         }
       }
-      // IAM is eventually consistent — wait for role/policy propagation
-      await new Promise((resolve) => setTimeout(resolve, 10000));
       const creds = await policyManager.assumeScopedRole(
         dataStoreId,
         accountId,
@@ -893,11 +941,21 @@ async function createDataStore(
       scopedCredentials = creds;
     }
 
+    // The first scoped call made with the freshly assumed role may hit
+    // AccessDenied while the inline policy propagates — retry it (bounded)
+    // instead of sleeping a fixed 10s beforehand. Only the FIRST call is
+    // wrapped: whichever of connect/getMetrics runs first for this
+    // provisionMode. A non-AccessDenied error is not retried.
+    let firstScopedCallDone = false;
+
     if (input.provisionMode !== "CREATE_NEW") {
-      await adapter.connect(
-        config,
-        dispatchCreds(adapter, scopedCredentials, credentials),
+      await retryFirstScopedCallOnAccessDenied(() =>
+        adapter.connect(
+          config,
+          dispatchCreds(adapter, scopedCredentials, credentials),
+        ),
       );
+      firstScopedCallDone = true;
     }
 
     // Get metrics (use scoped credentials if available). A metrics
@@ -909,11 +967,19 @@ async function createDataStore(
     // still wrong".
     let metricsErrorMessage: string | undefined;
     try {
-      const metrics = await adapter.getMetrics!(
-        config,
-        resourceArn,
-        dispatchCreds(adapter, scopedCredentials, credentials),
-      );
+      const metrics = firstScopedCallDone
+        ? await adapter.getMetrics!(
+            config,
+            resourceArn,
+            dispatchCreds(adapter, scopedCredentials, credentials),
+          )
+        : await retryFirstScopedCallOnAccessDenied(() =>
+            adapter.getMetrics!(
+              config,
+              resourceArn,
+              dispatchCreds(adapter, scopedCredentials, credentials),
+            ),
+          );
       size = size || metrics.size;
       records = records ?? metrics.records;
     } catch (metricsError) {
