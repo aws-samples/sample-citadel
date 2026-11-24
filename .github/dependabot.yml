@@ -126,6 +126,12 @@ updates:
         update-types:
           - minor
           - patch
+    ignore:
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
+      # @types/node major tracks Node LTS; runtime is pinned to Node 24
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
     labels:
       - dependencies
 
