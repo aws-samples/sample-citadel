@@ -33,7 +33,6 @@
     "smoke": "node scripts/smoke/deployed-smoke.mjs"
   },
   "dependencies": {
-    "@aws-cdk/aws-bedrock-agentcore-alpha": "^2.273.0-alpha.0",
     "@aws-cdk/aws-lambda-python-alpha": "^2.273.0-alpha.0",
     "@aws-crypto/sha256-js": "^5.2.0",
     "@aws-sdk/client-agent-registry": "^3.1175.0",
