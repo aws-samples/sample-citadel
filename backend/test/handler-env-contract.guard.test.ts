@@ -94,8 +94,12 @@ const PER_HANDLER_OPTIONAL: Record<string, Set<string>> = {
 // Source analysis helpers
 // ---------------------------------------------------------------------------
 
-/** Regex: process.env.SOME_VAR */
-const PROCESS_ENV_RE = /process\.env\.([A-Z][A-Z0-9_]*)/g;
+/**
+ * Regex: process.env.SOME_VAR (dot access) OR process.env["SOME_VAR"] /
+ * process.env['SOME_VAR'] (bracket access, either quote style).
+ */
+const PROCESS_ENV_RE =
+  /process\.env\.([A-Z][A-Z0-9_]*)|process\.env\[\s*["']([A-Z][A-Z0-9_]*)["']\s*\]/g;
 
 /** Regex: local relative imports (from "./foo" or from "../bar/baz"). */
 const LOCAL_IMPORT_RE =
@@ -103,6 +107,8 @@ const LOCAL_IMPORT_RE =
 
 /**
  * Given an absolute TS file path, return all process.env var names referenced.
+ * Matches both dot access (process.env.X) and bracket access
+ * (process.env["X"] / process.env['X']).
  */
 function envVarsInFile(absPath: string): Set<string> {
   const names = new Set<string>();
@@ -113,7 +119,7 @@ function envVarsInFile(absPath: string): Set<string> {
     return names;
   }
   for (const m of src.matchAll(PROCESS_ENV_RE)) {
-    names.add(m[1]);
+    names.add((m[1] ?? m[2]) as string);
   }
   return names;
 }
@@ -345,6 +351,51 @@ function extractLambdaEnvMap(template: Template): Array<{
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+describe("PROCESS_ENV_RE / envVarsInFile — dot and bracket access forms", () => {
+  // PROCESS_ENV_RE carries the `g` flag for matchAll() use in envVarsInFile;
+  // RegExp#test() on a global regex advances lastIndex as a side effect, so
+  // each assertion below resets lastIndex first to avoid state leaking
+  // between calls (a global regex's .test() is not idempotent otherwise).
+  beforeEach(() => {
+    PROCESS_ENV_RE.lastIndex = 0;
+  });
+
+  test("matches dot-access form process.env.FOO_BAR", () => {
+    expect(PROCESS_ENV_RE.test("const x = process.env.FOO_BAR;")).toBe(true);
+  });
+
+  test("matches double-quoted bracket-access form process.env[\"FOO_BAR\"]", () => {
+    expect(PROCESS_ENV_RE.test('const x = process.env["FOO_BAR"];')).toBe(true);
+  });
+
+  test("matches single-quoted bracket-access form process.env['FOO_BAR']", () => {
+    expect(PROCESS_ENV_RE.test("const x = process.env['FOO_BAR'];")).toBe(true);
+  });
+
+  test("does NOT match a near-miss that is not a process.env read (negative control)", () => {
+    expect(PROCESS_ENV_RE.test("const x = someOtherObject.env.FOO_BAR;")).toBe(
+      false,
+    );
+  });
+
+  test("envVarsInFile extracts names from both dot and bracket forms in one file", () => {
+    const tmpFile = path.join(
+      fs.mkdtempSync(path.join(require("os").tmpdir(), "kiro-env-re-")),
+      "sample.ts",
+    );
+    fs.writeFileSync(
+      tmpFile,
+      [
+        'const a = process.env.ALPHA_VAR;',
+        'const b = process.env["BRAVO_VAR"];',
+        "const c = process.env['CHARLIE_VAR'];",
+      ].join("\n"),
+    );
+    const found = envVarsInFile(tmpFile);
+    expect(found).toEqual(new Set(["ALPHA_VAR", "BRAVO_VAR", "CHARLIE_VAR"]));
+  });
+});
 
 describe("Handler environment-variable contract guard (Node.js Lambdas)", () => {
   let template: Template;
@@ -829,28 +880,7 @@ scaffoldArbiterStubs();
 
 import { ArbiterStack } from "../lib/arbiter-stack";
 
-/** Python os.environ[...] / os.environ.get(...) / os.getenv(...) readers. */
-const PY_ENV_READ_PATTERNS = [
-  /os\.environ\.get\(\s*['"]([A-Z0-9_]+)['"]/g,
-  /os\.getenv\(\s*['"]([A-Z0-9_]+)['"]/g,
-  /os\.environ\[\s*['"]([A-Z0-9_]+)['"]\s*\]/g,
-];
-
 const ARBITER_ROOT_FOR_GOV = path.resolve(__dirname, "../../arbiter");
-
-function envVarsReadInPyFile(absPath: string): Set<string> {
-  const names = new Set<string>();
-  let src: string;
-  try {
-    src = fs.readFileSync(absPath, "utf8");
-  } catch {
-    return names;
-  }
-  for (const re of PY_ENV_READ_PATTERNS) {
-    for (const m of src.matchAll(re)) names.add(m[1]);
-  }
-  return names;
-}
 
 function functionEnvKeysArbiter(
   template: Template,
@@ -1002,10 +1032,9 @@ describe("Arbiter Python handler contract — governance table vars on load_gove
     // These four vars are NOT read as a direct `os.environ.get("X")` /
     // `os.getenv("X")` literal — they're passed as a string argument to the
     // shared `_scan_table_by_env(env_var: str)` helper (hierarchy.py:188),
-    // which does `os.environ.get(env_var)` one level removed. The generic
-    // PY_ENV_READ_PATTERNS above (mirroring arbiter-stack-env-parity.test.ts's
-    // ENV_READ_PATTERNS) intentionally only matches the direct-literal form,
-    // so this sanity check uses its own pattern for this one indirection.
+    // which does `os.environ.get(env_var)` one level removed. Direct-literal
+    // Python env reads are already covered by arbiter-stack-env-parity.test.ts;
+    // this sanity check uses its own pattern for this one indirection.
     const hierarchyFile = path.join(ARBITER_ROOT_FOR_GOV, "governance", "hierarchy.py");
     const src = fs.readFileSync(hierarchyFile, "utf8");
     const scanByEnvRe = /_scan_table_by_env\(\s*["']([A-Z0-9_]+)["']\s*\)/g;
