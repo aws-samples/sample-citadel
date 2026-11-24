@@ -873,6 +873,13 @@ if (app.node.tryGetContext("nag") !== "false") {
       servicesStack,
       "ToolRunResolverFunction/ServiceRole/DefaultPolicy/Resource",
     ],
+    // Production evidence 2026-11-20T05:27Z: residual Resource::* is only
+    // the un-scopable cloudwatch:PutMetricData (registry-stack.ts),
+    // namespace-conditioned to "RegistrySync" in code so the SyncFailure
+    // alarm metric can land instead of logging AccessDenied. The
+    // agent-registry grant is resource-scoped separately (registryArnPaths
+    // below).
+    [registryStack, "RegistrySyncLambda/ServiceRole/DefaultPolicy/Resource"],
   ];
   for (const [stack, path] of resourceStarPaths) {
     NagSuppressions.addResourceSuppressionsByPath(

@@ -721,6 +721,106 @@ describe("RegistryStack — backend-stack-split phase 2", () => {
     });
   });
 
+  describe("RegistrySyncLambda SyncFailure metric emission (cloudwatch:PutMetricData AccessDenied)", () => {
+    // Local copy of the role-statement lookup used by the sibling
+    // "tools-table grant parity" describe block above — kept local rather
+    // than hoisted because that block defines it as a closure over its own
+    // `template` capture point in the same outer scope; duplicating the
+    // ~20-line lookup here avoids reaching into another describe block's
+    // internals.
+    function registrySyncRoleStatementsForMetricTest(): CfnIamStatement[] {
+      const fns = template.findResources("AWS::Lambda::Function", {
+        Properties: { Handler: "registry-sync.handler" },
+      });
+      const fnLogicalId = Object.keys(fns)[0];
+      expect(fnLogicalId).toBeDefined();
+      const roleRef = (fns[fnLogicalId] as CfnLambdaFunctionResource).Properties
+        ?.Role?.["Fn::GetAtt"]?.[0];
+      expect(roleRef).toBeDefined();
+
+      const policies = template.findResources("AWS::IAM::Policy");
+      const statements: CfnIamStatement[] = [];
+      for (const policy of Object.values(policies)) {
+        const props = (policy as CfnIamPolicyResource).Properties;
+        const roles = props?.Roles ?? [];
+        const attachedToSyncRole = roles.some((r) => r.Ref === roleRef);
+        if (!attachedToSyncRole) continue;
+        const stmts = props?.PolicyDocument?.Statement;
+        if (Array.isArray(stmts)) statements.push(...stmts);
+      }
+      return statements;
+    }
+
+    function putMetricDataStatements(): CfnIamStatement[] {
+      return registrySyncRoleStatementsForMetricTest().filter((stmt) => {
+        const actions = Array.isArray(stmt.Action)
+          ? stmt.Action
+          : [stmt.Action];
+        return actions.includes("cloudwatch:PutMetricData");
+      });
+    }
+
+    test("sync role has a cloudwatch:PutMetricData statement", () => {
+      expect(putMetricDataStatements().length).toBeGreaterThan(0);
+    });
+
+    test("the PutMetricData statement's cloudwatch:namespace condition covers every PutMetricDataCommand namespace used in registry-sync.ts, and no other namespace", () => {
+      const handlerSrc = readFileSync(
+        path.join(__dirname, "..", "src", "lambda", "registry-sync.ts"),
+        "utf-8",
+      );
+      // registry-sync.ts has more than one PutMetricDataCommand call site
+      // (emitNameKeyCollisionMetric uses "Citadel/RegistrySync";
+      // emitSyncFailureMetric — the one in the production evidence — uses
+      // "RegistrySync"). Collect every Namespace literal passed to
+      // PutMetricDataCommand across the whole file so this assertion
+      // can't silently miss a future call site.
+      const handlerNamespaces = new Set<string>();
+      const namespaceRe =
+        /new PutMetricDataCommand\(\s*\{\s*Namespace:\s*"([^"]+)"/g;
+      let match: RegExpExecArray | null;
+      while ((match = namespaceRe.exec(handlerSrc)) !== null) {
+        handlerNamespaces.add(match[1]);
+      }
+      expect(handlerNamespaces.size).toBeGreaterThan(0);
+
+      const statements = putMetricDataStatements();
+      expect(statements.length).toBeGreaterThan(0);
+
+      const conditionNamespaces = new Set<string>();
+      for (const stmt of statements) {
+        const raw = (
+          stmt.Condition as
+            { StringEquals?: Record<string, unknown> } | undefined
+        )?.StringEquals?.["cloudwatch:namespace"];
+        const values = Array.isArray(raw)
+          ? raw
+          : raw !== undefined
+            ? [raw]
+            : [];
+        for (const v of values) conditionNamespaces.add(v as string);
+      }
+
+      // Every namespace the handler actually writes must be allowed.
+      for (const ns of handlerNamespaces) {
+        expect(conditionNamespaces.has(ns)).toBe(true);
+      }
+      // The condition must not allow any namespace the handler doesn't use.
+      expect(conditionNamespaces.size).toBe(handlerNamespaces.size);
+      for (const ns of conditionNamespaces) {
+        expect(handlerNamespaces.has(ns)).toBe(true);
+      }
+    });
+
+    test("the PutMetricData statement uses Resource '*' (PutMetricData is not resource-scopable)", () => {
+      const statements = putMetricDataStatements();
+      expect(statements.length).toBeGreaterThan(0);
+      for (const stmt of statements) {
+        expect(stmt.Resource).toBe("*");
+      }
+    });
+  });
+
   test("no IAM policy statement grants a full-service wildcard action (iam:*, dynamodb:*, or s3:*)", () => {
     const policies = template.findResources("AWS::IAM::Policy");
     for (const policy of Object.values(policies)) {
