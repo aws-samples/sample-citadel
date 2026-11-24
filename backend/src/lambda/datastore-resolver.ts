@@ -900,7 +900,14 @@ async function createDataStore(
       );
     }
 
-    // Get metrics (use scoped credentials if available)
+    // Get metrics (use scoped credentials if available). A metrics
+    // failure (e.g. AccessDenied listing bucket objects) does not block
+    // the connection — the resource itself is reachable — but it MUST be
+    // visible on the record via errorMessage instead of a silent warning
+    // behind status=CONNECTED, so an operator can tell "connected, no
+    // metrics" apart from "connected, metrics unknown because IAM is
+    // still wrong".
+    let metricsErrorMessage: string | undefined;
     try {
       const metrics = await adapter.getMetrics!(
         config,
@@ -911,6 +918,10 @@ async function createDataStore(
       records = records ?? metrics.records;
     } catch (metricsError) {
       console.warn("Failed to get metrics (non-fatal):", metricsError);
+      metricsErrorMessage =
+        metricsError instanceof Error
+          ? `Metrics unavailable: ${metricsError.message}`
+          : "Metrics unavailable: unknown error";
     }
 
     // Update final state
@@ -918,8 +929,9 @@ async function createDataStore(
       new UpdateCommand({
         TableName: DATASTORES_TABLE,
         Key: { dataStoreId },
-        UpdateExpression:
-          "SET #status = :status, updatedAt = :now, resourceArn = :arn, secretArn = :secret, #size = :size, records = :records",
+        UpdateExpression: metricsErrorMessage
+          ? "SET #status = :status, updatedAt = :now, resourceArn = :arn, secretArn = :secret, #size = :size, records = :records, errorMessage = :errorMessage"
+          : "SET #status = :status, updatedAt = :now, resourceArn = :arn, secretArn = :secret, #size = :size, records = :records REMOVE errorMessage",
         ExpressionAttributeNames: {
           "#status": "status",
           "#size": "size",
@@ -931,6 +943,9 @@ async function createDataStore(
           ":secret": secretArn || null,
           ":size": size || null,
           ":records": records ?? null,
+          ...(metricsErrorMessage
+            ? { ":errorMessage": metricsErrorMessage }
+            : {}),
         },
         ReturnValues: "ALL_NEW",
       }),
