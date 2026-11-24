@@ -77,6 +77,20 @@ def publish_usage_event(session_id: str, usage_record: dict, run_id: str | None 
     must never break a conversation turn, so failures are logged and
     swallowed, never raised.
 
+    The usage fields are nested under ``usage`` (fix for the
+    citadel-cost-ledger-dev zero-usage-rows defect: the writer Lambda reads
+    ``detail.usage``, and a flat spread produced a Detail shape it never
+    matched). The fields are ALSO kept spread at the top level for backward
+    compatibility with any other consumer that already reads them flat.
+
+    ``orgId`` is stamped from the request-scoped identity the runtime
+    already binds per request (``request_context.bind_request``, which
+    itself fails closed if the organisation is absent — see
+    ``request_context.MissingOrgError``). Reading it is best-effort and
+    never gates the publish: outside a bound request (as in this file's own
+    unit tests, which call this function directly with no request bound)
+    ``orgId`` is omitted entirely rather than invented.
+
     ``run_id`` is additive, optional, and nullable (Pass 1, decision
     f1cbd5ef): included as ``runId`` only when a non-empty string is
     supplied. A missing/None/malformed value never gates this publish and
@@ -90,7 +104,20 @@ def publish_usage_event(session_id: str, usage_record: dict, run_id: str | None 
             'projectId': session_id,
             'correlationId': str(uuid4()),
             **usage_record,
+            'usage': dict(usage_record),
         }
+        # Best-effort orgId: the runtime binds this once per request
+        # (agent-message-handler derives it from the project record and
+        # fails the request closed if absent — see request_context.py).
+        # Never invent a value; absence here means no request is bound
+        # (e.g. a direct unit-test call), not that the org is unknown for
+        # a real invocation.
+        try:
+            org_id = request_context.current_session().org_id
+            if org_id:
+                detail['orgId'] = org_id
+        except RuntimeError:
+            pass
         # Additive, optional traceContext (design §"Carried-context format
         # decision" / H6): merged in only when an active X-Ray (sub)segment
         # exists. No-op-safe otherwise (property-tested), so existing

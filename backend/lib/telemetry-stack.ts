@@ -480,6 +480,7 @@ export class TelemetryStack extends cdk.Stack {
         actions: [
           "dynamodb:Query",
           "dynamodb:Scan",
+          "dynamodb:GetItem",
           "dynamodb:PutItem",
           "dynamodb:UpdateItem",
         ],

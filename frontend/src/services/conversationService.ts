@@ -123,23 +123,36 @@ export async function getConversationHistoryForProject(
   }
 }
 
-// Track initialized subscriptions by projectId
+// Track initialized subscriptions by composite subscription key
+// (`${EVENT_TYPES.CONVERSATION}:${projectId}`), never by projectId alone —
+// this is what makes initializeConversationSubscription's "already
+// initialized" short-circuit project-specific instead of colliding with
+// whichever project's CONVERSATION subscription happened to still be
+// registered in subscriptionManager (e.g. within the 1s cleanup debounce,
+// or held open by another component such as ProjectWorkspace).
 const initializedProjects = new Set<string>();
+
+function conversationSubscriptionKey(projectId: string): string {
+  return `${EVENT_TYPES.CONVERSATION}:${projectId}`;
+}
 
 /**
  * Initialize the backend subscription for conversation events for a specific project
  * This is called once per projectId on the first local subscription
  */
 function initializeConversationSubscription(projectId: string): void {
-  if (initializedProjects.has(projectId)) {
+  const subscriptionKey = conversationSubscriptionKey(projectId);
+
+  if (initializedProjects.has(subscriptionKey)) {
     return;
   }
 
-  // Initialize backend subscription through SubscriptionManager
-  // Note: We use a composite event type that includes the projectId
-  // to ensure separate backend connections per project
+  // Initialize backend subscription through SubscriptionManager, keyed by
+  // the composite subscriptionKey so each project gets its OWN backend
+  // connection even though every project shares EVENT_TYPES.CONVERSATION
+  // for local event-bus emission/filtering.
   const eventType = EVENT_TYPES.CONVERSATION;
-  
+
   subscriptionManager.initializeSubscription(
     eventType,
     onConversationMessage,
@@ -150,10 +163,15 @@ function initializeConversationSubscription(projectId: string): void {
         return data.onConversationMessage;
       }
       return null;
-    }
+    },
+    subscriptionKey
   );
 
-  initializedProjects.add(projectId);
+  // Only mark this project initialized now that initializeSubscription has
+  // been called for its OWN composite key — a prior bug marked a project
+  // initialized unconditionally, even on a path that never created (or
+  // reused) a subscription scoped to that project.
+  initializedProjects.add(subscriptionKey);
 }
 
 /**
@@ -172,11 +190,13 @@ export function subscribeToConversation(
   onMessage: (message: ConversationMessage) => void,
   _onError?: (error: unknown) => void
 ): () => void {
+  const subscriptionKey = conversationSubscriptionKey(projectId);
+
   // Initialize backend subscription if needed
   initializeConversationSubscription(projectId);
 
-  // Add local subscriber to reference count
-  subscriptionManager.addLocalSubscriber(EVENT_TYPES.CONVERSATION);
+  // Add local subscriber to reference count, scoped to this project's key
+  subscriptionManager.addLocalSubscriber(EVENT_TYPES.CONVERSATION, subscriptionKey);
 
   // Subscribe to local event bus with projectId filtering
   // Since conversation events are project-specific, we need to filter
@@ -199,7 +219,7 @@ export function subscribeToConversation(
 
     // Remove local subscriber from reference count
     // This will trigger backend cleanup if no subscribers remain
-    subscriptionManager.removeLocalSubscriber(EVENT_TYPES.CONVERSATION);
+    subscriptionManager.removeLocalSubscriber(EVENT_TYPES.CONVERSATION, subscriptionKey);
   };
 }
 
