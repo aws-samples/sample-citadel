@@ -73,6 +73,13 @@ jest.mock('../../components/ui/banner', () => ({
   Banner: () => <div data-testid="banner" />,
 }));
 
+// ── Mock DlqAlarmsWidget: requires OrganizationProvider context not present
+// in this test's render tree, and is unrelated to the lazy-loading behavior
+// under test here. ─────────────────────────────────────────────────────────
+jest.mock('../../components/DlqAlarmsWidget', () => ({
+  DlqAlarmsWidget: () => <div data-testid="dlq-alarms-widget" />,
+}));
+
 // ── Mock useDashboardData so loading=false and counts populate metric cards ──
 jest.mock('../../hooks/useDashboardData', () => ({
   useDashboardData: jest.fn(),
