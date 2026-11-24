@@ -227,6 +227,15 @@ export class TelemetryStack extends cdk.Stack {
    * attach the AppSync Lambda data source + resolvers cross-stack.
    */
   public readonly evalSamplingConfigResolverFunction: lambda.Function;
+  /**
+   * Board task 4cc234d1 — admin-only, read-only Query.getPlatformAlarms.
+   * Surfaces the state of this stack's OWN citadel-* CloudWatch alarms
+   * (DlqNotEmptyAlarm and sibling SLO alarms) — creates no new alarms.
+   * Deterministic functionName so BackendStack's addPlatformHealthResolver
+   * can import it by ARN (same cross-stack pattern as
+   * evalSamplingConfigResolverFunction above, decision d36fbbf7).
+   */
+  public readonly platformHealthResolverFunction: lambda.Function;
 
   constructor(scope: Construct, id: string, props: TelemetryStackProps) {
     super(scope, id, props);
@@ -480,6 +489,7 @@ export class TelemetryStack extends cdk.Stack {
         actions: [
           "dynamodb:Query",
           "dynamodb:Scan",
+          "dynamodb:GetItem",
           "dynamodb:PutItem",
           "dynamodb:UpdateItem",
         ],
@@ -2370,6 +2380,59 @@ export class TelemetryStack extends cdk.Stack {
     );
     costDriftHighAlarm.addAlarmAction(
       new cw_actions.SnsAction(props.alarmTopic),
+    );
+
+    // Platform Health Resolver — admin-only, read-only
+    // Query.getPlatformAlarms (board task 4cc234d1, moved here from
+    // BackendStack to satisfy the backend-stack-split removals-only
+    // policy). Surfaces the state of THIS stack's own citadel-* CloudWatch
+    // alarms (DlqNotEmptyAlarm, DlqNotEmptySharedAlarm, and sibling SLO
+    // alarms declared above) — this construct creates no new alarms. A
+    // dedicated small Lambda rather than an existing resolver, for the
+    // same least-privilege rationale as the original BackendStack
+    // construct. AppSync data-source/resolver attachment happens in
+    // BackendStack (addPlatformHealthResolver, called from bin/app.ts)
+    // because BackendStack — not this stack — holds the real appSyncApi
+    // L2 construct, same cross-stack pattern as
+    // evalSamplingConfigResolverFunction above (decision d36fbbf7).
+    this.platformHealthResolverFunction = new lambda.Function(
+      this,
+      "PlatformHealthResolverFunction",
+      {
+        functionName: `citadel-platform-health-resolver-${props.environment}`,
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
+        handler: "platform-health-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          ALARM_NAME_PREFIX: "citadel-",
+          ENVIRONMENT: props.environment,
+        },
+        timeout: cdk.Duration.seconds(30),
+        logGroup: new logs.LogGroup(
+          this,
+          "PlatformHealthResolverFunctionLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
+      },
+    );
+    // cloudwatch:DescribeAlarms does not support resource-level permissions
+    // (IAM: CloudWatch alarms are not ARN-scopable for Describe* actions).
+    // Resource "*" is the only valid grant; reads are further narrowed at
+    // call time by AlarmNamePrefix=ALARM_NAME_PREFIX ("citadel-"). No
+    // sqs:GetQueueAttributes grant is added — queueDepth/queueName are
+    // derived from the alarm's own Dimensions/StateReasonData, keeping this
+    // function's role to a single read action. Identical IAM statement to
+    // the original BackendStack construct (board task 4cc234d1).
+    this.platformHealthResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["cloudwatch:DescribeAlarms"],
+        resources: ["*"],
+      }),
     );
   }
 }

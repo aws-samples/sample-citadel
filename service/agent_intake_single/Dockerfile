@@ -10,7 +10,7 @@
 # the identical linux/amd64 manifest digest via `docker manifest inspect`,
 # so pinning the tag below is equivalent to pinning the digest at the time
 # this was written.
-FROM python:3.15-slim-bookworm
+FROM python:3.15-slim-bookworm@sha256:96599df822d0e1c6bb700014a05c7f3c8cabc6e0f7ff3c4f9f69cee033b4b5d9
 COPY --from=ghcr.io/astral-sh/uv:0.13.9@sha256:49fe3c925d4b7a84ba2ef19883307bba2bbcf929a22040afb46f2dd092d13aeb /uv /uvx /bin/
 
 WORKDIR /app

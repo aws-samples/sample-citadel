@@ -155,6 +155,13 @@ type Query {
   listPendingApprovals(limit: Int, nextToken: String): PendingApprovalConnection!
   # CIT-042: Organisation tag policy. Authenticated org member or admin.
   getTagPolicy(orgId: ID!): TagPolicy
+  # Admin-only platform alarm state (DLQ + SLO CloudWatch alarms). Read-only,
+  # account-wide (no org scoping — platform signal, not tenant data). Gated
+  # both by the directive (defence-in-depth) and, authoritatively, by
+  # isAdminFromEvent in platform-health-resolver.ts — a non-admin caller
+  # gets a thrown error, never an empty/filtered list.
+  getPlatformAlarms: PlatformAlarmsResult!
+    @aws_cognito_user_pools(cognito_groups: ["admin"])
 }
 
 type PendingApproval {
@@ -3735,4 +3742,31 @@ input UpdateTagPolicyInput {
   orgId: ID!
   requiredKeys: [TagPolicyRuleInput!]!
   expectedVersion: Int
+}
+
+# Platform alarm state (getPlatformAlarms). Read-only surface over the
+# existing CloudWatch alarms declared in telemetry-stack.ts (DlqNotEmptyAlarm,
+# DlqNotEmptySharedAlarm, and sibling SLO alarms) — no new alarms are created.
+# queueName/queueDepth are derived from the alarm's own dimensions and
+# StateReasonData, not a live SQS read (no sqs:GetQueueAttributes grant).
+enum AlarmState {
+  OK
+  ALARM
+  INSUFFICIENT_DATA
+}
+
+type PlatformAlarm {
+  alarmName: String!
+  state: AlarmState!
+  reason: String
+  stateUpdatedAt: AWSDateTime
+  category: String
+  queueName: String
+  queueDepth: Int
+  redriveHint: String
+}
+
+type PlatformAlarmsResult {
+  configured: Boolean!
+  alarms: [PlatformAlarm!]!
 }

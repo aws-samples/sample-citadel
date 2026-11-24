@@ -60,6 +60,10 @@ const CROSS_STACK_IMPORTS: ReadonlyMap<string, string> = new Map([
   // telemetry-stack.ts (handler: "eval-sampling-config-resolver.handler"),
   // ARN threaded through bin/app.ts (DECISION d36fbbf7).
   ["resolverFn", "eval-sampling-config-resolver"],
+  // backend-stack.ts addPlatformHealthResolver(): Lambda created in
+  // telemetry-stack.ts (handler: "platform-health-resolver.handler"), ARN
+  // threaded through bin/app.ts (board task 4cc234d1).
+  ["platformHealthResolverFn", "platform-health-resolver"],
 ]);
 
 /**
@@ -142,6 +146,18 @@ const DOCUMENTED_EXEMPTIONS: ReadonlyMap<string, string> = new Map([
       "legs (assertRowOrg gate for both, BackendSubscriptionError, " +
       "unknown-field rejection) and CDK wiring in backend-stack.ts are " +
       "pinned in backend-subscription-authorizer.test.ts.",
+  ],
+  [
+    "platform-health-resolver",
+    "Single-handler Lambda (no dispatch switch to enumerate): " +
+      "Query.getPlatformAlarms is the only field, admin-gated via " +
+      "isAdminFromEvent (authoritative — the schema's " +
+      '@aws_cognito_user_pools(cognito_groups:["admin"]) directive is ' +
+      "defence-in-depth only) and fail-closed to a thrown PermissionError " +
+      "for non-admins, never an empty/filtered list. Covered directly by " +
+      "platform-health-resolver.test.ts (admin gate, configured:false on " +
+      "missing prefix/denied DescribeAlarms, state/queueDepth mapping) and " +
+      "by platform-alarms.test.ts (CDK wiring + IAM grant).",
   ],
 ]);
 

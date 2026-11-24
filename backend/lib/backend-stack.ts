@@ -2626,6 +2626,14 @@ export class BackendStack extends cdk.Stack {
     // the rule was left in BackendStack during phase 1 specifically because
     // its target function moves here, in phase 2.
 
+    // NOTE: PlatformHealthResolverFunction (+ its log group, IAM grant,
+    // PlatformHealthLambdaDataSource, and GetPlatformAlarmsResolver) moved
+    // to CitadelTelemetryStack (board task 4cc234d1) — TelemetryStack
+    // already owns the citadel-* alarms this resolver reads, and the
+    // backend stage is removals-only by policy. Wired cross-stack via
+    // addPlatformHealthResolver() below, same deterministic-ARN pattern as
+    // addEvalSamplingConfigResolvers (decision d36fbbf7).
+
     // Data sources
     // NOTE: ProjectsDataSource/ConversationsDataSource/AgentStatusDataSource
     // (unused DynamoDB data sources — no resolver ever attached) and
@@ -2661,6 +2669,7 @@ export class BackendStack extends cdk.Stack {
       "OrganizationLambdaDataSource",
       organizationResolverFunction,
     );
+    // NOTE: PlatformHealthLambdaDataSource moved to CitadelTelemetryStack.
     // NOTE: ChatterLambdaDataSource moved to CitadelProjectsStack.
     const integrationLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "IntegrationLambdaDataSource",
@@ -2987,6 +2996,9 @@ export class BackendStack extends cdk.Stack {
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });
+
+    // NOTE: GetPlatformAlarmsResolver moved to CitadelTelemetryStack (wired
+    // cross-stack via addPlatformHealthResolver() below).
 
     // NOTE: PublishChatterResolver moved to CitadelProjectsStack.
 
@@ -4615,6 +4627,38 @@ export class BackendStack extends cdk.Stack {
     dataSource.createResolver("ListEvalProdSamplesResolver", {
       typeName: "Query",
       fieldName: "listEvalProdSamples",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+  }
+
+  /**
+   * Board task 4cc234d1 — cross-stack AppSync wiring for
+   * platform-health-resolver.ts's Lambda, which lives in
+   * CitadelTelemetryStack (TelemetryStack already owns the citadel-*
+   * alarms this resolver reads; the backend stage is removals-only by
+   * policy). Same fromFunctionAttributes+addLambdaDataSource pattern as
+   * addEvalSamplingConfigResolvers above. Called from app.ts after both
+   * BackendStack and TelemetryStack are instantiated.
+   */
+  public addPlatformHealthResolver(resolverFunctionArn: string): void {
+    const platformHealthResolverFn = lambda.Function.fromFunctionAttributes(
+      this,
+      "ImportedPlatformHealthResolver",
+      {
+        functionArn: resolverFunctionArn,
+        sameEnvironment: true,
+      },
+    );
+
+    const dataSource = this.appSyncApi.addLambdaDataSource(
+      "PlatformHealthLambdaDataSource",
+      platformHealthResolverFn,
+    );
+
+    dataSource.createResolver("GetPlatformAlarmsResolver", {
+      typeName: "Query",
+      fieldName: "getPlatformAlarms",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });

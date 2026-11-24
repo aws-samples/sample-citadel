@@ -59,8 +59,15 @@ export function useSubscriptionHealth(
     setStatus('reconnecting');
     timerRef.current = setTimeout(async () => {
       try {
-        // Force cleanup and re-initialise the backend subscription.
-        subscriptionManager.cleanupSubscription(EVENT_TYPES.CONVERSATION);
+        // Force cleanup and re-initialise the backend subscription, scoped
+        // to THIS project's composite key (conversationService keys
+        // CONVERSATION subscriptions by `${EVENT_TYPES.CONVERSATION}:${projectId}`,
+        // never by the bare event type, so other projects' subscriptions
+        // are unaffected).
+        subscriptionManager.cleanupSubscription(
+          EVENT_TYPES.CONVERSATION,
+          `${EVENT_TYPES.CONVERSATION}:${projectId}`,
+        );
         // Remove the project from the initialised set so subscribeToConversation re-inits.
         // The set is module-private; the simplest way is to call cleanupSubscription which
         // already marks the subscription inactive — the next subscribeToConversation call

@@ -47,6 +47,10 @@ import {
   PutMetricDataCommand,
 } from "@aws-sdk/client-cloudwatch";
 import { parsePublicHttpsUrl, UrlRejectedError } from "../utils/url-safety";
+import {
+  isReservedWorkflowNodeId,
+  RESERVED_WORKFLOW_NODE_IDS,
+} from "../utils/validation";
 
 /** Trust-path summary persisted into governanceAttestation by the activation path. */
 interface TrustPathAttestationSummary {
@@ -779,6 +783,12 @@ export async function createAgentConfigRegistry(
   }
 
   const parsedConfig = parseConfigOrThrow(input.config) ?? {};
+  const parsedConfigName = parsedConfig.name as string | undefined;
+  if (isReservedWorkflowNodeId(parsedConfigName)) {
+    throw new Error(
+      `ValidationError: Agent name "${parsedConfigName}" is reserved and cannot be used: it collides with a top-level attribute of the workflow tracking record used during orchestration (${RESERVED_WORKFLOW_NODE_IDS.join(", ")}). Choose a different name.`,
+    );
+  }
   const config: string =
     typeof input.config === "string"
       ? input.config
@@ -1041,6 +1051,12 @@ export async function updateAgentConfigRegistry(
     }
   } else if (newConfig && typeof newConfig === "object") {
     parsedNewConfig = newConfig;
+  }
+  const parsedNewConfigName = parsedNewConfig.name as string | undefined;
+  if (isReservedWorkflowNodeId(parsedNewConfigName)) {
+    throw new Error(
+      `ValidationError: Agent name "${parsedNewConfigName}" is reserved and cannot be used: it collides with a top-level attribute of the workflow tracking record used during orchestration (${RESERVED_WORKFLOW_NODE_IDS.join(", ")}). Choose a different name.`,
+    );
   }
 
   // Preserve existing orgId; fall back to caller for legacy records.
@@ -1972,6 +1988,12 @@ async function createAgentConfig(
 ): Promise<AgentConfig> {
   const now = new Date().toISOString();
   const config = parseConfigOrThrow(input.config) ?? {};
+  const configName = config.name as string | undefined;
+  if (isReservedWorkflowNodeId(configName)) {
+    throw new Error(
+      `ValidationError: Agent name "${configName}" is reserved and cannot be used: it collides with a top-level attribute of the workflow tracking record used during orchestration (${RESERVED_WORKFLOW_NODE_IDS.join(", ")}). Choose a different name.`,
+    );
+  }
 
   const agentConfig: AgentConfig = {
     agentId: input.agentId,
@@ -2017,6 +2039,13 @@ async function updateAgentConfig(
   const newConfig = input.config
     ? parseConfigOrThrow(input.config)
     : existingConfig;
+  const newConfigName = (newConfig as Record<string, unknown> | undefined)
+    ?.name as string | undefined;
+  if (isReservedWorkflowNodeId(newConfigName)) {
+    throw new Error(
+      `ValidationError: Agent name "${newConfigName}" is reserved and cannot be used: it collides with a top-level attribute of the workflow tracking record used during orchestration (${RESERVED_WORKFLOW_NODE_IDS.join(", ")}). Choose a different name.`,
+    );
+  }
 
   // D-02: Optimistic locking — increment version and use conditional write
   const currentVersion =

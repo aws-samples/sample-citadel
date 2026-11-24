@@ -21,8 +21,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-import approval_requests
-from approval_requests import (
+from common import approval_requests
+from common.approval_requests import (
     AWAITING_APPROVAL,
     build_approval_request,
     is_awaiting,

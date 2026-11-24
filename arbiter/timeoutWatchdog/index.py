@@ -28,15 +28,17 @@ from datetime import datetime, timezone, timedelta
 import boto3
 from botocore.exceptions import ClientError
 
-# Ensure stepRunner is importable (executor, approval_requests live there).
+# Ensure stepRunner is importable (executor.py lives there); approval_requests
+# is a shared common/ (layer) module, resolved via the layer on sys.path.
 _step_runner_dir = os.path.join(os.path.dirname(__file__), '..', 'stepRunner')
 if _step_runner_dir not in sys.path:
     sys.path.insert(0, _step_runner_dir)
 
 import common.tracing as tracing  # noqa: E402  — activate tracing before clients
+from common.dynamo_pagination import collect_items  # noqa: E402
 
 import executor  # noqa: E402
-from approval_requests import AWAITING_APPROVAL  # noqa: E402
+from common.approval_requests import AWAITING_APPROVAL  # noqa: E402
 
 EXECUTIONS_TABLE = os.environ.get('EXECUTIONS_TABLE', 'citadel-executions-dev')
 DEFAULT_APPROVAL_TIMEOUT_SECONDS = 86_400  # 24 hours
@@ -85,8 +87,12 @@ def _scan_awaiting_or_running() -> list:
     Running executions may contain individual parked nodes that need timeout
     checks (the execution-level status only flips to ``awaiting_approval``
     when ALL non-terminal nodes are settled).
+
+    Pagination uses the shared ``common.dynamo_pagination.collect_items``
+    helper (finding: PR213 CI hang) instead of a bare ``if not last_key:
+    break`` loop, which never terminates against a unit test's MagicMock
+    table stub. Behaviour for callers is unchanged.
     """
-    items: list = []
     scan_kwargs = {
         'FilterExpression': '#s IN (:running, :awaiting)',
         'ExpressionAttributeNames': {'#s': 'status'},
@@ -95,14 +101,7 @@ def _scan_awaiting_or_running() -> list:
             ':awaiting': AWAITING_APPROVAL,
         },
     }
-    while True:
-        resp = _executions_table.scan(**scan_kwargs)
-        items.extend(resp.get('Items', []))
-        last_key = resp.get('LastEvaluatedKey')
-        if not last_key:
-            break
-        scan_kwargs['ExclusiveStartKey'] = last_key
-    return items
+    return collect_items(_executions_table.scan, **scan_kwargs)
 
 
 def _find_expired_approval_requests(

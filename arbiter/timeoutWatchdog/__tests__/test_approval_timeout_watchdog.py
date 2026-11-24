@@ -18,7 +18,7 @@ import sys
 import os
 from datetime import datetime, timezone, timedelta
 
-# stepRunner must be importable (executor, approval_requests live there)
+# stepRunner must be importable (executor.py lives there); approval_requests
 _step_runner = os.path.join(os.path.dirname(__file__), '..', '..', 'stepRunner')
 if _step_runner not in sys.path:
     sys.path.insert(0, _step_runner)

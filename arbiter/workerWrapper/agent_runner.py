@@ -14,6 +14,8 @@ import logging
 import sys
 import os
 import time
+import inspect
+import traceback
 import importlib.util
 
 logger = logging.getLogger(__name__)
@@ -101,6 +103,145 @@ _CAPTURED_USAGE: list = []
 # node result. Kept in lockstep with the mirror constant + defensive fallback
 # in index.py (a parity test pins them equal).
 AGENT_EXECUTION_FAILURE_MARKER = 'agentExecutionFailed'
+
+
+class ContractError(TypeError):
+    """Raised when an agent's entry function's signature is incompatible
+    with the (event) / (event, context) invocation contract (fix/worker-
+    agent-entrypoint-contract).
+
+    Mirrors the structural failure-marker contract used elsewhere in this
+    module: callers classify on the exception CLASS name ('ContractError'),
+    so the message only needs to be informative for humans/logs.
+    """
+
+
+def _resolve_entry_function(module, candidate_names=('handler', 'main')):
+    """Resolve the agent module's entry function and its name.
+
+    Tries ``candidate_names`` in order (``handler`` first, matching the
+    documented fabricator convention; ``main`` as a fallback for agents that
+    expose a zero/one-arg ``main`` instead). Returns ``(name, function)``.
+    Raises ``AttributeError`` if neither candidate exists, preserving the
+    pre-fix behaviour of letting a missing entrypoint surface as a plain
+    AttributeError from ``module.handler``.
+    """
+    for name in candidate_names:
+        func = getattr(module, name, None)
+        if func is not None:
+            return name, func
+    raise AttributeError(
+        f"agent module exposes none of the expected entry functions "
+        f"{candidate_names!r}"
+    )
+
+
+def _invoke_entry_function(func, request: dict):
+    """Invoke ``func`` according to its ``inspect.signature`` (fix/worker-
+    agent-entrypoint-contract).
+
+    Dispatch rules, in order:
+      * NAMED-PARAMETER-BY-KEY (the existing, documented fabricator
+        convention — e.g. ``def handler(email_address: str)`` or
+        ``def handler(x: int)``, where ``request`` carries that same key,
+        e.g. ``{'email_address': ...}`` / ``{'x': 4}``, built from the
+        agent's own ``llm_tool_schema``; see ``arbiter/fabricator/index.py``
+        templates/examples). If ``inspect.Signature.bind(**request)``
+        succeeds — i.e. every one of ``request``'s keys binds to a declared
+        parameter (named positional-or-keyword, keyword-only, or **kwargs) —
+        call ``func(**request)``. This is tried FIRST and takes priority
+        over the positional rules below, because it is the pre-existing
+        behaviour (``func(**request)`` unconditionally) for every shape it
+        covers, and the positional rules must not regress it.
+      * 0 required/positional params           -> ``func()``
+      * 1 positional-or-keyword/positional param -> ``func(request)`` (the
+        whole event/request dict as a single positional argument — this is
+        the fix for the original defect: the prior unconditional
+        ``module.handler(**request)`` raised
+        ``TypeError: handler() missing 1 required positional argument: 'event'``
+        whenever the single param's name did not match any key in
+        ``request``, e.g. a workflow-style ``def handler(event)`` invoked
+        with ``{'foo': 'bar'}`` — a shape the bind-by-key rule above
+        necessarily cannot satisfy, since no key is named ``event``).
+      * 2 such params                           -> ``func(request, None)``
+        (event, context) — context has no real value available at this
+        invocation seam, so ``None`` is passed; agents that only read
+        attributes off it defensively are unaffected, agents that require a
+        populated context are out of scope for this fix.
+      * more than 2, or a signature using ``*args`` -> ``func(request, None)``
+        if the signature can accept two positional arguments (i.e. accepts
+        ``*args`` or has no more than 2 required params beyond what ``*args``
+        covers); otherwise raise ``ContractError`` naming the signature.
+
+    See the bind-by-key tests (named param preserved, event-shaped single
+    param still receives the whole dict, two-param gets (event, None)) in
+    ``test_agent_entrypoint_contract.py``.
+    """
+    sig = inspect.signature(func)
+    params = list(sig.parameters.values())
+
+    positional_kinds = (
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+    )
+    has_var_positional = any(
+        p.kind == inspect.Parameter.VAR_POSITIONAL for p in params
+    )
+    positional_params = [p for p in params if p.kind in positional_kinds]
+
+    if not params:
+        return func()
+
+    # Named-parameter-by-key fabricator convention, tried FIRST (see
+    # docstring): if every key in `request` binds to a declared parameter of
+    # `func` (named positional-or-keyword/keyword-only param, or absorbed by
+    # **kwargs), call func(**request). inspect.Signature.bind raises
+    # TypeError on any unresolvable/extra/missing-required argument, so this
+    # is a precise "would **request actually satisfy this signature by
+    # name" check rather than a guess. This preserves BOTH the pre-existing
+    # **kwargs-only convention (`def handler(**kwargs)`) AND single/multi
+    # named-scalar handlers (`def handler(x: int)`, `def handler(email_address: str)`)
+    # exactly as they behaved under the old unconditional func(**request).
+    try:
+        sig.bind(**request)
+    except TypeError:
+        pass
+    else:
+        return func(**request)
+
+    if len(positional_params) == 1 and not has_var_positional:
+        return func(request)
+
+    if len(positional_params) == 2 and not has_var_positional:
+        return func(request, None)
+
+    if has_var_positional:
+        # A signature using *args (e.g. def handler(*args)) can accept the
+        # 2-arg (event, context) call; bind() still enforces any OTHER
+        # required named param, so this can legitimately raise TypeError,
+        # which is reported as a ContractError naming the signature rather
+        # than a bare TypeError.
+        try:
+            return func(request, None)
+        except TypeError as exc:
+            raise ContractError(
+                f"entry function signature {sig} is incompatible with the "
+                f"(event) / (event, context) invocation contract: {exc}"
+            ) from exc
+
+    # 3+ positional params with no *args (e.g. def handler(event, context,
+    # extra) — or extra=None with a default; a default does not change the
+    # ARITY the caller must satisfy under this 2-arg contract, so it is
+    # NOT special-cased and still raises here) cannot be satisfied by the
+    # (event) / (event, context) contract. Clear ContractError naming the
+    # signature, per the task's explicit requirement, rather than a bare
+    # TypeError from an under-supplied positional call.
+    raise ContractError(
+        f"entry function signature {sig} is incompatible with the "
+        "(event) / (event, context) invocation contract: expected 0, 1, or "
+        "2 positional parameters (or *args)."
+    )
+
 
 
 def build_failure_envelope(exc: BaseException, usage: list) -> dict:
@@ -939,8 +1080,14 @@ def main():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
+    entry_name, entry_func = _resolve_entry_function(module)
     try:
-        response = module.handler(**request)
+        entry_signature = str(inspect.signature(entry_func))
+    except (TypeError, ValueError):
+        entry_signature = '<unresolvable signature>'
+
+    try:
+        response = _invoke_entry_function(entry_func, request)
     except Exception as exc:  # noqa: BLE001 — mapped to a failure envelope below
         # DEFECT FIX (finding 56d763d4): an agent-body exception must NOT be
         # laundered into a successful ``response`` string. The old code did
@@ -949,6 +1096,27 @@ def main():
         # ``node.completed`` and the execution finalized ``completed`` —
         # starving retry.py's failure-class logic, the durable-execution
         # watchdog, and every downstream pass/fail consumer.
+        #
+        # fix/worker-agent-entrypoint-contract: an invocation error (the
+        # agent's entry function raising, including a ContractError from an
+        # incompatible signature) is logged with the FULL traceback plus the
+        # resolved entrypoint name and its signature, alongside the existing
+        # message — the original defect report showed only a single
+        # structured log line and no traceback, which made a signature
+        # mismatch like `handler() missing 1 required positional argument:
+        # 'event'` nearly impossible to diagnose from logs alone. Nothing
+        # already-sanitised elsewhere is sanitised further here.
+        logger.error(
+            'agent entry function invocation failed: %s: %s',
+            type(exc).__name__, exc,
+            extra={
+                'traceback': ''.join(traceback.format_exception(
+                    type(exc), exc, exc.__traceback__,
+                )),
+                'entrypoint': entry_name,
+                'signature': entry_signature,
+            },
+        )
         #
         # Instead emit a FAILURE-MARKED envelope carrying the exception CLASS
         # (for retry classification) + the diagnostic message, and exit

@@ -439,6 +439,37 @@ describe("TelemetryStack — query/budgets Lambda IAM split", () => {
     void queryRolePolicies;
   });
 
+  test("cost reconciler Lambda's IAM role grants dynamodb:GetItem on the ledger table (watermark read)", () => {
+    const { template, stack } = buildStack();
+    const ledgerTableArnToken = stack.resolve(stack.costLedgerTable.tableArn);
+
+    const allPolicies = template.findResources("AWS::IAM::Policy");
+    let sawGetItemOnLedger = false;
+    for (const [, resource] of Object.entries(allPolicies)) {
+      const roles = resource.Properties?.Roles ?? [];
+      const roleRefs = JSON.stringify(roles);
+      if (!roleRefs.includes("CostLedgerReconciler")) continue;
+      const statements = resource.Properties?.PolicyDocument?.Statement ?? [];
+      for (const stmt of statements) {
+        const actions = Array.isArray(stmt.Action)
+          ? stmt.Action
+          : [stmt.Action];
+        if (!actions.includes("dynamodb:GetItem")) continue;
+        const resources = Array.isArray(stmt.Resource)
+          ? stmt.Resource
+          : [stmt.Resource];
+        const resourcesStr = JSON.stringify(resources);
+        if (
+          resourcesStr.includes(JSON.stringify(ledgerTableArnToken)) ||
+          resourcesStr === JSON.stringify([ledgerTableArnToken])
+        ) {
+          sawGetItemOnLedger = true;
+        }
+      }
+    }
+    expect(sawGetItemOnLedger).toBe(true);
+  });
+
   test("budgets Lambda's IAM role grants both dynamodb:Query and dynamodb:UpdateItem", () => {
     const { template } = buildStack();
 

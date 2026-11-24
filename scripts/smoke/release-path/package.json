@@ -9,13 +9,13 @@
     "smoke": "ts-node run-smoke.ts"
   },
   "dependencies": {
-    "@aws-sdk/client-cognito-identity-provider": "3.1106.0",
-    "@aws-sdk/client-dynamodb": "3.1106.0",
-    "@aws-sdk/lib-dynamodb": "3.1106.0"
+    "@aws-sdk/client-cognito-identity-provider": "3.1174.0",
+    "@aws-sdk/client-dynamodb": "3.1174.0",
+    "@aws-sdk/lib-dynamodb": "3.1174.0"
   },
   "devDependencies": {
-    "@types/node": "20.19.43",
+    "@types/node": "24.19.2",
     "ts-node": "10.9.2",
-    "typescript": "5.9.3"
+    "typescript": "7.0.2"
   }
 }

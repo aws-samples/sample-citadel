@@ -372,6 +372,56 @@ async function retryOptimisticLock<T>(
 }
 
 /**
+ * Error names AWS SDK v3 clients use for an IAM AccessDenied rejection.
+ * Any other error name/shape is NOT retried — it propagates immediately.
+ */
+const ACCESS_DENIED_ERROR_NAMES = new Set([
+  "AccessDenied",
+  "AccessDeniedException",
+]);
+
+function isAccessDeniedError(error: unknown): boolean {
+  return error instanceof Error && ACCESS_DENIED_ERROR_NAMES.has(error.name);
+}
+
+/**
+ * Bounded retry for the FIRST scoped call made with a freshly assumed IAM
+ * role (connect or getMetrics in createDataStore). Replaces a fixed 10s
+ * sleep after `PolicyManager.ensureRole`: IAM is eventually consistent, so
+ * the inline policy may not have propagated yet, producing an AccessDenied
+ * on the very first scoped call. Retries ONLY on AccessDenied/
+ * AccessDeniedException, up to `maxAttempts` total attempts, with the given
+ * backoff schedule (ms) between attempts. Any other error is rethrown
+ * immediately without retrying. Total worst-case wait (2+4+6+8 = 20s) stays
+ * well inside the 10-minute resolver timeout (backend-stack.ts
+ * DataStoreResolverFunction).
+ */
+async function retryFirstScopedCallOnAccessDenied<T>(
+  fn: () => Promise<T>,
+  options: { maxAttempts?: number; backoffMs?: number[] } = {},
+): Promise<T> {
+  const maxAttempts = options.maxAttempts ?? 5;
+  const backoffMs = options.backoffMs ?? [2000, 4000, 6000, 8000];
+
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (!isAccessDeniedError(error)) {
+        throw error;
+      }
+      lastError = error;
+      if (attempt < maxAttempts) {
+        const delay = backoffMs[attempt - 1] ?? backoffMs[backoffMs.length - 1];
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+  }
+  throw lastError;
+}
+
+/**
  * H4: dispatch credentials for an adapter call. Replaces the
  * `scopedCredentials || credentials` idiom, which fell back to the
  * CALLER-SUPPLIED `credentials` (parsed from `input.credentials`, an
@@ -784,14 +834,56 @@ async function createDataStore(
     let records: number | undefined;
 
     if (input.provisionMode === "CREATE_NEW") {
-      // Continuum C3 (PR-2): provisioning runs on the PLATFORM path BEFORE
-      // any tenant-assumable role exists. Adapters build their own
-      // ambient/named platform clients internally for provision/deprovision
+      // Fix (post-#634 regression): most adapters
       // (DynamoDBAdapter.platformProvisionClient, RdsAdapter.platformProvisionClient,
-      // KnowledgeBaseAdapter.platformBedrockProvisionClient) — no scoped
-      // credentials are passed here, and none are needed: `ensureRole` for
-      // this data store has not run yet, so there is no role to assume.
-      //
+      // KnowledgeBaseAdapter.platformBedrockProvisionClient) provision via an
+      // AMBIENT platform client and never call requireScopedCredentials in
+      // provision() — for those, no scoped role is needed yet. S3Adapter is
+      // the exception: S3Adapter.provision routes through makeClient() ->
+      // requireScopedCredentials() like every other S3 data-plane call, so
+      // passing `undefined` credentials (as this code used to, unconditionally)
+      // throws CredentialMissingError for every CREATE_NEW S3 datastore. Fix:
+      // gate on the adapter's own explicit opt-in flag
+      // (`provisionRequiresScopedCredentials`), not on whether its `provision`
+      // policy set happens to be non-empty — DynamoDB/RDS/KnowledgeBase all
+      // declare non-empty `provision` policies for IAM purposes even though
+      // their provision() call never consumes scoped credentials, so gating
+      // on policy-set size wrongly roped the platform-path adapters into this
+      // branch too. When the flag is set, assume a role scoped to the
+      // adapter's provision policies BEFORE calling provision(), and pass the
+      // resulting scoped credentials through unmodified (no spread) so the
+      // retry wrapper never strips the scoped marker. Adapters that don't set
+      // the flag are unaffected — `provisionScopedCredentials` stays
+      // undefined and provision() is called exactly as before.
+      let provisionScopedCredentials: ScopedCredentials | undefined;
+      if (adapter.provisionRequiresScopedCredentials === true) {
+        const provisionPolicies = adapter.requiredPolicies(
+          config,
+          accountId,
+          region,
+        ).provision;
+        const provisionCrossAccountExternalId =
+          await validateCrossAccountConfig(config, policyManager);
+        await policyManager.ensureRole(
+          dataStoreId,
+          provisionPolicies,
+          accountId,
+          "datastore",
+          config.crossAccountRoleArn,
+          await getAdditionalTrustedPrincipals(),
+          provisionCrossAccountExternalId,
+          { orgId: callerOrgId, agentId: dataStoreId },
+        );
+        roleCreated = true;
+        provisionScopedCredentials = await policyManager.assumeScopedRole(
+          dataStoreId,
+          accountId,
+          "datastore",
+          config.crossAccountRoleArn,
+          provisionCrossAccountExternalId,
+        );
+      }
+
       // Update status to PROVISIONING
       await dynamodb.send(
         new UpdateCommand({
@@ -806,7 +898,11 @@ async function createDataStore(
         }),
       );
 
-      const provisionResult = await adapter.provision!(config, undefined);
+      const provisionResult = provisionScopedCredentials
+        ? await retryFirstScopedCallOnAccessDenied(() =>
+            adapter.provision!(config, provisionScopedCredentials),
+          )
+        : await adapter.provision!(config, undefined);
       resourceArn = provisionResult.resourceArn;
       size = provisionResult.size;
       records = provisionResult.records;
@@ -881,8 +977,6 @@ async function createDataStore(
           );
         }
       }
-      // IAM is eventually consistent — wait for role/policy propagation
-      await new Promise((resolve) => setTimeout(resolve, 10000));
       const creds = await policyManager.assumeScopedRole(
         dataStoreId,
         accountId,
@@ -893,24 +987,53 @@ async function createDataStore(
       scopedCredentials = creds;
     }
 
+    // The first scoped call made with the freshly assumed role may hit
+    // AccessDenied while the inline policy propagates — retry it (bounded)
+    // instead of sleeping a fixed 10s beforehand. Only the FIRST call is
+    // wrapped: whichever of connect/getMetrics runs first for this
+    // provisionMode. A non-AccessDenied error is not retried.
+    let firstScopedCallDone = false;
+
     if (input.provisionMode !== "CREATE_NEW") {
-      await adapter.connect(
-        config,
-        dispatchCreds(adapter, scopedCredentials, credentials),
+      await retryFirstScopedCallOnAccessDenied(() =>
+        adapter.connect(
+          config,
+          dispatchCreds(adapter, scopedCredentials, credentials),
+        ),
       );
+      firstScopedCallDone = true;
     }
 
-    // Get metrics (use scoped credentials if available)
+    // Get metrics (use scoped credentials if available). A metrics
+    // failure (e.g. AccessDenied listing bucket objects) does not block
+    // the connection — the resource itself is reachable — but it MUST be
+    // visible on the record via errorMessage instead of a silent warning
+    // behind status=CONNECTED, so an operator can tell "connected, no
+    // metrics" apart from "connected, metrics unknown because IAM is
+    // still wrong".
+    let metricsErrorMessage: string | undefined;
     try {
-      const metrics = await adapter.getMetrics!(
-        config,
-        resourceArn,
-        dispatchCreds(adapter, scopedCredentials, credentials),
-      );
+      const metrics = firstScopedCallDone
+        ? await adapter.getMetrics!(
+            config,
+            resourceArn,
+            dispatchCreds(adapter, scopedCredentials, credentials),
+          )
+        : await retryFirstScopedCallOnAccessDenied(() =>
+            adapter.getMetrics!(
+              config,
+              resourceArn,
+              dispatchCreds(adapter, scopedCredentials, credentials),
+            ),
+          );
       size = size || metrics.size;
       records = records ?? metrics.records;
     } catch (metricsError) {
       console.warn("Failed to get metrics (non-fatal):", metricsError);
+      metricsErrorMessage =
+        metricsError instanceof Error
+          ? `Metrics unavailable: ${metricsError.message}`
+          : "Metrics unavailable: unknown error";
     }
 
     // Update final state
@@ -918,8 +1041,9 @@ async function createDataStore(
       new UpdateCommand({
         TableName: DATASTORES_TABLE,
         Key: { dataStoreId },
-        UpdateExpression:
-          "SET #status = :status, updatedAt = :now, resourceArn = :arn, secretArn = :secret, #size = :size, records = :records",
+        UpdateExpression: metricsErrorMessage
+          ? "SET #status = :status, updatedAt = :now, resourceArn = :arn, secretArn = :secret, #size = :size, records = :records, errorMessage = :errorMessage"
+          : "SET #status = :status, updatedAt = :now, resourceArn = :arn, secretArn = :secret, #size = :size, records = :records REMOVE errorMessage",
         ExpressionAttributeNames: {
           "#status": "status",
           "#size": "size",
@@ -931,6 +1055,9 @@ async function createDataStore(
           ":secret": secretArn || null,
           ":size": size || null,
           ":records": records ?? null,
+          ...(metricsErrorMessage
+            ? { ":errorMessage": metricsErrorMessage }
+            : {}),
         },
         ReturnValues: "ALL_NEW",
       }),

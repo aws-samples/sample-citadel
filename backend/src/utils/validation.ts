@@ -354,3 +354,30 @@ export function validateHTTPSUrl(url: string): void {
     );
   }
 }
+
+/**
+ * Reserved top-level attribute names on the arbiter supervisor's workflow
+ * tracking DynamoDB item (arbiter/supervisor/index.py,
+ * RESERVED_WORKFLOW_TRACKING_KEYS, finding 679abf74). An agent config's
+ * `config.name` becomes the Bedrock tool name, which the supervisor uses
+ * verbatim as a node id in create_workflow_tracking_record — colliding with
+ * one of these crashes that call with a ValueError. This is a second,
+ * independent copy of the same literal set (cross-language: no shared
+ * module between the TypeScript backend and the Python arbiter), so a
+ * change on one side must be mirrored on the other; see
+ * arbiter/supervisor/__tests__/test_index_properties.py for the Python-side
+ * coverage of the same two strings.
+ */
+export const RESERVED_WORKFLOW_NODE_IDS = ["requestId", "data"] as const;
+
+/**
+ * True when `name` collides with a reserved workflow tracking-record key
+ * (finding 679abf74). Pure predicate rather than a throwing guard so each
+ * caller can raise the error in whatever style/class its own module already
+ * uses (agent-config-resolver.ts throws plain `Error("ValidationError: ...")`
+ * strings rather than the `ValidationError` class in this file).
+ */
+export function isReservedWorkflowNodeId(name: string | undefined): boolean {
+  if (!name) return false;
+  return (RESERVED_WORKFLOW_NODE_IDS as readonly string[]).includes(name);
+}

@@ -192,6 +192,25 @@ interface IntakeUsageDetail {
   /** Additive, nullable (CIT-102 §5): eval-run correlation id + context flag. */
   evalRunId?: string;
   evalContext?: boolean;
+  /**
+   * FLAT SHAPE (defect fix, zero-usage-rows incident): the intake
+   * runtime's live `intake.usage.captured` event spreads the usage
+   * record's own fields onto `detail` directly instead of nesting them
+   * under `detail.usage`. Every field below mirrors a `UsageRecord`
+   * field so `extractIntakeUsageRecords` can reconstruct a usage record
+   * from either shape. Nested `usage` above is always preferred when
+   * present.
+   */
+  modelId?: string;
+  inputTokens?: unknown;
+  outputTokens?: unknown;
+  totalTokens?: unknown;
+  latencyMs?: unknown;
+  callIndex?: unknown;
+  capturedAt?: string;
+  bedrockRequestId?: string;
+  releaseId?: string;
+  releaseArm?: unknown;
 }
 
 interface WorkflowNodeCompletedDetail {
@@ -264,6 +283,46 @@ function parseUsageArray(raw: unknown): UsageRecord[] {
     return [raw as UsageRecord];
   }
   return [];
+}
+
+/** Usage-record field names, used to detect and reconstruct the flat shape. */
+const FLAT_USAGE_FIELDS = [
+  "modelId",
+  "inputTokens",
+  "outputTokens",
+  "totalTokens",
+  "latencyMs",
+  "callIndex",
+  "capturedAt",
+  "bedrockRequestId",
+  "releaseId",
+  "releaseArm",
+] as const;
+
+/**
+ * Accepts both the nested shape (`detail.usage` is a `UsageRecord` or
+ * `UsageRecord[]`) and the flat shape produced by the live intake runtime,
+ * which spreads the usage record's fields directly onto `detail` instead
+ * of nesting them under `detail.usage`. Nested `usage` wins when present
+ * (it is the documented contract); the flat fields are a fallback so a
+ * genuine event from the runtime is never silently dropped to zero rows.
+ */
+function extractIntakeUsageRecords(detail: IntakeUsageDetail): UsageRecord[] {
+  const nested = parseUsageArray(detail.usage);
+  if (nested.length > 0) {
+    return nested;
+  }
+
+  const flat: UsageRecord = {};
+  let sawAny = false;
+  for (const field of FLAT_USAGE_FIELDS) {
+    const value = (detail as Record<string, unknown>)[field];
+    if (value !== undefined) {
+      (flat as Record<string, unknown>)[field] = value;
+      sawAny = true;
+    }
+  }
+  return sawAny ? [flat] : [];
 }
 
 interface Dimensions {
@@ -587,7 +646,7 @@ async function handleIntakeUsage(
   detail: IntakeUsageDetail,
   ingestedAt: string,
 ): Promise<LedgerRow[]> {
-  const usageRecords = parseUsageArray(detail.usage);
+  const usageRecords = extractIntakeUsageRecords(detail);
   const dims: Dimensions = {
     orgId: detail.orgId,
     projectId: detail.projectId,
@@ -742,7 +801,67 @@ export const handler = async (
     return;
   }
 
+  if (rows.length === 0) {
+    // DEDUPE RULE exception: task.completion carrying workflow correlation
+    // is INTENTIONALLY dropped (owned by workflow.node.completed) and
+    // already logged at debug in handleTaskCompletion. Warning here would
+    // be a false alarm on every such event, which is by far the common
+    // case for workflow-node model calls.
+    const isIntentionalDedupeDrop =
+      source === "task.completion" &&
+      detailType === "task.completion" &&
+      Boolean(
+        (event.detail as TaskCompletionDetail).workflowExecutionId,
+      ) &&
+      Boolean((event.detail as TaskCompletionDetail).nodeId);
+
+    if (!isIntentionalDedupeDrop) {
+      // A recognized event that yields zero rows is never silent: the
+      // defect this guards (citadel-cost-ledger-dev had zero usage rows)
+      // was exactly this case going unlogged. Name the event type,
+      // source, and which usage fields were absent so the cause is
+      // diagnosable from CloudWatch alone, without reproducing the event
+      // locally.
+      const missingFields = describeMissingUsageFields(event.detail);
+      console.warn(
+        JSON.stringify({
+          level: "warn",
+          message:
+            "cost-ledger-writer: event yielded zero usage rows (no ledger write)",
+          detailType,
+          source,
+          eventId,
+          missingFields,
+        }),
+      );
+    }
+    return;
+  }
+
   for (const row of rows) {
     await writeLedgerRow(row);
   }
 };
+
+/**
+ * Names which usage-bearing fields were absent from an event's detail, for
+ * the zero-row WARN above. Checks both the nested `usage` key and the flat
+ * per-field shape so the log is useful regardless of which shape the
+ * producer was expected to send.
+ */
+function describeMissingUsageFields(detail: unknown): string[] {
+  if (typeof detail !== "object" || detail === null) {
+    return ["usage", ...FLAT_USAGE_FIELDS];
+  }
+  const record = detail as Record<string, unknown>;
+  const missing: string[] = [];
+  if (record.usage === undefined) {
+    missing.push("usage");
+  }
+  for (const field of FLAT_USAGE_FIELDS) {
+    if (record[field] === undefined) {
+      missing.push(field);
+    }
+  }
+  return missing;
+}

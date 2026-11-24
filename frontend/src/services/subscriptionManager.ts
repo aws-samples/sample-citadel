@@ -27,6 +27,7 @@ export interface BackendSubscription {
  */
 interface SubscriptionState {
   eventType: EventType;
+  subscriptionKey: string;
   backendUnsubscribe: (() => void) | null;
   localSubscriberCount: number;
   cleanupTimer: NodeJS.Timeout | null;
@@ -45,29 +46,37 @@ interface SubscriptionState {
 export interface SubscriptionManagerInterface {
   /**
    * Initialize a backend subscription for an event type
-   * @param eventType - The event type to subscribe to
+   * @param eventType - The event type to subscribe to (used to emit on the local event bus)
    * @param subscriptionQuery - GraphQL subscription query
    * @param variables - Variables for the subscription query
    * @param transformer - Function to transform backend data before emitting
+   * @param subscriptionKey - Optional composite key distinguishing this
+   *   backend subscription from others sharing the same eventType (e.g.
+   *   `${eventType}:${projectId}`). Defaults to `eventType` when omitted,
+   *   preserving one-subscription-per-eventType behaviour for callers that
+   *   don't need per-entity distinction.
    */
   initializeSubscription(
     eventType: EventType,
     subscriptionQuery: string,
     variables: Record<string, any>,
-    transformer: (data: any) => any
+    transformer: (data: any) => any,
+    subscriptionKey?: string
   ): void;
 
   /**
    * Increment local subscriber count
    * @param eventType - The event type
+   * @param subscriptionKey - Optional composite key (defaults to eventType)
    */
-  addLocalSubscriber(eventType: EventType): void;
+  addLocalSubscriber(eventType: EventType, subscriptionKey?: string): void;
 
   /**
    * Decrement local subscriber count and cleanup if needed
    * @param eventType - The event type
+   * @param subscriptionKey - Optional composite key (defaults to eventType)
    */
-  removeLocalSubscriber(eventType: EventType): void;
+  removeLocalSubscriber(eventType: EventType, subscriptionKey?: string): void;
 
   /**
    * Get active backend subscriptions
@@ -78,8 +87,9 @@ export interface SubscriptionManagerInterface {
   /**
    * Force cleanup of a subscription
    * @param eventType - The event type to cleanup
+   * @param subscriptionKey - Optional composite key (defaults to eventType)
    */
-  cleanupSubscription(eventType: EventType): void;
+  cleanupSubscription(eventType: EventType, subscriptionKey?: string): void;
 }
 
 /**
@@ -88,7 +98,11 @@ export interface SubscriptionManagerInterface {
  */
 class SubscriptionManager implements SubscriptionManagerInterface {
   private static instance: SubscriptionManager | null = null;
-  private subscriptions: Map<EventType, SubscriptionState>;
+  // Keyed by composite subscriptionKey (defaults to eventType when the
+  // caller omits one), NOT by eventType alone — several entities can share
+  // one eventType (e.g. EVENT_TYPES.CONVERSATION, one backend subscription
+  // per projectId) and must not collide on the same map entry.
+  private subscriptions: Map<string, SubscriptionState>;
   private readonly CLEANUP_DEBOUNCE_MS = 1000; // 1 second debounce
   private readonly MAX_RECONNECT_ATTEMPTS = 5;
   private readonly INITIAL_RECONNECT_DELAY_MS = 1000; // 1 second
@@ -117,10 +131,11 @@ class SubscriptionManager implements SubscriptionManagerInterface {
     eventType: EventType,
     subscriptionQuery: string,
     variables: Record<string, any>,
-    transformer: (data: any) => any
+    transformer: (data: any) => any,
+    subscriptionKey: string = eventType
   ): void {
-    // Check if subscription already exists
-    const existingState = this.subscriptions.get(eventType);
+    // Check if subscription already exists for THIS composite key
+    const existingState = this.subscriptions.get(subscriptionKey);
     if (existingState?.isActive) {
       // Subscription already initialized, just cancel any pending cleanup
       if (existingState.cleanupTimer) {
@@ -131,7 +146,7 @@ class SubscriptionManager implements SubscriptionManagerInterface {
     }
 
     // Create the subscription with error handling
-    this.createBackendSubscription(eventType, subscriptionQuery, variables, transformer);
+    this.createBackendSubscription(eventType, subscriptionQuery, variables, transformer, subscriptionKey);
   }
 
   /**
@@ -142,7 +157,8 @@ class SubscriptionManager implements SubscriptionManagerInterface {
     eventType: EventType,
     subscriptionQuery: string,
     variables: Record<string, any>,
-    transformer: (data: any) => any
+    transformer: (data: any) => any,
+    subscriptionKey: string = eventType
   ): void {
     try {
       // Wrap the subscription to catch errors
@@ -165,7 +181,7 @@ class SubscriptionManager implements SubscriptionManagerInterface {
               eventBus.emit(eventType, transformedData);
               
               // Reset reconnect attempts on successful data reception
-              const state = this.subscriptions.get(eventType);
+              const state = this.subscriptions.get(subscriptionKey);
               if (state) {
                 // Track reconnection success if this was a reconnection
                 if (state.reconnectAttempts > 0) {
@@ -175,7 +191,7 @@ class SubscriptionManager implements SubscriptionManagerInterface {
               }
             }
           } catch (error) {
-            const state = this.subscriptions.get(eventType);
+            const state = this.subscriptions.get(subscriptionKey);
             const subscriberCount = state?.localSubscriberCount || 0;
             
             // Log error with production-safe logging (Requirement 7.5)
@@ -189,7 +205,7 @@ class SubscriptionManager implements SubscriptionManagerInterface {
             );
             
             // Emit error event to local subscribers
-            this.emitSubscriptionError(eventType, error as Error, state?.reconnectAttempts || 0);
+            this.emitSubscriptionError(eventType, error as Error, state?.reconnectAttempts || 0, subscriptionKey);
           }
         }
       );
@@ -199,7 +215,7 @@ class SubscriptionManager implements SubscriptionManagerInterface {
       // we may need to handle connection issues
       const connectionCheckTimer = setTimeout(() => {
         if (!hasReceivedData && !errorOccurred) {
-          const state = this.subscriptions.get(eventType);
+          const state = this.subscriptions.get(subscriptionKey);
           if (state?.isActive) {
             // Connection may have failed silently
             if (process.env.NODE_ENV === 'development') {
@@ -212,12 +228,13 @@ class SubscriptionManager implements SubscriptionManagerInterface {
       }, 10000); // 10 second check
 
       // Get or create subscription state
-      let state = this.subscriptions.get(eventType);
+      let state = this.subscriptions.get(subscriptionKey);
       
       if (!state) {
         // Create new state
         state = {
           eventType,
+          subscriptionKey,
           backendUnsubscribe: () => {
             clearTimeout(connectionCheckTimer);
             backendUnsubscribe();
@@ -232,7 +249,7 @@ class SubscriptionManager implements SubscriptionManagerInterface {
           reconnectTimer: null,
           maxReconnectAttempts: this.MAX_RECONNECT_ATTEMPTS,
         };
-        this.subscriptions.set(eventType, state);
+        this.subscriptions.set(subscriptionKey, state);
       } else {
         // Update existing state
         state.backendUnsubscribe = () => {
@@ -259,7 +276,7 @@ class SubscriptionManager implements SubscriptionManagerInterface {
         { subscriberCount: state.localSubscriberCount }
       );
     } catch (error) {
-      const state = this.subscriptions.get(eventType);
+      const state = this.subscriptions.get(subscriptionKey);
       const subscriberCount = state?.localSubscriberCount || 0;
       
       // Log error with production-safe logging (Requirement 7.5)
@@ -273,10 +290,10 @@ class SubscriptionManager implements SubscriptionManagerInterface {
       );
       
       // Emit error event
-      this.emitSubscriptionError(eventType, error as Error, state?.reconnectAttempts || 0);
+      this.emitSubscriptionError(eventType, error as Error, state?.reconnectAttempts || 0, subscriptionKey);
       
       // Attempt reconnection
-      this.scheduleReconnection(eventType);
+      this.scheduleReconnection(subscriptionKey);
     }
   }
 
@@ -284,8 +301,8 @@ class SubscriptionManager implements SubscriptionManagerInterface {
    * Increment local subscriber count
    * Cancels any pending cleanup for this event type
    */
-  public addLocalSubscriber(eventType: EventType): void {
-    const state = this.subscriptions.get(eventType);
+  public addLocalSubscriber(eventType: EventType, subscriptionKey: string = eventType): void {
+    const state = this.subscriptions.get(subscriptionKey);
     
     if (!state) {
       console.warn(
@@ -321,8 +338,8 @@ class SubscriptionManager implements SubscriptionManagerInterface {
    * Decrement local subscriber count and schedule cleanup if needed
    * Uses debounced cleanup to prevent rapid connect/disconnect cycles
    */
-  public removeLocalSubscriber(eventType: EventType): void {
-    const state = this.subscriptions.get(eventType);
+  public removeLocalSubscriber(eventType: EventType, subscriptionKey: string = eventType): void {
+    const state = this.subscriptions.get(subscriptionKey);
     
     if (!state) {
       console.warn(
@@ -349,7 +366,7 @@ class SubscriptionManager implements SubscriptionManagerInterface {
 
     // Schedule cleanup if no subscribers remain
     if (state.localSubscriberCount === 0) {
-      this.scheduleCleanup(eventType);
+      this.scheduleCleanup(subscriptionKey);
     }
   }
 
@@ -357,12 +374,14 @@ class SubscriptionManager implements SubscriptionManagerInterface {
    * Schedule debounced cleanup for a subscription
    * Waits 1 second before actually closing the connection
    */
-  private scheduleCleanup(eventType: EventType): void {
-    const state = this.subscriptions.get(eventType);
+  private scheduleCleanup(subscriptionKey: string): void {
+    const state = this.subscriptions.get(subscriptionKey);
     
     if (!state) {
       return;
     }
+
+    const eventType = state.eventType;
 
     // Clear any existing cleanup timer
     if (state.cleanupTimer) {
@@ -373,7 +392,7 @@ class SubscriptionManager implements SubscriptionManagerInterface {
     state.cleanupTimer = setTimeout(() => {
       // Double-check subscriber count before cleanup
       if (state.localSubscriberCount === 0) {
-        this.performCleanup(eventType);
+        this.performCleanup(subscriptionKey);
       }
     }, this.CLEANUP_DEBOUNCE_MS);
 
@@ -395,12 +414,14 @@ class SubscriptionManager implements SubscriptionManagerInterface {
    * Perform actual cleanup of a subscription
    * Closes the WebSocket connection and removes state
    */
-  private performCleanup(eventType: EventType): void {
-    const state = this.subscriptions.get(eventType);
+  private performCleanup(subscriptionKey: string): void {
+    const state = this.subscriptions.get(subscriptionKey);
     
     if (!state) {
       return;
     }
+
+    const eventType = state.eventType;
 
     // Clear cleanup timer
     if (state.cleanupTimer) {
@@ -435,7 +456,7 @@ class SubscriptionManager implements SubscriptionManagerInterface {
     state.isActive = false;
 
     // Remove from map
-    this.subscriptions.delete(eventType);
+    this.subscriptions.delete(subscriptionKey);
 
     // Log in development mode
     if (process.env.NODE_ENV === 'development') {
@@ -455,10 +476,10 @@ class SubscriptionManager implements SubscriptionManagerInterface {
   public getActiveSubscriptions(): BackendSubscription[] {
     const activeSubscriptions: BackendSubscription[] = [];
 
-    this.subscriptions.forEach((state, eventType) => {
+    this.subscriptions.forEach((state) => {
       if (state.isActive && state.backendUnsubscribe) {
         activeSubscriptions.push({
-          eventType,
+          eventType: state.eventType,
           unsubscribe: state.backendUnsubscribe,
           subscriberCount: state.localSubscriberCount,
         });
@@ -472,8 +493,8 @@ class SubscriptionManager implements SubscriptionManagerInterface {
    * Force cleanup of a subscription
    * Immediately closes the connection without debounce
    */
-  public cleanupSubscription(eventType: EventType): void {
-    const state = this.subscriptions.get(eventType);
+  public cleanupSubscription(eventType: EventType, subscriptionKey: string = eventType): void {
+    const state = this.subscriptions.get(subscriptionKey);
     
     if (!state) {
       return;
@@ -492,15 +513,15 @@ class SubscriptionManager implements SubscriptionManagerInterface {
     }
 
     // Perform immediate cleanup
-    this.performCleanup(eventType);
+    this.performCleanup(subscriptionKey);
   }
 
   /**
    * Emit a subscription error event to local subscribers
    * Includes event type, error details, timestamp, and attempt count
    */
-  private emitSubscriptionError(eventType: EventType, error: Error, attemptCount: number): void {
-    const state = this.subscriptions.get(eventType);
+  private emitSubscriptionError(eventType: EventType, error: Error, attemptCount: number, subscriptionKey: string = eventType): void {
+    const state = this.subscriptions.get(subscriptionKey);
     const subscriberCount = state?.localSubscriberCount || 0;
     
     // Log error with production-safe logging (Requirement 7.5)
@@ -531,12 +552,14 @@ class SubscriptionManager implements SubscriptionManagerInterface {
    * Implements exponential backoff: 1s, 2s, 4s, 8s, max 30s
    * Stops after MAX_RECONNECT_ATTEMPTS (5) failed attempts
    */
-  private scheduleReconnection(eventType: EventType): void {
-    const state = this.subscriptions.get(eventType);
+  private scheduleReconnection(subscriptionKey: string): void {
+    const state = this.subscriptions.get(subscriptionKey);
     
     if (!state) {
       return;
     }
+
+    const eventType = state.eventType;
 
     // Check if we've exceeded max reconnect attempts
     if (state.reconnectAttempts >= state.maxReconnectAttempts) {
@@ -549,7 +572,8 @@ class SubscriptionManager implements SubscriptionManagerInterface {
       this.emitSubscriptionError(
         eventType,
         error,
-        state.reconnectAttempts
+        state.reconnectAttempts,
+        subscriptionKey
       );
       
       // Mark as inactive but keep state for potential manual reconnection
@@ -627,7 +651,8 @@ class SubscriptionManager implements SubscriptionManagerInterface {
         state.eventType,
         state.subscriptionQuery,
         state.variables,
-        state.transformer
+        state.transformer,
+        state.subscriptionKey
       );
     }, delay);
   }
@@ -636,8 +661,8 @@ class SubscriptionManager implements SubscriptionManagerInterface {
    * Clear all subscriptions (for testing)
    */
   public clearAll(): void {
-    this.subscriptions.forEach((_state, eventType) => {
-      this.cleanupSubscription(eventType);
+    this.subscriptions.forEach((state, subscriptionKey) => {
+      this.cleanupSubscription(state.eventType, subscriptionKey);
     });
     this.subscriptions.clear();
   }
