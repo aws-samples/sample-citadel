@@ -45,17 +45,21 @@ describe('conversationService', () => {
       // Subscribe
       const unsubscribe = subscribeToConversation(projectId, mockCallback);
 
-      // Verify subscriptionManager.initializeSubscription was called
+      // Verify subscriptionManager.initializeSubscription was called, with
+      // a composite subscriptionKey scoping this project's backend
+      // subscription (never just the bare eventType).
       expect(subscriptionManager.initializeSubscription).toHaveBeenCalledWith(
         EVENT_TYPES.CONVERSATION,
         expect.stringContaining('subscription OnConversationMessage'),
         { projectId },
-        expect.any(Function)
+        expect.any(Function),
+        `${EVENT_TYPES.CONVERSATION}:${projectId}`
       );
 
-      // Verify addLocalSubscriber was called
+      // Verify addLocalSubscriber was called, scoped to this project's key
       expect(subscriptionManager.addLocalSubscriber).toHaveBeenCalledWith(
-        EVENT_TYPES.CONVERSATION
+        EVENT_TYPES.CONVERSATION,
+        `${EVENT_TYPES.CONVERSATION}:${projectId}`
       );
 
       // Verify eventBus.subscribe was called
@@ -78,7 +82,8 @@ describe('conversationService', () => {
       subscribeToConversation(projectId, mockCallback);
 
       expect(subscriptionManager.addLocalSubscriber).toHaveBeenCalledWith(
-        EVENT_TYPES.CONVERSATION
+        EVENT_TYPES.CONVERSATION,
+        `${EVENT_TYPES.CONVERSATION}:${projectId}`
       );
     });
 
@@ -94,7 +99,8 @@ describe('conversationService', () => {
 
       expect(mockUnsubscribe).toHaveBeenCalled();
       expect(subscriptionManager.removeLocalSubscriber).toHaveBeenCalledWith(
-        EVENT_TYPES.CONVERSATION
+        EVENT_TYPES.CONVERSATION,
+        `${EVENT_TYPES.CONVERSATION}:${projectId}`
       );
     });
 
