@@ -2626,6 +2626,52 @@ export class BackendStack extends cdk.Stack {
     // the rule was left in BackendStack during phase 1 specifically because
     // its target function moves here, in phase 2.
 
+    // Platform Health Resolver — admin-only, read-only Query.getPlatformAlarms
+    // (board task 4cc234d1). Surfaces the state of the EXISTING CloudWatch
+    // alarms declared in telemetry-stack.ts (DlqNotEmptyAlarm,
+    // DlqNotEmptySharedAlarm, and sibling citadel-* SLO alarms) — this
+    // construct creates no new alarms. A dedicated small Lambda rather than
+    // an existing resolver: app-metrics-handler/recent-activity-resolver are
+    // DynamoDB-only and org-scoped, while alarm state is a cross-org
+    // platform signal best served by its own least-privilege role.
+    const platformHealthResolverFunction = new lambda.Function(
+      this,
+      "PlatformHealthResolverFunction",
+      {
+        runtime: NODE_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
+        handler: "platform-health-resolver.handler",
+        code: lambda.Code.fromAsset("dist/lambda"),
+        environment: {
+          ALARM_NAME_PREFIX: "citadel-",
+          ENVIRONMENT: props.environment,
+        },
+        timeout: cdk.Duration.seconds(30),
+        logGroup: new logs.LogGroup(
+          this,
+          "PlatformHealthResolverFunctionLogs",
+          {
+            retention: logs.RetentionDays.ONE_WEEK,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          },
+        ),
+      },
+    );
+    // cloudwatch:DescribeAlarms does not support resource-level permissions
+    // (IAM: CloudWatch alarms are not ARN-scopable for Describe* actions).
+    // Resource "*" is the only valid grant; reads are further narrowed at
+    // call time by AlarmNamePrefix=ALARM_NAME_PREFIX ("citadel-"). No
+    // sqs:GetQueueAttributes grant is added — queueDepth/queueName are
+    // derived from the alarm's own Dimensions/StateReasonData, keeping this
+    // function's role to a single read action.
+    platformHealthResolverFunction.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["cloudwatch:DescribeAlarms"],
+        resources: ["*"],
+      }),
+    );
+
     // Data sources
     // NOTE: ProjectsDataSource/ConversationsDataSource/AgentStatusDataSource
     // (unused DynamoDB data sources — no resolver ever attached) and
@@ -2660,6 +2706,10 @@ export class BackendStack extends cdk.Stack {
     const organizationLambdaDataSource = this.appSyncApi.addLambdaDataSource(
       "OrganizationLambdaDataSource",
       organizationResolverFunction,
+    );
+    const platformHealthLambdaDataSource = this.appSyncApi.addLambdaDataSource(
+      "PlatformHealthLambdaDataSource",
+      platformHealthResolverFunction,
     );
     // NOTE: ChatterLambdaDataSource moved to CitadelProjectsStack.
     const integrationLambdaDataSource = this.appSyncApi.addLambdaDataSource(
@@ -2984,6 +3034,17 @@ export class BackendStack extends cdk.Stack {
     organizationLambdaDataSource.createResolver("UpdateTagPolicyResolver", {
       typeName: "Mutation",
       fieldName: "updateTagPolicy",
+      requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
+      responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
+    });
+
+    // Admin-only, read-only platform alarm state (board task 4cc234d1).
+    // Authorization is enforced in the handler via isAdminFromEvent; the
+    // schema's @aws_cognito_user_pools(cognito_groups: ["admin"]) directive
+    // is defence-in-depth only, matching the sibling admin queries above.
+    platformHealthLambdaDataSource.createResolver("GetPlatformAlarmsResolver", {
+      typeName: "Query",
+      fieldName: "getPlatformAlarms",
       requestMappingTemplate: appsync.MappingTemplate.lambdaRequest(),
       responseMappingTemplate: appsync.MappingTemplate.lambdaResult(),
     });

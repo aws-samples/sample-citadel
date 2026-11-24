@@ -143,6 +143,18 @@ const DOCUMENTED_EXEMPTIONS: ReadonlyMap<string, string> = new Map([
       "unknown-field rejection) and CDK wiring in backend-stack.ts are " +
       "pinned in backend-subscription-authorizer.test.ts.",
   ],
+  [
+    "platform-health-resolver",
+    "Single-handler Lambda (no dispatch switch to enumerate): " +
+      "Query.getPlatformAlarms is the only field, admin-gated via " +
+      "isAdminFromEvent (authoritative — the schema's " +
+      '@aws_cognito_user_pools(cognito_groups:["admin"]) directive is ' +
+      "defence-in-depth only) and fail-closed to a thrown PermissionError " +
+      "for non-admins, never an empty/filtered list. Covered directly by " +
+      "platform-health-resolver.test.ts (admin gate, configured:false on " +
+      "missing prefix/denied DescribeAlarms, state/queueDepth mapping) and " +
+      "by platform-alarms.test.ts (CDK wiring + IAM grant).",
+  ],
 ]);
 
 /** Mutations whose IAM-only schema directive an exemption reason relies on. */

@@ -954,6 +954,29 @@ if (app.node.tryGetContext("nag") !== "false") {
     ],
   );
 
+  // IAM5 — Query.getPlatformAlarms (board task 4cc234d1). cloudwatch:DescribeAlarms
+  // does not support resource-level permissions (CloudWatch alarms are not
+  // ARN-scopable for Describe* actions) — AWS IAM evidence:
+  // https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazoncloudwatch.html
+  // Resource "*" is the only valid grant for this action; reads are further
+  // narrowed at call time by AlarmNamePrefix="citadel-" and the resolver is
+  // admin-gated (isAdminFromEvent). No sqs:GetQueueAttributes or other
+  // permission is granted to this function.
+  NagSuppressions.addResourceSuppressionsByPath(
+    backendStack,
+    `/${backendStack.stackName}/PlatformHealthResolverFunction/ServiceRole/DefaultPolicy/Resource`,
+    [
+      {
+        id: "AwsSolutions-IAM5",
+        reason:
+          "cloudwatch:DescribeAlarms has no resource-level permissions (not " +
+          'ARN-scopable); Resource "*" is the only valid grant. Narrowed at ' +
+          "call time by AlarmNamePrefix; resolver is admin-gated.",
+        appliesTo: [{ regex: "/^Resource::\\*$/g" }],
+      },
+    ],
+  );
+
   // CloudFront — partial hardening. TLS 1.2 and access logging applied; the
   // rest require follow-up work.
   NagSuppressions.addResourceSuppressionsByPath(
