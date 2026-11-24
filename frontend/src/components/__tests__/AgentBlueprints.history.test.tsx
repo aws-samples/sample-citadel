@@ -20,7 +20,7 @@ jest.mock('react-router-dom', () => ({
 
 // ReactFlowProvider is a lightweight context wrapper; pass children through so
 // we never mount the heavy canvas in jsdom.
-jest.mock('reactflow', () => ({
+jest.mock('@xyflow/react', () => ({
   __esModule: true,
   ReactFlowProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));

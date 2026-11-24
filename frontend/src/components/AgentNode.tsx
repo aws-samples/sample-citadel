@@ -8,9 +8,9 @@
  */
 
 import { memo } from 'react';
-import { Handle, Position, NodeProps, useReactFlow } from 'reactflow';
+import { Handle, Position, type NodeProps, useReactFlow } from '@xyflow/react';
 import { Trash2, Settings, CheckCircle2, XCircle, MinusCircle, Loader2 } from 'lucide-react';
-import type { AgentNodeData } from '../types';
+import type { WorkflowNode } from '../types';
 import { ResourceBadge } from './ResourceBadge';
 import { Card } from './ui/card';
 import { Button } from './ui/button';
@@ -25,7 +25,7 @@ import { Button } from './ui/button';
  * - Delete and configure action buttons (shown when selected)
  * - Validation error indicators and tooltips
  */
-export const AgentNode = memo(({ id, data, selected }: NodeProps<AgentNodeData>) => {
+export const AgentNode = memo(({ id, data, selected }: NodeProps<WorkflowNode>) => {
   const { label, icon, agentConfig, validationErrors, isPlaceholder, executionStatus } = data;
   const { setNodes, setEdges } = useReactFlow();
   const hasErrors = validationErrors && validationErrors.length > 0;

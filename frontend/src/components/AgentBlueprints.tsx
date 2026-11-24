@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { ReactFlowProvider, type NodeMouseHandler } from 'reactflow';
-import 'reactflow/dist/style.css';
+import { ReactFlowProvider, type NodeMouseHandler } from '@xyflow/react';
+import '@xyflow/react/dist/style.css';
 import { useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { AgentTray } from './AgentTray';

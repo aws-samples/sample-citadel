@@ -10,7 +10,7 @@ import '@testing-library/jest-dom';
 
 jest.mock('uuid', () => ({ v4: () => 'test-uuid' }));
 
-jest.mock('reactflow', () => ({
+jest.mock('@xyflow/react', () => ({
   __esModule: true,
   ReactFlowProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
