@@ -13,14 +13,16 @@
 // uuid ESM stub — must be declared before any import that transitively loads it.
 jest.mock('uuid', () => ({ v4: () => 'test-uuid' }));
 
-// Full ReactFlow mock — avoids canvas/DOM issues in jsdom.
-jest.mock('reactflow', () => {
+// Full ReactFlow mock — avoids canvas/DOM issues in jsdom. @xyflow/react ships
+// ESM-only, so jest.requireActual() cannot be used under ts-jest's CJS
+// transform; every named export WorkflowCanvas.tsx or this test needs is
+// stubbed explicitly instead of spreading the real module.
+jest.mock('@xyflow/react', () => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const React = require('react');
   return {
-    ...jest.requireActual('reactflow'),
     __esModule: true,
-    default: function MockReactFlow(props: Record<string, (...args: unknown[]) => void>) {
+    ReactFlow: function MockReactFlow(props: Record<string, (...args: unknown[]) => void>) {
       return React.createElement('div', { 'data-testid': 'mock-reactflow' },
         React.createElement('button', {
           'data-testid': 'fire-edge-double-click',
@@ -32,7 +34,12 @@ jest.mock('reactflow', () => {
         }),
       );
     },
-    useReactFlow: () => ({ project: (p: { x: number; y: number }) => p }),
+    ReactFlowProvider: ({ children }: { children: React.ReactNode }) => React.createElement(React.Fragment, null, children),
+    Background: () => null,
+    Controls: () => null,
+    MiniMap: () => null,
+    addEdge: (edge: unknown, edges: unknown[]) => [...edges, edge],
+    useReactFlow: () => ({ screenToFlowPosition: (p: { x: number; y: number }) => p }),
   };
 });
 
@@ -51,7 +58,7 @@ jest.mock('../../utils/resolveToolBindings', () => ({
 
 import { render, screen, fireEvent } from '@testing-library/react';
 import '@testing-library/jest-dom';
-import { ReactFlowProvider } from 'reactflow';
+import { ReactFlowProvider } from '@xyflow/react';
 import { WorkflowCanvas } from '../WorkflowCanvas';
 import type { WorkflowNode, WorkflowEdge } from '../../types/workflow';
 

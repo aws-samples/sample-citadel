@@ -6,13 +6,17 @@
  * validation results, and related data structures.
  */
 
-import type { Node, Edge } from 'reactflow';
+import type { Node, Edge } from '@xyflow/react';
 import type { AgentConfig } from '../services/agentConfigService';
 
 /**
  * Data structure for an agent node on the workflow canvas
+ *
+ * The index signature is required by @xyflow/react v13's `Node<T>` generic,
+ * which constrains `T extends Record<string, unknown>`.
  */
 export interface AgentNodeData {
+  [key: string]: unknown;
   agentId: string;
   agentConfig: AgentConfig;
   label: string;

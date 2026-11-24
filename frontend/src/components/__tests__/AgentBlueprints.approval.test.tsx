@@ -16,7 +16,7 @@ jest.mock('react-router-dom', () => ({
   useParams: () => ({}),
 }));
 
-jest.mock('reactflow', () => ({
+jest.mock('@xyflow/react', () => ({
   __esModule: true,
   ReactFlowProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));

@@ -7,21 +7,20 @@
  */
 
 import React, { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
-import ReactFlow, {
+import {
+  ReactFlow,
   Background,
   Controls,
   MiniMap,
   useReactFlow,
   addEdge,
-  applyNodeChanges,
-  applyEdgeChanges,
   type Connection,
   type OnConnect,
   type OnNodesChange,
   type OnEdgesChange,
   type NodeMouseHandler,
-} from 'reactflow';
-import 'reactflow/dist/style.css';
+} from '@xyflow/react';
+import '@xyflow/react/dist/style.css';
 import { v4 as uuidv4 } from 'uuid';
 import { toast } from 'sonner';
 import { AgentNode } from './AgentNode';
@@ -104,7 +103,7 @@ export const WorkflowCanvas = memo(function WorkflowCanvas({
    * Prevent invalid connections
    */
   const isValidConnection = useCallback(
-    (connection: Connection): boolean => {
+    (connection: Connection | WorkflowEdge): boolean => {
       // Prevent self-connections
       if (connection.source === connection.target) {
         console.warn('Self-connections are not allowed');
@@ -167,9 +166,9 @@ export const WorkflowCanvas = memo(function WorkflowCanvas({
   /**
    * Handle edge changes (deletion, updates, etc.)
    */
-  const onEdgesChange: OnEdgesChange = useCallback(
+  const onEdgesChange: OnEdgesChange<WorkflowEdge> = useCallback(
     (changes) => {
-      setEdges((eds) => applyEdgeChanges(changes, eds));
+      setEdges((eds) => changes.applyTo(eds));
     },
     [setEdges]
   );
@@ -180,9 +179,9 @@ export const WorkflowCanvas = memo(function WorkflowCanvas({
    * Update connected edges during movement
    * Node selection
    */
-  const onNodesChange: OnNodesChange = useCallback(
+  const onNodesChange: OnNodesChange<WorkflowNode> = useCallback(
     (changes) => {
-      setNodes((nds) => applyNodeChanges(changes, nds) as WorkflowNode[]);
+      setNodes((nds) => changes.applyTo(nds));
       
       // Track selection changes
       for (const change of changes) {
@@ -324,20 +323,21 @@ export const WorkflowCanvas = memo(function WorkflowCanvas({
         return;
       }
 
-      // Get the position relative to the ReactFlow canvas
-      const reactFlowBounds = reactFlowWrapper.current.getBoundingClientRect();
-      
-      // Use reactFlowInstance to project screen coordinates to flow coordinates
+      // Use reactFlowInstance to project screen coordinates to flow coordinates.
+      // @xyflow/react v13's screenToFlowPosition expects raw screen coordinates
+      // and subtracts the container rect internally — do not subtract
+      // reactFlowBounds.left/top here (that was the v11 project() convention).
       let position;
       try {
-        position = reactFlowInstance.project({
-          x: event.clientX - reactFlowBounds.left,
-          y: event.clientY - reactFlowBounds.top,
+        position = reactFlowInstance.screenToFlowPosition({
+          x: event.clientX,
+          y: event.clientY,
         });
         console.log('Drop position:', position);
       } catch (error) {
         console.error('Failed to project position:', error);
         // Fallback to simple calculation if project fails
+        const reactFlowBounds = reactFlowWrapper.current.getBoundingClientRect();
         position = {
           x: event.clientX - reactFlowBounds.left,
           y: event.clientY - reactFlowBounds.top,
