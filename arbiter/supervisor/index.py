@@ -294,6 +294,17 @@ Your goal is to behave as a highly autonomous supervisory system that can manage
 }]
 
 
+# Reserved top-level attribute names on the workflow tracking DynamoDB item
+# (finding 679abf74). A node id (agent/tool name) must never collide with one
+# of these, since they are the record's own identity key ("requestId") and
+# the nested per-node payload map ("data") written by
+# create_workflow_tracking_record and read by update_orchestration_with_results.
+# Exposed as a module-level constant so property tests can import the real
+# value instead of retyping the literal set (see
+# arbiter/supervisor/__tests__/test_index_properties.py).
+RESERVED_WORKFLOW_TRACKING_KEYS = frozenset({"requestId", "data"})
+
+
 def create_workflow_tracking_record(nodes: list[str]):
     """Create a DynamoDB tracking item for a set of dispatched agent nodes.
 
@@ -311,12 +322,11 @@ def create_workflow_tracking_record(nodes: list[str]):
     outright at creation is simpler and safer than namespacing every node
     flag under a nested 'nodes' map and updating every reader.
     """
-    reserved = {"requestId", "data"}
-    collisions = reserved.intersection(nodes)
+    collisions = RESERVED_WORKFLOW_TRACKING_KEYS.intersection(nodes)
     if collisions:
         raise ValueError(
             f"Node id(s) {sorted(collisions)} collide with reserved "
-            f"workflow tracking record attribute(s) {sorted(reserved)}; "
+            f"workflow tracking record attribute(s) {sorted(RESERVED_WORKFLOW_TRACKING_KEYS)}; "
             "rename the agent/tool so its node id does not shadow a "
             "reserved tracking-record key."
         )

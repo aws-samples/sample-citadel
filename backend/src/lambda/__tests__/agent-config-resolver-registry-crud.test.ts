@@ -309,6 +309,28 @@ describe("Registry-backed CRUD functions (task 6.4)", () => {
       ).rejects.toThrow("Cannot determine caller organization");
       expect(mockCreateResource).not.toHaveBeenCalled();
     });
+
+    // Finding 679abf74: config.name becomes the Bedrock tool name, which the
+    // arbiter supervisor uses as a node id in create_workflow_tracking_record
+    // (arbiter/supervisor/index.py). "requestId" and "data" are reserved
+    // top-level attributes of that record; reject the collision here, at the
+    // earliest write boundary, instead of letting it raise an opaque
+    // ValueError deep in orchestration.
+    test.each(["requestId", "data"])(
+      "rejects reserved agent name %p before calling createResource",
+      async (reservedName) => {
+        await expect(
+          createAgentConfigRegistry(
+            {
+              agentId: "agent-1",
+              config: JSON.stringify({ name: reservedName }),
+            },
+            eventWithOrg,
+          ),
+        ).rejects.toThrow(/reserved/i);
+        expect(mockCreateResource).not.toHaveBeenCalled();
+      },
+    );
   });
 
   // ─── updateAgentConfigRegistry ──────────────────────────────
@@ -766,6 +788,26 @@ describe("Registry-backed CRUD functions (task 6.4)", () => {
       // The status transition ran and failed BEFORE any metadata write.
       expect(mockUpdateResource).not.toHaveBeenCalled();
     });
+
+    // Finding 679abf74: same reserved-key guard as createAgentConfigRegistry,
+    // applied to the merged config on the update path.
+    test.each(["requestId", "data"])(
+      "rejects reserved agent name %p before calling updateResource",
+      async (reservedName) => {
+        mockGetResource.mockResolvedValue(existingRecord);
+
+        await expect(
+          updateAgentConfigRegistry(
+            {
+              agentId: "agent-1",
+              config: JSON.stringify({ name: reservedName }),
+            },
+            eventWithOrg,
+          ),
+        ).rejects.toThrow(/reserved/i);
+        expect(mockUpdateResource).not.toHaveBeenCalled();
+      },
+    );
   });
 
   // ─── deleteAgentConfigRegistry ──────────────────────────────

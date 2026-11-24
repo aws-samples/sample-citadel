@@ -48,6 +48,7 @@ with patch.multiple(
         create_workflow_tracking_record,
         update_orchestration_with_results,
         send_response,
+        RESERVED_WORKFLOW_TRACKING_KEYS,
     )
 
 
@@ -68,10 +69,19 @@ conversation_messages = st.lists(
     max_size=5,
 )
 
+# Reserved workflow-tracking-record keys (finding 679abf74) must never appear
+# as a node id in these property tests: create_workflow_tracking_record
+# raises ValueError on collision by design (see
+# TestCreateWorkflowTrackingRecord.test_rejects_each_reserved_key below for
+# deterministic coverage of that behaviour). Filtering here imports the real
+# constant from index.py rather than retyping the literal set, so the
+# strategy can never drift out of sync with the production reserved set.
 node_names = st.lists(
     st.text(min_size=1, max_size=20, alphabet=st.characters(
         whitelist_categories=("L", "N"),
-    )).filter(lambda s: s.strip() != ""),
+    )).filter(
+        lambda s: s.strip() != "" and s not in RESERVED_WORKFLOW_TRACKING_KEYS
+    ),
     min_size=1,
     max_size=10,
     unique=True,
@@ -147,6 +157,23 @@ class TestCreateWorkflowTrackingRecord:
         """Empty node list returns None (early exit)."""
         result = create_workflow_tracking_record([])
         assert result is None
+
+    @pytest.mark.parametrize("reserved_key", sorted(RESERVED_WORKFLOW_TRACKING_KEYS))
+    def test_rejects_each_reserved_key(self, reserved_key):
+        """A node id equal to any reserved tracking-record key raises ValueError.
+
+        Deterministic companion to the node_names strategy filter above:
+        proves the defence-in-depth ValueError actually fires for every
+        member of the real reserved set, not just the one Hypothesis
+        happened to find (finding 679abf74).
+        """
+        with pytest.raises(ValueError, match="collide with reserved"):
+            create_workflow_tracking_record([reserved_key])
+
+    def test_rejects_reserved_key_mixed_with_valid_nodes(self):
+        """A reserved key collides even when mixed with otherwise-valid node ids."""
+        with pytest.raises(ValueError, match="collide with reserved"):
+            create_workflow_tracking_record(["validAgent", "data"])
 
     @given(nodes=node_names)
     @settings(max_examples=50)
