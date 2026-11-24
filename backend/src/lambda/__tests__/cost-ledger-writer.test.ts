@@ -132,6 +132,69 @@ describe("cost-ledger-writer (pass 1 — usage-only rows)", () => {
     expect(item.GSI2PK).toBe("APP#app-2");
   });
 
+  test("intake.usage.captured with usage fields spread at the top level of detail (flat shape) still writes 1 row", async () => {
+    const event = {
+      id: "evt-2-flat",
+      source: "agent_intake.usage",
+      "detail-type": "intake.usage.captured",
+      detail: {
+        orgId: "org-2",
+        appId: "app-2",
+        // Flat shape: the intake runtime's real event spreads usage
+        // fields onto `detail` directly instead of nesting under
+        // `detail.usage`.
+        modelId: "anthropic.claude-sonnet-5",
+        inputTokens: 10,
+        outputTokens: 5,
+        latencyMs: 100,
+        callIndex: 0,
+        capturedAt: "2026-07-25T00:00:01.000Z",
+        source: "worker",
+      },
+    } as unknown as IncomingEvent;
+
+    await handler(event);
+    const putCalls = ddbMock.commandCalls(
+      (await import("@aws-sdk/lib-dynamodb")).PutCommand,
+    );
+    expect(putCalls).toHaveLength(1);
+    const item = putCalls[0].args[0].input.Item as Record<string, unknown>;
+    expect(item.PK).toBe("ORG#org-2");
+    expect(item.inputTokens).toBe(10);
+    expect(item.outputTokens).toBe(5);
+  });
+
+  test("intake.usage.captured that yields zero rows logs a WARN naming event type, source, and the missing fields", async () => {
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const event = {
+        id: "evt-2-empty",
+        source: "agent_intake.usage",
+        "detail-type": "intake.usage.captured",
+        detail: {
+          orgId: "org-2",
+          appId: "app-2",
+          // Neither nested `usage` nor flat usage fields present.
+        },
+      } as unknown as IncomingEvent;
+
+      await handler(event);
+      const putCalls = ddbMock.commandCalls(
+        (await import("@aws-sdk/lib-dynamodb")).PutCommand,
+      );
+      expect(putCalls).toHaveLength(0);
+      expect(warnSpy).toHaveBeenCalled();
+      const warnedWith = warnSpy.mock.calls
+        .map((args) => String(args[0]))
+        .join("\n");
+      expect(warnedWith).toContain("intake.usage.captured");
+      expect(warnedWith).toContain("agent_intake.usage");
+      expect(warnedWith.toLowerCase()).toContain("missing");
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   test("workflow.node.completed writes per-node usage rows with WorkflowIndex GSI keys", async () => {
     await handler(workflowNodeCompletedEvent());
     const putCalls = ddbMock.commandCalls(
