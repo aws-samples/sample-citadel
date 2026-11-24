@@ -2091,73 +2091,76 @@ export class ArbiterStack extends cdk.Stack {
     // below (Step Runner + watchdog alarms are declared inside the guard
     // block; DLQ/supervisor/fabricator/worker alarms unconditionally).
     const operationalAlarms: cloudwatch.Alarm[] = [];
+    // Hoisted above the guard block (rather than `const` inside it) so the
+    // governance-table wiring further down this constructor — added once
+    // `this.authorityUnitsTable` etc. exist — can still reach this function.
+    // Mirrors the existing pattern used for seedAgentConfigLambda/
+    // workerAgentWrapperLambda/supervisorLambda, all patched in post-hoc for
+    // the same "table construct declared later" reason.
+    let stepRunnerFunction: lambda.Function | undefined;
     if (
       props.workflowsTable &&
       props.executionsTable &&
       props.appSyncEndpoint
     ) {
-      const stepRunnerFunction = new lambda.Function(
-        this,
-        "StepRunnerFunction",
-        {
-          runtime: PYTHON_RUNTIME,
-          architecture: LAMBDA_ARCHITECTURE,
-          handler: "index.handler",
-          code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, "stepRunner"), {
-            exclude: [...PYTHON_ASSET_EXCLUDES],
+      stepRunnerFunction = new lambda.Function(this, "StepRunnerFunction", {
+        runtime: PYTHON_RUNTIME,
+        architecture: LAMBDA_ARCHITECTURE,
+        handler: "index.handler",
+        code: lambda.Code.fromAsset(path.join(ARBITER_ROOT, "stepRunner"), {
+          exclude: [...PYTHON_ASSET_EXCLUDES],
+        }),
+        // Shared arbiter layer so `from common import workflow_contract`
+        // resolves at runtime (common/ is staged at /opt/python/common).
+        layers: [catalogLayer],
+        timeout: cdk.Duration.minutes(5),
+        memorySize: 1024,
+        environment: {
+          EXECUTIONS_TABLE: props.executionsTable.tableName,
+          WORKFLOWS_TABLE: props.workflowsTable.tableName,
+          AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
+          TOOLS_CONFIG_TABLE: toolsConfigTable.tableName,
+          EVENT_BUS_NAME: props.agentEventBus.eventBusName,
+          APPSYNC_ENDPOINT: props.appSyncEndpoint,
+          // Governance enforcement-mode resolution: hierarchy.py reads
+          // ENVIRONMENT to build the SSM parameter path
+          // /citadel/governance/enforce/{ENVIRONMENT}. Without it the mode
+          // silently defaults to 'shadow' and all governance gates are inert.
+          ENVIRONMENT: props.environment,
+          // URL of the worker agent queue. The Step Runner dispatches a
+          // workflow node to the worker by sending a discriminated message to
+          // this SQS queue; the worker runs the agent and emits the node
+          // completed/failed events the rules below consume.
+          WORKER_QUEUE_URL: workerAgentQueue.queueUrl,
+          // Release-aware dispatch (this story): mirrors the Supervisor's
+          // env var wiring above — table names, plus G3's
+          // RELEASE_DISPATCH_ENVIRONMENT (feature switch, uppercased) and
+          // RELEASE_DEFAULT_ORG_ID (named org seam). Omitted when the
+          // tables/prop aren't provisioned. See ArbiterStackProps's doc
+          // comment for the rationale.
+          ...(props.agentReleasesTable && {
+            AGENT_RELEASES_TABLE: props.agentReleasesTable.tableName,
           }),
-          // Shared arbiter layer so `from common import workflow_contract`
-          // resolves at runtime (common/ is staged at /opt/python/common).
-          layers: [catalogLayer],
-          timeout: cdk.Duration.minutes(5),
-          memorySize: 1024,
-          environment: {
-            EXECUTIONS_TABLE: props.executionsTable.tableName,
-            WORKFLOWS_TABLE: props.workflowsTable.tableName,
-            AGENT_CONFIG_TABLE: props.agentConfigTable.tableName,
-            TOOLS_CONFIG_TABLE: toolsConfigTable.tableName,
-            EVENT_BUS_NAME: props.agentEventBus.eventBusName,
-            APPSYNC_ENDPOINT: props.appSyncEndpoint,
-            // Governance enforcement-mode resolution: hierarchy.py reads
-            // ENVIRONMENT to build the SSM parameter path
-            // /citadel/governance/enforce/{ENVIRONMENT}. Without it the mode
-            // silently defaults to 'shadow' and all governance gates are inert.
-            ENVIRONMENT: props.environment,
-            // URL of the worker agent queue. The Step Runner dispatches a
-            // workflow node to the worker by sending a discriminated message to
-            // this SQS queue; the worker runs the agent and emits the node
-            // completed/failed events the rules below consume.
-            WORKER_QUEUE_URL: workerAgentQueue.queueUrl,
-            // Release-aware dispatch (this story): mirrors the Supervisor's
-            // env var wiring above — table names, plus G3's
-            // RELEASE_DISPATCH_ENVIRONMENT (feature switch, uppercased) and
-            // RELEASE_DEFAULT_ORG_ID (named org seam). Omitted when the
-            // tables/prop aren't provisioned. See ArbiterStackProps's doc
-            // comment for the rationale.
-            ...(props.agentReleasesTable && {
-              AGENT_RELEASES_TABLE: props.agentReleasesTable.tableName,
-            }),
-            ...(props.environmentReleasePointersTable && {
-              ENVIRONMENT_RELEASE_POINTERS_TABLE:
-                props.environmentReleasePointersTable.tableName,
-              RELEASE_DISPATCH_ENVIRONMENT: props.environment.toUpperCase(),
-            }),
-            // G3 — the named org for release-aware dispatch. Set
-            // unconditionally (bin/app.ts defaults to 'Default') so the
-            // release gate never runs with an empty org id.
-            RELEASE_DEFAULT_ORG_ID: props.releaseDefaultOrgId ?? "Default",
-            // Execution pause/resume engine: executor.py reads
-            // APPROVAL_GATE_ENABLED at module level to decide whether
-            // invoke_node parks a node pending human approval before
-            // dispatch. Precedence:
-            // process.env.APPROVAL_GATE_ENABLED → CDK context
-            // `approvalGateEnabled` → 'false'. Validated at synth time above.
-            APPROVAL_GATE_ENABLED: resolvedApprovalGateEnabled,
-          },
-          deadLetterQueueEnabled: true,
-          deadLetterQueue: arbiterAsyncDlq,
+          ...(props.environmentReleasePointersTable && {
+            ENVIRONMENT_RELEASE_POINTERS_TABLE:
+              props.environmentReleasePointersTable.tableName,
+            RELEASE_DISPATCH_ENVIRONMENT: props.environment.toUpperCase(),
+          }),
+          // G3 — the named org for release-aware dispatch. Set
+          // unconditionally (bin/app.ts defaults to 'Default') so the
+          // release gate never runs with an empty org id.
+          RELEASE_DEFAULT_ORG_ID: props.releaseDefaultOrgId ?? "Default",
+          // Execution pause/resume engine: executor.py reads
+          // APPROVAL_GATE_ENABLED at module level to decide whether
+          // invoke_node parks a node pending human approval before
+          // dispatch. Precedence:
+          // process.env.APPROVAL_GATE_ENABLED → CDK context
+          // `approvalGateEnabled` → 'false'. Validated at synth time above.
+          APPROVAL_GATE_ENABLED: resolvedApprovalGateEnabled,
         },
-      );
+        deadLetterQueueEnabled: true,
+        deadLetterQueue: arbiterAsyncDlq,
+      });
 
       // Least-privilege IAM per design 8.2
       props.executionsTable.grantReadWriteData(stepRunnerFunction);
@@ -3098,6 +3101,58 @@ export class ArbiterStack extends cdk.Stack {
 
     seedAgentConfigResource.node.addDependency(this.authorityUnitsTable);
     seedAgentConfigResource.node.addDependency(this.constitutionalLayersTable);
+
+    // ============================================================
+    // Governance table read access for the three execution functions
+    // (board task 9afcf38a, consensus bbe782e1, option A)
+    // ============================================================
+    // StepRunnerFunction, WorkerAgentWrapper and SupervisorAgent each call
+    // governance/hierarchy.py's load_governance_state(), which scans the
+    // four tables below via `_scan_table_by_env`. All three functions are
+    // declared earlier in this constructor (before `this.authorityUnitsTable`
+    // etc. exist as constructs), so — exactly like seedAgentConfigLambda
+    // above and the GovernanceGraphSnapshotFn / GovernanceGraphSnapshotOnChangeFn
+    // Lambdas further down — the env vars and grants are patched in here.
+    //
+    // READ-ONLY: grantReadData only (GetItem/Query/Scan/BatchGetItem, plus
+    // any GSI the table carries); no write actions. hierarchy.py's loaders
+    // never mutate these tables, so a write grant would violate least
+    // privilege.
+    //
+    // Enforcement-mode default: hierarchy.py's _resolve_enforcement_mode()
+    // reads ENVIRONMENT (already wired on all three functions above) to
+    // build the SSM parameter path /citadel/governance/enforce/{ENVIRONMENT}
+    // and falls back to _DEFAULT_ENFORCEMENT_MODE = 'shadow' whenever that
+    // parameter is unset or unresolvable — so these three functions run in
+    // shadow mode by default until an operator explicitly promotes the SSM
+    // parameter to 'strict' (or relaxes it to 'permissive').
+    const governanceTableReaders: lambda.Function[] = [
+      workerAgentWrapperLambda,
+      supervisorLambda,
+    ];
+    if (stepRunnerFunction) {
+      governanceTableReaders.push(stepRunnerFunction);
+    }
+    for (const fn of governanceTableReaders) {
+      fn.addEnvironment(
+        "AUTHORITY_UNITS_TABLE",
+        this.authorityUnitsTable.tableName,
+      );
+      fn.addEnvironment(
+        "COMPOSITION_CONTRACTS_TABLE",
+        this.compositionContractsTable.tableName,
+      );
+      fn.addEnvironment("CASE_LAW_TABLE", this.caseLawTable.tableName);
+      fn.addEnvironment(
+        "CONSTITUTIONAL_LAYERS_TABLE",
+        this.constitutionalLayersTable.tableName,
+      );
+
+      this.authorityUnitsTable.grantReadData(fn);
+      this.compositionContractsTable.grantReadData(fn);
+      this.caseLawTable.grantReadData(fn);
+      this.constitutionalLayersTable.grantReadData(fn);
+    }
 
     // ============================================================
     // Governance UI Wave 1 — read-only resolver for the ledger table
