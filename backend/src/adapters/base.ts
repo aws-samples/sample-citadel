@@ -80,6 +80,16 @@ export interface ConnectorAdapter {
   readonly category: ConnectorCategory;
   readonly spec: ConnectorSpec;
 
+  /**
+   * Opt-in flag: when true, `provision()` makes data-plane calls that
+   * route through requireScopedCredentials (e.g. S3Adapter.makeClient),
+   * so the resolver must assume a scoped role BEFORE calling provision()
+   * for a CREATE_NEW datastore. Adapters that provision via an ambient
+   * platform client (DynamoDB, RDS, KnowledgeBase, ...) leave this unset
+   * (falsy) and are provisioned with no scoped credentials, as before.
+   */
+  readonly provisionRequiresScopedCredentials?: boolean;
+
   requiredPolicies(
     config: Record<string, unknown>,
     accountId: string,
