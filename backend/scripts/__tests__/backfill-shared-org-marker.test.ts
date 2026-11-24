@@ -54,6 +54,12 @@ jest.mock("../../src/services/registry-service", () => ({
   RegistryRecordStatusValues: { APPROVED: "APPROVED" },
 }));
 
+const lookupOwnerOrganization = jest.fn();
+jest.mock("../../src/utils/org-membership", () => ({
+  lookupOwnerOrganization: (...args: unknown[]) =>
+    lookupOwnerOrganization(...args),
+}));
+
 import {
   classifyRecord,
   emptySummary,
@@ -154,6 +160,95 @@ describe("classifyRecord", () => {
     const resolveCreatedByOrg = () => undefined;
     expect(classifyRecord(rec, resolveCreatedByOrg)).toEqual({
       outcome: "mark-unknown",
+    });
+  });
+
+  describe("buildCreatedByOrgResolver — createdBy-to-org lookup via UserOrgMembership (lookupOwnerOrganization)", () => {
+    beforeEach(() => {
+      lookupOwnerOrganization.mockReset();
+    });
+
+    it("resolves a blank-orgId record's createdBy to exactly one tenant org as AMBIGUOUS, reported, never auto-assigned", async () => {
+      // RED: this currently fails because the createdBy-to-org lookup used
+      // by the default scan pass is never populated — every non-allowlisted
+      // blank-orgId record falls through to orgUnknown regardless of
+      // whether its createdBy maps to a real tenant org via the same
+      // UserOrgMembership table the resolvers already read
+      // (src/utils/org-membership.ts: lookupOwnerOrganization).
+      const { buildCreatedByOrgResolver } =
+        await import("../backfill-shared-org-marker");
+      lookupOwnerOrganization.mockImplementation(async (owner: string) =>
+        owner === "user-sub-single-org" ? "org-solo" : null,
+      );
+      const resolveCreatedByOrg = await buildCreatedByOrgResolver([
+        "user-sub-single-org",
+      ]);
+
+      const rec: RecordShape = {
+        id: "r-ambiguous-owner",
+        name: "orphan-agent-3",
+        orgId: "",
+        createdBy: "user-sub-single-org",
+      };
+
+      expect(classifyRecord(rec, resolveCreatedByOrg)).toEqual({
+        outcome: "ambiguous",
+        resolvedOrgId: "org-solo",
+      });
+    });
+
+    it("resolves to undefined (mark-unknown) when createdBy maps to zero orgs", async () => {
+      const { buildCreatedByOrgResolver } =
+        await import("../backfill-shared-org-marker");
+      lookupOwnerOrganization.mockResolvedValue(null);
+      const resolveCreatedByOrg = await buildCreatedByOrgResolver([
+        "user-sub-no-org",
+      ]);
+
+      const rec: RecordShape = {
+        id: "r-zero-orgs",
+        name: "orphan-agent-4",
+        orgId: "",
+        createdBy: "user-sub-no-org",
+      };
+
+      expect(classifyRecord(rec, resolveCreatedByOrg)).toEqual({
+        outcome: "mark-unknown",
+      });
+    });
+
+    it("never auto-assigns across independent resolver builds — a later lookup result does not leak into an earlier-built resolver (no accidental caching across runs)", async () => {
+      // There is no reachable "2+ distinct orgs for one createdBy" case
+      // to exercise end-to-end: buildCreatedByOrgResolver's index is
+      // keyed by the raw createdBy string, and lookupOwnerOrganization
+      // (backed by the UserOrgMembership table, one row per `sub`) can
+      // only ever return a single org or null per distinct key — so the
+      // `orgs.size !== 1` guard's `> 1` branch is unreachable with
+      // today's data model. It is kept anyway, deliberately mirroring
+      // resolveToolOrgFromIndex's existing multi-org defense for tool
+      // names, in case the membership model ever changes to support
+      // multiple orgs per user. What IS independently verifiable here:
+      // each resolver build is a fresh, independent snapshot — a
+      // membership change observed by a second build must never bleed
+      // into a resolver already handed out from a first build.
+      const { buildCreatedByOrgResolver } =
+        await import("../backfill-shared-org-marker");
+      lookupOwnerOrganization.mockImplementation(async (owner: string) =>
+        owner === "user-sub-reassigned" ? "org-before" : null,
+      );
+      const beforeResolver = await buildCreatedByOrgResolver([
+        "user-sub-reassigned",
+      ]);
+
+      lookupOwnerOrganization.mockImplementation(async (owner: string) =>
+        owner === "user-sub-reassigned" ? "org-after" : null,
+      );
+      const afterResolver = await buildCreatedByOrgResolver([
+        "user-sub-reassigned",
+      ]);
+
+      expect(beforeResolver("user-sub-reassigned")).toBe("org-before");
+      expect(afterResolver("user-sub-reassigned")).toBe("org-after");
     });
   });
 
@@ -409,6 +504,8 @@ describe("main() default-pass exit code — errors / ambiguous rows", () => {
     registryListResources.mockReset();
     ddbSend.mockReset();
     ddbSend.mockResolvedValue({ Items: [] });
+    lookupOwnerOrganization.mockReset();
+    lookupOwnerOrganization.mockResolvedValue(null);
     exitSpy = jest.spyOn(process, "exit").mockImplementation(((
       code?: number,
     ) => {
@@ -434,7 +531,33 @@ describe("main() default-pass exit code — errors / ambiguous rows", () => {
 
   it("exits with code 3 when a DDB scan fails (summary.errors > 0)", async () => {
     registryListResources.mockResolvedValue([]);
-    ddbSend.mockRejectedValueOnce(new Error("scan failed"));
+    ddbSend.mockRejectedValue(new Error("scan failed"));
+
+    await expect(main()).rejects.toThrow("process.exit(3)");
+    expect(exitSpy).toHaveBeenCalledWith(3);
+  });
+
+  it("exits with code 3 when a blank-orgId record's createdBy resolves to exactly one tenant org via UserOrgMembership (ambiguousReported > 0)", async () => {
+    // Distinct from the tool-name AMBIGUOUS case below: this exercises
+    // the ordinary createdBy -> UserOrgMembership path (lookupOwnerOrganization)
+    // directly, end to end through main()'s default pass.
+    lookupOwnerOrganization.mockImplementation(async (owner: string) =>
+      owner === "user-sub-owner-1" ? "org-owner-1" : null,
+    );
+    registryListResources.mockImplementation(async (type: string) => {
+      if (type === "agent") {
+        return [
+          {
+            recordId: "agent-rec-1",
+            name: "ordinary-user-agent",
+            customDescriptorContent: JSON.stringify({
+              createdBy: "user-sub-owner-1",
+            }),
+          },
+        ];
+      }
+      return [];
+    });
 
     await expect(main()).rejects.toThrow("process.exit(3)");
     expect(exitSpy).toHaveBeenCalledWith(3);
