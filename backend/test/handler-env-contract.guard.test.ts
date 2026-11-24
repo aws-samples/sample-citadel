@@ -734,16 +734,6 @@ const BACKEND_STACK_KNOWN_GAPS: Array<{
   reason: string;
 }> = [
   {
-    handler: "agent-config-resolver.handler",
-    logicalIdPrefix: "AgentConfigResolverFunction",
-    variable: "PROJECTS_TABLE",
-    reason:
-      "agent-config-resolver.ts imports assertProjectOrgAccess from " +
-      "utils/project-org-access.ts and calls it (line ~356). That function " +
-      "reads process.env.PROJECTS_TABLE and throws ProjectOrgAccessError " +
-      "(fail-closed) when unset, so every call denies access today.",
-  },
-  {
     handler: "integration-resolver.handler",
     logicalIdPrefix: "IntegrationResolverFunction",
     variable: "AGENTCORE_GATEWAY_ID",
