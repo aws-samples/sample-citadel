@@ -53,6 +53,69 @@ class TestPublishUsageEvent:
         assert detail["inputTokens"] == 1
         assert detail["source"] == "intake"
 
+    def test_usage_fields_are_nested_under_usage_key(self, monkeypatch):
+        """Defect fix (citadel-cost-ledger-dev zero usage rows): the writer
+        reads detail.usage; usage fields must be nested, not spread flat
+        onto detail. Top-level fields are additionally kept for backward
+        compatibility with any other consumer that reads them flat."""
+        import tools.state as state
+
+        client = mock.MagicMock()
+        monkeypatch.setattr(state, "events_client", client)
+        monkeypatch.setattr(state, "EVENT_BUS_NAME", "test-bus")
+
+        record = {
+            "modelId": "m", "inputTokens": 1, "outputTokens": 2,
+            "latencyMs": 3, "callIndex": 0, "capturedAt": "2026-01-01T00:00:00+00:00",
+            "source": "intake",
+        }
+        state.publish_usage_event("sess-2b", record)
+
+        detail = json.loads(client.put_events.call_args.kwargs["Entries"][0]["Detail"])
+        assert detail["usage"]["modelId"] == "m"
+        assert detail["usage"]["inputTokens"] == 1
+        assert detail["usage"]["outputTokens"] == 2
+        assert detail["usage"]["source"] == "intake"
+        # Backward compatibility: top-level fields still present.
+        assert detail["modelId"] == "m"
+        assert detail["inputTokens"] == 1
+
+    def test_org_id_stamped_from_bound_request_context(self, monkeypatch):
+        import tools.state as state
+        import request_context
+
+        client = mock.MagicMock()
+        monkeypatch.setattr(state, "events_client", client)
+        monkeypatch.setattr(state, "EVENT_BUS_NAME", "test-bus")
+        request_context.bind_request({
+            "session_id": "sess-org-1",
+            "sessionAttributes": {"userId": "user-1", "org": "org-abc"},
+        })
+        try:
+            state.publish_usage_event("sess-org-1", {"source": "intake"})
+        finally:
+            request_context.clear()
+
+        detail = json.loads(client.put_events.call_args.kwargs["Entries"][0]["Detail"])
+        assert detail["orgId"] == "org-abc"
+
+    def test_org_id_absent_when_no_request_context_bound(self, monkeypatch):
+        """Never invent an org. Outside a bound request (e.g. the existing
+        unit tests in this file, which call publish_usage_event directly)
+        orgId must be omitted entirely, not a placeholder."""
+        import tools.state as state
+        import request_context
+
+        request_context.clear()
+        client = mock.MagicMock()
+        monkeypatch.setattr(state, "events_client", client)
+        monkeypatch.setattr(state, "EVENT_BUS_NAME", "test-bus")
+
+        state.publish_usage_event("sess-org-2", {"source": "intake"})
+
+        detail = json.loads(client.put_events.call_args.kwargs["Entries"][0]["Detail"])
+        assert "orgId" not in detail
+
     def test_does_not_publish_when_event_bus_unset(self, monkeypatch):
         import tools.state as state
 
