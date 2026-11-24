@@ -98,15 +98,16 @@ const statusIcons: Record<string, LucideIcon> = {
 
 export function DataStores() {
   const { selectedOrganization, currentUser } = useOrganization();
-  const orgId = selectedOrganization || "default";
 
-  // Create-target org resolution (UX/diagnosability fix — b5d463f2 background):
-  // 'All Organizations' and a null selection are FILTER SCOPES for the list
-  // above, not valid creation targets. The create path must submit the
-  // CALLER'S OWN organisation (never the selector value), and must never
-  // fall back to a placeholder like "default" — createDataStore now rejects
-  // an org mismatch for everyone, including admins, so a placeholder can
-  // never succeed and only produces a confusing "access denied".
+  // List/stats org resolution (mirrors Integrations.tsx:190-195): the
+  // request to listDataStores/getDataStoreStats must always carry the
+  // CALLER'S OWN organisation, never the selector value. For admins,
+  // OrganizationContext sets selectedOrganization to the literal
+  // "All Organizations", and for a caller with no selection at all the
+  // old code fell back to the literal "default" — neither is a real org,
+  // so the backend's exact-match OrgIndex query returns nothing.
+  // selectedOrganization is a client-side filter scope only; it is never
+  // sent to the server.
   const callerOrgId = currentUser?.organization || null;
   const canCreateDataStore = Boolean(callerOrgId);
   const createDisabledReason = !callerOrgId
@@ -135,11 +136,17 @@ export function DataStores() {
   });
 
   const loadDataStores = async () => {
+    if (!callerOrgId) {
+      setDataStores([]);
+      setStats({ total: 0, connected: 0, error: 0 });
+      setLoading(false);
+      return;
+    }
     try {
       setLoading(true);
       const [data, statsData] = await Promise.all([
-        datastoreService.listDataStores(orgId),
-        datastoreService.getDataStoreStats(orgId),
+        datastoreService.listDataStores(callerOrgId),
+        datastoreService.getDataStoreStats(callerOrgId),
       ]);
       setDataStores(data);
       setStats(statsData);
@@ -152,7 +159,7 @@ export function DataStores() {
 
   useEffect(() => {
     loadDataStores();
-  }, [orgId]);
+  }, [callerOrgId]);
 
   const getCategoryCount = (categoryId: string) => {
     if (categoryId === "all") return dataStores.length;
@@ -160,6 +167,14 @@ export function DataStores() {
   };
 
   const filteredDataStores = filterDataStoresByUsage(dataStores, selectedUsageTab).filter((dataStore) => {
+    // selectedOrganization is a CLIENT-SIDE filter scope only (never sent
+    // to listDataStores/getDataStoreStats). "All Organizations" and a null
+    // selection mean "no extra filter"; only a concrete org name narrows
+    // the already-loaded, caller-scoped result set.
+    const matchesOrg =
+      !selectedOrganization || selectedOrganization === "All Organizations"
+        ? true
+        : (dataStore as { orgId?: string }).orgId === selectedOrganization;
     const matchesCategory = selectedCategory === "all" || dataStore.category === selectedCategory;
     const matchesSearch =
       dataStore.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -168,7 +183,7 @@ export function DataStores() {
       viewMode === "connected"
         ? dataStore.status === DataStoreStatus.CONNECTED || dataStore.status === DataStoreStatus.PROVISIONED
         : true;
-    return matchesCategory && matchesSearch && matchesView;
+    return matchesOrg && matchesCategory && matchesSearch && matchesView;
   });
 
   if (loading) {
