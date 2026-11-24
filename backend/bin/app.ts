@@ -480,6 +480,15 @@ telemetryStack.addStackDependency(arbiterStack);
 const evalSamplingConfigResolverArn = `arn:aws:lambda:${env.region}:${env.account}:function:citadel-eval-sampling-config-resolver-${environment}`;
 backendStack.addEvalSamplingConfigResolvers(evalSamplingConfigResolverArn);
 
+// Board task 4cc234d1: cross-stack AppSync wiring for
+// platform-health-resolver.ts, which now lives in TelemetryStack (moved
+// from BackendStack to satisfy the backend-stack-split removals-only
+// policy). Same deterministic-ARN rationale as
+// evalSamplingConfigResolverArn above — TelemetryStack already depends on
+// BackendStack, so a construct-level reference back would be cyclic.
+const platformHealthResolverArn = `arn:aws:lambda:${env.region}:${env.account}:function:citadel-platform-health-resolver-${environment}`;
+backendStack.addPlatformHealthResolver(platformHealthResolverArn);
+
 // Frontend hosting stack
 const frontendStack = new FrontendStack(
   app,
@@ -961,10 +970,12 @@ if (app.node.tryGetContext("nag") !== "false") {
   // Resource "*" is the only valid grant for this action; reads are further
   // narrowed at call time by AlarmNamePrefix="citadel-" and the resolver is
   // admin-gated (isAdminFromEvent). No sqs:GetQueueAttributes or other
-  // permission is granted to this function.
+  // permission is granted to this function. Moved here from BackendStack
+  // alongside the Lambda itself (board task 4cc234d1, backend-stack-split
+  // removals-only policy) — same IAM statement, same suppression reason.
   NagSuppressions.addResourceSuppressionsByPath(
-    backendStack,
-    `/${backendStack.stackName}/PlatformHealthResolverFunction/ServiceRole/DefaultPolicy/Resource`,
+    telemetryStack,
+    `/${telemetryStack.stackName}/PlatformHealthResolverFunction/ServiceRole/DefaultPolicy/Resource`,
     [
       {
         id: "AwsSolutions-IAM5",

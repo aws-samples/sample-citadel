@@ -60,6 +60,10 @@ const CROSS_STACK_IMPORTS: ReadonlyMap<string, string> = new Map([
   // telemetry-stack.ts (handler: "eval-sampling-config-resolver.handler"),
   // ARN threaded through bin/app.ts (DECISION d36fbbf7).
   ["resolverFn", "eval-sampling-config-resolver"],
+  // backend-stack.ts addPlatformHealthResolver(): Lambda created in
+  // telemetry-stack.ts (handler: "platform-health-resolver.handler"), ARN
+  // threaded through bin/app.ts (board task 4cc234d1).
+  ["platformHealthResolverFn", "platform-health-resolver"],
 ]);
 
 /**
