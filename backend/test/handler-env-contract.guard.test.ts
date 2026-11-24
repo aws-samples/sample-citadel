@@ -668,8 +668,38 @@ const BACKEND_STACK_OPTIONAL: Record<string, Set<string>> = {
   // observed here keeps the allowlist precise rather than global.
   "model-catalog-sync": new Set(["LOG_LEVEL"]),
   "model-config-resolver": new Set(["LOG_LEVEL"]),
-  "integration-resolver": new Set(["LOG_LEVEL", "AWS_REGION"]),
-  "gateway-registration-handler": new Set(["LOG_LEVEL", "AWS_REGION"]),
+  // integration-resolver.ts imports provisionCredentialProvider /
+  // deprovisionCredentialProvider from utils/gateway-target-manager.ts, but
+  // never calls buildLambdaTargetPayload / buildSmithyTargetPayload /
+  // buildMCPServerTargetPayload / getTarget / deleteTargetAndProvider — the
+  // only functions in that file that read AGENTCORE_GATEWAY_ID. The
+  // transitive env-var walk here is whole-file (it cannot distinguish
+  // called vs. uncalled exports in the same module), so it attributes a var
+  // this handler never actually reaches at runtime. Same false-positive
+  // class as the organization-resolver / seed-eval-suites/index entries
+  // below (type-only-import attribution) — here it's an unused-sibling-
+  // export attribution instead. Verified by grep: no builder/getTarget/
+  // delete call exists in integration-resolver.ts.
+  "integration-resolver": new Set([
+    "LOG_LEVEL",
+    "AWS_REGION",
+    "AGENTCORE_GATEWAY_ID",
+  ]),
+  // gateway-registration-handler.ts DOES call buildLambdaTargetPayload /
+  // buildSmithyTargetPayload / buildMCPServerTargetPayload, each of which
+  // reads AGENTCORE_GATEWAY_ID via the module-private getRequiredGatewayId().
+  // Rather than set this as a CDK-provided env var, the handler's own
+  // getGatewayId() resolves it from GATEWAY_ID_PARAM (an SSM parameter
+  // written post-deploy — the gateway id is not known at synth time) and
+  // bridges the result into process.env.AGENTCORE_GATEWAY_ID at runtime,
+  // called before every builder call site (registerLambda, registerSmithy,
+  // registerMcpServer). Optional here because the runtime bridge, not a
+  // static env var, is the intended resolution path.
+  "gateway-registration-handler": new Set([
+    "LOG_LEVEL",
+    "AWS_REGION",
+    "AGENTCORE_GATEWAY_ID",
+  ]),
   "agent-config-resolver": new Set([
     "AWS_REGION",
     // governance-flag.ts: `process.env.GOVERNANCE_FLAG_CACHE_TTL_SECONDS` is
@@ -732,37 +762,7 @@ const BACKEND_STACK_KNOWN_GAPS: Array<{
   logicalIdPrefix: string;
   variable: string;
   reason: string;
-}> = [
-  {
-    handler: "integration-resolver.handler",
-    logicalIdPrefix: "IntegrationResolverFunction",
-    variable: "AGENTCORE_GATEWAY_ID",
-    reason:
-      "integration-resolver.ts imports provisionCredentialProvider / " +
-      "deprovisionCredentialProvider from utils/gateway-target-manager.ts, " +
-      "both of which call the module-private getRequiredGatewayId(), which " +
-      "reads process.env.AGENTCORE_GATEWAY_ID and throws 'AgentCore " +
-      "Gateway not configured' when unset. The function is deployed with " +
-      "GATEWAY_ID_PARAM (an SSM parameter name) instead; nothing on this " +
-      "handler's path bridges GATEWAY_ID_PARAM into AGENTCORE_GATEWAY_ID " +
-      "the way agent-import-resolver.ts's resolveGatewayId() does.",
-  },
-  {
-    handler: "gateway-registration-handler.handler",
-    logicalIdPrefix: "GatewayRegistrationHandler",
-    variable: "AGENTCORE_GATEWAY_ID",
-    reason:
-      "gateway-registration-handler.ts calls buildLambdaTargetPayload / " +
-      "buildSmithyTargetPayload / buildMCPServerTargetPayload from " +
-      "utils/gateway-target-manager.ts (lines ~311/327/375/388/396), each " +
-      "of which calls getRequiredGatewayId() internally and throws when " +
-      "AGENTCORE_GATEWAY_ID is unset. The handler's own getGatewayId() " +
-      "resolves GATEWAY_ID_PARAM via SSM for OTHER call sites (lines " +
-      "~227/530) but never writes the result back to " +
-      "process.env.AGENTCORE_GATEWAY_ID, so the three builder calls still " +
-      "hit the unset env var and throw.",
-  },
-];
+}> = [];
 
 describe("Handler environment-variable contract guard — BackendStack (part c)", () => {
   let template: Template;

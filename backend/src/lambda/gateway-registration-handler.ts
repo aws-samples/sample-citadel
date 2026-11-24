@@ -75,12 +75,31 @@ const GATEWAY_ID_PARAM = process.env.GATEWAY_ID_PARAM || "";
 
 let cachedGatewayId: string | undefined;
 
+/**
+ * Resolve the shared AgentCore Gateway id, bridging the result into
+ * `process.env.AGENTCORE_GATEWAY_ID`.
+ *
+ * `buildLambdaTargetPayload` / `buildSmithyTargetPayload` /
+ * `buildMCPServerTargetPayload` (utils/gateway-target-manager.ts) call the
+ * module-private `getRequiredGatewayId()`, which reads
+ * `process.env.AGENTCORE_GATEWAY_ID` directly and throws when it is unset.
+ * This handler is deployed with `GATEWAY_ID_PARAM` (an SSM parameter name)
+ * instead, because the gateway id is only known post-deploy (it is written
+ * by a custom resource / provisioned in ServicesStack). Every call site
+ * that leads into one of those three builders must call this function
+ * FIRST so the bridge has happened before the builder reads the env var —
+ * mirrors agent-import-resolver.ts's resolveGatewayId() bridging pattern.
+ */
 async function getGatewayId(): Promise<string> {
-  if (cachedGatewayId) return cachedGatewayId;
+  if (cachedGatewayId) {
+    process.env.AGENTCORE_GATEWAY_ID = cachedGatewayId;
+    return cachedGatewayId;
+  }
   const resp = await ssm.send(
     new GetParameterCommand({ Name: GATEWAY_ID_PARAM }),
   );
   cachedGatewayId = resp.Parameter?.Value || "";
+  process.env.AGENTCORE_GATEWAY_ID = cachedGatewayId;
   return cachedGatewayId;
 }
 
@@ -308,6 +327,9 @@ async function registerLambda(detail: IntegrationEvent): Promise<void> {
   }
 
   // Lambda + Smithy use GATEWAY_IAM_ROLE — credential provider not required.
+  // Resolve (and bridge into process.env.AGENTCORE_GATEWAY_ID) BEFORE the
+  // builder call below, which reads that env var internally.
+  await getGatewayId();
   const cmdInput = buildLambdaTargetPayload({
     integrationId: detail.integrationId,
     config: integration.config,
@@ -324,6 +346,9 @@ async function registerSmithy(detail: IntegrationEvent): Promise<void> {
     );
   }
 
+  // Resolve (and bridge into process.env.AGENTCORE_GATEWAY_ID) BEFORE the
+  // builder call below, which reads that env var internally.
+  await getGatewayId();
   const cmdInput = buildSmithyTargetPayload({
     integrationId: detail.integrationId,
     config: integration.config,
@@ -344,6 +369,11 @@ async function registerMcpServer(detail: IntegrationEvent): Promise<void> {
     detail.credentialProviderArn ?? integration.credentialProviderArn;
   const credentialProviderType = (detail.credentialProviderType ??
     integration.credentialProviderType) as "API_KEY" | "OAUTH2" | undefined;
+
+  // Resolve (and bridge into process.env.AGENTCORE_GATEWAY_ID) BEFORE any
+  // of the three buildMCPServerTargetPayload call sites below, which read
+  // that env var internally. One resolve covers all three branches.
+  await getGatewayId();
 
   let cmdInput;
   if (credentialProviderType === "OAUTH2") {
