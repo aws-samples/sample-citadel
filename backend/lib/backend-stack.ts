@@ -1113,6 +1113,13 @@ export class BackendStack extends cdk.Stack {
           ACCOUNT_ID: this.account,
           // Tag-policy enforcement: reads the caller's organisation policy row.
           ORGANIZATIONS_TABLE: organisationTable.tableName,
+          // Project-org reconciliation gate (finding 677c1a6c): the resolver
+          // imports assertProjectOrgAccess from utils/project-org-access.ts,
+          // which reads PROJECTS_TABLE directly and fails CLOSED
+          // (ProjectOrgAccessError) when it is unset. Mirrors the
+          // agentMessageHandlerFunction wiring below (same table, same
+          // read-only grant shape).
+          PROJECTS_TABLE: this.projectsTable.tableName,
         },
         memorySize: 512,
         timeout: cdk.Duration.seconds(30),
@@ -1259,6 +1266,9 @@ export class BackendStack extends cdk.Stack {
     this.agentConfigTable.grantReadWriteData(agentConfigResolverFunction);
     // Tag-policy enforcement: read-only access to the organisations table.
     organisationTable.grantReadData(agentConfigResolverFunction);
+    // Project-org reconciliation gate: read-only access to the projects
+    // table (assertProjectOrgAccess only ever calls GetCommand).
+    this.projectsTable.grantReadData(agentConfigResolverFunction);
 
     // Grant agent-config-resolver permission to call Registry APIs
     agentConfigResolverFunction.addToRolePolicy(

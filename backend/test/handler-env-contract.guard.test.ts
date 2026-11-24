@@ -29,6 +29,7 @@ import * as events from "aws-cdk-lib/aws-events";
 import * as sns from "aws-cdk-lib/aws-sns";
 import { Bucket } from "aws-cdk-lib/aws-s3";
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import { scaffoldBackendAssetDirs } from "./helpers/scaffold-stub-assets";
 
@@ -365,7 +366,7 @@ describe("PROCESS_ENV_RE / envVarsInFile — dot and bracket access forms", () =
     expect(PROCESS_ENV_RE.test("const x = process.env.FOO_BAR;")).toBe(true);
   });
 
-  test("matches double-quoted bracket-access form process.env[\"FOO_BAR\"]", () => {
+  test('matches double-quoted bracket-access form process.env["FOO_BAR"]', () => {
     expect(PROCESS_ENV_RE.test('const x = process.env["FOO_BAR"];')).toBe(true);
   });
 
@@ -381,13 +382,13 @@ describe("PROCESS_ENV_RE / envVarsInFile — dot and bracket access forms", () =
 
   test("envVarsInFile extracts names from both dot and bracket forms in one file", () => {
     const tmpFile = path.join(
-      fs.mkdtempSync(path.join(require("os").tmpdir(), "kiro-env-re-")),
+      fs.mkdtempSync(path.join(os.tmpdir(), "kiro-env-re-")),
       "sample.ts",
     );
     fs.writeFileSync(
       tmpFile,
       [
-        'const a = process.env.ALPHA_VAR;',
+        "const a = process.env.ALPHA_VAR;",
         'const b = process.env["BRAVO_VAR"];',
         "const c = process.env['CHARLIE_VAR'];",
       ].join("\n"),
@@ -667,8 +668,38 @@ const BACKEND_STACK_OPTIONAL: Record<string, Set<string>> = {
   // observed here keeps the allowlist precise rather than global.
   "model-catalog-sync": new Set(["LOG_LEVEL"]),
   "model-config-resolver": new Set(["LOG_LEVEL"]),
-  "integration-resolver": new Set(["LOG_LEVEL", "AWS_REGION"]),
-  "gateway-registration-handler": new Set(["LOG_LEVEL", "AWS_REGION"]),
+  // integration-resolver.ts imports provisionCredentialProvider /
+  // deprovisionCredentialProvider from utils/gateway-target-manager.ts, but
+  // never calls buildLambdaTargetPayload / buildSmithyTargetPayload /
+  // buildMCPServerTargetPayload / getTarget / deleteTargetAndProvider — the
+  // only functions in that file that read AGENTCORE_GATEWAY_ID. The
+  // transitive env-var walk here is whole-file (it cannot distinguish
+  // called vs. uncalled exports in the same module), so it attributes a var
+  // this handler never actually reaches at runtime. Same false-positive
+  // class as the organization-resolver / seed-eval-suites/index entries
+  // below (type-only-import attribution) — here it's an unused-sibling-
+  // export attribution instead. Verified by grep: no builder/getTarget/
+  // delete call exists in integration-resolver.ts.
+  "integration-resolver": new Set([
+    "LOG_LEVEL",
+    "AWS_REGION",
+    "AGENTCORE_GATEWAY_ID",
+  ]),
+  // gateway-registration-handler.ts DOES call buildLambdaTargetPayload /
+  // buildSmithyTargetPayload / buildMCPServerTargetPayload, each of which
+  // reads AGENTCORE_GATEWAY_ID via the module-private getRequiredGatewayId().
+  // Rather than set this as a CDK-provided env var, the handler's own
+  // getGatewayId() resolves it from GATEWAY_ID_PARAM (an SSM parameter
+  // written post-deploy — the gateway id is not known at synth time) and
+  // bridges the result into process.env.AGENTCORE_GATEWAY_ID at runtime,
+  // called before every builder call site (registerLambda, registerSmithy,
+  // registerMcpServer). Optional here because the runtime bridge, not a
+  // static env var, is the intended resolution path.
+  "gateway-registration-handler": new Set([
+    "LOG_LEVEL",
+    "AWS_REGION",
+    "AGENTCORE_GATEWAY_ID",
+  ]),
   "agent-config-resolver": new Set([
     "AWS_REGION",
     // governance-flag.ts: `process.env.GOVERNANCE_FLAG_CACHE_TTL_SECONDS` is
@@ -678,7 +709,10 @@ const BACKEND_STACK_OPTIONAL: Record<string, Set<string>> = {
     // logger, which reads LOG_LEVEL with an "INFO" default.
     "LOG_LEVEL",
   ]),
-  "tool-config-resolver": new Set(["AWS_REGION", "GOVERNANCE_FLAG_CACHE_TTL_SECONDS"]),
+  "tool-config-resolver": new Set([
+    "AWS_REGION",
+    "GOVERNANCE_FLAG_CACHE_TTL_SECONDS",
+  ]),
   // registry-provisioner.ts interpolates the ambient Lambda-runtime log
   // stream name into an error message only — never a required config value.
   "registry-provisioner": new Set(["AWS_LAMBDA_LOG_STREAM_NAME"]),
@@ -728,47 +762,7 @@ const BACKEND_STACK_KNOWN_GAPS: Array<{
   logicalIdPrefix: string;
   variable: string;
   reason: string;
-}> = [
-  {
-    handler: "agent-config-resolver.handler",
-    logicalIdPrefix: "AgentConfigResolverFunction",
-    variable: "PROJECTS_TABLE",
-    reason:
-      "agent-config-resolver.ts imports assertProjectOrgAccess from " +
-      "utils/project-org-access.ts and calls it (line ~356). That function " +
-      "reads process.env.PROJECTS_TABLE and throws ProjectOrgAccessError " +
-      "(fail-closed) when unset, so every call denies access today.",
-  },
-  {
-    handler: "integration-resolver.handler",
-    logicalIdPrefix: "IntegrationResolverFunction",
-    variable: "AGENTCORE_GATEWAY_ID",
-    reason:
-      "integration-resolver.ts imports provisionCredentialProvider / " +
-      "deprovisionCredentialProvider from utils/gateway-target-manager.ts, " +
-      "both of which call the module-private getRequiredGatewayId(), which " +
-      "reads process.env.AGENTCORE_GATEWAY_ID and throws 'AgentCore " +
-      "Gateway not configured' when unset. The function is deployed with " +
-      "GATEWAY_ID_PARAM (an SSM parameter name) instead; nothing on this " +
-      "handler's path bridges GATEWAY_ID_PARAM into AGENTCORE_GATEWAY_ID " +
-      "the way agent-import-resolver.ts's resolveGatewayId() does.",
-  },
-  {
-    handler: "gateway-registration-handler.handler",
-    logicalIdPrefix: "GatewayRegistrationHandler",
-    variable: "AGENTCORE_GATEWAY_ID",
-    reason:
-      "gateway-registration-handler.ts calls buildLambdaTargetPayload / " +
-      "buildSmithyTargetPayload / buildMCPServerTargetPayload from " +
-      "utils/gateway-target-manager.ts (lines ~311/327/375/388/396), each " +
-      "of which calls getRequiredGatewayId() internally and throws when " +
-      "AGENTCORE_GATEWAY_ID is unset. The handler's own getGatewayId() " +
-      "resolves GATEWAY_ID_PARAM via SSM for OTHER call sites (lines " +
-      "~227/530) but never writes the result back to " +
-      "process.env.AGENTCORE_GATEWAY_ID, so the three builder calls still " +
-      "hit the unset env var and throw.",
-  },
-];
+}> = [];
 
 describe("Handler environment-variable contract guard — BackendStack (part c)", () => {
   let template: Template;
@@ -847,12 +841,16 @@ describe("Handler environment-variable contract guard — BackendStack (part c)"
       BACKEND_STACK_KNOWN_GAPS.map((g) => `${g.handler}::${g.variable}`),
     );
     expect(AMBIENT_VARS.has(syntheticVar)).toBe(false);
-    expect(PER_HANDLER_OPTIONAL["agent-config-resolver"]?.has(syntheticVar)).toBeFalsy();
-    expect(BACKEND_STACK_OPTIONAL["agent-config-resolver"]?.has(syntheticVar)).toBeFalsy();
+    expect(
+      PER_HANDLER_OPTIONAL["agent-config-resolver"]?.has(syntheticVar),
+    ).toBeFalsy();
+    expect(
+      BACKEND_STACK_OPTIONAL["agent-config-resolver"]?.has(syntheticVar),
+    ).toBeFalsy();
     expect(match!.envKeys.has(syntheticVar)).toBe(false);
-    expect(knownGapKeys.has(`agent-config-resolver.handler::${syntheticVar}`)).toBe(
-      false,
-    );
+    expect(
+      knownGapKeys.has(`agent-config-resolver.handler::${syntheticVar}`),
+    ).toBe(false);
   });
 });
 
@@ -944,9 +942,7 @@ const GOVERNANCE_STATE_CALLERS = [
 const ARBITER_GOVERNANCE_KNOWN_GAPS: Array<{
   functionName: string;
   variable: string;
-}> = GOVERNANCE_STATE_CALLERS.flatMap(({ name }) =>
-  GOVERNANCE_TABLE_VARS.map((variable) => ({ functionName: name, variable })),
-);
+}> = [];
 
 describe("Arbiter Python handler contract — governance table vars on load_governance_state() callers", () => {
   let template: Template;
@@ -959,12 +955,20 @@ describe("Arbiter Python handler contract — governance table vars on load_gove
     const app = new cdkArbiter.App({
       context: { "aws:cdk:bundling-stacks": [] },
     });
-    const backendStack = new cdkArbiter.Stack(app, "MockBackendStackEnvContract", {
-      env: { account: "123456789012", region: "us-east-1" },
-    });
-    const agentEventBus = new eventsArbiter.EventBus(backendStack, "AgentEventBus", {
-      eventBusName: "citadel-agents-test",
-    });
+    const backendStack = new cdkArbiter.Stack(
+      app,
+      "MockBackendStackEnvContract",
+      {
+        env: { account: "123456789012", region: "us-east-1" },
+      },
+    );
+    const agentEventBus = new eventsArbiter.EventBus(
+      backendStack,
+      "AgentEventBus",
+      {
+        eventBusName: "citadel-agents-test",
+      },
+    );
     const mkTable = (id: string, name: string, pk: string) =>
       new dynamodbArbiter.Table(backendStack, id, {
         tableName: name,
@@ -995,12 +999,16 @@ describe("Arbiter Python handler contract — governance table vars on load_gove
     const codeBucket = new BucketArbiter(backendStack, "CodeBucket", {
       bucketName: "citadel-code-test",
     });
-    const fanoutFunction = new lambdaArbiter.Function(backendStack, "FanoutFunction", {
-      runtime: lambdaArbiter.Runtime.NODEJS_24_X,
-      handler: "workflow-progress-fanout.handler",
-      code: lambdaArbiter.Code.fromAsset("dist/lambda"),
-      timeout: cdkArbiter.Duration.seconds(30),
-    });
+    const fanoutFunction = new lambdaArbiter.Function(
+      backendStack,
+      "FanoutFunction",
+      {
+        runtime: lambdaArbiter.Runtime.NODEJS_24_X,
+        handler: "workflow-progress-fanout.handler",
+        code: lambdaArbiter.Code.fromAsset("dist/lambda"),
+        timeout: cdkArbiter.Duration.seconds(30),
+      },
+    );
     const appSyncApi = new appsyncArbiter.GraphqlApi(backendStack, "MockApi", {
       name: "mock-api",
       schema: appsyncArbiter.SchemaFile.fromAsset(
@@ -1024,7 +1032,8 @@ describe("Arbiter Python handler contract — governance table vars on load_gove
   });
 
   afterAll(() => {
-    if (savedSkipBundling === undefined) delete process.env.CITADEL_SKIP_BUNDLING;
+    if (savedSkipBundling === undefined)
+      delete process.env.CITADEL_SKIP_BUNDLING;
     else process.env.CITADEL_SKIP_BUNDLING = savedSkipBundling;
   });
 
@@ -1035,7 +1044,11 @@ describe("Arbiter Python handler contract — governance table vars on load_gove
     // which does `os.environ.get(env_var)` one level removed. Direct-literal
     // Python env reads are already covered by arbiter-stack-env-parity.test.ts;
     // this sanity check uses its own pattern for this one indirection.
-    const hierarchyFile = path.join(ARBITER_ROOT_FOR_GOV, "governance", "hierarchy.py");
+    const hierarchyFile = path.join(
+      ARBITER_ROOT_FOR_GOV,
+      "governance",
+      "hierarchy.py",
+    );
     const src = fs.readFileSync(hierarchyFile, "utf8");
     const scanByEnvRe = /_scan_table_by_env\(\s*["']([A-Z0-9_]+)["']\s*\)/g;
     const read = new Set<string>();
@@ -1068,7 +1081,7 @@ describe("Arbiter Python handler contract — governance table vars on load_gove
     },
   );
 
-  test("prints the full gap report for triage", () => {
+  test("prints the full gap report for triage (now empty — board task 9afcf38a wired all four vars on all three callers)", () => {
     const lines = ARBITER_GOVERNANCE_KNOWN_GAPS.map(
       (g) => `  - ${g.functionName}: missing ${g.variable}`,
     );
@@ -1077,7 +1090,7 @@ describe("Arbiter Python handler contract — governance table vars on load_gove
       "Arbiter governance-table env gap report " +
         `(${ARBITER_GOVERNANCE_KNOWN_GAPS.length} entries):\n${lines.join("\n")}`,
     );
-    expect(ARBITER_GOVERNANCE_KNOWN_GAPS.length).toBeGreaterThan(0);
+    expect(ARBITER_GOVERNANCE_KNOWN_GAPS.length).toBe(0);
   });
 
   test("every KNOWN_GAPS entry is confirmed still missing (stale-gap guard)", () => {
