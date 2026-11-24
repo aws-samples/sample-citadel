@@ -13,6 +13,7 @@ import ChartRow3 from './dashboard/ChartRow3';
 import ChartRow4 from './dashboard/ChartRow4';
 import CostChartRow from './dashboard/CostChartRow';
 import { useDashboardData } from '../hooks/useDashboardData';
+import { DlqAlarmsWidget } from '../components/DlqAlarmsWidget';
 import { CHART_TOOLTIP_STYLE, CHART_GRID_STROKE, CHART_AXIS_STROKE, CHART_LEGEND_STYLE } from './dashboard/chartStyles';
 
 function computeGrowthData(agents: any[]) {
@@ -83,6 +84,8 @@ export function Dashboard() {
           <h2 className="text-foreground text-2xl font-semibold mb-2">Dashboard</h2>
           <p className="text-muted-foreground text-sm">Welcome to your AI Factory. Monitor your agents, workflows, and requests.</p>
         </div>
+
+        <DlqAlarmsWidget />
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
           <MetricCard label="Active Requests" value={counts.activeRequests} loading={loading} error={error}

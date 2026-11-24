@@ -1688,6 +1688,17 @@ export const MOVED_LAMBDA_ROLES: MovedLambdaMapping[] =
  */
 export const EXPECTED_NEW_FIELDS: AllowlistEntry[] = [
   {
+    logicalId: "Query.getPlatformAlarms",
+    justification:
+      "Board task 4cc234d1: admin-only, read-only platform alarm state. " +
+      "Resolver hosted cross-stack from BackendStack (see ADDITION_ALLOWLIST " +
+      "entry AgenticAIApiGetPlatformAlarmsResolver10C376FC) on a Lambda now " +
+      "owned by CitadelTelemetryStack. Previously a BackendStack-only field; " +
+      "this exemption is for rail 3's merged-set check, not a template " +
+      "removal/addition (rail 1 already covers the backend-side resolver " +
+      "addition separately).",
+  },
+  {
     logicalId: "Mutation.resumeExecution",
     justification:
       "StepRunner resume resolver — see ADDITION_ALLOWLIST entry " +
@@ -1890,6 +1901,43 @@ export const EXPECTED_NEW_FIELDS: AllowlistEntry[] = [
  * construct ID or its position in the construct tree ever changes.
  */
 export const ADDITION_ALLOWLIST: AllowlistEntry[] = [
+  // ═══════════════════════════════════════════════════════════════════════
+  // Board task 4cc234d1 — Query.getPlatformAlarms cross-stack AppSync
+  // wiring. platform-health-resolver.ts's Lambda now lives in
+  // CitadelTelemetryStack (moved out of BackendStack to satisfy the
+  // removals-only policy); BackendStack still owns the AppSync API, so it
+  // hosts the data source + resolver via addPlatformHealthResolver(), same
+  // cross-stack pattern as the eval-sampling-config wiring below. Logical
+  // IDs confirmed via a live `npm run split:gates -- dev` run, not
+  // hand-typed.
+  // ═══════════════════════════════════════════════════════════════════════
+  {
+    logicalId: "AgenticAIApiPlatformHealthLambdaDataSource95EBEDCE",
+    justification:
+      "Board task 4cc234d1: Lambda data source for " +
+      "platform-health-resolver.ts, now imported by ARN from " +
+      "CitadelTelemetryStack (addPlatformHealthResolver).",
+  },
+  {
+    logicalId: "AgenticAIApiPlatformHealthLambdaDataSourceServiceRole5095713A",
+    justification:
+      "Board task 4cc234d1: service role for " +
+      "PlatformHealthLambdaDataSource; added with it.",
+  },
+  {
+    logicalId:
+      "AgenticAIApiPlatformHealthLambdaDataSourceServiceRoleDefaultPolicy13C93004",
+    justification:
+      "Board task 4cc234d1: DefaultPolicy of " +
+      "PlatformHealthLambdaDataSource's role; added with it.",
+  },
+  {
+    logicalId: "AgenticAIApiGetPlatformAlarmsResolver10C376FC",
+    justification:
+      "Board task 4cc234d1: Query.getPlatformAlarms resolver on " +
+      "PlatformHealthLambdaDataSource, wired from BackendStack onto the " +
+      "cross-stack-imported CitadelTelemetryStack Lambda.",
+  },
   {
     logicalId: "BackendAsyncDlqB9955E40",
     justification:

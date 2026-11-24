@@ -35,6 +35,9 @@ jest.mock('../dashboard/ChartRow2', () => () => <div data-testid="chart-row-2" /
 jest.mock('../dashboard/ChartRow3', () => () => <div data-testid="chart-row-3" />);
 jest.mock('../dashboard/ChartRow4', () => () => <div data-testid="chart-row-4" />);
 jest.mock('../dashboard/CostChartRow', () => () => <div data-testid="cost-chart-row" />);
+jest.mock('../../components/DlqAlarmsWidget', () => ({
+  DlqAlarmsWidget: () => <div data-testid="dlq-alarms-widget" />,
+}));
 
 jest.mock('recharts', () => ({
   ResponsiveContainer: ({ children }: any) => <div>{children}</div>,
