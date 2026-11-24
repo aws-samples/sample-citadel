@@ -17,7 +17,7 @@ from botocore.exceptions import ClientError
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from approval_requests import AWAITING_APPROVAL
+from common.approval_requests import AWAITING_APPROVAL
 from common.metrics_constants import METRIC_APPROVAL_PARK_FAILED, UNIT_COUNT
 
 

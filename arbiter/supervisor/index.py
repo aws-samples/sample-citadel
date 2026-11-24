@@ -91,15 +91,11 @@ from model_config_loader import load_model_id
 # ``tools_config``/``workflow_contract``.
 from common.usage import build_usage_record, extract_converse_usage, extract_request_id
 
-# arbiter/stepRunner/ is a sibling directory (no __init__.py — same layout
-# as arbiter/supervisor/). conftest.py seeds sys.path for tests; the
-# Lambda asset layout may not include it, so add it explicitly. Safe to
-# do unconditionally — duplicates are checked.
-_step_runner_dir = os.path.join(_arbiter_dir, 'stepRunner')
-if _step_runner_dir not in sys.path:
-    sys.path.insert(0, _step_runner_dir)
-
-from approval_requests import build_approval_request
+# approval_requests lives in arbiter/common/ (shared layer package), not
+# arbiter/stepRunner/ — stepRunner is excluded from the supervisor Lambda
+# asset (backend/lib/arbiter-stack.ts assetExcludes), so no sys.path hack
+# is needed; it resolves the same way as common.region/common.usage above.
+from common.approval_requests import build_approval_request
 from common.metrics_constants import (
     METRIC_NAMESPACE,
     METRIC_RELEASE_DISPATCH_EVALUATED,

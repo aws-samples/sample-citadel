@@ -197,24 +197,6 @@ def _run_import(bundle_root, layer_python, import_body, *, cwd=None):
 # exactly the class of regression this test exists to catch.
 # ---------------------------------------------------------------------------
 
-_SUPERVISOR_XFAIL_REASON = (
-    "GENUINE bundle regression, not a test-harness gap: supervisor/index.py "
-    "does `from approval_requests import build_approval_request` (called at "
-    "line ~1221, not dead code) expecting a bundle-root-level "
-    "`approval_requests` module, but approval_requests.py physically lives "
-    "at arbiter/stepRunner/approval_requests.py, and `stepRunner` is "
-    "explicitly listed in the supervisor Lambda's assetExcludes in "
-    "backend/lib/arbiter-stack.ts (entry: ARBITER_ROOT, index: "
-    "'supervisor/index.py'), so the deployed bundle does not contain it. "
-    "Exact failure: ModuleNotFoundError: No module named "
-    "'approval_requests'. Every repo-layout unit test for supervisor "
-    "passes because arbiter/conftest.py puts arbiter/stepRunner on "
-    "sys.path, masking this at test time. The deployed supervisor Lambda "
-    "will crash at import time (cold start) until approval_requests.py is "
-    "either copied into supervisor/'s bundle input or the "
-    "assetExcludes/import path is fixed."
-)
-
 _CASES = [
     (
         "supervisor",
@@ -224,6 +206,7 @@ _CASES = [
         "import common.usage\n"
         "import common.metrics_constants\n"
         "import common.tracing\n"
+        "import common.approval_requests\n"
         "import governance\n",
     ),
     (
@@ -294,17 +277,16 @@ _CASES = [
 
 _CASE_IDS = [c[0] for c in _CASES]
 
-# Importability cases are identical to _CASES except the supervisor entry is
-# wrapped in pytest.param(..., marks=xfail(strict=True)) — ONLY for the
-# import-resolution test, which is the one that actually hits the
-# approval_requests gap. The guard-the-guard test below (which only ever
-# imports the literal name "arbiter" and must always fail with
-# ModuleNotFoundError regardless of the approval_requests bug) reuses the
-# unmarked _CASES so it is not accidentally xfailed too.
-_IMPORTABILITY_CASES = [
-    pytest.param(*_CASES[0], marks=pytest.mark.xfail(strict=True, reason=_SUPERVISOR_XFAIL_REASON)),
-    *_CASES[1:],
-]
+# Importability cases are identical to _CASES — the supervisor entry no
+# longer needs an xfail marker: approval_requests.py was moved to
+# arbiter/common/approval_requests.py (shipped in both the catalog layer
+# and the supervisor Lambda asset), and supervisor/index.py now imports it
+# via ``from common.approval_requests import build_approval_request``
+# instead of the removed arbiter/stepRunner/ sys.path hack. The
+# guard-the-guard test below (which only ever imports the literal name
+# "arbiter" and must always fail with ModuleNotFoundError) also reuses
+# _CASES directly.
+_IMPORTABILITY_CASES = _CASES
 
 
 @pytest.mark.parametrize("case_id,stage_fn,import_body", _IMPORTABILITY_CASES, ids=_CASE_IDS)
