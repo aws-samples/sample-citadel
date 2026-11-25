@@ -534,10 +534,16 @@ async function updateWorkflow(
       }),
     );
 
+    // orgId (chatter-producer stamping fix): existing.orgId is the
+    // workflow's own org, already resolved above via getWorkflow's
+    // assertRowOrg gate; chatter-publisher.ts refuses to forward any
+    // EventBridge detail lacking orgId, so workflow.updated was being
+    // dropped before this fix.
     await emitEvent("workflow.updated", {
       workflowId: input.workflowId,
       userId,
       changes: input,
+      orgId: existing.orgId,
     });
 
     return result.Attributes;
@@ -976,10 +982,12 @@ async function updateWorkflowConfiguration(
       }),
     );
 
+    // orgId (chatter-producer stamping fix): see call site above.
     await emitEvent("workflow.updated", {
       workflowId,
       userId,
       changes: { configuration: merged },
+      orgId: existing.orgId,
     });
 
     return result.Attributes;

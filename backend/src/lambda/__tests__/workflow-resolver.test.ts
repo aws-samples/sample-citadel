@@ -587,6 +587,42 @@ describe("workflow-resolver", () => {
       expect(result.version).toBe(2);
     });
 
+    // Chatter-producer stamping fix (remaining-producers sweep): the
+    // publisher refuses to forward any EventBridge detail lacking orgId.
+    // workflow.updated previously carried only workflowId/userId/changes.
+    test("workflow.updated carries detail.orgId from the caller's custom:organization claim", async () => {
+      callerOrg = "org-1";
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          workflowId: "wf-1",
+          orgId: "org-1",
+          version: 1,
+          status: "DRAFT",
+        },
+      });
+      ddbMock.on(UpdateCommand).resolves({
+        Attributes: {
+          workflowId: "wf-1",
+          orgId: "org-1",
+          name: "Updated Name",
+          version: 2,
+          status: "DRAFT",
+        },
+      });
+
+      await invoke(
+        makeEvent("updateWorkflow", {
+          input: { workflowId: "wf-1", name: "Updated Name", version: 1 },
+        }),
+      );
+
+      const ebCalls = ebMock.commandCalls(PutEventsCommand);
+      expect(ebCalls).toHaveLength(1);
+      const entry = ebCalls[0].args[0].input.Entries![0];
+      const detail = JSON.parse(entry.Detail!);
+      expect(detail.orgId).toBe("org-1");
+    });
+
     test("throws conflict error when version is stale", async () => {
       ddbMock.on(GetCommand).resolves({
         Item: {
@@ -1403,6 +1439,46 @@ describe("workflow-resolver", () => {
       expect(updateCalls).toHaveLength(1);
       const updateInput = updateCalls[0].args[0].input;
       expect(updateInput.ConditionExpression).toContain("version");
+    });
+
+    // Chatter-producer stamping fix (remaining-producers sweep): the
+    // publisher refuses to forward any EventBridge detail lacking orgId.
+    // This second workflow.updated call site (configuration-only updates)
+    // previously carried only workflowId/userId/changes.
+    test("workflow.updated carries detail.orgId from the caller's custom:organization claim", async () => {
+      callerOrg = "org-1";
+      ddbMock.on(GetCommand).resolves({
+        Item: {
+          workflowId: "wf-1",
+          orgId: "org-1",
+          version: 3,
+          status: "DRAFT",
+          configuration: "{}",
+        },
+      });
+      ddbMock.on(UpdateCommand).resolves({
+        Attributes: {
+          workflowId: "wf-1",
+          orgId: "org-1",
+          version: 4,
+          status: "DRAFT",
+          configuration: "{}",
+        },
+      });
+
+      await invoke(
+        makeEvent("updateWorkflowConfiguration", {
+          workflowId: "wf-1",
+          configuration: "{}",
+          version: 3,
+        }),
+      );
+
+      const ebCalls = ebMock.commandCalls(PutEventsCommand);
+      expect(ebCalls).toHaveLength(1);
+      const entry = ebCalls[0].args[0].input.Entries![0];
+      const detail = JSON.parse(entry.Detail!);
+      expect(detail.orgId).toBe("org-1");
     });
   });
 
