@@ -103,7 +103,7 @@
     "cdk-nag": "^3.1.0",
     "esbuild": "^0.28.2",
     "eslint": "^10.15.0",
-    "fast-check": "^4.10.3",
+    "fast-check": "^4.11.0",
     "globals": "^17.14.0",
     "graphql": "17.1.0",
     "jest": "^30.4.2",
