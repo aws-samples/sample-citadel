@@ -315,6 +315,12 @@ class NodeDispatchMessage:
     # reserve is unfenced (exactly-once-within-attempt only), preserving
     # back-compat.
     dispatch_generation: Optional[int] = None
+    # Additive (chatter-producer orgId stamping fix, remaining-producers
+    # sweep): the execution's orgId, carried from the step runner's dispatch
+    # so the worker can forward it onto workflow.node.completed/failed.
+    # None for any pre-org_id dispatcher, a pre-tenancy execution row, or a
+    # malformed wire value — best-effort, never fabricated.
+    org_id: Optional[str] = None
 
 
 @dataclass
@@ -413,6 +419,7 @@ def build_node_dispatch_message(
     dispatched_at: Optional[str] = None,
     run_id: Optional[str] = None,
     dispatch_generation: Optional[int] = None,
+    org_id: Optional[str] = None,
 ) -> dict:
     """Build a JSON-serializable node-dispatch message for the worker queue.
 
@@ -470,6 +477,10 @@ def build_node_dispatch_message(
         raise ValueError(
             "node-dispatch message: 'dispatch_generation' must be an int when present"
         )
+    if org_id is not None and not isinstance(org_id, str):
+        raise ValueError(
+            "node-dispatch message: 'org_id' must be a string when present"
+        )
 
     message: dict[str, Any] = {
         'message_type': MESSAGE_TYPE_WORKFLOW_NODE,
@@ -490,6 +501,8 @@ def build_node_dispatch_message(
         message['runId'] = run_id
     if dispatch_generation is not None:
         message['dispatch_generation'] = dispatch_generation
+    if isinstance(org_id, str) and org_id:
+        message['orgId'] = org_id
     return message
 
 
@@ -766,6 +779,12 @@ def parse_node_dispatch_message(body: Any) -> NodeDispatchMessage:
         # mirrors dispatched_at's malformed-wire-value degradation above.
         run_id = None
 
+    org_id = body.get('orgId')
+    if org_id is not None and not isinstance(org_id, str):
+        # Best-effort, never gates parsing (chatter-producer orgId stamping
+        # fix) — mirrors run_id's malformed-wire-value degradation above.
+        org_id = None
+
     dispatch_generation = body.get('dispatch_generation')
     if isinstance(dispatch_generation, bool) or not isinstance(dispatch_generation, int):
         # Best-effort, never gates parsing (PR2 fence): a malformed/absent
@@ -783,6 +802,7 @@ def parse_node_dispatch_message(body: Any) -> NodeDispatchMessage:
         dispatched_at=dispatched_at,
         run_id=run_id,
         dispatch_generation=dispatch_generation,
+        org_id=org_id,
     )
 
 
@@ -804,6 +824,7 @@ def build_node_result_detail(
     dispatched_at: Optional[str] = None,
     worker_started_at: Optional[str] = None,
     run_id: Optional[str] = None,
+    org_id: Optional[str] = None,
 ) -> dict:
     """Build the EventBridge detail body for a node-result event.
 
@@ -838,6 +859,13 @@ def build_node_result_detail(
     f1cbd5ef): promoted to a top-level ``runId`` key ONLY when a non-empty
     string is supplied, regardless of ``status``. Omitted entirely
     otherwise, keeping the detail byte-identical to pre-runId callers.
+
+    ``org_id`` is additive, optional, and nullable (chatter-producer orgId
+    stamping fix, remaining-producers sweep): promoted to a top-level
+    ``orgId`` key ONLY when a non-empty string is supplied, regardless of
+    ``status``. Omitted entirely otherwise, keeping the detail
+    byte-identical to pre-org_id callers. chatter-publisher.ts refuses to
+    forward any EventBridge detail lacking ``orgId``.
     """
     _validate_identity(
         'node-result event',
@@ -885,6 +913,8 @@ def build_node_result_detail(
         detail['traceContext'] = trace_context
     if isinstance(run_id, str) and run_id:
         detail['runId'] = run_id
+    if isinstance(org_id, str) and org_id:
+        detail['orgId'] = org_id
     return detail
 
 
