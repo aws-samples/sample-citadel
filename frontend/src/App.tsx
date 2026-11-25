@@ -40,6 +40,7 @@ const LazyApprovalsPage = lazy(() =>
 );
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { serverService } from './services';
+import type { AuthUser } from 'aws-amplify/auth';
 import { OrganizationProvider } from './contexts/OrganizationContext';
 import { GovernanceModeProvider } from './contexts/GovernanceModeContext';
 import { Toaster } from './components/ui/sonner';
@@ -118,9 +119,15 @@ function AppApiDashboardRoute() {
   );
 }
 
-function AgenticStudioWorkflowRoute() {
-  const { workflowId } = useParams<{ workflowId: string }>();
-  if (!workflowId) return <Navigate to="/agentic-studio" replace />;
+function AgenticStudioRoute() {
+  // Derives workflowId from the splat so /agentic-studio and
+  // /agentic-studio/workflows/:workflowId resolve to the SAME Route match
+  // (one element instance) rather than two distinct routes that React
+  // Router would mount/unmount across the URL-sync navigate.
+  const params = useParams<{ '*': string }>();
+  const tail = params['*'] || '';
+  const match = /^workflows\/([^/]+)\/?$/.exec(tail);
+  const workflowId = match ? match[1] : undefined;
   return <AgenticStudio workflowId={workflowId} />;
 }
 
@@ -163,7 +170,7 @@ function AppBuilderRoute() {
 }
 
 function App() {
-  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
@@ -177,14 +184,14 @@ function App() {
       if (user) {
         setCurrentUser(user);
       }
-    } catch (error) {
+    } catch {
       console.log('User not authenticated');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleLogin = (user: any) => {
+  const handleLogin = (user: AuthUser) => {
     setCurrentUser(user);
     navigate('/dashboard');
   };
@@ -228,8 +235,10 @@ function App() {
               <Route path="/" element={<Navigate to="/dashboard" replace />} />
               <Route path="/dashboard" element={<Dashboard />} />
               <Route path="/intake-requests" element={<IntakeRequests />} />
-              <Route path="/agentic-studio" element={<AgenticStudio />} />
-              <Route path="/agentic-studio/workflows/:workflowId" element={<AgenticStudioWorkflowRoute />} />
+              {/* Single route for both /agentic-studio and /agentic-studio/workflows/:id so
+                  the URL sync in AgentBlueprints (navigate replace on first save) matches the
+                  SAME Route and keeps the canvas mounted instead of remounting it (CIT-291 bug B). */}
+              <Route path="/agentic-studio/*" element={<AgenticStudioRoute />} />
               <Route path="/agent-apps" element={<AgentAppsRoute />} />
               <Route path="/agent-apps/new" element={<AppBuilderRoute />} />
               <Route path="/agent-apps/:appId" element={<AppDetailViewRoute />} />
