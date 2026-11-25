@@ -67,9 +67,6 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
   // draft is still usable within that session, never cross-user.
   const autosaveKey = workflowAutosaveStorageKey(currentUser?.userId ?? 'anonymous');
 
-  // Server-side autosave (debounced update + conflict handling + offline fallback).
-  const { save, isSaving, lastSaved, conflict, workflow } = useWorkflowPersistence(workflowId);
-
   // Live per-node execution updates over the onWorkflowProgress subscription.
   const { nodeResults, executionStatus } = useExecutionSubscription(executionId);
 
@@ -80,6 +77,13 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
   // Hydrating an existing workflow sets nodes/edges without user input; skip
   // the autosave those state changes would otherwise schedule.
   const skipNextSaveRef = useRef(false);
+
+  // Server-side autosave (debounced update + conflict handling + offline fallback).
+  // getVersion is read at save-fire time (not scheduling time) so a
+  // version bump from hydration or a prior save response is always
+  // honoured instead of racing the server with a stale version.
+  const getVersion = useCallback(() => versionRef.current, []);
+  const { save, isSaving, lastSaved, conflict, workflow } = useWorkflowPersistence(workflowId, getVersion);
 
   // Merge per-node execution status into node data so AgentNode can render
   // badges. Runs whenever nodeResults changes. Clears when executionId resets.
@@ -220,9 +224,20 @@ export function AgentBlueprints({ workflowId: initialWorkflowId }: AgentBlueprin
    * canvas nodes/edges, and adopt its id/version/status so autosave UPDATES
    * this workflow and Publish/Run gate on its real status. On failure, surface
    * the error and fall back to a blank canvas.
+   *
+   * Non-destructive re-entry guard (CIT-291 bug B): initialWorkflowId can
+   * transition from undefined to a real id on this SAME mounted instance —
+   * e.g. the URL-sync effect's navigate(replace:true) after this canvas's
+   * own createWorkflow call updates the route's :workflowId param, which
+   * flows back in as a new initialWorkflowId prop value. If this instance
+   * already owns that exact workflow (workflowIdRef.current matches), the
+   * canvas already holds the authoritative local state — skip the fetch
+   * entirely rather than re-hydrating and overwriting any node the user
+   * dropped in the interim.
    */
   useEffect(() => {
     if (!initialWorkflowId) return;
+    if (workflowIdRef.current === initialWorkflowId) return;
     let cancelled = false;
 
     (async () => {
