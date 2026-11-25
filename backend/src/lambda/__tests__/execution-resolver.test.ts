@@ -620,6 +620,29 @@ describe("execution-resolver", () => {
       expect(detail.workflowId).toBe("wf-1");
     });
 
+    // Chatter-producer stamping fix (remaining-producers sweep): the
+    // publisher refuses to forward any EventBridge detail lacking orgId.
+    // execution.start.requested previously carried only
+    // executionId/workflowId/runId, so every start was silently dropped.
+    test("execution.start.requested carries detail.orgId from the caller's custom:organization claim", async () => {
+      callerOrg = "org-1";
+      ddbMock.on(GetCommand).resolves({ Item: publishedWorkflow });
+      ddbMock.on(PutCommand).resolves({});
+
+      await invoke(
+        makeEvent("startExecution", {
+          workflowId: "wf-1",
+          input: JSON.stringify({ key: "value" }),
+        }),
+      );
+
+      const ebCalls = ebMock.commandCalls(PutEventsCommand);
+      expect(ebCalls).toHaveLength(1);
+      const entry = ebCalls[0].args[0].input.Entries![0];
+      const detail = JSON.parse(entry.Detail!);
+      expect(detail.orgId).toBe("org-1");
+    });
+
     test("rejects DRAFT workflows", async () => {
       ddbMock.on(GetCommand).resolves({
         Item: {

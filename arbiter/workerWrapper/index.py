@@ -1452,6 +1452,11 @@ def _emit_node_result(
         dispatched_at=getattr(msg, 'dispatched_at', None),
         worker_started_at=worker_started_at,
         run_id=getattr(msg, 'run_id', None),
+        # orgId (chatter-producer stamping fix): forwarded from the
+        # dispatch message's org_id (the execution's orgId, carried by the
+        # step runner at dispatch time) regardless of status. None for any
+        # pre-org_id dispatch message, keeping the Detail byte-identical.
+        org_id=getattr(msg, 'org_id', None),
     )
     detail_type = (
         workflow_contract.NODE_COMPLETED_DETAIL_TYPE

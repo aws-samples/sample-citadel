@@ -86,6 +86,41 @@ class TestStartExecutionAndScheduleFrontierPassOrgId:
         assert invoke_mock.call_args.kwargs.get("org_id") == "org-frontier"
 
 
+class TestInvokeNodeThreadsOrgIdOntoSqsDispatch:
+    """The worker only learns the execution's orgId if it is on the SQS
+    dispatch message body, not just the chatter/node-started events
+    (chatter-producer stamping fix, remaining-producers sweep). Mirrors
+    TestExecutorThreadsCorrelationIdOntoDispatch in
+    test_dispatch_correlation_id.py.
+    """
+
+    def _invoke(self, monkeypatch, *, org_id=None):
+        import executor
+
+        node = {"id": "n0", "agentId": "agent-A", "data": {}}
+        exec_table = MagicMock()
+        exec_table.update_item.return_value = {
+            "Attributes": {"nodeResults": {"n0": {"dispatchGeneration": 1}}}
+        }
+        sqs = MagicMock()
+        monkeypatch.setenv("WORKER_QUEUE_URL", "https://sqs/queue")
+        with patch.object(executor, "_executions_table", exec_table), \
+             patch.object(executor, "_get_sqs_client", lambda: sqs), \
+             patch.object(executor, "events", MagicMock()), \
+             patch.object(executor.tracing, "active_trace_context", lambda: None):
+            executor.invoke_node("exec1", "wf1", node, {}, {}, org_id=org_id)
+        import json
+        return json.loads(sqs.send_message.call_args.kwargs["MessageBody"])
+
+    def test_dispatch_body_carries_org_id(self, monkeypatch):
+        body = self._invoke(monkeypatch, org_id="org-dispatch")
+        assert body["orgId"] == "org-dispatch"
+
+    def test_dispatch_body_omits_org_id_when_absent(self, monkeypatch):
+        body = self._invoke(monkeypatch, org_id=None)
+        assert "orgId" not in body
+
+
 class TestTopLevelPublishCallSitesPassOrgId:
     def test_finalize_execution_passes_org_id(self, monkeypatch):
         import executor

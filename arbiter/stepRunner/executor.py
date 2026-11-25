@@ -1302,6 +1302,13 @@ def invoke_node(
         # never degrades to None.
         correlation_id=run_id or execution_id,
         **_run_id_kwargs,
+        # orgId (chatter-producer stamping fix): forwarded onto the SQS
+        # dispatch message body so the worker can carry it through to
+        # workflow.node.completed/failed (build_node_result_detail) —
+        # previously only the chatter/node-started events carried org_id;
+        # the dispatch message itself never did, so the worker had no
+        # orgId to forward.
+        **_org_id_kwargs,
     )
 
     # H3 trace-context propagation (architect task f4f4bab3-7a07-4acf-ba43-

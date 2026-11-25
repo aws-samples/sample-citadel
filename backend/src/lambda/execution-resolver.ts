@@ -525,10 +525,16 @@ async function startExecution(
     executionId,
     workflowId,
   });
+  // orgId (chatter-producer stamping fix): callerOrg was already
+  // resolved above via requireCallerOrg to stamp the execution row;
+  // chatter-publisher.ts refuses to forward any EventBridge detail
+  // lacking orgId, so execution.start.requested was being dropped
+  // before this fix.
   await emitEvent("execution.start.requested", {
     executionId: dispatchContext.executionId,
     workflowId: dispatchContext.workflowId,
     runId: dispatchContext.runId,
+    orgId: callerOrg,
   });
 
   return toApiExecution(execution as ExecutionRecord);
