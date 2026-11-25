@@ -90,7 +90,7 @@
       },
       "scripts": {
             "dev": "vite",
-            "build": "vite build",
+            "build": "vite build && node scripts/assert-no-third-party-script-hosts.mjs",
             "test": "jest",
             "test:integration": "./scripts/run-integration-tests.sh",
             "generate-aws-exports": "node scripts/generate-aws-exports.js",

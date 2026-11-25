@@ -34,17 +34,19 @@
       // is dead once monacoSetup.ts calls `loader.config({ monaco })`
       // with the locally bundled monaco instance, but the literal
       // string still ends up in the production bundle. Strip it at
-      // transform time so no cdn.jsdelivr.net string reaches output.
+      // transform time. scripts/assert-no-third-party-script-hosts.mjs
+      // verifies after the build that no such host reaches the output.
       {
         name: 'strip-monaco-loader-cdn-default',
         transform(code, id) {
-          if (id.includes('@monaco-editor/loader') && code.includes('cdn.jsdelivr.net')) {
-            return code.replace(
-              /https:\/\/cdn\.jsdelivr\.net\/npm\/monaco-editor@[^'"]*/g,
-              ''
-            );
+          if (!id.includes('@monaco-editor/loader')) {
+            return null;
           }
-          return null;
+          const stripped = code.replace(
+            /https:\/\/cdn\.jsdelivr\.net\/npm\/monaco-editor@[^'"]*/g,
+            ''
+          );
+          return stripped === code ? null : stripped;
         },
       },
     ],
