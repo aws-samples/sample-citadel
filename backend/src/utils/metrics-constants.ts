@@ -86,3 +86,14 @@ export const DIMENSION_RELEASE_ARM = "ReleaseArm";
 
 export const DIMENSION_WORKFLOW_ID = "WorkflowId";
 export const DIMENSION_AGENT_ID = "AgentId";
+
+/**
+ * Chatter-publisher refusal counter (Count): emitted whenever
+ * chatter-publisher.ts refuses to publish an EventBridge event because
+ * detail.orgId is missing. The refusal itself was downgraded from ERROR to
+ * WARN (observability-only, not a governance-critical failure) so this
+ * metric is the measurable signal dashboards/alarms should watch instead
+ * of grepping ERROR logs. Pinned per the "do NOT retype metric names"
+ * lesson — always import this constant at the emission call site.
+ */
+export const METRIC_CHATTER_ORG_ID_MISSING = "ChatterOrgIdMissing";

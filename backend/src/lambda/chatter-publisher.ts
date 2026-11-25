@@ -3,6 +3,11 @@ import { SignatureV4 } from "@smithy/signature-v4";
 import { Sha256 } from "@aws-crypto/sha256-js";
 import { HttpRequest } from "@smithy/protocol-http";
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
+import { emitMetrics } from "../utils/emf";
+import {
+  METRIC_CHATTER_ORG_ID_MISSING,
+  UNIT_COUNT,
+} from "../utils/metrics-constants";
 
 const APPSYNC_ENDPOINT = process.env.APPSYNC_ENDPOINT!;
 const AWS_REGION = process.env.AWS_REGION || "us-east-1";
@@ -79,14 +84,32 @@ export const handler = async (event: EventBridgeEvent<string, unknown>) => {
     // event lacking it (e.g. a producer that hasn't been updated, or a
     // non-tenancy event incidentally matching this catch-all rule) is
     // dropped here rather than broadcast org-less to every subscriber.
+    //
+    // Downgraded from ERROR to WARN (chatter-producer stamping fix):
+    // the ChatterRule is now narrowed to the specific sources/detail
+    // types the known producers emit, and those producers now stamp
+    // orgId — so a refusal here means an unexpected/legacy producer,
+    // observability-only rather than a page-worthy failure. The
+    // ChatterOrgIdMissing counter metric (EMF, no new IAM grant needed)
+    // is the measurable signal for dashboards/alarms in place of
+    // grepping ERROR logs.
     const detail = event.detail as { orgId?: unknown } | null | undefined;
     const orgId =
       detail && typeof detail.orgId === "string" ? detail.orgId : "";
     if (!orgId) {
-      console.error(
+      console.warn(
         "Refusing to publish chatter: EventBridge event carries no orgId",
         { source: event.source, detailType: event["detail-type"] },
       );
+      emitMetrics({
+        metrics: [
+          { name: METRIC_CHATTER_ORG_ID_MISSING, value: 1, unit: UNIT_COUNT },
+        ],
+        properties: {
+          source: event.source,
+          detailType: event["detail-type"],
+        },
+      });
       return {
         statusCode: 200,
         body: JSON.stringify({ success: false, reason: "missing orgId" }),

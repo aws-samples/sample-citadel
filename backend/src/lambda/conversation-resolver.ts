@@ -29,6 +29,7 @@ import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import { v4 as uuidv4 } from "uuid";
 import { mintRunId, buildDispatchContext } from "../utils/run-id";
 import { assertProjectAccess } from "../utils/project-access";
+import { extractOrgFromEvent } from "../utils/auth-event";
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -276,6 +277,17 @@ async function sendMessage(event: AppSyncEvent) {
       // layer 1): route the outbound envelope through buildDispatchContext,
       // whose `runId` parameter is REQUIRED — a future refactor that drops
       // `runId` here fails `tsc`, not just a runtime check.
+      //
+      // orgId (chatter-producer stamping fix): the caller's own
+      // custom:organization claim, read via the same extractOrgFromEvent
+      // helper assertProjectAccess uses for the access check above.
+      // chatter-publisher.ts refuses to publish any EventBridge detail
+      // lacking orgId, so every message.sent_to_agent event was being
+      // dropped before this fix. Best-effort — a caller with no
+      // resolvable org claim (stale token, API-key auth) omits the key
+      // rather than inventing a value; the dispatch itself still proceeds
+      // since access was already granted by assertProjectAccess above.
+      const callerOrgId = await extractOrgFromEvent(event);
       const dispatchContext = buildDispatchContext({
         runId,
         projectId,
@@ -285,6 +297,7 @@ async function sendMessage(event: AppSyncEvent) {
         userId,
         timestamp: messageRecord.timestamp,
         metadata: parsedMetadata,
+        ...(callerOrgId && { orgId: callerOrgId }),
       });
 
       await eventBridgeClient.send(

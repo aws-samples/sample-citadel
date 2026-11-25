@@ -385,6 +385,38 @@ describe("ProjectsStack — backend-stack-split phase 1", () => {
     expect(Object.keys(rules)).toHaveLength(4);
   });
 
+  test("ChatterRule is narrowed to the sources/detail types chatter-publisher accepts and TaskRunner.tsx consumes (no bus-wide catch-all)", () => {
+    const rules = template.findResources("AWS::Events::Rule", {
+      Properties: Match.objectLike({
+        Description: "Captures all agent communication for real-time display",
+      }),
+    });
+    const chatterRules = Object.values(rules);
+    expect(chatterRules).toHaveLength(1);
+
+    const pattern = (
+      chatterRules[0] as {
+        Properties?: { EventPattern?: { source?: unknown } };
+      }
+    ).Properties?.EventPattern;
+
+    // Must no longer be the bus-wide catch-all (prefix match on every source).
+    expect(JSON.stringify(pattern)).not.toContain('"prefix"');
+
+    const sources = pattern?.source as string[] | undefined;
+    expect(sources).toBeDefined();
+    // The known, orgId-stamping chatter producers only.
+    expect(sources).toEqual(
+      expect.arrayContaining([
+        "citadel",
+        "citadel.workflows",
+        "citadel.supervisor",
+        "agent_intake.usage",
+      ]),
+    );
+    expect(sources).toHaveLength(4);
+  });
+
   // --- cdk-nag suppression parity ---
   test("every Lambda execution role assumes lambda.amazonaws.com with a ManagedPolicyArns array (matches the app-level IAM4 suppression category)", () => {
     const roles = template.findResources("AWS::IAM::Role", {
@@ -469,6 +501,29 @@ describe("ProjectsStack — CIT-268 TURN_ACCEPTED wiring", () => {
             Effect: "Allow",
           }),
         ]),
+      }),
+    });
+  });
+});
+
+// Handler-env-contract guard fix: chatter-publisher.handler reads
+// process.env.ENVIRONMENT (via emf.ts's emitMetrics dimension default) but
+// the function's CDK environment only set APPSYNC_ENDPOINT. Fixed by setting
+// ENVIRONMENT the same way sibling functions in this stack receive it
+// (props.environment).
+describe("ProjectsStack — chatter publisher ENVIRONMENT for metric emission", () => {
+  let template: Template;
+  beforeAll(() => {
+    ({ template } = createTestStack());
+  });
+
+  test("chatter-publisher Lambda has ENVIRONMENT env var matching props.environment", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Handler: "chatter-publisher.handler",
+      Environment: Match.objectLike({
+        Variables: Match.objectLike({
+          ENVIRONMENT: "test",
+        }),
       }),
     });
   });
