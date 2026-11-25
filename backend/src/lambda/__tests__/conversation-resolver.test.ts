@@ -126,6 +126,36 @@ describe("conversation-resolver", () => {
     });
   });
 
+  describe("sendMessage stamps orgId onto the dispatched EventBridge detail", () => {
+    test("message.sent_to_agent carries detail.orgId from the caller's custom:organization claim", async () => {
+      dynamoMock.on(PutCommand).resolves({});
+      eventBridgeMock.on(PutEventsCommand).resolves({});
+
+      await invoke<MessageResult>({
+        info: { fieldName: "sendMessage" },
+        arguments: {
+          projectId: "proj-1",
+          message: {
+            agentId: "agent-1",
+            message: "Hello agent",
+            messageType: "USER_INPUT",
+          },
+        },
+        identity: {
+          sub: "user-123",
+          username: "testuser",
+          "custom:organization": "acme-corp",
+        },
+      } as unknown as HandlerEvent);
+
+      const calls = eventBridgeMock.commandCalls(PutEventsCommand);
+      expect(calls).toHaveLength(1);
+      const entry = calls[0].args[0].input.Entries?.[0];
+      const detail = JSON.parse(entry?.Detail ?? "{}");
+      expect(detail.orgId).toBe("acme-corp");
+    });
+  });
+
   describe("getConversationHistory", () => {
     test("returns paginated messages sorted by timestamp", async () => {
       dynamoMock.on(QueryCommand).resolves({

@@ -29,7 +29,7 @@ _logger = logging.getLogger(__name__)
 
 
 def publish_event(detail_type: str, detail: dict, run_id: str | None = None,
-                   eval_run_id: str | None = None) -> None:
+                   eval_run_id: str | None = None, org_id: str | None = None) -> None:
     """Publish a single event to EventBridge with timestamp injection.
 
     Additive, optional traceContext (design §"Carried-context format
@@ -46,6 +46,16 @@ def publish_event(detail_type: str, detail: dict, run_id: str | None = None,
     contract exactly: merged in as ``evalRunId`` only when a non-empty
     string is supplied. Absent/None (every non-eval execution) never adds
     the key — byte-identical to the pre-CIT-102 detail shape.
+
+    ``org_id`` (chatter-producer orgId stamping fix): merged in as
+    ``orgId`` only when a non-empty string is supplied, mirroring the same
+    omit-when-absent contract as ``run_id``/``eval_run_id``. Callers pass
+    the execution's own server-derived ``orgId`` (``execution.get('orgId',
+    '')``); an execution predating tenancy stamping has none, and this
+    helper keeps that case byte-identical rather than inventing a value.
+    chatter-publisher.ts refuses to publish any EventBridge detail lacking
+    ``orgId``, so every workflow.*/supervisor.chatter event emitted
+    without this parameter was previously dropped at WARN/ERROR.
     """
     detail['timestamp'] = datetime.now(timezone.utc).isoformat()
     trace_context = tracing.active_trace_context()
@@ -55,6 +65,8 @@ def publish_event(detail_type: str, detail: dict, run_id: str | None = None,
         detail['runId'] = run_id
     if isinstance(eval_run_id, str) and eval_run_id:
         detail['evalRunId'] = eval_run_id
+    if isinstance(org_id, str) and org_id:
+        detail['orgId'] = org_id
     eb_client.put_events(Entries=[{
         'Source': SOURCE,
         'DetailType': detail_type,
@@ -65,7 +77,7 @@ def publish_event(detail_type: str, detail: dict, run_id: str | None = None,
 
 def publish_workflow_started(
     execution_id: str, workflow_id: str, app_id: str, started_at: str,
-    run_id: str | None = None,
+    run_id: str | None = None, org_id: str | None = None,
 ) -> None:
     """Publish workflow.started event when execution transitions pending → running."""
     publish_event('workflow.started', {
@@ -74,12 +86,12 @@ def publish_workflow_started(
         'appId': app_id,
         'startedAt': started_at,
         'correlationId': execution_id,
-    }, run_id=run_id)
+    }, run_id=run_id, org_id=org_id)
 
 
 def publish_node_started(
     execution_id: str, workflow_id: str, node_id: str, agent_id: str, started_at: str,
-    run_id: str | None = None,
+    run_id: str | None = None, org_id: str | None = None,
 ) -> None:
     """Publish workflow.node.started event when a node begins execution."""
     publish_event('workflow.node.started', {
@@ -89,12 +101,13 @@ def publish_node_started(
         'agentId': agent_id,
         'startedAt': started_at,
         'correlationId': execution_id,
-    }, run_id=run_id)
+    }, run_id=run_id, org_id=org_id)
 
 
 def publish_node_completed(
     execution_id: str, workflow_id: str, node_id: str, agent_id: str, completed_at: str,
     output: dict, usage: list | None = None, run_id: str | None = None,
+    org_id: str | None = None,
 ) -> None:
     """Publish workflow.node.completed event when a node completes successfully.
 
@@ -121,12 +134,12 @@ def publish_node_completed(
     }
     if usage is not None:
         detail['usage'] = usage
-    publish_event('workflow.node.completed', detail, run_id=run_id)
+    publish_event('workflow.node.completed', detail, run_id=run_id, org_id=org_id)
 
 
 def publish_node_failed(
     execution_id: str, workflow_id: str, node_id: str, agent_id: str, error: str, retry_count: int,
-    run_id: str | None = None,
+    run_id: str | None = None, org_id: str | None = None,
 ) -> None:
     """Publish workflow.node.failed event when a node fails."""
     publish_event('workflow.node.failed', {
@@ -137,12 +150,12 @@ def publish_node_failed(
         'error': error,
         'retryCount': retry_count,
         'correlationId': execution_id,
-    }, run_id=run_id)
+    }, run_id=run_id, org_id=org_id)
 
 
 def publish_node_retrying(
     execution_id: str, workflow_id: str, node_id: str, agent_id: str, retry_count: int, backoff: float,
-    run_id: str | None = None,
+    run_id: str | None = None, org_id: str | None = None,
 ) -> None:
     """Publish workflow.node.retrying event when a node is scheduled for retry."""
     publish_event('workflow.node.retrying', {
@@ -153,12 +166,13 @@ def publish_node_retrying(
         'retryCount': retry_count,
         'backoff': backoff,
         'correlationId': execution_id,
-    }, run_id=run_id)
+    }, run_id=run_id, org_id=org_id)
 
 
 def publish_workflow_completed(
     execution_id: str, workflow_id: str, completed_at: str, output: dict,
     run_id: str | None = None, eval_run_id: str | None = None,
+    org_id: str | None = None,
 ) -> None:
     """Publish workflow.completed event when all nodes complete successfully.
 
@@ -171,12 +185,13 @@ def publish_workflow_completed(
         'completedAt': completed_at,
         'output': output,
         'correlationId': execution_id,
-    }, run_id=run_id, eval_run_id=eval_run_id)
+    }, run_id=run_id, eval_run_id=eval_run_id, org_id=org_id)
 
 
 def publish_workflow_failed(
     execution_id: str, workflow_id: str, failed_node_id: str, error: str, failed_at: str,
     run_id: str | None = None, eval_run_id: str | None = None,
+    org_id: str | None = None,
 ) -> None:
     """Publish workflow.failed event when execution fails.
 
@@ -190,7 +205,7 @@ def publish_workflow_failed(
         'error': error,
         'failedAt': failed_at,
         'correlationId': execution_id,
-    }, run_id=run_id, eval_run_id=eval_run_id)
+    }, run_id=run_id, eval_run_id=eval_run_id, org_id=org_id)
 
 
 def publish_supervisor_chatter(
@@ -200,6 +215,7 @@ def publish_supervisor_chatter(
     *,
     correlation_id: str | None = None,
     run_id: str | None = None,
+    org_id: str | None = None,
 ) -> str:
     """Emit a supervisor.chatter event for cross-system correlation (US-ARB-016).
 
@@ -209,7 +225,10 @@ def publish_supervisor_chatter(
     telemetry, not a governance-critical path.
 
     ``run_id`` is additive/optional/nullable (Pass 1, decision f1cbd5ef),
-    forwarded to ``publish_event``'s omit-when-absent contract.
+    forwarded to ``publish_event``'s omit-when-absent contract. ``org_id``
+    mirrors the same contract (chatter-producer orgId stamping fix) —
+    chatter-publisher.ts refuses any event lacking ``detail.orgId``, so an
+    unstamped supervisor.chatter event was silently dropped before this fix.
     """
     cid = correlation_id or str(uuid.uuid4())
     detail = {
@@ -221,7 +240,7 @@ def publish_supervisor_chatter(
         'timestamp': datetime.now(timezone.utc).isoformat(),
     }
     try:
-        publish_event(SUPERVISOR_CHATTER_DETAIL_TYPE, detail, run_id=run_id)
+        publish_event(SUPERVISOR_CHATTER_DETAIL_TYPE, detail, run_id=run_id, org_id=org_id)
     except Exception as exc:  # noqa: BLE001 — telemetry must not raise
         # Telemetry-only: never break the workflow on chatter failure.
         _logger.warning(

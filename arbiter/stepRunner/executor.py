@@ -781,6 +781,7 @@ def start_execution(execution_id: str, workflow_id: str) -> None:
         workflow_id=workflow_id,
         app_id=execution.get('appId', ''),
         started_at=now,
+        org_id=execution.get('orgId') or None,
         **_run_id_kwargs,
     )
     _log_event('execution_start', executionId=execution_id, workflowId=workflow_id)
@@ -833,7 +834,7 @@ def start_execution(execution_id: str, workflow_id: str) -> None:
             # unchanged, byte-identical to the pre-feature dispatch.
             invoke_node(execution_id, workflow_id, node, execution_input,
                         merge_node_configuration(configuration, node),
-                        run_id=_run_id)
+                        run_id=_run_id, org_id=execution.get('orgId') or None)
 
 
 def _park_node_awaiting_approval(
@@ -1053,6 +1054,7 @@ def handle_node_awaiting_approval(
 def invoke_node(
     execution_id: str, workflow_id: str, node: dict, input_data: dict, configuration: dict,
     *, run_id: str | None = None, pause_requested: bool = False,
+    org_id: str | None = None,
 ) -> None:
     """Invoke a single workflow node.
 
@@ -1068,6 +1070,13 @@ def invoke_node(
     events and the SQS dispatch message. Never fabricated — a caller that
     passes ``None`` (a pre-runId execution row) produces byte-identical
     events/messages to the pre-runId code path.
+
+    ``org_id`` mirrors ``run_id``'s threading contract (chatter-producer
+    orgId stamping fix): the caller's own execution row's ``orgId``,
+    forwarded to the outbound supervisor.chatter / workflow.node.started
+    events so chatter-publisher.ts (which refuses any event lacking
+    ``detail.orgId``) stops dropping them. Omitted/None is forwarded
+    verbatim — never fabricated.
     """
     # US-ARB-016: fire-and-forget chatter event for cross-system correlation.
     # The returned correlationId is currently a local only; it becomes the
@@ -1078,6 +1087,11 @@ def invoke_node(
     # three call sites below when absent, so a pre-runId caller's call
     # signature stays byte-identical to the pre-feature code path.
     _run_id_kwargs = {'run_id': run_id} if run_id else {}
+    # org_id mirrors the same omit-when-absent contract (chatter-producer
+    # orgId stamping fix) — callers that pass no org_id (pre-tenancy
+    # execution rows, or code paths that haven't been updated) produce a
+    # byte-identical call signature to the pre-feature code path.
+    _org_id_kwargs = {'org_id': org_id} if org_id else {}
 
     # Runtime backstop (Pass 1, decision f1cbd5ef, silent-regression guard
     # layer 3): a node dispatched with no run_id emits a WARN-level
@@ -1097,6 +1111,7 @@ def invoke_node(
         workflow_id=workflow_id,
         node_id=node.get('id', 'unknown'),
         **_run_id_kwargs,
+        **_org_id_kwargs,
     )
 
     node_id = node['id']
@@ -1242,6 +1257,7 @@ def invoke_node(
         agent_id=agent_id,
         started_at=now,
         **_run_id_kwargs,
+        **_org_id_kwargs,
     )
 
     # Dispatch the node to the worker over the shared SQS queue. The message
@@ -1584,6 +1600,7 @@ def _finalize_execution(execution, output) -> bool:
         completed_at=now,
         output=output or {},
         eval_run_id=execution.get('evalRunId'),
+        org_id=execution.get('orgId') or None,
     )
     return True
 
@@ -1639,7 +1656,8 @@ def schedule_frontier(execution, workflow, *, default_input=None) -> list:
             invoke_node(execution_id, workflow_id, node, input_data,
                         merge_node_configuration(configuration, node),
                         run_id=execution.get('runId'),
-                        pause_requested=_pause_requested)
+                        pause_requested=_pause_requested,
+                        org_id=execution.get('orgId') or None)
             # Track the effective status after invoke_node for the
             # execution-level transition check below.
             if _pause_requested or (
@@ -2532,6 +2550,7 @@ def handle_node_failure(execution_id: str, node_id: str, error: str) -> None:
             agent_id=agent_id,
             retry_count=new_retry_count,
             backoff=backoff,
+            org_id=execution.get('orgId') or None,
         )
         # Correlation log only — a retry is not a terminal failure, so it does
         # NOT emit the NodeFailure metric (that would double-count retries).
@@ -2596,6 +2615,7 @@ def handle_node_failure(execution_id: str, node_id: str, error: str) -> None:
             error=error,
             failed_at=now,
             eval_run_id=execution.get('evalRunId'),
+            org_id=execution.get('orgId') or None,
         )
 
         # CIT-123 slice 3: compensation unwind trigger (design D1/D2, decision
@@ -3159,6 +3179,7 @@ def cancel_execution(execution_id: str) -> None:
         error='Execution cancelled',
         failed_at=now,
         eval_run_id=execution.get('evalRunId'),
+        org_id=execution.get('orgId') or None,
     )
 
 
