@@ -505,3 +505,26 @@ describe("ProjectsStack — CIT-268 TURN_ACCEPTED wiring", () => {
     });
   });
 });
+
+// Handler-env-contract guard fix: chatter-publisher.handler reads
+// process.env.ENVIRONMENT (via emf.ts's emitMetrics dimension default) but
+// the function's CDK environment only set APPSYNC_ENDPOINT. Fixed by setting
+// ENVIRONMENT the same way sibling functions in this stack receive it
+// (props.environment).
+describe("ProjectsStack — chatter publisher ENVIRONMENT for metric emission", () => {
+  let template: Template;
+  beforeAll(() => {
+    ({ template } = createTestStack());
+  });
+
+  test("chatter-publisher Lambda has ENVIRONMENT env var matching props.environment", () => {
+    template.hasResourceProperties("AWS::Lambda::Function", {
+      Handler: "chatter-publisher.handler",
+      Environment: Match.objectLike({
+        Variables: Match.objectLike({
+          ENVIRONMENT: "test",
+        }),
+      }),
+    });
+  });
+});

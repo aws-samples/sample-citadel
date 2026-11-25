@@ -579,6 +579,7 @@ export class ProjectsStack extends cdk.Stack {
         code: lambda.Code.fromAsset("dist/lambda"),
         environment: {
           APPSYNC_ENDPOINT: props.appSyncApi.graphqlUrl,
+          ENVIRONMENT: props.environment,
         },
         timeout: cdk.Duration.seconds(30),
         logGroup: new logs.LogGroup(this, "ChatterPublisherFunctionLogs", {
