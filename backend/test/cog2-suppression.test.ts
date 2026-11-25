@@ -25,6 +25,7 @@ import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import { AwsSolutionsChecks } from "cdk-nag";
+import { NagSuppressions } from "../lib/nag-suppressions-compat";
 import {
   scaffoldBackendAssetDirs,
   scaffoldServiceDockerfiles,
@@ -66,6 +67,121 @@ function findCog2Suppression(
   return rules.find((r) => r.id === "AwsSolutions-COG2");
 }
 
+/**
+ * Mirrors the app-wide IAM4/IAM5 stack suppression bin/app.ts applies to
+ * every stack (see `appLambdaSuppressions`). This test builds stacks in
+ * isolation, outside bin/app.ts's wiring, so without this the unrelated
+ * Lambda IAM4/IAM5 findings these stacks legitimately carry are
+ * unsuppressed. Under cdk-nag v2 that was merely an unchecked Annotation;
+ * under v3's IPolicyValidationPlugin, an unsuppressed finding throws
+ * during synth (Template.fromStack), so this test would fail on findings
+ * unrelated to the COG2 behavior it actually verifies.
+ */
+function applyAppWideLambdaSuppressions(stack: cdk.Stack): void {
+  NagSuppressions.addStackSuppressions(
+    stack,
+    [
+      {
+        id: "AwsSolutions-IAM4",
+        reason:
+          "AWSLambdaBasicExecutionRole is the documented default for CloudWatch Logs; scope is logs:CreateLogGroup/Stream/PutLogEvents on the function's own log group. Tracked: AAF-NAG-IAM4.",
+      },
+      {
+        id: "AwsSolutions-IAM5",
+        reason:
+          "Scoped wildcards required by AWS APIs and CDK patterns: DynamoDB GSI /index/*, CloudWatch Logs, Lambda version wildcards (:*), S3 path prefixes, citadel-scoped Secrets/SSM/IAM/bedrock-agentcore ARNs. Each pattern is narrow; unscoped Resource::* is still flagged. Tracked: AAF-NAG-IAM5.",
+      },
+      {
+        id: "AwsSolutions-L1",
+        reason:
+          "CDK framework manages this Lambda runtime version; will update on next CDK bump. Tracked: AAF-NAG-L1.",
+      },
+    ],
+    true,
+  );
+}
+
+/**
+ * Mirrors the BackendStack-specific SMG4/COG8 suppressions bin/app.ts
+ * applies by construct path (`AdminPasswordSecret`, `UserPool`). Same
+ * rationale as applyAppWideLambdaSuppressions above.
+ */
+function applyBackendStackSpecificSuppressions(stack: cdk.Stack): void {
+  NagSuppressions.addResourceSuppressionsByPath(
+    stack,
+    `/${stack.stackName}/AdminPasswordSecret/Resource`,
+    [
+      {
+        id: "AwsSolutions-SMG4",
+        reason:
+          "Bootstrap/admin secret. Automatic rotation requires a dedicated rotation Lambda. Tracked: AAF-NAG-SMG4-rotation.",
+      },
+    ],
+  );
+  NagSuppressions.addResourceSuppressionsByPath(
+    stack,
+    `/${stack.stackName}/UserPool/Resource`,
+    [
+      {
+        id: "AwsSolutions-COG8",
+        reason:
+          "FeaturePlan.PLUS has material per-MAU cost. Platform is internal; ESSENTIALS sufficient. Revisit if exposed externally. Tracked: AAF-NAG-COG8-plus.",
+      },
+    ],
+  );
+}
+
+/**
+ * Mirrors the ServicesStack-specific SMG4/COG8 suppressions bin/app.ts
+ * applies by construct path (`GatewayOAuthSecret`, `GatewayUserPool`). Only
+ * needed for the GatewayUserPool (M2M) describe block below — see the same
+ * rationale as applyAppWideLambdaSuppressions above (v3 throws on an
+ * unsuppressed finding during Template.fromStack; v2 did not).
+ */
+function applyServicesStackSpecificSuppressions(stack: cdk.Stack): void {
+  NagSuppressions.addResourceSuppressionsByPath(
+    stack,
+    `/${stack.stackName}/GatewayOAuthSecret/Resource`,
+    [
+      {
+        id: "AwsSolutions-SMG4",
+        reason:
+          "Bootstrap/admin secret. Automatic rotation requires a dedicated rotation Lambda. Tracked: AAF-NAG-SMG4-rotation.",
+      },
+    ],
+  );
+  NagSuppressions.addResourceSuppressionsByPath(
+    stack,
+    `/${stack.stackName}/GatewayUserPool/Resource`,
+    [
+      {
+        id: "AwsSolutions-COG8",
+        reason:
+          "FeaturePlan.PLUS has material per-MAU cost. Platform is internal; ESSENTIALS sufficient. Revisit if exposed externally. Tracked: AAF-NAG-COG8-plus.",
+      },
+    ],
+  );
+}
+
+/**
+ * S1/S10 suppression for the test-only prereq `TestDocBucket` scaffolded in
+ * this file (not a production resource bin/app.ts has any suppression
+ * for — it stands in for ServicesStack's real documentBucket dependency,
+ * which the owning stack suppresses elsewhere).
+ */
+function suppressTestOnlyBucketFindings(bucket: s3.Bucket): void {
+  NagSuppressions.addResourceSuppressions(bucket, [
+    {
+      id: "AwsSolutions-S1",
+      reason: "Test-only scaffolding bucket; not a deployed resource.",
+    },
+    {
+      id: "AwsSolutions-S10",
+      reason: "Test-only scaffolding bucket; not a deployed resource.",
+    },
+  ]);
+}
+
 describe("cdk-nag — AwsSolutions-COG2 documented suppressions", () => {
   // ---------------------------------------------------------------------------
   // backend UserPool (citadel-backend-${env}/UserPool/Resource)
@@ -81,9 +197,14 @@ describe("cdk-nag — AwsSolutions-COG2 documented suppressions", () => {
         environment: "test",
         env: { account: "123456789012", region: "us-east-1" },
       });
-      // Apply the AwsSolutions pack so any un-suppressed COG2 finding would
-      // surface as an error annotation on the UserPool/Resource path.
-      cdk.Aspects.of(app).add(new AwsSolutionsChecks({ verbose: false }));
+      // Apply the AwsSolutions pack (v3: registered via Validations, not
+      // Aspects) so any un-suppressed COG2 finding would surface as a
+      // policy-validation violation rather than a CFN metadata suppression.
+      cdk.Validations.of(app).addPlugins(
+        new AwsSolutionsChecks(app, { verbose: false }),
+      );
+      applyAppWideLambdaSuppressions(backendStack);
+      applyBackendStackSpecificSuppressions(backendStack);
       backendTemplate = Template.fromStack(backendStack);
     });
 
@@ -122,6 +243,7 @@ describe("cdk-nag — AwsSolutions-COG2 documented suppressions", () => {
         eventBusName: "test-bus",
       });
       const documentBucket = new s3.Bucket(prereq, "TestDocBucket");
+      suppressTestOnlyBucketFindings(documentBucket);
 
       servicesStack = new ServicesStack(app, "citadel-services-test", {
         environment: "test",
@@ -134,7 +256,11 @@ describe("cdk-nag — AwsSolutions-COG2 documented suppressions", () => {
         ),
         env: { account: "123456789012", region: "us-east-1" },
       });
-      cdk.Aspects.of(app).add(new AwsSolutionsChecks({ verbose: false }));
+      cdk.Validations.of(app).addPlugins(
+        new AwsSolutionsChecks(app, { verbose: false }),
+      );
+      applyAppWideLambdaSuppressions(servicesStack);
+      applyServicesStackSpecificSuppressions(servicesStack);
       servicesTemplate = Template.fromStack(servicesStack);
     });
 

@@ -4,7 +4,7 @@ import * as subscriptions from "aws-cdk-lib/aws-sns-subscriptions";
 import * as kms from "aws-cdk-lib/aws-kms";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as chatbot from "aws-cdk-lib/aws-chatbot";
-import { NagSuppressions } from "cdk-nag";
+import { NagSuppressions } from "./nag-suppressions-compat";
 
 /**
  * Configurable alarm-delivery destination for Citadel's SNS alarm topics.

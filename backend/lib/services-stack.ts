@@ -17,7 +17,7 @@ import * as events from "aws-cdk-lib/aws-events";
 import * as targets from "aws-cdk-lib/aws-events-targets";
 import * as opensearchserverless from "aws-cdk-lib/aws-opensearchserverless";
 import * as s3n from "aws-cdk-lib/aws-s3-notifications";
-import { NagSuppressions } from "cdk-nag";
+import { NagSuppressions } from "./nag-suppressions-compat";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";

@@ -23,7 +23,7 @@ import { Queue } from "aws-cdk-lib/aws-sqs";
 import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
 import { BlockPublicAccess, Bucket } from "aws-cdk-lib/aws-s3";
 import { Construct } from "constructs";
-import { NagSuppressions } from "cdk-nag";
+import { NagSuppressions } from "./nag-suppressions-compat";
 import {
   attachAlarmDelivery,
   grantCloudWatchAlarmPublish,

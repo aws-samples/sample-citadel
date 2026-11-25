@@ -15,7 +15,7 @@
  */
 import * as cdk from "aws-cdk-lib";
 import * as lambda from "aws-cdk-lib/aws-lambda";
-import { NagSuppressions } from "cdk-nag";
+import { NagSuppressions } from "./nag-suppressions-compat";
 import { IConstruct } from "constructs";
 
 export const L1_SUPPRESSION_REASON =

@@ -41,7 +41,7 @@ import * as sqs from "aws-cdk-lib/aws-sqs";
 import * as ssm from "aws-cdk-lib/aws-ssm";
 import { Provider } from "aws-cdk-lib/custom-resources";
 import { Construct } from "constructs";
-import { NagSuppressions } from "cdk-nag";
+import { NagSuppressions } from "./nag-suppressions-compat";
 import { REGISTRY_GENERATION } from "./registry-generation";
 import { LAMBDA_ARCHITECTURE, NODE_RUNTIME } from "./runtime-constants";
 
