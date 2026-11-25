@@ -44,7 +44,10 @@ export function AgentChatter({ isActive, messages }: AgentChatterProps) {
       'agent3.planning': 'text-chart-4',
       'agent4.implementation': 'text-chart-4',
       'citadel.assessment': 'text-chart-2',
-      'supervisor': 'text-chart-3',
+      // Real EventBridge source the supervisor emits (SUPERVISOR_RESPONSE_SOURCE
+      // in arbiter/supervisor/index.py), forwarded verbatim by
+      // chatter-publisher.ts — not the bare 'supervisor'.
+      'citadel.supervisor': 'text-chart-3',
     };
     return colors[source] || 'text-muted-foreground';
   };

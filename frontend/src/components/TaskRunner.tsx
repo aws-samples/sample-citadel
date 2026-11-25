@@ -41,8 +41,14 @@ export function TaskRunner() {
   const handleChatterMessage = useCallback((message: ChatterMessage) => {
     setChatterMessages((prev) => [...prev, message]);
     
-    // Check if this is a supervisor response
-    if (message.source === 'supervisor' && message.detailType === 'task.response') {
+    // Check if this is a supervisor response. The arbiter's supervisor
+    // always emits the reserved EventBridge source constant
+    // SUPERVISOR_RESPONSE_SOURCE = 'citadel.supervisor'
+    // (arbiter/supervisor/index.py), regardless of callback.source, and
+    // chatter-publisher.ts forwards event.source verbatim into the AppSync
+    // mutation's `source` field — so the real value here is always
+    // 'citadel.supervisor', never the bare 'supervisor'.
+    if (message.source === 'citadel.supervisor' && message.detailType === 'task.response') {
       try {
         const detail = typeof message.detail === 'string' ? JSON.parse(message.detail) : message.detail;
         setSupervisorResponse(detail.message || 'Task completed');
