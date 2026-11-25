@@ -52,6 +52,7 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from common.region import cross_region_prefix
+from common.workflow_tracking import RESERVED_WORKFLOW_TRACKING_KEYS
 from model_config_loader import load_model_id
 
 _REGION = os.environ.get('AWS_REGION', 'us-west-2')
@@ -1468,6 +1469,24 @@ def store_agent_config_dynamo(file_name: str, agent_id: str, llm_tool_schema: An
             print(f"[store_agent_config_dynamo] ERROR: {error_msg}")
             raise ValueError(error_msg)
 
+        # Reject reserved workflow-tracking keys as agent ids (finding —
+        # reserved agent ids). agent_id is an LLM-chosen argument of the
+        # store_agent_config_registry @tool; writing it straight through to
+        # config['name'] let a fabricated agent named "data" or "requestId"
+        # reach this table (and the Registry, via
+        # store_agent_config_registry) before the supervisor's
+        # create_workflow_tracking_record ever ran its own ValueError check.
+        # Reject here, before any put_item, using the same shared constant.
+        if agent_id in RESERVED_WORKFLOW_TRACKING_KEYS:
+            error_msg = (
+                f"agent_id '{agent_id}' collides with reserved workflow "
+                f"tracking record attribute(s) "
+                f"{sorted(RESERVED_WORKFLOW_TRACKING_KEYS)}; choose a "
+                "different agent id"
+            )
+            print(f"[store_agent_config_dynamo] ERROR: {error_msg}")
+            raise ValueError(error_msg)
+
         # if llm_tool_schema is str then json loads it
         if isinstance(llm_tool_schema, str):
             print(f"[store_agent_config_dynamo] Converting llm_tool_schema from string to dict")
@@ -1710,6 +1729,21 @@ def store_agent_config_registry(
 
         if not registry_id:
             error_msg = "REGISTRY_ID environment variable is not set"
+            print(f"[store_agent_config_registry] ERROR: {error_msg}")
+            raise ValueError(error_msg)
+
+        # Reject reserved workflow-tracking keys as agent ids (finding —
+        # reserved agent ids), before the existing-record lookup or any
+        # CreateRegistryRecord call. Same guard and shared constant as
+        # store_agent_config_dynamo, so a fabricated agent named "data" or
+        # "requestId" cannot reach the Registry either.
+        if agent_id in RESERVED_WORKFLOW_TRACKING_KEYS:
+            error_msg = (
+                f"agent_id '{agent_id}' collides with reserved workflow "
+                f"tracking record attribute(s) "
+                f"{sorted(RESERVED_WORKFLOW_TRACKING_KEYS)}; choose a "
+                "different agent id"
+            )
             print(f"[store_agent_config_registry] ERROR: {error_msg}")
             raise ValueError(error_msg)
 

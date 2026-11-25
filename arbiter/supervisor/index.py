@@ -96,6 +96,7 @@ from common.usage import build_usage_record, extract_converse_usage, extract_req
 # asset (backend/lib/arbiter-stack.ts assetExcludes), so no sys.path hack
 # is needed; it resolves the same way as common.region/common.usage above.
 from common.approval_requests import build_approval_request
+from common.workflow_tracking import RESERVED_WORKFLOW_TRACKING_KEYS
 from common.metrics_constants import (
     METRIC_NAMESPACE,
     METRIC_RELEASE_DISPATCH_EVALUATED,
@@ -299,10 +300,14 @@ Your goal is to behave as a highly autonomous supervisory system that can manage
 # of these, since they are the record's own identity key ("requestId") and
 # the nested per-node payload map ("data") written by
 # create_workflow_tracking_record and read by update_orchestration_with_results.
-# Exposed as a module-level constant so property tests can import the real
-# value instead of retyping the literal set (see
-# arbiter/supervisor/__tests__/test_index_properties.py).
-RESERVED_WORKFLOW_TRACKING_KEYS = frozenset({"requestId", "data"})
+#
+# The literal set lives in common.workflow_tracking (imported above, with
+# the other common.* imports) so the fabricator can reject the same
+# collision at agent-creation time, before create_workflow_tracking_record
+# ever runs. RESERVED_WORKFLOW_TRACKING_KEYS stays importable from this
+# module under its original name — see the import near the top of the
+# file — so arbiter/supervisor/__tests__/test_index_properties.py keeps
+# working unchanged.
 
 
 def create_workflow_tracking_record(nodes: list[str]):
