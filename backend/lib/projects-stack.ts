@@ -681,14 +681,33 @@ export class ProjectsStack extends cdk.Stack {
       chatterSubscriptionAuthorizerDataSource,
     );
 
-    // EventBridge rule for ALL agent chatter - captures all messages on the
-    // shared bus. Matches all events by not specifying a source pattern.
+    // EventBridge rule for agent chatter — narrowed (chatter-producer
+    // stamping fix) to the exact sources the known, orgId-stamping
+    // producers emit and TaskRunner.tsx's onChatter subscription /
+    // chatter-publisher.ts actually consume:
+    //   - "citadel"            -> message.sent_to_agent
+    //     (conversation-resolver.ts)
+    //   - "citadel.workflows"  -> workflow.* + supervisor.chatter
+    //     (arbiter/stepRunner/events.py, workflow-resolver.ts's
+    //     workflow.created)
+    //   - "citadel.supervisor" -> task.response
+    //     (arbiter/supervisor/index.py's SUPERVISOR_RESPONSE_SOURCE)
+    //   - "agent_intake.usage" -> intake.usage.captured
+    //     (service/agent_intake_single/tools/state.py)
+    // No longer a bus-wide catch-all ({ prefix: "" }) — that previously
+    // matched every event on the shared bus, most of which never carry
+    // detail.orgId and were refused downstream by chatter-publisher.ts.
     const chatterRule = new events.Rule(this, "ChatterRule", {
       eventBus: props.agentEventBus,
       ruleName: `citadel-chatter-${props.environment}`,
       description: "Captures all agent communication for real-time display",
       eventPattern: {
-        source: [{ prefix: "" }] as unknown as string[],
+        source: [
+          "citadel",
+          "citadel.workflows",
+          "citadel.supervisor",
+          "agent_intake.usage",
+        ],
       },
     });
 
