@@ -20,15 +20,18 @@ import { render, screen, act, fireEvent, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event';
 import '@testing-library/jest-dom';
 import { MemoryRouter } from 'react-router-dom';
+import type { WorkflowNode } from '../types/workflow';
 
 jest.mock('@/components/AuthScreen', () => ({ AuthScreen: () => <div data-testid="auth-screen" /> }));
 jest.mock('@/components/AppLayout', () => ({
-  AppLayout: ({ children }: any) => <div data-testid="layout">{children}</div>,
+  AppLayout: ({ children }: { children: React.ReactNode }) => <div data-testid="layout">{children}</div>,
 }));
 jest.mock('@/components/ui/sonner', () => ({ Toaster: () => null }));
-jest.mock('@/components/ui/tooltip', () => ({ TooltipProvider: ({ children }: any) => <>{children}</> }));
+jest.mock('@/components/ui/tooltip', () => ({
+  TooltipProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+}));
 jest.mock('@/contexts/OrganizationContext', () => ({
-  OrganizationProvider: ({ children }: any) => <>{children}</>,
+  OrganizationProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
   useOrganization: () => ({
     selectedOrganization: 'org-1',
     currentUser: { organization: 'org-1', userId: 'user-1' },
@@ -81,7 +84,7 @@ jest.mock('@xyflow/react', () => ({
 // AgentBlueprints tree is observable directly.
 let canvasMountCount = 0;
 jest.mock('../components/WorkflowCanvas', () => ({
-  WorkflowCanvas: ({ nodes, setNodes }: { nodes: { id: string }[]; setNodes: (fn: (prev: any[]) => any[]) => void }) => {
+  WorkflowCanvas: ({ nodes, setNodes }: { nodes: { id: string }[]; setNodes: (fn: (prev: WorkflowNode[]) => WorkflowNode[]) => void }) => {
     const React = jest.requireActual('react');
     React.useEffect(() => {
       canvasMountCount += 1;
@@ -98,7 +101,14 @@ jest.mock('../components/WorkflowCanvas', () => ({
                 id: 'node-dropped',
                 type: 'agentNode',
                 position: { x: 0, y: 0 },
-                data: { agentId: 'agent-known', label: 'Dropped', inputCount: 1, outputCount: 1, configuration: {} },
+                data: {
+                  agentId: 'agent-known',
+                  agentConfig: { agentId: 'agent-known', name: 'Known Agent', config: { name: 'Known Agent' }, state: 'active' },
+                  label: 'Dropped',
+                  inputCount: 1,
+                  outputCount: 1,
+                  configuration: {},
+                },
               },
             ])
           }

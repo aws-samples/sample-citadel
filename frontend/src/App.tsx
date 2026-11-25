@@ -40,6 +40,7 @@ const LazyApprovalsPage = lazy(() =>
 );
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { serverService } from './services';
+import type { AuthUser } from 'aws-amplify/auth';
 import { OrganizationProvider } from './contexts/OrganizationContext';
 import { GovernanceModeProvider } from './contexts/GovernanceModeContext';
 import { Toaster } from './components/ui/sonner';
@@ -169,7 +170,7 @@ function AppBuilderRoute() {
 }
 
 function App() {
-  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
   const navigate = useNavigate();
 
@@ -183,14 +184,14 @@ function App() {
       if (user) {
         setCurrentUser(user);
       }
-    } catch (error) {
+    } catch {
       console.log('User not authenticated');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleLogin = (user: any) => {
+  const handleLogin = (user: AuthUser) => {
     setCurrentUser(user);
     navigate('/dashboard');
   };
