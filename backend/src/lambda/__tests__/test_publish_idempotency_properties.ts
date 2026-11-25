@@ -7,9 +7,9 @@
  * re-provisioning. For any non-published app, `unpublishApp` returns current
  * state without error.
  */
-process.env.REGISTRY_ID = 'test-registry-id';
+process.env.REGISTRY_ID = "test-registry-id";
 
-import * as fc from 'fast-check';
+import * as fc from "fast-check";
 import {
   ApiGatewayV2Client,
   CreateApiCommand,
@@ -18,18 +18,25 @@ import {
   CreateRouteCommand,
   CreateAuthorizerCommand,
   DeleteApiCommand,
-} from '@aws-sdk/client-apigatewayv2';
+} from "@aws-sdk/client-apigatewayv2";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
-import { STSClient } from '@aws-sdk/client-sts';
-import { IAMClient } from '@aws-sdk/client-iam';
-import { mockClient } from 'aws-sdk-client-mock';
+import {
+  DynamoDBDocumentClient,
+  QueryCommand,
+  UpdateCommand,
+} from "@aws-sdk/lib-dynamodb";
+import {
+  EventBridgeClient,
+  PutEventsCommand,
+} from "@aws-sdk/client-eventbridge";
+import { STSClient } from "@aws-sdk/client-sts";
+import { IAMClient } from "@aws-sdk/client-iam";
+import { mockClient } from "aws-sdk-client-mock";
 
 import {
   seedMockRegistry,
   resetMockRegistry,
-} from './fixtures/registry-service-mock';
+} from "./fixtures/registry-service-mock";
 
 // This file tests publishApp/unpublishApp directly (not through the
 // handler), so it must mock RegistryService itself for the owner gate
@@ -37,11 +44,11 @@ import {
 // from the property-generated appId, and seedOwnerApp seeds a matching
 // Registry record per property run, so the gate passes and the pre-fix
 // idempotency behavior is exercised unchanged.
-jest.mock('../../services/registry-service', () => {
+jest.mock("../../services/registry-service", () => {
   const { getMockRegistryService } = jest.requireActual(
-    './fixtures/registry-service-mock',
+    "./fixtures/registry-service-mock",
   );
-  const actual = jest.requireActual('../../services/registry-service');
+  const actual = jest.requireActual("../../services/registry-service");
   return {
     RegistryService: jest
       .fn()
@@ -51,13 +58,13 @@ jest.mock('../../services/registry-service', () => {
   };
 });
 
-import { publishApp, unpublishApp, AppMetadata } from '../app-publish-handler';
-import { PolicyManager } from '../../utils/policy-manager';
+import { publishApp, unpublishApp, AppMetadata } from "../app-publish-handler";
+import { PolicyManager } from "../../utils/policy-manager";
 
 // ── Owner-gate fixture (finding 13a58234) ───────────────────
 
-const IDEMPOTENCY_OWNER_ID = 'user-1';
-const IDEMPOTENCY_APP_ORG = 'owner-org';
+const IDEMPOTENCY_OWNER_ID = "user-1";
+const IDEMPOTENCY_APP_ORG = "owner-org";
 
 /** AppSync event authorized as the seeded app's owner — see seedOwnerApp. */
 const OWNER_EVENT = {
@@ -65,7 +72,7 @@ const OWNER_EVENT = {
     sub: IDEMPOTENCY_OWNER_ID,
     claims: {
       sub: IDEMPOTENCY_OWNER_ID,
-      'custom:organization': IDEMPOTENCY_APP_ORG,
+      "custom:organization": IDEMPOTENCY_APP_ORG,
     },
   },
 };
@@ -79,9 +86,9 @@ const OWNER_EVENT = {
  * only flows into the EventBridge event detail, not the Registry gate).
  */
 function seedOwnerApp(appId: string) {
-  seedMockRegistry('agent', appId, {
-    name: 'Test App',
-    status: 'ACTIVE',
+  seedMockRegistry("agent", appId, {
+    name: "Test App",
+    status: "ACTIVE",
     customDescriptorContent: JSON.stringify({
       appId,
       manifest: {
@@ -104,7 +111,9 @@ const iamMock = mockClient(IAMClient);
 // ── Test Deps ───────────────────────────────────────────────
 
 const mockPolicyManager = {
-  getAccountContext: jest.fn().mockResolvedValue({ accountId: '123456789012', region: 'us-east-1' }),
+  getAccountContext: jest
+    .fn()
+    .mockResolvedValue({ accountId: "123456789012", region: "us-east-1" }),
   ensureRole: jest.fn().mockResolvedValue(undefined),
   deleteRole: jest.fn().mockResolvedValue(undefined),
 } as unknown as PolicyManager;
@@ -115,47 +124,55 @@ function makeDeps() {
     apiGwClient: new ApiGatewayV2Client({}),
     eventBridgeClient: new EventBridgeClient({}),
     policyManager: mockPolicyManager,
-    appsTable: 'citadel-apps-test',
-    eventBusName: 'citadel-agents-test',
-    environment: 'dev',
-    authorizerFnArn: 'arn:aws:lambda:us-east-1:123:function:auth',
-    region: 'us-east-1',
+    appsTable: "citadel-apps-test",
+    eventBusName: "citadel-agents-test",
+    environment: "dev",
+    authorizerFnArn: "arn:aws:lambda:us-east-1:123:function:auth",
+    region: "us-east-1",
   };
 }
 
 // ── Generators ──────────────────────────────────────────────
 
 /** Valid appId: alphanumeric + hyphens/underscores */
-const appIdArb = fc.string({ minLength: 1, maxLength: 30 })
-  .filter(s => /^[a-zA-Z0-9_-]+$/.test(s));
+const appIdArb = fc
+  .string({ minLength: 1, maxLength: 30 })
+  .filter((s) => /^[a-zA-Z0-9_-]+$/.test(s));
 
 /** Valid API Gateway endpoint URL */
-const endpointUrlArb = fc.string({ minLength: 1, maxLength: 20 })
-  .filter(s => /^[a-zA-Z0-9]+$/.test(s))
-  .map(id => `https://${id}.execute-api.us-east-1.amazonaws.com`);
+const endpointUrlArb = fc
+  .string({ minLength: 1, maxLength: 20 })
+  .filter((s) => /^[a-zA-Z0-9]+$/.test(s))
+  .map((id) => `https://${id}.execute-api.us-east-1.amazonaws.com`);
 
 /** Valid API Gateway ID */
-const apiIdArb = fc.string({ minLength: 1, maxLength: 20 })
-  .filter(s => /^[a-zA-Z0-9]+$/.test(s));
+const apiIdArb = fc
+  .string({ minLength: 1, maxLength: 20 })
+  .filter((s) => /^[a-zA-Z0-9]+$/.test(s));
 
 /** Valid API key ID */
 const keyIdArb = fc.uuid();
 
 /** Valid org ID */
-const orgIdArb = fc.string({ minLength: 1, maxLength: 20 })
-  .filter(s => /^[a-zA-Z0-9_-]+$/.test(s));
+const orgIdArb = fc
+  .string({ minLength: 1, maxLength: 20 })
+  .filter((s) => /^[a-zA-Z0-9_-]+$/.test(s));
 
 /** Non-published app statuses */
-const nonPublishedStatusArb = fc.constantFrom('DRAFT', 'APPROVED', 'DEPRECATED');
+const nonPublishedStatusArb = fc.constantFrom(
+  "DRAFT",
+  "APPROVED",
+  "DEPRECATED",
+);
 
 /** Valid app name */
-const appNameArb = fc.string({ minLength: 1, maxLength: 50 })
-  .filter(s => s.trim().length > 0);
+const appNameArb = fc
+  .string({ minLength: 1, maxLength: 50 })
+  .filter((s) => s.trim().length > 0);
 
 // ── Property 4 Tests ────────────────────────────────────────
 
-describe('Property 4: Publish and unpublish idempotence', () => {
-
+describe("Property 4: Publish and unpublish idempotence", () => {
   beforeEach(() => {
     apiGwMock.reset();
     ddbMock.reset();
@@ -175,7 +192,7 @@ describe('Property 4: Publish and unpublish idempotence', () => {
    * keyId, and orgId, calling publishApp returns the current state without
    * calling any API Gateway SDK commands or emitting EventBridge events.
    */
-  it('publishApp on already-published app returns current state without re-provisioning', async () => {
+  it("publishApp on already-published app returns current state without re-provisioning", async () => {
     await fc.assert(
       fc.asyncProperty(
         appIdArb,
@@ -192,13 +209,13 @@ describe('Property 4: Publish and unpublish idempotence', () => {
 
           const publishedApp: AppMetadata = {
             appId,
-            name: 'Published App',
-            status: 'PUBLISHED',
-            workflowIds: ['wf-1'],
+            name: "Published App",
+            status: "PUBLISHED",
+            workflowIds: ["wf-1"],
             orgId,
             endpointUrl,
             apiId,
-            sortId: 'METADATA',
+            sortId: "METADATA",
             groupId: `APP#${appId}`,
           };
 
@@ -209,21 +226,30 @@ describe('Property 4: Publish and unpublish idempotence', () => {
             ],
           });
 
-          const result = await publishApp(appId, 'user-1', OWNER_EVENT, makeDeps());
+          const result = await publishApp(
+            appId,
+            "user-1",
+            OWNER_EVENT,
+            makeDeps(),
+          );
 
           // Returns current published state
-          expect(result.app.status).toBe('PUBLISHED');
+          expect(result.app.status).toBe("PUBLISHED");
           expect(result.endpointUrl).toBe(endpointUrl);
           expect(result.apiKeyId).toBe(keyId);
           // Never re-expose plaintext key
-          expect(result.apiKey).toBe('');
+          expect(result.apiKey).toBe("");
 
           // No API Gateway provisioning commands called
           expect(apiGwMock.commandCalls(CreateApiCommand)).toHaveLength(0);
           expect(apiGwMock.commandCalls(CreateStageCommand)).toHaveLength(0);
-          expect(apiGwMock.commandCalls(CreateIntegrationCommand)).toHaveLength(0);
+          expect(apiGwMock.commandCalls(CreateIntegrationCommand)).toHaveLength(
+            0,
+          );
           expect(apiGwMock.commandCalls(CreateRouteCommand)).toHaveLength(0);
-          expect(apiGwMock.commandCalls(CreateAuthorizerCommand)).toHaveLength(0);
+          expect(apiGwMock.commandCalls(CreateAuthorizerCommand)).toHaveLength(
+            0,
+          );
 
           // No EventBridge events emitted
           expect(ebMock.commandCalls(PutEventsCommand)).toHaveLength(0);
@@ -241,7 +267,7 @@ describe('Property 4: Publish and unpublish idempotence', () => {
    * operations (API Gateway deletion, key revocation, IAM role deletion) are
    * performed.
    */
-  it('unpublishApp on non-published app returns current state without error or modification', async () => {
+  it("unpublishApp on non-published app returns current state without error or modification", async () => {
     await fc.assert(
       fc.asyncProperty(
         appIdArb,
@@ -260,15 +286,20 @@ describe('Property 4: Publish and unpublish idempotence', () => {
             appId,
             name: appName,
             status,
-            workflowIds: ['wf-1'],
+            workflowIds: ["wf-1"],
             orgId,
-            sortId: 'METADATA',
+            sortId: "METADATA",
             groupId: `APP#${appId}`,
           };
 
           ddbMock.on(QueryCommand).resolves({ Items: [app] });
 
-          const result = await unpublishApp(appId, 'user-1', OWNER_EVENT, makeDeps());
+          const result = await unpublishApp(
+            appId,
+            "user-1",
+            OWNER_EVENT,
+            makeDeps(),
+          );
 
           // Returns current state unchanged
           expect(result.app.status).toBe(status);
@@ -279,7 +310,9 @@ describe('Property 4: Publish and unpublish idempotence', () => {
           expect(apiGwMock.commandCalls(DeleteApiCommand)).toHaveLength(0);
           expect(ebMock.commandCalls(PutEventsCommand)).toHaveLength(0);
           expect(ddbMock.commandCalls(UpdateCommand)).toHaveLength(0);
-          expect((mockPolicyManager.deleteRole as jest.Mock)).not.toHaveBeenCalled();
+          expect(
+            mockPolicyManager.deleteRole as jest.Mock,
+          ).not.toHaveBeenCalled();
         },
       ),
       { numRuns: 50 },

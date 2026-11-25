@@ -1,35 +1,35 @@
 /**
  * Property-Based Test for Configuration Round-Trip
- * 
+ *
  * Property 16: Connector schema completeness (Round-trip)
  * For any connector type, serializing its configuration to the backend format
  * and then deserializing it should produce an equivalent configuration object.
- * 
+ *
  * Validates: Requirements 9.1, 9.2, 9.3, 9.4, 9.5, 9.6, 9.7
  */
 
-import * as fc from 'fast-check';
-import { getConnectorSpec } from '../connector-registry';
+import * as fc from "fast-check";
+import { getConnectorSpec } from "../connector-registry";
 
-describe('Configuration Round-Trip - Property-Based Tests', () => {
+describe("Configuration Round-Trip - Property-Based Tests", () => {
   /**
    * Property 16: Connector schema completeness
-   * 
+   *
    * For any connector type, serializing its configuration to the backend format
    * and then deserializing it should produce an equivalent configuration object.
-   * 
+   *
    * Validates: Requirements 9.1, 9.2, 9.3, 9.4, 9.5, 9.6, 9.7
    */
-  describe('Property 16: Configuration round-trip', () => {
+  describe("Property 16: Configuration round-trip", () => {
     // Define all connector types from GraphQL schema
     const graphqlConnectorTypes = [
-      'CONFLUENCE',
-      'SLACK',
-      'JIRA',
-      'SERVICENOW',
-      'ZENDESK',
-      'PAGERDUTY',
-      'MICROSOFT'
+      "CONFLUENCE",
+      "SLACK",
+      "JIRA",
+      "SERVICENOW",
+      "ZENDESK",
+      "PAGERDUTY",
+      "MICROSOFT",
     ];
 
     /**
@@ -41,7 +41,7 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
     function serializeConfiguration(
       connectorType: string,
       credentials: ConfigBag,
-      config: ConfigBag
+      config: ConfigBag,
     ): { secretData: ConfigBag; ssmData: ConfigBag } {
       const spec = getConnectorSpec(connectorType);
       if (!spec) {
@@ -50,14 +50,14 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
 
       // Build secret value (what goes into Secrets Manager)
       const secretData: Record<string, unknown> = {};
-      
+
       // Add authentication fields
       for (const field of spec.authentication.fields) {
         if (credentials[field] !== undefined) {
           secretData[field] = credentials[field];
         }
       }
-      
+
       // Add configuration fields that should be in secret
       for (const configField of spec.configuration.required) {
         if (config[configField] !== undefined) {
@@ -67,13 +67,15 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
 
       // Build SSM data (what goes into SSM Parameter Store)
       const ssmData: Record<string, unknown> = {};
-      
+
       for (const paramName of spec.configuration.ssmParameters) {
         // Convert param-name to paramName (camelCase)
-        const camelCaseKey = paramName.replace(/-([a-z])/g, (g) => g[1].toUpperCase());
-        
+        const camelCaseKey = paramName.replace(/-([a-z])/g, (g) =>
+          g[1].toUpperCase(),
+        );
+
         const value = config[paramName] || config[camelCaseKey];
-        
+
         if (value !== undefined) {
           ssmData[paramName] = value;
         }
@@ -89,7 +91,7 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
     function deserializeConfiguration(
       connectorType: string,
       secretData: ConfigBag,
-      ssmData: ConfigBag
+      ssmData: ConfigBag,
     ): { credentials: ConfigBag; config: ConfigBag } {
       const spec = getConnectorSpec(connectorType);
       if (!spec) {
@@ -106,19 +108,21 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
 
       // Extract configuration from both secret data and SSM data
       const config: Record<string, unknown> = {};
-      
+
       // Get config fields from secret data
       for (const configField of spec.configuration.required) {
         if (secretData[configField] !== undefined) {
           config[configField] = secretData[configField];
         }
       }
-      
+
       // Get config fields from SSM data
       for (const paramName of spec.configuration.ssmParameters) {
         if (ssmData[paramName] !== undefined) {
           // Convert param-name to paramName (camelCase) for consistency
-          const camelCaseKey = paramName.replace(/-([a-z])/g, (g) => g[1].toUpperCase());
+          const camelCaseKey = paramName.replace(/-([a-z])/g, (g) =>
+            g[1].toUpperCase(),
+          );
           config[camelCaseKey] = ssmData[paramName];
         }
       }
@@ -133,7 +137,7 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
     function areConfigurationsEquivalent(
       original: { credentials: ConfigBag; config: ConfigBag },
       roundtrip: { credentials: ConfigBag; config: ConfigBag },
-      connectorType: string
+      connectorType: string,
     ): boolean {
       const spec = getConnectorSpec(connectorType);
       if (!spec) {
@@ -157,11 +161,15 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
 
       // Check SSM parameters (might be in different key formats)
       for (const paramName of spec.configuration.ssmParameters) {
-        const camelCaseKey = paramName.replace(/-([a-z])/g, (g) => g[1].toUpperCase());
-        
-        const originalValue = original.config[paramName] || original.config[camelCaseKey];
-        const roundtripValue = roundtrip.config[paramName] || roundtrip.config[camelCaseKey];
-        
+        const camelCaseKey = paramName.replace(/-([a-z])/g, (g) =>
+          g[1].toUpperCase(),
+        );
+
+        const originalValue =
+          original.config[paramName] || original.config[camelCaseKey];
+        const roundtripValue =
+          roundtrip.config[paramName] || roundtrip.config[camelCaseKey];
+
         if (originalValue !== roundtripValue) {
           return false;
         }
@@ -170,7 +178,7 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
       return true;
     }
 
-    test('should preserve all data through serialization and deserialization', () => {
+    test("should preserve all data through serialization and deserialization", () => {
       fc.assert(
         fc.property(
           fc.constantFrom(...graphqlConnectorTypes),
@@ -183,7 +191,8 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
             // Generate valid credentials
             const credentials: Record<string, unknown> = {};
             for (const field of spec.authentication.fields) {
-              credentials[field] = `test-${field}-${Math.random().toString(36).substring(7)}`;
+              credentials[field] =
+                `test-${field}-${Math.random().toString(36).substring(7)}`;
             }
 
             // Generate valid configuration
@@ -193,14 +202,16 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
               if (spec.authentication.fields.includes(field)) {
                 config[field] = credentials[field];
               } else {
-                config[field] = `test-${field}-${Math.random().toString(36).substring(7)}`;
+                config[field] =
+                  `test-${field}-${Math.random().toString(36).substring(7)}`;
               }
             }
 
             // Add optional fields randomly
             for (const field of spec.configuration.optional) {
               if (Math.random() > 0.5) {
-                config[field] = `test-${field}-${Math.random().toString(36).substring(7)}`;
+                config[field] =
+                  `test-${field}-${Math.random().toString(36).substring(7)}`;
               }
             }
 
@@ -208,19 +219,23 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
             const { secretData, ssmData } = serializeConfiguration(
               connectorType,
               credentials,
-              config
+              config,
             );
 
             // Deserialize
             const roundtrip = deserializeConfiguration(
               connectorType,
               secretData,
-              ssmData
+              ssmData,
             );
 
             // Property: Round-trip should preserve all data
             const original = { credentials, config };
-            const isEquivalent = areConfigurationsEquivalent(original, roundtrip, connectorType);
+            const isEquivalent = areConfigurationsEquivalent(
+              original,
+              roundtrip,
+              connectorType,
+            );
 
             expect(isEquivalent).toBe(true);
 
@@ -235,13 +250,13 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
             }
 
             return true;
-          }
+          },
         ),
-        { numRuns: 100 }
+        { numRuns: 100 },
       );
     });
 
-    test('should handle empty optional configuration fields', () => {
+    test("should handle empty optional configuration fields", () => {
       fc.assert(
         fc.property(
           fc.constantFrom(...graphqlConnectorTypes),
@@ -267,12 +282,12 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
             const { secretData, ssmData } = serializeConfiguration(
               connectorType,
               credentials,
-              config
+              config,
             );
             const roundtrip = deserializeConfiguration(
               connectorType,
               secretData,
-              ssmData
+              ssmData,
             );
 
             // Property: Should handle missing optional fields gracefully
@@ -285,13 +300,13 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
             }
 
             return true;
-          }
+          },
         ),
-        { numRuns: 100 }
+        { numRuns: 100 },
       );
     });
 
-    test('should maintain data types through round-trip', () => {
+    test("should maintain data types through round-trip", () => {
       fc.assert(
         fc.property(
           fc.constantFrom(...graphqlConnectorTypes),
@@ -318,17 +333,19 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
             const { secretData, ssmData } = serializeConfiguration(
               connectorType,
               credentials,
-              config
+              config,
             );
             const roundtrip = deserializeConfiguration(
               connectorType,
               secretData,
-              ssmData
+              ssmData,
             );
 
             // Property: Data types should be preserved
             for (const field of spec.authentication.fields) {
-              expect(typeof roundtrip.credentials[field]).toBe(typeof credentials[field]);
+              expect(typeof roundtrip.credentials[field]).toBe(
+                typeof credentials[field],
+              );
               expect(roundtrip.credentials[field]).toBe(credentials[field]);
             }
 
@@ -338,63 +355,67 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
             }
 
             return true;
-          }
+          },
         ),
-        { numRuns: 100 }
+        { numRuns: 100 },
       );
     });
 
-    test('should handle all connector-specific field combinations', () => {
+    test("should handle all connector-specific field combinations", () => {
       // Test specific connector configurations to ensure completeness
       const testCases = [
         {
-          type: 'CONFLUENCE',
-          credentials: { email: 'test@example.com', apiToken: 'token123' },
-          config: { baseUrl: 'https://test.atlassian.net' }
+          type: "CONFLUENCE",
+          credentials: { email: "test@example.com", apiToken: "token123" },
+          config: { baseUrl: "https://test.atlassian.net" },
         },
         {
-          type: 'SERVICENOW',
-          credentials: { username: 'admin', password: 'pass123' },
-          config: { instanceUrl: 'https://test.service-now.com' }
+          type: "SERVICENOW",
+          credentials: { username: "admin", password: "pass123" },
+          config: { instanceUrl: "https://test.service-now.com" },
         },
         {
-          type: 'JIRA',
-          credentials: { email: 'test@example.com', apiToken: 'token123' },
-          config: { baseUrl: 'https://test.atlassian.net' }
+          type: "JIRA",
+          credentials: { email: "test@example.com", apiToken: "token123" },
+          config: { baseUrl: "https://test.atlassian.net" },
         },
         {
-          type: 'SLACK',
-          credentials: { clientId: 'client123', clientSecret: 'secret123' },
-          config: { workspaceId: 'T01234ABCDE' }
+          type: "SLACK",
+          credentials: { clientId: "client123", clientSecret: "secret123" },
+          config: { workspaceId: "T01234ABCDE" },
         },
         {
-          type: 'MICROSOFT',
-          credentials: { clientId: 'client123', clientSecret: 'secret123', tenantId: 'tenant123' },
-          config: { tenantId: 'tenant123' }
+          type: "MICROSOFT",
+          credentials: {
+            clientId: "client123",
+            clientSecret: "secret123",
+            tenantId: "tenant123",
+          },
+          config: { tenantId: "tenant123" },
         },
         {
-          type: 'ZENDESK',
-          credentials: { email: 'test@example.com', apiToken: 'token123' },
-          config: { subdomain: 'test-company' }
+          type: "ZENDESK",
+          credentials: { email: "test@example.com", apiToken: "token123" },
+          config: { subdomain: "test-company" },
         },
         {
-          type: 'PAGERDUTY',
-          credentials: { apiToken: 'token123' },
-          config: {}
-        }
+          type: "PAGERDUTY",
+          credentials: { apiToken: "token123" },
+          config: {},
+        },
       ];
 
       for (const testCase of testCases) {
         const { secretData, ssmData } = serializeConfiguration(
           testCase.type,
           testCase.credentials,
-          testCase.config
+          testCase.config,
         );
 
         const roundtrip = deserializeConfiguration(
           testCase.type,
           secretData,
-          ssmData
+          ssmData,
         );
 
         // Verify credentials are preserved
@@ -405,14 +426,17 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
         // Verify config is preserved
         for (const [key, value] of Object.entries(testCase.config)) {
           // Handle both param-name and paramName formats
-          const camelCaseKey = key.replace(/-([a-z])/g, (g) => g[1].toUpperCase());
-          const roundtripValue = roundtrip.config[key] || roundtrip.config[camelCaseKey];
+          const camelCaseKey = key.replace(/-([a-z])/g, (g) =>
+            g[1].toUpperCase(),
+          );
+          const roundtripValue =
+            roundtrip.config[key] || roundtrip.config[camelCaseKey];
           expect(roundtripValue).toBe(value);
         }
       }
     });
 
-    test('should not lose data when config fields are stored in secret', () => {
+    test("should not lose data when config fields are stored in secret", () => {
       fc.assert(
         fc.property(
           fc.constantFrom(...graphqlConnectorTypes),
@@ -438,12 +462,14 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
             const { secretData, ssmData } = serializeConfiguration(
               connectorType,
               credentials,
-              config
+              config,
             );
 
             // Property: Config fields that are in secret structure should be in secretData
             for (const configField of spec.configuration.required) {
-              if (spec.authentication.secretStructure[configField] !== undefined) {
+              if (
+                spec.authentication.secretStructure[configField] !== undefined
+              ) {
                 expect(secretData[configField]).toBe(config[configField]);
               }
             }
@@ -452,7 +478,7 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
             const roundtrip = deserializeConfiguration(
               connectorType,
               secretData,
-              ssmData
+              ssmData,
             );
 
             // Property: All config fields should be retrievable after round-trip
@@ -461,9 +487,9 @@ describe('Configuration Round-Trip - Property-Based Tests', () => {
             }
 
             return true;
-          }
+          },
         ),
-        { numRuns: 100 }
+        { numRuns: 100 },
       );
     });
   });

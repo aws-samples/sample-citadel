@@ -1,8 +1,8 @@
-import { EventBridgeEvent } from 'aws-lambda';
-import { SignatureV4 } from '@aws-sdk/signature-v4';
-import { Sha256 } from '@aws-crypto/sha256-js';
-import { HttpRequest } from '@smithy/protocol-http';
-import { defaultProvider } from '@aws-sdk/credential-provider-node';
+import { EventBridgeEvent } from "aws-lambda";
+import { SignatureV4 } from "@aws-sdk/signature-v4";
+import { Sha256 } from "@aws-crypto/sha256-js";
+import { HttpRequest } from "@smithy/protocol-http";
+import { defaultProvider } from "@aws-sdk/credential-provider-node";
 
 interface AssessmentCompletedDetail {
   sessionId: string;
@@ -11,10 +11,12 @@ interface AssessmentCompletedDetail {
   timestamp: string;
 }
 
-export const handler = async (event: EventBridgeEvent<'assessment.completed', AssessmentCompletedDetail>) => {
+export const handler = async (
+  event: EventBridgeEvent<"assessment.completed", AssessmentCompletedDetail>,
+) => {
   const { projectId } = event.detail;
   const appsyncEndpoint = process.env.APPSYNC_ENDPOINT!;
-  const region = process.env.AWS_REGION || 'ap-southeast-2';
+  const region = process.env.AWS_REGION || "ap-southeast-2";
 
   const mutation = `
     mutation PublishAssessmentCompletion($projectId: ID!) {
@@ -33,16 +35,16 @@ export const handler = async (event: EventBridgeEvent<'assessment.completed', As
   const request = new HttpRequest({
     hostname: url.hostname,
     path: url.pathname,
-    method: 'POST',
+    method: "POST",
     headers: {
-      'Content-Type': 'application/json',
+      "Content-Type": "application/json",
       host: url.hostname,
     },
     body,
   });
 
   const signer = new SignatureV4({
-    service: 'appsync',
+    service: "appsync",
     region,
     credentials: defaultProvider(),
     sha256: Sha256,

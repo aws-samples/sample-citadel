@@ -19,17 +19,17 @@
  * grants a wildcard resource. Discovery is read-only and may use `Resource:
  * '*'` because List/Describe operations don't support resource-level scoping.
  */
-import type { AgentInvocationProtocol } from '../services/registry-service';
+import type { AgentInvocationProtocol } from "../services/registry-service";
 
 /** IAM policy language version used across the platform. */
-const POLICY_VERSION = '2012-10-17' as const;
+const POLICY_VERSION = "2012-10-17" as const;
 
 /**
  * A single IAM policy statement, in the shape PolicyManager emits
  * (capitalised keys, array-valued Action/Resource).
  */
 export interface IamPolicyStatement {
-  Effect: 'Allow';
+  Effect: "Allow";
   Action: string[];
   Resource: string[];
 }
@@ -41,7 +41,7 @@ export interface IamPolicyDocument {
 }
 
 /** Role-name prefix for per-agent import invoke roles: `citadel-agent-invoke-{id}`. */
-export const IMPORT_INVOKE_ROLE_PREFIX = 'citadel-agent-invoke-';
+export const IMPORT_INVOKE_ROLE_PREFIX = "citadel-agent-invoke-";
 
 /**
  * Builds the scoped IAM role name for an imported agent's invoke role.
@@ -63,7 +63,7 @@ export class UnsupportedInvokeProtocolError extends Error {
 
   constructor(protocol: string) {
     super(`Invocation protocol '${protocol}' is not supported in phase 1`);
-    this.name = 'UnsupportedInvokeProtocolError';
+    this.name = "UnsupportedInvokeProtocolError";
     this.protocol = protocol;
   }
 }
@@ -75,15 +75,15 @@ export class UnsupportedInvokeProtocolError extends Error {
  */
 function invokeActionsFor(protocol: AgentInvocationProtocol): string[] | null {
   switch (protocol) {
-    case 'AGENTCORE_RUNTIME':
-      return ['bedrock-agentcore:InvokeAgentRuntime'];
-    case 'LAMBDA_INVOKE':
-      return ['lambda:InvokeFunction'];
-    case 'BEDROCK_AGENT':
-      return ['bedrock:InvokeAgent'];
-    case 'HTTP_ENDPOINT':
-      return ['execute-api:Invoke'];
-    case 'MCP':
+    case "AGENTCORE_RUNTIME":
+      return ["bedrock-agentcore:InvokeAgentRuntime"];
+    case "LAMBDA_INVOKE":
+      return ["lambda:InvokeFunction"];
+    case "BEDROCK_AGENT":
+      return ["bedrock:InvokeAgent"];
+    case "HTTP_ENDPOINT":
+      return ["execute-api:Invoke"];
+    case "MCP":
       // MCP agents are reached over HTTP with bearer-token auth supplied via a
       // Secrets Manager secretRef (AgentInvocationBlock.auth.secretRef). There
       // is no AWS IAM "invoke" action for an MCP endpoint, so no scoped invoke
@@ -105,9 +105,11 @@ function invokeActionsFor(protocol: AgentInvocationProtocol): string[] | null {
  */
 function assertConcreteResource(targetArn: string): void {
   if (!targetArn || targetArn.trim().length === 0) {
-    throw new Error('buildImportInvokePolicy: targetArn must be a non-empty resource ARN');
+    throw new Error(
+      "buildImportInvokePolicy: targetArn must be a non-empty resource ARN",
+    );
   }
-  if (targetArn.includes('*')) {
+  if (targetArn.includes("*")) {
     throw new Error(
       `buildImportInvokePolicy: targetArn must not contain a wildcard '*' — ` +
         `a least-privilege invoke policy grants exactly one concrete resource (got '${targetArn}')`,
@@ -116,10 +118,13 @@ function assertConcreteResource(targetArn: string): void {
 }
 
 /** Builds a one-statement Allow policy document. */
-function singleStatementDocument(actions: string[], resources: string[]): IamPolicyDocument {
+function singleStatementDocument(
+  actions: string[],
+  resources: string[],
+): IamPolicyDocument {
   return {
     Version: POLICY_VERSION,
-    Statement: [{ Effect: 'Allow', Action: actions, Resource: resources }],
+    Statement: [{ Effect: "Allow", Action: actions, Resource: resources }],
   };
 }
 
@@ -155,7 +160,7 @@ export function buildImportInvokePolicy(
 
 /** Builds an Allow statement over all resources (read-only discovery). */
 function readOnlyStatement(actions: string[]): IamPolicyStatement {
-  return { Effect: 'Allow', Action: actions, Resource: ['*'] };
+  return { Effect: "Allow", Action: actions, Resource: ["*"] };
 }
 
 /**
@@ -174,43 +179,43 @@ export function buildImportDiscoveryPolicy(): IamPolicyDocument {
     Statement: [
       // AgentCore Runtime agents
       readOnlyStatement([
-        'bedrock-agentcore:ListAgentRuntimes',
-        'bedrock-agentcore:GetAgentRuntime',
-        'bedrock-agentcore:ListAgentRuntimeEndpoints',
+        "bedrock-agentcore:ListAgentRuntimes",
+        "bedrock-agentcore:GetAgentRuntime",
+        "bedrock-agentcore:ListAgentRuntimeEndpoints",
       ]),
       // Bedrock Agents
       readOnlyStatement([
-        'bedrock:ListAgents',
-        'bedrock:GetAgent',
-        'bedrock:ListAgentAliases',
-        'bedrock:ListAgentActionGroups',
-        'bedrock:ListAgentKnowledgeBases',
+        "bedrock:ListAgents",
+        "bedrock:GetAgent",
+        "bedrock:ListAgentAliases",
+        "bedrock:ListAgentActionGroups",
+        "bedrock:ListAgentKnowledgeBases",
       ]),
       // Lambda-hosted agents
       readOnlyStatement([
-        'lambda:ListFunctions',
-        'lambda:GetFunctionConfiguration',
-        'lambda:GetFunction',
-        'lambda:GetPolicy',
-        'lambda:ListTags',
-        'lambda:ListEventSourceMappings',
-        'lambda:ListFunctionUrlConfigs',
+        "lambda:ListFunctions",
+        "lambda:GetFunctionConfiguration",
+        "lambda:GetFunction",
+        "lambda:GetPolicy",
+        "lambda:ListTags",
+        "lambda:ListEventSourceMappings",
+        "lambda:ListFunctionUrlConfigs",
       ]),
       // ECS-hosted agents
       readOnlyStatement([
-        'ecs:ListClusters',
-        'ecs:ListServices',
-        'ecs:DescribeServices',
-        'ecs:DescribeTaskDefinition',
+        "ecs:ListClusters",
+        "ecs:ListServices",
+        "ecs:DescribeServices",
+        "ecs:DescribeTaskDefinition",
       ]),
       // EC2 (compute substrate discovery)
-      readOnlyStatement(['ec2:DescribeInstances', 'ec2:DescribeTags']),
+      readOnlyStatement(["ec2:DescribeInstances", "ec2:DescribeTags"]),
       // EKS-hosted agents
-      readOnlyStatement(['eks:ListClusters', 'eks:DescribeCluster']),
+      readOnlyStatement(["eks:ListClusters", "eks:DescribeCluster"]),
       // API Gateway (HTTP endpoints) — apigateway:GET is the read action
-      readOnlyStatement(['apigateway:GET']),
+      readOnlyStatement(["apigateway:GET"]),
       // Resource Groups Tagging API (cross-substrate discovery by tag)
-      readOnlyStatement(['tag:GetResources']),
+      readOnlyStatement(["tag:GetResources"]),
     ],
   };
 }
