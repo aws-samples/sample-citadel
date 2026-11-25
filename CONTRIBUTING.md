@@ -69,3 +69,25 @@ If you discover a potential security issue in this project we ask that you notif
 ## Licensing
 
 See the [LICENSE](LICENSE) file for our project's licensing. We will ask you to confirm the licensing of your contribution.
+
+## Formatting
+
+This repository uses [Prettier](https://prettier.io) to format `backend/**/*.{ts,js}` (the
+files `.husky/pre-commit`'s lint-staged config formats on commit). `.prettierrc` is the
+authoritative configuration — it pins the installed Prettier major's own defaults, which
+matched the existing code when the config was introduced. `.prettierignore` excludes
+generated/vendored output (`node_modules`, `dist`, `build`, `cdk.out`, `coverage`, `.venv`,
+`**/split-baseline/**`, lockfiles).
+
+`lint-staged` runs `prettier --write` on staged files automatically via the pre-commit hook;
+you do not need to run Prettier manually before committing. To format on demand:
+
+```bash
+npx prettier --write 'backend/**/*.{ts,js}'
+```
+
+After the repo-wide formatting commit lands, run once so `git blame` skips it:
+
+```bash
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
