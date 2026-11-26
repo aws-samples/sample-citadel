@@ -419,7 +419,9 @@ describe("RegistryService CRUD operations", () => {
           descriptors: {
             custom: {
               data: JSON.stringify({
-                manifest: { name: input.recordId === "agent-1" ? "Agent 1" : "Agent 2" },
+                manifest: {
+                  name: input.recordId === "agent-1" ? "Agent 1" : "Agent 2",
+                },
                 orgId: "org-1",
               }),
             },

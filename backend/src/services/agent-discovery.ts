@@ -21,24 +21,27 @@
 import {
   ResourceGroupsTaggingAPIClient,
   GetResourcesCommand,
-} from '@aws-sdk/client-resource-groups-tagging-api';
-import type { GetResourcesCommandOutput } from '@aws-sdk/client-resource-groups-tagging-api';
-import type { STSClient } from '@aws-sdk/client-sts';
-import type { CommandSender } from '../adapters/agent-source/invoke-support';
+} from "@aws-sdk/client-resource-groups-tagging-api";
+import type { GetResourcesCommandOutput } from "@aws-sdk/client-resource-groups-tagging-api";
+import type { STSClient } from "@aws-sdk/client-sts";
+import type { CommandSender } from "../adapters/agent-source/invoke-support";
 import type {
   AgentCandidate,
   AgentInvocationProtocol,
   AgentOrigin,
   AgentSourceAdapter,
-} from '../adapters/agent-source/base';
-import { EcsSourceAdapter } from '../adapters/agent-source/ecs-source-adapter';
-import { EksSourceAdapter } from '../adapters/agent-source/eks-source-adapter';
-import { Ec2SourceAdapter } from '../adapters/agent-source/ec2-source-adapter';
-import type { AdapterCredentialProvider } from '../adapters/agent-source/invoke-support';
-import { validateImportDescriptor } from '../lambda/agent-config-resolver';
-import { assumeRoleCredentials, type AssumedRoleCredentials } from '../utils/trust-path';
+} from "../adapters/agent-source/base";
+import { EcsSourceAdapter } from "../adapters/agent-source/ecs-source-adapter";
+import { EksSourceAdapter } from "../adapters/agent-source/eks-source-adapter";
+import { Ec2SourceAdapter } from "../adapters/agent-source/ec2-source-adapter";
+import type { AdapterCredentialProvider } from "../adapters/agent-source/invoke-support";
+import { validateImportDescriptor } from "../lambda/agent-config-resolver";
+import {
+  assumeRoleCredentials,
+  type AssumedRoleCredentials,
+} from "../utils/trust-path";
 
-const DEFAULT_REGION = process.env.AWS_REGION || 'ap-southeast-2';
+const DEFAULT_REGION = process.env.AWS_REGION || "ap-southeast-2";
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -56,7 +59,7 @@ export class UnsupportedSourceError extends Error {
 
   constructor(substrate: string) {
     super(`${substrate} not supported in phase 1`);
-    this.name = 'UnsupportedSourceError';
+    this.name = "UnsupportedSourceError";
     this.substrate = substrate;
     // Preserve the prototype chain so `instanceof` holds after transpilation.
     Object.setPrototypeOf(this, UnsupportedSourceError.prototype);
@@ -71,7 +74,7 @@ export class UnsupportedSourceError extends Error {
 export class InvalidSourceRefError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = 'InvalidSourceRefError';
+    this.name = "InvalidSourceRefError";
     Object.setPrototypeOf(this, InvalidSourceRefError.prototype);
   }
 }
@@ -112,26 +115,30 @@ export interface ResolvedSourceRef {
  *   supported URL scheme.
  */
 export function resolveSourceRef(ref: string): ResolvedSourceRef {
-  const trimmed = typeof ref === 'string' ? ref.trim() : '';
+  const trimmed = typeof ref === "string" ? ref.trim() : "";
   if (trimmed.length === 0) {
-    throw new InvalidSourceRefError('source ref is empty');
+    throw new InvalidSourceRefError("source ref is empty");
   }
 
-  if (trimmed.startsWith('arn:')) {
+  if (trimmed.startsWith("arn:")) {
     return resolveArn(trimmed);
   }
 
   const scheme = schemeOf(trimmed);
-  if (scheme === 'mcp') {
-    return { protocol: 'MCP', substrate: 'mcp', target: trimmed };
+  if (scheme === "mcp") {
+    return { protocol: "MCP", substrate: "mcp", target: trimmed };
   }
-  if (scheme === 'mcp+https' || scheme === 'mcp+http') {
+  if (scheme === "mcp+https" || scheme === "mcp+http") {
     // Explicit MCP flag over an http(s) endpoint: strip the `mcp+` flag so the
     // target is a plain URL the MCP adapter can dial.
-    return { protocol: 'MCP', substrate: 'mcp', target: trimmed.slice('mcp+'.length) };
+    return {
+      protocol: "MCP",
+      substrate: "mcp",
+      target: trimmed.slice("mcp+".length),
+    };
   }
-  if (scheme === 'https' || scheme === 'http') {
-    return { protocol: 'HTTP_ENDPOINT', substrate: 'http', target: trimmed };
+  if (scheme === "https" || scheme === "http") {
+    return { protocol: "HTTP_ENDPOINT", substrate: "http", target: trimmed };
   }
 
   throw new InvalidSourceRefError(`unrecognised source ref: ${ref}`);
@@ -139,8 +146,8 @@ export function resolveSourceRef(ref: string): ResolvedSourceRef {
 
 /** Lower-cased URI scheme (text before `://`), or '' when there is none. */
 function schemeOf(ref: string): string {
-  const idx = ref.indexOf('://');
-  return idx > 0 ? ref.slice(0, idx).toLowerCase() : '';
+  const idx = ref.indexOf("://");
+  return idx > 0 ? ref.slice(0, idx).toLowerCase() : "";
 }
 
 /**
@@ -149,32 +156,46 @@ function schemeOf(ref: string): string {
  * itself contain ':' (e.g. lambda `function:name`) so it is re-joined.
  */
 function resolveArn(arn: string): ResolvedSourceRef {
-  const parts = arn.split(':');
+  const parts = arn.split(":");
   // arn : partition : service : region : account : resource(+)
-  if (parts.length < 6 || parts[0] !== 'arn') {
+  if (parts.length < 6 || parts[0] !== "arn") {
     throw new InvalidSourceRefError(`malformed ARN: ${arn}`);
   }
   const service = parts[2];
-  const resource = parts.slice(5).join(':');
+  const resource = parts.slice(5).join(":");
 
-  if (service === 'bedrock-agentcore' && resource.startsWith('runtime/')) {
-    return { protocol: 'AGENTCORE_RUNTIME', substrate: 'agentcore_runtime', target: arn };
+  if (service === "bedrock-agentcore" && resource.startsWith("runtime/")) {
+    return {
+      protocol: "AGENTCORE_RUNTIME",
+      substrate: "agentcore_runtime",
+      target: arn,
+    };
   }
-  if (service === 'lambda' && resource.startsWith('function:')) {
-    return { protocol: 'LAMBDA_INVOKE', substrate: 'lambda', target: arn };
+  if (service === "lambda" && resource.startsWith("function:")) {
+    return { protocol: "LAMBDA_INVOKE", substrate: "lambda", target: arn };
   }
   if (
-    service === 'bedrock' &&
-    (resource.startsWith('agent-alias/') || resource.startsWith('agent/'))
+    service === "bedrock" &&
+    (resource.startsWith("agent-alias/") || resource.startsWith("agent/"))
   ) {
-    return { protocol: 'BEDROCK_AGENT', substrate: 'bedrock_agent', target: arn };
+    return {
+      protocol: "BEDROCK_AGENT",
+      substrate: "bedrock_agent",
+      target: arn,
+    };
   }
 
   // Recognised phase-1 service but the wrong resource shape (e.g. a lambda
   // layer, a bedrock foundation-model) is a genuine paste error, not an
   // unsupported substrate.
-  if (service === 'lambda' || service === 'bedrock' || service === 'bedrock-agentcore') {
-    throw new InvalidSourceRefError(`unsupported ${service} resource: ${resource}`);
+  if (
+    service === "lambda" ||
+    service === "bedrock" ||
+    service === "bedrock-agentcore"
+  ) {
+    throw new InvalidSourceRefError(
+      `unsupported ${service} resource: ${resource}`,
+    );
   }
 
   // ECS is a DISCOVERY SUBSTRATE (US-IMP-018): a SERVICE ARN resolves to an
@@ -182,8 +203,8 @@ function resolveArn(arn: string): ResolvedSourceRef {
   // discover/describe are substrate-specific (they resolve the service's
   // endpoint via the load balancer / `citadel:endpoint` tag). Non-service ECS
   // ARNs (task, task-definition, cluster) stay unsupported below.
-  if (service === 'ecs' && resource.startsWith('service/')) {
-    return { protocol: 'HTTP_ENDPOINT', substrate: 'ecs', target: arn };
+  if (service === "ecs" && resource.startsWith("service/")) {
+    return { protocol: "HTTP_ENDPOINT", substrate: "ecs", target: arn };
   }
 
   // EKS is a DISCOVERY SUBSTRATE (US-IMP-019): a CLUSTER ARN resolves to an
@@ -193,8 +214,8 @@ function resolveArn(arn: string): ResolvedSourceRef {
   // cluster-tagged load balancer; the cluster's own `endpoint` is the k8s API
   // server, never the agent target). Non-cluster EKS ARNs (nodegroup,
   // fargateprofile) stay unsupported below.
-  if (service === 'eks' && resource.startsWith('cluster/')) {
-    return { protocol: 'HTTP_ENDPOINT', substrate: 'eks', target: arn };
+  if (service === "eks" && resource.startsWith("cluster/")) {
+    return { protocol: "HTTP_ENDPOINT", substrate: "eks", target: arn };
   }
 
   // EC2 is a DISCOVERY SUBSTRATE (US-IMP-020): an INSTANCE ARN resolves to an
@@ -204,8 +225,8 @@ function resolveArn(arn: string): ResolvedSourceRef {
   // load balancer the instance is a registered target of, or the instance's
   // private DNS/IP). Non-instance EC2 ARNs (vpc, security-group, volume, …) stay
   // unsupported below.
-  if (service === 'ec2' && resource.startsWith('instance/')) {
-    return { protocol: 'HTTP_ENDPOINT', substrate: 'ec2', target: arn };
+  if (service === "ec2" && resource.startsWith("instance/")) {
+    return { protocol: "HTTP_ENDPOINT", substrate: "ec2", target: arn };
   }
 
   // Any other AWS service (Step Functions/SageMaker, SQS, non-service ECS,
@@ -255,7 +276,7 @@ export interface TagScanDeps {
   /** Clock for `discoveredAt`; defaults to `() => new Date()`. */
   now?: () => Date;
   /** Logger for skipped (unsupported) resources; defaults to `console`. */
-  logger?: Pick<Console, 'warn'>;
+  logger?: Pick<Console, "warn">;
 }
 
 /**
@@ -292,7 +313,7 @@ export async function tagScanDiscover(
       credentials = await assumeRoleCredentials(
         scope.discoveryRoleArn,
         scope.discoveryExternalId,
-        { stsClient: deps.stsClient, sessionNamePrefix: 'import-tagscan' },
+        { stsClient: deps.stsClient, sessionNamePrefix: "import-tagscan" },
       );
     } catch (err) {
       // A failed cross-account assume yields an EMPTY scan rather than crashing
@@ -309,10 +330,10 @@ export async function tagScanDiscover(
 
   const sender: CommandSender = deps.senderFactory
     ? deps.senderFactory(region, credentials)
-    : deps.sender ?? buildTaggingSender(region, credentials);
+    : (deps.sender ?? buildTaggingSender(region, credentials));
 
-  const tagKey = scope.tagKey ?? 'citadel:agent';
-  const values = scope.tagValue ? [scope.tagValue] : ['true'];
+  const tagKey = scope.tagKey ?? "citadel:agent";
+  const values = scope.tagValue ? [scope.tagValue] : ["true"];
   const tagFilters = [{ Key: tagKey, Values: values }];
 
   const candidates: AgentCandidate[] = [];
@@ -339,7 +360,7 @@ export async function tagScanDiscover(
             region: arnRegion ?? region,
             account,
             discoveredAt: now().toISOString(),
-            ownership: 'external',
+            ownership: "external",
           },
           displayName: deriveDisplayName(arn),
           reference: arn,
@@ -377,15 +398,15 @@ export interface ManifestCandidate {
 
 /** Protocol -> substrate fallback used when a manifest omits origin.substrate. */
 const PROTOCOL_SUBSTRATE: Record<AgentInvocationProtocol, string> = {
-  AGENTCORE_RUNTIME: 'agentcore_runtime',
-  BEDROCK_AGENT: 'bedrock_agent',
-  LAMBDA_INVOKE: 'lambda',
-  HTTP_ENDPOINT: 'http',
-  MCP: 'mcp',
-  A2A: 'a2a',
-  STEP_FUNCTIONS: 'step_functions',
-  SAGEMAKER_ENDPOINT: 'sagemaker_endpoint',
-  SQS_ASYNC: 'sqs_async',
+  AGENTCORE_RUNTIME: "agentcore_runtime",
+  BEDROCK_AGENT: "bedrock_agent",
+  LAMBDA_INVOKE: "lambda",
+  HTTP_ENDPOINT: "http",
+  MCP: "mcp",
+  A2A: "a2a",
+  STEP_FUNCTIONS: "step_functions",
+  SAGEMAKER_ENDPOINT: "sagemaker_endpoint",
+  SQS_ASYNC: "sqs_async",
 };
 
 /**
@@ -398,9 +419,11 @@ const PROTOCOL_SUBSTRATE: Record<AgentInvocationProtocol, string> = {
  * @throws {InvalidSourceRefError} on malformed JSON, or on a manifest that fails
  *   descriptor validation (the message lists the offending fields).
  */
-export function candidateFromManifest(manifestJson: string | object): ManifestCandidate {
+export function candidateFromManifest(
+  manifestJson: string | object,
+): ManifestCandidate {
   let parsed: unknown;
-  if (typeof manifestJson === 'string') {
+  if (typeof manifestJson === "string") {
     try {
       parsed = JSON.parse(manifestJson);
     } catch (err) {
@@ -415,14 +438,17 @@ export function candidateFromManifest(manifestJson: string | object): ManifestCa
   const validation = validateImportDescriptor(parsed);
   if (!validation.valid) {
     throw new InvalidSourceRefError(
-      `invalid import manifest: ${validation.errors.join('; ')}`,
+      `invalid import manifest: ${validation.errors.join("; ")}`,
     );
   }
 
   // Validation guarantees invocation.protocol (one of the nine protocols),
   // invocation.target (non-empty), and origin.ownership === 'external'.
   const root = parsed as Record<string, unknown>;
-  const invocation = root.invocation as { protocol: AgentInvocationProtocol; target: string };
+  const invocation = root.invocation as {
+    protocol: AgentInvocationProtocol;
+    target: string;
+  };
   const originBlock = isPlainObject(root.origin) ? root.origin : {};
 
   const substrate =
@@ -433,13 +459,16 @@ export function candidateFromManifest(manifestJson: string | object): ManifestCa
     account: asString(originBlock.account),
     region: asString(originBlock.region),
     substrate,
-    discoveredAt: asString(originBlock.discoveredAt) ?? new Date().toISOString(),
-    ownership: 'external', // forced — invariant 1
+    discoveredAt:
+      asString(originBlock.discoveredAt) ?? new Date().toISOString(),
+    ownership: "external", // forced — invariant 1
   };
 
   const reference = origin.sourceArn ?? invocation.target;
   const displayName =
-    asString(root.displayName) ?? asString(root.name) ?? deriveDisplayName(reference);
+    asString(root.displayName) ??
+    asString(root.name) ??
+    deriveDisplayName(reference);
 
   return {
     candidate: { origin, displayName, reference },
@@ -478,8 +507,8 @@ function buildTaggingSender(
 
 /** Standard ARN field extraction: `arn:partition:service:region:account:…`. */
 function parseArnFields(arn: string): { region?: string; account?: string } {
-  const parts = arn.split(':');
-  if (parts[0] !== 'arn' || parts.length < 6) return {};
+  const parts = arn.split(":");
+  if (parts[0] !== "arn" || parts.length < 6) return {};
   return { region: parts[3] || undefined, account: parts[4] || undefined };
 }
 
@@ -489,15 +518,21 @@ function parseArnFields(arn: string): { region?: string; account?: string } {
  * or the last URL path segment, falling back to the ref itself.
  */
 function deriveDisplayName(ref: string): string {
-  if (ref.startsWith('arn:')) {
-    const parts = ref.split(':');
-    const resource = parts.length >= 6 ? parts.slice(5).join(':') : ref;
-    const tail = resource.split(/[/:]/).filter((s) => s.length > 0).pop();
+  if (ref.startsWith("arn:")) {
+    const parts = ref.split(":");
+    const resource = parts.length >= 6 ? parts.slice(5).join(":") : ref;
+    const tail = resource
+      .split(/[/:]/)
+      .filter((s) => s.length > 0)
+      .pop();
     return tail ?? ref;
   }
   try {
     const url = new URL(ref);
-    const seg = url.pathname.split('/').filter((s) => s.length > 0).pop();
+    const seg = url.pathname
+      .split("/")
+      .filter((s) => s.length > 0)
+      .pop();
     return seg ?? url.host ?? ref;
   } catch {
     return ref;
@@ -506,12 +541,12 @@ function deriveDisplayName(ref: string): string {
 
 /** Narrowing guard: true when `value` is a non-null, non-array object. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** Returns `value` when it is a non-empty string, else `undefined`. */
 function asString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.length > 0 ? value : undefined;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -547,12 +582,18 @@ export function getDiscoveryAdapterForSubstrate(
   deps: DiscoveryAdapterDeps = {},
 ): AgentSourceAdapter | undefined {
   switch (substrate) {
-    case 'ecs':
-      return new EcsSourceAdapter({ credentialProvider: deps.credentialProvider });
-    case 'eks':
-      return new EksSourceAdapter({ credentialProvider: deps.credentialProvider });
-    case 'ec2':
-      return new Ec2SourceAdapter({ credentialProvider: deps.credentialProvider });
+    case "ecs":
+      return new EcsSourceAdapter({
+        credentialProvider: deps.credentialProvider,
+      });
+    case "eks":
+      return new EksSourceAdapter({
+        credentialProvider: deps.credentialProvider,
+      });
+    case "ec2":
+      return new Ec2SourceAdapter({
+        credentialProvider: deps.credentialProvider,
+      });
     default:
       return undefined;
   }

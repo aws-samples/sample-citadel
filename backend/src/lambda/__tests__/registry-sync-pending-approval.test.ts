@@ -74,11 +74,7 @@ afterEach(() => {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeGaEvent(
-  state: string,
-  recordId: string,
-  time: string,
-): unknown {
+function makeGaEvent(state: string, recordId: string, time: string): unknown {
   return {
     version: "0",
     id: `evt-${recordId}`,
@@ -131,7 +127,11 @@ const approvedRecord: RegistryRecord = {
 
 describe("Pending Approval detail-type", () => {
   test("validateEvent accepts 'Registry Record State changed to Pending Approval'", () => {
-    const event = makeGaEvent("Pending Approval", "RecPending001", "2026-01-01T00:00:01Z");
+    const event = makeGaEvent(
+      "Pending Approval",
+      "RecPending001",
+      "2026-01-01T00:00:01Z",
+    );
     expect(validateEvent(event as RegistryEvent)).toBeNull();
   });
 
@@ -149,7 +149,11 @@ describe("Pending Approval detail-type", () => {
     ddbMock.on(PutCommand).resolves({});
 
     await handler(
-      makeGaEvent("Pending Approval", "RecPending001", "2026-01-01T00:00:01Z") as RegistryEvent,
+      makeGaEvent(
+        "Pending Approval",
+        "RecPending001",
+        "2026-01-01T00:00:01Z",
+      ) as RegistryEvent,
     );
 
     expect(mockGetResource).toHaveBeenCalledWith("agent", "RecPending001");
@@ -199,7 +203,11 @@ describe("stale-event guard", () => {
     ddbMock.on(PutCommand).resolves({});
 
     await handler(
-      makeGaEvent("Approved", "RecPending001", "2026-01-01T00:00:03Z") as RegistryEvent,
+      makeGaEvent(
+        "Approved",
+        "RecPending001",
+        "2026-01-01T00:00:03Z",
+      ) as RegistryEvent,
     );
 
     // The UpdateCommand must have set lastRegistryEventAt
@@ -228,7 +236,11 @@ describe("stale-event guard", () => {
     sqsMock.on(SendMessageCommand).resolves({});
 
     await handler(
-      makeGaEvent("Pending Approval", "RecPending001", "2026-01-01T00:00:01Z") as RegistryEvent,
+      makeGaEvent(
+        "Pending Approval",
+        "RecPending001",
+        "2026-01-01T00:00:01Z",
+      ) as RegistryEvent,
     );
 
     // The stale event should be skipped — no UpdateCommand for merge fields
@@ -249,7 +261,11 @@ describe("stale-event guard", () => {
     ddbMock.on(PutCommand).resolves({});
 
     await handler(
-      makeGaEvent("Approved", "RecPending001", "2026-01-01T00:00:03Z") as RegistryEvent,
+      makeGaEvent(
+        "Approved",
+        "RecPending001",
+        "2026-01-01T00:00:03Z",
+      ) as RegistryEvent,
     );
 
     const updateCalls = ddbMock.commandCalls(UpdateCommand);
@@ -269,7 +285,11 @@ describe("stale-event guard", () => {
     ddbMock.on(PutCommand).resolves({});
 
     await handler(
-      makeGaEvent("Pending Approval", "RecPending001", "2026-01-01T00:00:01Z") as RegistryEvent,
+      makeGaEvent(
+        "Pending Approval",
+        "RecPending001",
+        "2026-01-01T00:00:01Z",
+      ) as RegistryEvent,
     );
 
     const updateCalls = ddbMock.commandCalls(UpdateCommand);

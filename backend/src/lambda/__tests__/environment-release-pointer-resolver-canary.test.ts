@@ -233,11 +233,9 @@ describe("startCanary", () => {
 
   it("refuses a percent above the org ceiling, fail-closed, with zero writes (D5)", async () => {
     stubCurrentPointer("DEV", pointer());
-    ddbMock
-      .on(GetCommand, { TableName: POLICY_TABLE })
-      .resolves({
-        Item: { orgId: "org-1", policy: { canaryMaxBasisPoints: 2000 } },
-      });
+    ddbMock.on(GetCommand, { TableName: POLICY_TABLE }).resolves({
+      Item: { orgId: "org-1", policy: { canaryMaxBasisPoints: 2000 } },
+    });
     await expect(
       startCanary(
         {

@@ -105,25 +105,29 @@ describe(`ArbiterCatalogLayer — runtime import smoke (${DOCKER_PLATFORM})`, ()
     );
   }
 
-  test(`layer asset satisfies all runtime imports on ${DOCKER_PLATFORM} (pydantic_core, strands, mcp, boto3)`, () => {
-    const cmd = [
-      "docker run --rm",
-      `--platform ${DOCKER_PLATFORM}`,
-      "--entrypoint python",
-      `-v ${layerAsset}/python:/opt/python`,
-      "-e PYTHONPATH=/opt/python",
-      "public.ecr.aws/lambda/python:3.15",
-      `-c "${IMPORT_CHECK}"`,
-    ].join(" ");
+  test(
+    `layer asset satisfies all runtime imports on ${DOCKER_PLATFORM} (pydantic_core, strands, mcp, boto3)`,
+    () => {
+      const cmd = [
+        "docker run --rm",
+        `--platform ${DOCKER_PLATFORM}`,
+        "--entrypoint python",
+        `-v ${layerAsset}/python:/opt/python`,
+        "-e PYTHONPATH=/opt/python",
+        "public.ecr.aws/lambda/python:3.15",
+        `-c "${IMPORT_CHECK}"`,
+      ].join(" ");
 
-    const output = execSync(cmd, {
-      encoding: "utf-8",
-      timeout: 300_000,
-      stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
+      const output = execSync(cmd, {
+        encoding: "utf-8",
+        timeout: 300_000,
+        stdio: ["pipe", "pipe", "pipe"],
+      }).trim();
 
-    expect(output).toContain("layer-ok");
-  }, /* 5 min timeout for Docker pull + import */ 360_000);
+      expect(output).toContain("layer-ok");
+    },
+    /* 5 min timeout for Docker pull + import */ 360_000,
+  );
 
   test(`bundled .so files carry the ${EXPECTED_ARCH_TAG} architecture tag`, () => {
     const soFiles = findSoFiles(path.join(layerAsset, "python"));

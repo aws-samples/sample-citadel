@@ -15,13 +15,10 @@
 
 /** How a probed endpoint was classified. */
 export type ReachabilityClassification =
-  | 'reachable'
-  | 'unreachable'
-  | 'unverifiable_private'
-  | 'no_endpoint';
+  "reachable" | "unreachable" | "unverifiable_private" | "no_endpoint";
 
 /** Whether an endpoint host is reachable from this (non-VPC) Lambda. */
-export type EndpointHostClass = 'public' | 'private';
+export type EndpointHostClass = "public" | "private";
 
 /** Result of a best-effort reachability probe. Never thrown — always returned. */
 export interface ReachabilityResult {
@@ -41,8 +38,8 @@ export interface ProbeReachabilityOptions {
 const DEFAULT_TIMEOUT_MS = 5000;
 
 const PRIVATE_DETAIL =
-  'endpoint resolves to a private/internal host; not reachable from the ' +
-  'non-VPC import Lambda — needs VPC peering/PrivateLink (out of scope)';
+  "endpoint resolves to a private/internal host; not reachable from the " +
+  "non-VPC import Lambda — needs VPC peering/PrivateLink (out of scope)";
 
 /**
  * Classifies an endpoint's host as 'private' (unreachable-and-unverifiable from
@@ -58,31 +55,31 @@ const PRIVATE_DETAIL =
  */
 export function classifyEndpointHost(url: string): EndpointHostClass {
   const host = extractHostname(url);
-  if (!host) return 'public';
+  if (!host) return "public";
 
   // Strip IPv6 brackets and lowercase for suffix/name comparisons.
-  const h = host.replace(/^\[/, '').replace(/\]$/, '').toLowerCase();
+  const h = host.replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
 
   // Loopback / internal DNS names + suffixes.
   if (
-    h === 'localhost' ||
-    h === '::1' ||
-    h.endsWith('.localhost') ||
-    h.endsWith('.internal') ||
-    h.endsWith('.local')
+    h === "localhost" ||
+    h === "::1" ||
+    h.endsWith(".localhost") ||
+    h.endsWith(".internal") ||
+    h.endsWith(".local")
   ) {
-    return 'private';
+    return "private";
   }
 
   // AWS internal ALB/NLB DNS (e.g. internal-foo-123.us-east-1.elb.amazonaws.com).
-  if (h.startsWith('internal-') && h.endsWith('.elb.amazonaws.com')) {
-    return 'private';
+  if (h.startsWith("internal-") && h.endsWith(".elb.amazonaws.com")) {
+    return "private";
   }
 
   // RFC1918 / loopback / link-local IPv4 literals.
-  if (isPrivateIpv4(h)) return 'private';
+  if (isPrivateIpv4(h)) return "private";
 
-  return 'public';
+  return "public";
 }
 
 /**
@@ -101,22 +98,27 @@ export async function probeReachability(
   options: ProbeReachabilityOptions = {},
 ): Promise<ReachabilityResult> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const fetchFn = options.fetchFn ?? ((input, init) => globalThis.fetch(input, init));
+  const fetchFn =
+    options.fetchFn ?? ((input, init) => globalThis.fetch(input, init));
 
   // 1. No / invalid / non-http(s) endpoint → nothing to probe.
   const parsed = parseHttpUrl(url);
   if (!parsed) {
     return {
       reachable: false,
-      classification: 'no_endpoint',
-      detail: 'no HTTP(S) endpoint to probe',
+      classification: "no_endpoint",
+      detail: "no HTTP(S) endpoint to probe",
     };
   }
 
   // 2. Private / internal host → unverifiable from this non-VPC Lambda. Do NOT
   //    fetch a private host blindly (it would falsely read as 'unreachable').
-  if (classifyEndpointHost(parsed.href) === 'private') {
-    return { reachable: false, classification: 'unverifiable_private', detail: PRIVATE_DETAIL };
+  if (classifyEndpointHost(parsed.href) === "private") {
+    return {
+      reachable: false,
+      classification: "unverifiable_private",
+      detail: PRIVATE_DETAIL,
+    };
   }
 
   // 3. Public host → bounded GET. Any HTTP response means the host is reachable;
@@ -124,12 +126,23 @@ export async function probeReachability(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetchFn(parsed.href, { method: 'GET', signal: controller.signal });
+    const res = await fetchFn(parsed.href, {
+      method: "GET",
+      signal: controller.signal,
+    });
     // Only the status line is inspected — the body is never read (no secret/
     // payload exfiltration).
-    return { reachable: true, classification: 'reachable', detail: `HTTP ${res.status}` };
+    return {
+      reachable: true,
+      classification: "reachable",
+      detail: `HTTP ${res.status}`,
+    };
   } catch (err) {
-    return { reachable: false, classification: 'unreachable', detail: errMessage(err) };
+    return {
+      reachable: false,
+      classification: "unreachable",
+      detail: errMessage(err),
+    };
   } finally {
     clearTimeout(timer);
   }
@@ -139,14 +152,15 @@ export async function probeReachability(
 
 /** Parse an http(s) URL; undefined for empty/invalid/non-http(s) input. */
 function parseHttpUrl(url: string | undefined): URL | undefined {
-  if (typeof url !== 'string' || url.trim() === '') return undefined;
+  if (typeof url !== "string" || url.trim() === "") return undefined;
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
     return undefined;
   }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return undefined;
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+    return undefined;
   return parsed;
 }
 
@@ -156,7 +170,7 @@ function parseHttpUrl(url: string | undefined): URL | undefined {
  * parse succeeds.
  */
 function extractHostname(url: string): string | undefined {
-  if (typeof url !== 'string' || url.trim() === '') return undefined;
+  if (typeof url !== "string" || url.trim() === "") return undefined;
   try {
     return new URL(url).hostname;
   } catch {
@@ -186,7 +200,7 @@ function isPrivateIpv4(host: string): boolean {
 /** Network/timeout error → a short, secret-free detail string. */
 function errMessage(err: unknown): string {
   if (err instanceof Error) {
-    if (err.name === 'AbortError') return 'request timed out';
+    if (err.name === "AbortError") return "request timed out";
     return err.message;
   }
   return String(err);

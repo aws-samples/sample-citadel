@@ -28,12 +28,12 @@
  * This module is self-contained: it does not import from app-resolver.ts
  * and constructs its own DynamoDBDocumentClient lazily on first use.
  */
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
   PutCommand,
   UpdateCommand,
-} from '@aws-sdk/lib-dynamodb';
+} from "@aws-sdk/lib-dynamodb";
 
 // Lazy singleton DynamoDBDocumentClient. Constructed on first use so that
 // unit tests that never invoke the authority hooks (e.g. AUTHORITY_UNITS_TABLE
@@ -61,34 +61,42 @@ export function getAuthorityUnitsTable(): string | undefined {
 export async function grantFabricatorAuthority(appId: string): Promise<void> {
   const tableName = getAuthorityUnitsTable();
   if (!tableName) {
-    console.warn('AUTHORITY_UNITS_TABLE unset; skipping fabricator authority grant for app', appId);
+    console.warn(
+      "AUTHORITY_UNITS_TABLE unset; skipping fabricator authority grant for app",
+      appId,
+    );
     return;
   }
   const now = new Date().toISOString();
   try {
     // registryId column name per Decision #9; value is the appId string during the AgentApp → RegistryAgentRecord deprecation window
-    await getDocClient().send(new PutCommand({
-      TableName: tableName,
-      Item: {
-        unitId: `fabricator-${appId}-create-agents`,
-        agentId: 'fabricator',
-        registryId: appId,
-        scope: {
-          decision_type: 'create_agent',
-          domain: '*',
-          conditions: { target_app_id: appId },
-          limits: {},
+    await getDocClient().send(
+      new PutCommand({
+        TableName: tableName,
+        Item: {
+          unitId: `fabricator-${appId}-create-agents`,
+          agentId: "fabricator",
+          registryId: appId,
+          scope: {
+            decision_type: "create_agent",
+            domain: "*",
+            conditions: { target_app_id: appId },
+            limits: {},
+          },
+          riskRating: "low",
+          revoked: false,
+          createdAt: now,
+          createdBy: `app-resolver:createApp:${appId}`,
         },
-        riskRating: 'low',
-        revoked: false,
-        createdAt: now,
-        createdBy: `app-resolver:createApp:${appId}`,
-      },
-      ConditionExpression: 'attribute_not_exists(unitId)',
-    }));
+        ConditionExpression: "attribute_not_exists(unitId)",
+      }),
+    );
   } catch (err: unknown) {
-    if (err instanceof Error && err.name === 'ConditionalCheckFailedException') {
-      console.warn('Authority unit already exists for app', appId);
+    if (
+      err instanceof Error &&
+      err.name === "ConditionalCheckFailedException"
+    ) {
+      console.warn("Authority unit already exists for app", appId);
       return;
     }
     throw err;
@@ -98,25 +106,36 @@ export async function grantFabricatorAuthority(appId: string): Promise<void> {
 export async function revokeFabricatorAuthority(appId: string): Promise<void> {
   const tableName = getAuthorityUnitsTable();
   if (!tableName) {
-    console.warn('AUTHORITY_UNITS_TABLE unset; skipping fabricator authority revoke for app', appId);
+    console.warn(
+      "AUTHORITY_UNITS_TABLE unset; skipping fabricator authority revoke for app",
+      appId,
+    );
     return;
   }
   const now = new Date().toISOString();
   try {
-    await getDocClient().send(new UpdateCommand({
-      TableName: tableName,
-      Key: { unitId: `fabricator-${appId}-create-agents` },
-      UpdateExpression: 'SET revoked = :true, revokedAt = :now',
-      ExpressionAttributeValues: {
-        ':true': true,
-        ':now': now,
-        ':false': false,
-      },
-      ConditionExpression: 'attribute_exists(unitId) AND revoked = :false',
-    }));
+    await getDocClient().send(
+      new UpdateCommand({
+        TableName: tableName,
+        Key: { unitId: `fabricator-${appId}-create-agents` },
+        UpdateExpression: "SET revoked = :true, revokedAt = :now",
+        ExpressionAttributeValues: {
+          ":true": true,
+          ":now": now,
+          ":false": false,
+        },
+        ConditionExpression: "attribute_exists(unitId) AND revoked = :false",
+      }),
+    );
   } catch (err: unknown) {
-    if (err instanceof Error && err.name === 'ConditionalCheckFailedException') {
-      console.warn('Authority unit not found or already revoked for app', appId);
+    if (
+      err instanceof Error &&
+      err.name === "ConditionalCheckFailedException"
+    ) {
+      console.warn(
+        "Authority unit not found or already revoked for app",
+        appId,
+      );
       return;
     }
     throw err;

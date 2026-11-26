@@ -8,10 +8,10 @@
  * Requirement references: 6.3, 6.4, 6.8
  */
 
-import * as fc from 'fast-check';
-import { STSClient } from '@aws-sdk/client-sts';
-import { mockClient } from 'aws-sdk-client-mock';
-import { processHealthChecks } from '../health-monitor';
+import * as fc from "fast-check";
+import { STSClient } from "@aws-sdk/client-sts";
+import { mockClient } from "aws-sdk-client-mock";
+import { processHealthChecks } from "../health-monitor";
 
 // processHealthChecks assumes a scoped STS role per store (GetCallerIdentity +
 // AssumeRole). With no real AWS credentials in the test environment, the
@@ -30,13 +30,18 @@ beforeEach(() => {
 
 const dataStoreIdArb = fc.stringMatching(/^ds-[a-z0-9]{8}$/);
 const orgIdArb = fc.stringMatching(/^org-[a-z0-9]{8}$/);
-const dataStoreTypeArb = fc.constantFrom('S3', 'DYNAMODB', 'RDS_POSTGRESQL', 'AURORA_MYSQL');
+const dataStoreTypeArb = fc.constantFrom(
+  "S3",
+  "DYNAMODB",
+  "RDS_POSTGRESQL",
+  "AURORA_MYSQL",
+);
 
 interface MockDataStore {
   dataStoreId: string;
   orgId: string;
   type: string;
-  status: 'CONNECTED' | 'ERROR';
+  status: "CONNECTED" | "ERROR";
   config: string;
   errorMessage: string | null;
 }
@@ -45,8 +50,8 @@ const connectedStoreArb: fc.Arbitrary<MockDataStore> = fc.record({
   dataStoreId: dataStoreIdArb,
   orgId: orgIdArb,
   type: dataStoreTypeArb,
-  status: fc.constant('CONNECTED' as const),
-  config: fc.constant(JSON.stringify({ bucketName: 'test-bucket' })),
+  status: fc.constant("CONNECTED" as const),
+  config: fc.constant(JSON.stringify({ bucketName: "test-bucket" })),
   errorMessage: fc.constant(null),
 });
 
@@ -54,219 +59,275 @@ const errorStoreArb: fc.Arbitrary<MockDataStore> = fc.record({
   dataStoreId: dataStoreIdArb,
   orgId: orgIdArb,
   type: dataStoreTypeArb,
-  status: fc.constant('ERROR' as const),
-  config: fc.constant(JSON.stringify({ bucketName: 'test-bucket' })),
-  errorMessage: fc.constant('Previous error'),
+  status: fc.constant("ERROR" as const),
+  config: fc.constant(JSON.stringify({ bucketName: "test-bucket" })),
+  errorMessage: fc.constant("Previous error"),
 });
 
 const uniqueStoresArb = (arb: fc.Arbitrary<MockDataStore>) =>
-  fc.array(arb, { minLength: 1, maxLength: 10 }).map(stores => {
-    const seen = new Set<string>();
-    return stores.filter(s => {
-      if (seen.has(s.dataStoreId)) return false;
-      seen.add(s.dataStoreId);
-      return true;
-    });
-  }).filter(stores => stores.length > 0);
+  fc
+    .array(arb, { minLength: 1, maxLength: 10 })
+    .map((stores) => {
+      const seen = new Set<string>();
+      return stores.filter((s) => {
+        if (seen.has(s.dataStoreId)) return false;
+        seen.add(s.dataStoreId);
+        return true;
+      });
+    })
+    .filter((stores) => stores.length > 0);
 
 // ---- Tests ----
 
-describe('Health Monitor: permission error handling', () => {
-  it('a CONNECTED store stays CONNECTED when testConnection fails with AccessDenied', async () => {
+describe("Health Monitor: permission error handling", () => {
+  it("a CONNECTED store stays CONNECTED when testConnection fails with AccessDenied", async () => {
     await fc.assert(
-      fc.asyncProperty(
-        uniqueStoresArb(connectedStoreArb),
-        async (stores) => {
-          const storeState = new Map(stores.map(s => [s.dataStoreId, { ...s }]));
+      fc.asyncProperty(uniqueStoresArb(connectedStoreArb), async (stores) => {
+        const storeState = new Map(
+          stores.map((s) => [s.dataStoreId, { ...s }]),
+        );
 
-          const getAdapterFn = (_store: MockDataStore) => ({
-            testConnection: async () => ({
-              success: false,
-              message: 'Permission denied accessing bucket test-bucket',
-              details: { errorName: 'AccessDenied', isPermissionError: true },
-            }),
-          });
+        const getAdapterFn = (_store: MockDataStore) => ({
+          testConnection: async () => ({
+            success: false,
+            message: "Permission denied accessing bucket test-bucket",
+            details: { errorName: "AccessDenied", isPermissionError: true },
+          }),
+        });
 
-          const updateStoreFn = async (id: string, status: string, errMsg: string | null) => {
-            const current = storeState.get(id);
-            if (current) storeState.set(id, { ...current, status: status as MockDataStore["status"], errorMessage: errMsg });
-          };
+        const updateStoreFn = async (
+          id: string,
+          status: string,
+          errMsg: string | null,
+        ) => {
+          const current = storeState.get(id);
+          if (current)
+            storeState.set(id, {
+              ...current,
+              status: status as MockDataStore["status"],
+              errorMessage: errMsg,
+            });
+        };
 
-          await processHealthChecks(stores, getAdapterFn, updateStoreFn);
+        await processHealthChecks(stores, getAdapterFn, updateStoreFn);
 
-          for (const store of stores) {
-            const final = storeState.get(store.dataStoreId)!;
-            expect(final.status).toBe('CONNECTED');
-            expect(final.errorMessage).toBeNull();
-          }
+        for (const store of stores) {
+          const final = storeState.get(store.dataStoreId)!;
+          expect(final.status).toBe("CONNECTED");
+          expect(final.errorMessage).toBeNull();
         }
-      ),
-      { numRuns: 50 }
+      }),
+      { numRuns: 50 },
     );
   });
 
-  it('a CONNECTED store moves to ERROR when testConnection fails with a genuine connectivity error', async () => {
+  it("a CONNECTED store moves to ERROR when testConnection fails with a genuine connectivity error", async () => {
     await fc.assert(
-      fc.asyncProperty(
-        uniqueStoresArb(connectedStoreArb),
-        async (stores) => {
-          const storeState = new Map(stores.map(s => [s.dataStoreId, { ...s }]));
+      fc.asyncProperty(uniqueStoresArb(connectedStoreArb), async (stores) => {
+        const storeState = new Map(
+          stores.map((s) => [s.dataStoreId, { ...s }]),
+        );
 
-          const getAdapterFn = (_store: MockDataStore) => ({
-            testConnection: async () => ({
-              success: false,
-              message: 'Connection timed out',
-              details: { errorName: 'TimeoutError' },
-            }),
-          });
+        const getAdapterFn = (_store: MockDataStore) => ({
+          testConnection: async () => ({
+            success: false,
+            message: "Connection timed out",
+            details: { errorName: "TimeoutError" },
+          }),
+        });
 
-          const updateStoreFn = async (id: string, status: string, errMsg: string | null) => {
-            const current = storeState.get(id);
-            if (current) storeState.set(id, { ...current, status: status as MockDataStore["status"], errorMessage: errMsg });
-          };
+        const updateStoreFn = async (
+          id: string,
+          status: string,
+          errMsg: string | null,
+        ) => {
+          const current = storeState.get(id);
+          if (current)
+            storeState.set(id, {
+              ...current,
+              status: status as MockDataStore["status"],
+              errorMessage: errMsg,
+            });
+        };
 
-          await processHealthChecks(stores, getAdapterFn, updateStoreFn);
+        await processHealthChecks(stores, getAdapterFn, updateStoreFn);
 
-          for (const store of stores) {
-            const final = storeState.get(store.dataStoreId)!;
-            expect(final.status).toBe('ERROR');
-            expect(final.errorMessage).toBe('Connection timed out');
-          }
+        for (const store of stores) {
+          const final = storeState.get(store.dataStoreId)!;
+          expect(final.status).toBe("ERROR");
+          expect(final.errorMessage).toBe("Connection timed out");
         }
-      ),
-      { numRuns: 50 }
+      }),
+      { numRuns: 50 },
     );
   });
 
-  it('an ERROR store stays ERROR when testConnection fails with AccessDenied (does not flip-flop)', async () => {
+  it("an ERROR store stays ERROR when testConnection fails with AccessDenied (does not flip-flop)", async () => {
     await fc.assert(
-      fc.asyncProperty(
-        uniqueStoresArb(errorStoreArb),
-        async (stores) => {
-          const storeState = new Map(stores.map(s => [s.dataStoreId, { ...s }]));
+      fc.asyncProperty(uniqueStoresArb(errorStoreArb), async (stores) => {
+        const storeState = new Map(
+          stores.map((s) => [s.dataStoreId, { ...s }]),
+        );
 
-          const getAdapterFn = (_store: MockDataStore) => ({
-            testConnection: async () => ({
-              success: false,
-              message: 'Access denied',
-              details: { errorName: 'AccessDeniedException', isPermissionError: true },
-            }),
-          });
-
-          const updateStoreFn = async (id: string, status: string, errMsg: string | null) => {
-            const current = storeState.get(id);
-            if (current) storeState.set(id, { ...current, status: status as MockDataStore["status"], errorMessage: errMsg });
-          };
-
-          await processHealthChecks(stores, getAdapterFn, updateStoreFn);
-
-          for (const store of stores) {
-            const final = storeState.get(store.dataStoreId)!;
-            // Should preserve existing status, not update
-            expect(final.status).toBe('ERROR');
-            expect(final.errorMessage).toBe('Previous error');
-          }
-        }
-      ),
-      { numRuns: 50 }
-    );
-  });
-
-  it('when adapter throws an AccessDenied exception, store status is preserved', async () => {
-    await fc.assert(
-      fc.asyncProperty(
-        uniqueStoresArb(connectedStoreArb),
-        async (stores) => {
-          const storeState = new Map(stores.map(s => [s.dataStoreId, { ...s }]));
-
-          const getAdapterFn = (_store: MockDataStore) => ({
-            testConnection: async () => {
-              const err = new Error('User: arn:aws:iam::123:role/foo is not authorized');
-              err.name = 'AccessDeniedException';
-              throw err;
+        const getAdapterFn = (_store: MockDataStore) => ({
+          testConnection: async () => ({
+            success: false,
+            message: "Access denied",
+            details: {
+              errorName: "AccessDeniedException",
+              isPermissionError: true,
             },
-          });
+          }),
+        });
 
-          const updateStoreFn = async (id: string, status: string, errMsg: string | null) => {
-            const current = storeState.get(id);
-            if (current) storeState.set(id, { ...current, status: status as MockDataStore["status"], errorMessage: errMsg });
-          };
+        const updateStoreFn = async (
+          id: string,
+          status: string,
+          errMsg: string | null,
+        ) => {
+          const current = storeState.get(id);
+          if (current)
+            storeState.set(id, {
+              ...current,
+              status: status as MockDataStore["status"],
+              errorMessage: errMsg,
+            });
+        };
 
-          await processHealthChecks(stores, getAdapterFn, updateStoreFn);
+        await processHealthChecks(stores, getAdapterFn, updateStoreFn);
 
-          for (const store of stores) {
-            const final = storeState.get(store.dataStoreId)!;
-            expect(final.status).toBe('CONNECTED');
-            expect(final.errorMessage).toBeNull();
-          }
+        for (const store of stores) {
+          const final = storeState.get(store.dataStoreId)!;
+          // Should preserve existing status, not update
+          expect(final.status).toBe("ERROR");
+          expect(final.errorMessage).toBe("Previous error");
         }
-      ),
-      { numRuns: 50 }
+      }),
+      { numRuns: 50 },
     );
   });
 
-  it('healthy stores still recover from ERROR to CONNECTED', async () => {
+  it("when adapter throws an AccessDenied exception, store status is preserved", async () => {
     await fc.assert(
-      fc.asyncProperty(
-        uniqueStoresArb(errorStoreArb),
-        async (stores) => {
-          const storeState = new Map(stores.map(s => [s.dataStoreId, { ...s }]));
+      fc.asyncProperty(uniqueStoresArb(connectedStoreArb), async (stores) => {
+        const storeState = new Map(
+          stores.map((s) => [s.dataStoreId, { ...s }]),
+        );
 
-          const getAdapterFn = (_store: MockDataStore) => ({
-            testConnection: async () => ({
-              success: true,
-              message: 'OK',
-            }),
-          });
+        const getAdapterFn = (_store: MockDataStore) => ({
+          testConnection: async () => {
+            const err = new Error(
+              "User: arn:aws:iam::123:role/foo is not authorized",
+            );
+            err.name = "AccessDeniedException";
+            throw err;
+          },
+        });
 
-          const updateStoreFn = async (id: string, status: string, errMsg: string | null) => {
-            const current = storeState.get(id);
-            if (current) storeState.set(id, { ...current, status: status as MockDataStore["status"], errorMessage: errMsg });
-          };
+        const updateStoreFn = async (
+          id: string,
+          status: string,
+          errMsg: string | null,
+        ) => {
+          const current = storeState.get(id);
+          if (current)
+            storeState.set(id, {
+              ...current,
+              status: status as MockDataStore["status"],
+              errorMessage: errMsg,
+            });
+        };
 
-          await processHealthChecks(stores, getAdapterFn, updateStoreFn);
+        await processHealthChecks(stores, getAdapterFn, updateStoreFn);
 
-          for (const store of stores) {
-            const final = storeState.get(store.dataStoreId)!;
-            expect(final.status).toBe('CONNECTED');
-            expect(final.errorMessage).toBeNull();
-          }
+        for (const store of stores) {
+          const final = storeState.get(store.dataStoreId)!;
+          expect(final.status).toBe("CONNECTED");
+          expect(final.errorMessage).toBeNull();
         }
-      ),
-      { numRuns: 50 }
+      }),
+      { numRuns: 50 },
     );
   });
 
-  it('a CONNECTED store stays CONNECTED when testConnection fails with UnknownError (no service permissions)', async () => {
+  it("healthy stores still recover from ERROR to CONNECTED", async () => {
     await fc.assert(
-      fc.asyncProperty(
-        uniqueStoresArb(connectedStoreArb),
-        async (stores) => {
-          const storeState = new Map(stores.map(s => [s.dataStoreId, { ...s }]));
+      fc.asyncProperty(uniqueStoresArb(errorStoreArb), async (stores) => {
+        const storeState = new Map(
+          stores.map((s) => [s.dataStoreId, { ...s }]),
+        );
 
-          const getAdapterFn = (_store: MockDataStore) => ({
-            testConnection: async () => ({
-              success: false,
-              message: 'Failed to connect to bucket test-bucket: UnknownError',
-              details: { errorName: 'UnknownError' },
-            }),
-          });
+        const getAdapterFn = (_store: MockDataStore) => ({
+          testConnection: async () => ({
+            success: true,
+            message: "OK",
+          }),
+        });
 
-          const updateStoreFn = async (id: string, status: string, errMsg: string | null) => {
-            const current = storeState.get(id);
-            if (current) storeState.set(id, { ...current, status: status as MockDataStore["status"], errorMessage: errMsg });
-          };
+        const updateStoreFn = async (
+          id: string,
+          status: string,
+          errMsg: string | null,
+        ) => {
+          const current = storeState.get(id);
+          if (current)
+            storeState.set(id, {
+              ...current,
+              status: status as MockDataStore["status"],
+              errorMessage: errMsg,
+            });
+        };
 
-          await processHealthChecks(stores, getAdapterFn, updateStoreFn);
+        await processHealthChecks(stores, getAdapterFn, updateStoreFn);
 
-          for (const store of stores) {
-            const final = storeState.get(store.dataStoreId)!;
-            expect(final.status).toBe('CONNECTED');
-            expect(final.errorMessage).toBeNull();
-          }
+        for (const store of stores) {
+          const final = storeState.get(store.dataStoreId)!;
+          expect(final.status).toBe("CONNECTED");
+          expect(final.errorMessage).toBeNull();
         }
-      ),
-      { numRuns: 50 }
+      }),
+      { numRuns: 50 },
+    );
+  });
+
+  it("a CONNECTED store stays CONNECTED when testConnection fails with UnknownError (no service permissions)", async () => {
+    await fc.assert(
+      fc.asyncProperty(uniqueStoresArb(connectedStoreArb), async (stores) => {
+        const storeState = new Map(
+          stores.map((s) => [s.dataStoreId, { ...s }]),
+        );
+
+        const getAdapterFn = (_store: MockDataStore) => ({
+          testConnection: async () => ({
+            success: false,
+            message: "Failed to connect to bucket test-bucket: UnknownError",
+            details: { errorName: "UnknownError" },
+          }),
+        });
+
+        const updateStoreFn = async (
+          id: string,
+          status: string,
+          errMsg: string | null,
+        ) => {
+          const current = storeState.get(id);
+          if (current)
+            storeState.set(id, {
+              ...current,
+              status: status as MockDataStore["status"],
+              errorMessage: errMsg,
+            });
+        };
+
+        await processHealthChecks(stores, getAdapterFn, updateStoreFn);
+
+        for (const store of stores) {
+          const final = storeState.get(store.dataStoreId)!;
+          expect(final.status).toBe("CONNECTED");
+          expect(final.errorMessage).toBeNull();
+        }
+      }),
+      { numRuns: 50 },
     );
   });
 });

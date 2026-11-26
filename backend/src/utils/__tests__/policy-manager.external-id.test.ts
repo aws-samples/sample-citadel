@@ -6,23 +6,27 @@
  * EXACTLY as before — that back-compat is locked down by the existing,
  * UNMODIFIED suites in policy-manager.test.ts and policy-manager.property.test.ts.
  */
-import { IAMClient, CreateRoleCommand, PutRolePolicyCommand } from '@aws-sdk/client-iam';
+import {
+  IAMClient,
+  CreateRoleCommand,
+  PutRolePolicyCommand,
+} from "@aws-sdk/client-iam";
 import {
   STSClient,
   GetCallerIdentityCommand,
   AssumeRoleCommand,
-} from '@aws-sdk/client-sts';
-import { mockClient } from 'aws-sdk-client-mock';
-import { PolicyManager } from '../policy-manager';
+} from "@aws-sdk/client-sts";
+import { mockClient } from "aws-sdk-client-mock";
+import { PolicyManager } from "../policy-manager";
 
 const iamMock = mockClient(IAMClient);
 const stsMock = mockClient(STSClient);
 
-const ACCOUNT = '123456789012';
-const EXTERNAL_ID = 'citadel-ext-abc123';
-const CROSS_ARN = 'arn:aws:iam::222233334444:role/CustomerInvokeRole';
+const ACCOUNT = "123456789012";
+const EXTERNAL_ID = "citadel-ext-abc123";
+const CROSS_ARN = "arn:aws:iam::222233334444:role/CustomerInvokeRole";
 
-describe('PolicyManager cross-account ExternalId (additive, behaviour-preserving)', () => {
+describe("PolicyManager cross-account ExternalId (additive, behaviour-preserving)", () => {
   beforeEach(() => {
     iamMock.reset();
     stsMock.reset();
@@ -32,22 +36,22 @@ describe('PolicyManager cross-account ExternalId (additive, behaviour-preserving
     });
     stsMock.on(AssumeRoleCommand).resolves({
       Credentials: {
-        AccessKeyId: 'AKIAEXAMPLE',
-        SecretAccessKey: 'secret',
-        SessionToken: 'token',
-        Expiration: new Date('2030-01-01T00:00:00.000Z'),
+        AccessKeyId: "AKIAEXAMPLE",
+        SecretAccessKey: "secret",
+        SessionToken: "token",
+        Expiration: new Date("2030-01-01T00:00:00.000Z"),
       },
     });
     iamMock.on(CreateRoleCommand).resolves({});
     iamMock.on(PutRolePolicyCommand).resolves({});
   });
 
-  describe('assumeScopedRole', () => {
-    it('threads ExternalId into every AssumeRoleCommand when provided (2-hop cross-account)', async () => {
+  describe("assumeScopedRole", () => {
+    it("threads ExternalId into every AssumeRoleCommand when provided (2-hop cross-account)", async () => {
       await new PolicyManager().assumeScopedRole(
-        'agent-1',
+        "agent-1",
         ACCOUNT,
-        'agent',
+        "agent",
         CROSS_ARN,
         EXTERNAL_ID,
       );
@@ -59,11 +63,11 @@ describe('PolicyManager cross-account ExternalId (additive, behaviour-preserving
       }
     });
 
-    it('threads ExternalId into the single scoped assume when no crossArn is given', async () => {
+    it("threads ExternalId into the single scoped assume when no crossArn is given", async () => {
       await new PolicyManager().assumeScopedRole(
-        'agent-2',
+        "agent-2",
         ACCOUNT,
-        'agent',
+        "agent",
         undefined,
         EXTERNAL_ID,
       );
@@ -73,35 +77,35 @@ describe('PolicyManager cross-account ExternalId (additive, behaviour-preserving
       expect(calls[0].args[0].input.ExternalId).toBe(EXTERNAL_ID);
     });
 
-    it('surfaces expiresAt mapped from the STS Expiration', async () => {
+    it("surfaces expiresAt mapped from the STS Expiration", async () => {
       const creds = await new PolicyManager().assumeScopedRole(
-        'agent-3',
+        "agent-3",
         ACCOUNT,
-        'agent',
+        "agent",
         undefined,
         EXTERNAL_ID,
       );
 
-      expect(creds.accessKeyId).toBe('AKIAEXAMPLE');
-      expect(creds.expiresAt).toBe('2030-01-01T00:00:00.000Z');
+      expect(creds.accessKeyId).toBe("AKIAEXAMPLE");
+      expect(creds.expiresAt).toBe("2030-01-01T00:00:00.000Z");
     });
 
-    it('omits ExternalId entirely when not provided (identical to before)', async () => {
-      await new PolicyManager().assumeScopedRole('agent-4', ACCOUNT, 'agent');
+    it("omits ExternalId entirely when not provided (identical to before)", async () => {
+      await new PolicyManager().assumeScopedRole("agent-4", ACCOUNT, "agent");
 
       const calls = stsMock.commandCalls(AssumeRoleCommand);
       expect(calls).toHaveLength(1);
-      expect('ExternalId' in (calls[0].args[0].input as object)).toBe(false);
+      expect("ExternalId" in (calls[0].args[0].input as object)).toBe(false);
     });
   });
 
-  describe('ensureRole', () => {
-    it('adds an sts:ExternalId StringEquals Condition to the trust policy when provided', async () => {
+  describe("ensureRole", () => {
+    it("adds an sts:ExternalId StringEquals Condition to the trust policy when provided", async () => {
       await new PolicyManager().ensureRole(
-        'agent-1',
-        [{ actions: ['bedrock:InvokeModel'], resources: ['*'] }],
+        "agent-1",
+        [{ actions: ["bedrock:InvokeModel"], resources: ["*"] }],
         ACCOUNT,
-        'agent',
+        "agent",
         undefined,
         undefined,
         EXTERNAL_ID,
@@ -113,16 +117,16 @@ describe('PolicyManager cross-account ExternalId (additive, behaviour-preserving
         create[0].args[0].input.AssumeRolePolicyDocument as string,
       );
       expect(trust.Statement[0].Condition).toEqual({
-        StringEquals: { 'sts:ExternalId': EXTERNAL_ID },
+        StringEquals: { "sts:ExternalId": EXTERNAL_ID },
       });
     });
 
-    it('omits the Condition entirely when no externalId is provided (identical to before)', async () => {
+    it("omits the Condition entirely when no externalId is provided (identical to before)", async () => {
       await new PolicyManager().ensureRole(
-        'agent-2',
-        [{ actions: ['bedrock:InvokeModel'], resources: ['*'] }],
+        "agent-2",
+        [{ actions: ["bedrock:InvokeModel"], resources: ["*"] }],
         ACCOUNT,
-        'agent',
+        "agent",
       );
 
       const create = iamMock.commandCalls(CreateRoleCommand);

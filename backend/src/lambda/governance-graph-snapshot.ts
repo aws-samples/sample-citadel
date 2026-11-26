@@ -21,21 +21,21 @@
  * with Status=Failure) catches the case.
  */
 
-import { randomUUID } from 'crypto';
+import { randomUUID } from "crypto";
 import {
   DynamoDBClient,
   ScanCommand as RawScanCommand,
-} from '@aws-sdk/client-dynamodb';
+} from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
   PutCommand,
   ScanCommand,
-} from '@aws-sdk/lib-dynamodb';
-import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
+} from "@aws-sdk/lib-dynamodb";
+import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 import {
   CloudWatchClient,
   PutMetricDataCommand,
-} from '@aws-sdk/client-cloudwatch';
+} from "@aws-sdk/client-cloudwatch";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -49,7 +49,7 @@ interface AuthorityGraphHistorySettingsRaw {
 
 interface SnapshotPayload {
   snapshotId: string;
-  kind: 'full';
+  kind: "full";
   timestamp: number;
   expiresAt: number;
   env: string;
@@ -78,11 +78,11 @@ export interface SnapshotResult {
 // ---------------------------------------------------------------------------
 
 const PER_TABLE_SCAN_CAP = 5000;
-const METRIC_NAMESPACE = 'Citadel/Governance/GraphSnapshot';
+const METRIC_NAMESPACE = "Citadel/Governance/GraphSnapshot";
 const SAFE_DEFAULTS: AuthorityGraphHistorySettingsRaw = {
   enabled: false,
   retentionDays: 30,
-  captureMode: 'daily',
+  captureMode: "daily",
 };
 
 // ---------------------------------------------------------------------------
@@ -100,15 +100,18 @@ const cw = new CloudWatchClient({});
 function isValidRawShape(
   candidate: unknown,
 ): candidate is AuthorityGraphHistorySettingsRaw {
-  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
     return false;
   }
   const c = candidate as Record<string, unknown>;
-  if (typeof c.enabled !== 'boolean') return false;
-  if (typeof c.retentionDays !== 'number' || !Number.isFinite(c.retentionDays)) {
+  if (typeof c.enabled !== "boolean") return false;
+  if (
+    typeof c.retentionDays !== "number" ||
+    !Number.isFinite(c.retentionDays)
+  ) {
     return false;
   }
-  if (typeof c.captureMode !== 'string' || c.captureMode.length === 0) {
+  if (typeof c.captureMode !== "string" || c.captureMode.length === 0) {
     return false;
   }
   return true;
@@ -122,7 +125,7 @@ export async function readSettings(
     const resp = await ssm.send(
       new GetParameterCommand({ Name: parameterName }),
     );
-    const value = resp.Parameter?.Value ?? '';
+    const value = resp.Parameter?.Value ?? "";
     if (value.length === 0) return { ...SAFE_DEFAULTS };
     let parsed: unknown;
     try {
@@ -181,7 +184,7 @@ export async function scanCappedTable(
 }
 
 export async function emitMetric(
-  status: 'Success' | 'Failure',
+  status: "Success" | "Failure",
   partial = false,
 ): Promise<void> {
   try {
@@ -190,12 +193,12 @@ export async function emitMetric(
         Namespace: METRIC_NAMESPACE,
         MetricData: [
           {
-            MetricName: 'Count',
+            MetricName: "Count",
             Value: 1,
-            Unit: 'Count',
+            Unit: "Count",
             Dimensions: [
-              { Name: 'Status', Value: status },
-              { Name: 'Partial', Value: partial ? 'true' : 'false' },
+              { Name: "Status", Value: status },
+              { Name: "Partial", Value: partial ? "true" : "false" },
             ],
             Timestamp: new Date(),
           },
@@ -203,7 +206,7 @@ export async function emitMetric(
       }),
     );
   } catch (err) {
-    console.error('governance-graph-snapshot: metric emit failed', err);
+    console.error("governance-graph-snapshot: metric emit failed", err);
   }
 }
 
@@ -212,7 +215,7 @@ export async function emitMetric(
 // ---------------------------------------------------------------------------
 
 export const handler = async (): Promise<SnapshotResult> => {
-  const env = process.env.ENVIRONMENT || 'unknown';
+  const env = process.env.ENVIRONMENT || "unknown";
 
   // 1. Read settings — bail out early when disabled. This is the default
   //    state and avoids ANY DDB scan / write traffic when the operator
@@ -220,36 +223,33 @@ export const handler = async (): Promise<SnapshotResult> => {
   const settings = await readSettings(env);
   if (!settings.enabled) {
     console.log(
-      'governance-graph-snapshot: Snapshot skipped — disabled (settings.enabled=false)',
+      "governance-graph-snapshot: Snapshot skipped — disabled (settings.enabled=false)",
     );
-    return { ok: true, snapshotId: null, reason: 'disabled' };
+    return { ok: true, snapshotId: null, reason: "disabled" };
   }
 
   // 1b. Honor captureMode. Fail-closed: any value not in
   //     {daily, both} skips this scheduled handler. The on-change
   //     handler skips on the inverse condition, so unknown values
   //     correctly cause BOTH handlers to skip rather than both run.
-  if (
-    settings.captureMode !== 'daily' &&
-    settings.captureMode !== 'both'
-  ) {
+  if (settings.captureMode !== "daily" && settings.captureMode !== "both") {
     console.log(
       `governance-graph-snapshot: skipped — captureMode='${settings.captureMode}' (daily run not configured)`,
     );
-    return { ok: true, snapshotId: null, reason: 'captureMode-skipped' };
+    return { ok: true, snapshotId: null, reason: "captureMode-skipped" };
   }
 
   // 2. Resolve env-var inputs. Missing destination table is fatal —
   //    the Lambda has no place to write the snapshot.
   const snapshotsTable = process.env.GRAPH_SNAPSHOTS_TABLE;
   if (!snapshotsTable) {
-    throw new Error('GRAPH_SNAPSHOTS_TABLE env var is not set');
+    throw new Error("GRAPH_SNAPSHOTS_TABLE env var is not set");
   }
   const sourceTables = {
-    authorityUnits: process.env.AUTHORITY_UNITS_TABLE ?? '',
-    compositionContracts: process.env.COMPOSITION_CONTRACTS_TABLE ?? '',
-    constitutionalLayers: process.env.CONSTITUTIONAL_LAYERS_TABLE ?? '',
-    caseLaw: process.env.CASE_LAW_TABLE ?? '',
+    authorityUnits: process.env.AUTHORITY_UNITS_TABLE ?? "",
+    compositionContracts: process.env.COMPOSITION_CONTRACTS_TABLE ?? "",
+    constitutionalLayers: process.env.CONSTITUTIONAL_LAYERS_TABLE ?? "",
+    caseLaw: process.env.CASE_LAW_TABLE ?? "",
   };
 
   // 3. Scan the four source tables in parallel — isolate failures.
@@ -267,7 +267,10 @@ export const handler = async (): Promise<SnapshotResult> => {
     }),
   );
 
-  const rows: Record<keyof typeof sourceTables, Array<Record<string, unknown>>> = {
+  const rows: Record<
+    keyof typeof sourceTables,
+    Array<Record<string, unknown>>
+  > = {
     authorityUnits: [],
     compositionContracts: [],
     constitutionalLayers: [],
@@ -282,14 +285,13 @@ export const handler = async (): Promise<SnapshotResult> => {
   let successfulTables = 0;
   settled.forEach((outcome, idx) => {
     const [key] = tableEntries[idx];
-    if (outcome.status === 'fulfilled') {
+    if (outcome.status === "fulfilled") {
       rows[key] = outcome.value.items;
       truncated[key] = outcome.value.truncated;
       successfulTables += 1;
     } else {
       const reason = outcome.reason;
-      const message =
-        reason instanceof Error ? reason.message : String(reason);
+      const message = reason instanceof Error ? reason.message : String(reason);
       console.error(
         `governance-graph-snapshot: source-table read failed for "${key}": ${message}`,
       );
@@ -299,9 +301,9 @@ export const handler = async (): Promise<SnapshotResult> => {
   // 4. All four tables failed — emit failure metric and throw so
   //    EventBridge surfaces the failed invocation.
   if (successfulTables === 0) {
-    await emitMetric('Failure');
+    await emitMetric("Failure");
     throw new Error(
-      'governance-graph-snapshot: all 4 source-table reads failed',
+      "governance-graph-snapshot: all 4 source-table reads failed",
     );
   }
 
@@ -309,7 +311,7 @@ export const handler = async (): Promise<SnapshotResult> => {
   const nowSec = Math.floor(Date.now() / 1000);
   const snapshot: SnapshotPayload = {
     snapshotId: randomUUID(),
-    kind: 'full',
+    kind: "full",
     timestamp: nowSec,
     expiresAt: nowSec + Math.max(0, Math.trunc(settings.retentionDays)) * 86400,
     env,
@@ -332,11 +334,11 @@ export const handler = async (): Promise<SnapshotResult> => {
       }),
     );
   } catch (err) {
-    await emitMetric('Failure', partial);
+    await emitMetric("Failure", partial);
     throw err;
   }
 
-  await emitMetric('Success', partial);
+  await emitMetric("Success", partial);
   console.log(
     `governance-graph-snapshot: wrote snapshot ${snapshot.snapshotId} (partial=${partial}, retention=${settings.retentionDays}d)`,
   );

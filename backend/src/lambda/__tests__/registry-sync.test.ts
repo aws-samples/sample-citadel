@@ -1480,9 +1480,9 @@ describe("handler — GA agent-registry events", () => {
     const input = ddbMock.commandCalls(UpdateCommand)[0].args[0].input;
     // sourceProjectId should be set via if_not_exists (never overwrites existing)
     expect(input.UpdateExpression).toContain("if_not_exists(#sourceProjectId");
-    expect(
-      input.ExpressionAttributeValues![":sourceProjectId"],
-    ).toBe("proj-sneaky");
+    expect(input.ExpressionAttributeValues![":sourceProjectId"]).toBe(
+      "proj-sneaky",
+    );
   });
 });
 // ---------------------------------------------------------------------------

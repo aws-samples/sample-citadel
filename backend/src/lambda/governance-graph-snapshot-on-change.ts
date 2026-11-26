@@ -38,24 +38,16 @@
  * tables does NOT cause traffic until an operator opts in.
  */
 
-import { randomUUID } from 'crypto';
-import type { DynamoDBStreamEvent } from 'aws-lambda';
-import {
-  DynamoDBClient,
-} from '@aws-sdk/client-dynamodb';
-import {
-  DynamoDBDocumentClient,
-  PutCommand,
-} from '@aws-sdk/lib-dynamodb';
+import { randomUUID } from "crypto";
+import type { DynamoDBStreamEvent } from "aws-lambda";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
 import {
   CloudWatchClient,
   PutMetricDataCommand,
-} from '@aws-sdk/client-cloudwatch';
+} from "@aws-sdk/client-cloudwatch";
 
-import {
-  readSettings,
-  scanCappedTable,
-} from './governance-graph-snapshot';
+import { readSettings, scanCappedTable } from "./governance-graph-snapshot";
 
 // ---------------------------------------------------------------------------
 // Types — kept in lockstep with SnapshotPayload in governance-graph-snapshot.ts
@@ -63,7 +55,7 @@ import {
 
 interface OnChangeSnapshotPayload {
   snapshotId: string;
-  kind: 'full';
+  kind: "full";
   timestamp: number;
   expiresAt: number;
   env: string;
@@ -78,7 +70,7 @@ interface OnChangeSnapshotPayload {
     caseLaw: boolean;
   };
   partial?: boolean;
-  trigger: 'OnChange';
+  trigger: "OnChange";
 }
 
 export interface OnChangeSnapshotResult {
@@ -93,7 +85,7 @@ export interface OnChangeSnapshotResult {
 // Constants
 // ---------------------------------------------------------------------------
 
-const METRIC_NAMESPACE = 'Citadel/Governance/GraphSnapshot';
+const METRIC_NAMESPACE = "Citadel/Governance/GraphSnapshot";
 
 // ---------------------------------------------------------------------------
 // Clients (lazy-instantiated so unit tests can mock the constructors before
@@ -123,7 +115,7 @@ export function __resetClientsForTest(): void {
 // ---------------------------------------------------------------------------
 
 async function emitOnChangeMetric(
-  status: 'Success' | 'Failure',
+  status: "Success" | "Failure",
   partial = false,
 ): Promise<void> {
   try {
@@ -132,13 +124,13 @@ async function emitOnChangeMetric(
         Namespace: METRIC_NAMESPACE,
         MetricData: [
           {
-            MetricName: 'Count',
+            MetricName: "Count",
             Value: 1,
-            Unit: 'Count',
+            Unit: "Count",
             Dimensions: [
-              { Name: 'Status', Value: status },
-              { Name: 'Partial', Value: partial ? 'true' : 'false' },
-              { Name: 'Trigger', Value: 'OnChange' },
+              { Name: "Status", Value: status },
+              { Name: "Partial", Value: partial ? "true" : "false" },
+              { Name: "Trigger", Value: "OnChange" },
             ],
             Timestamp: new Date(),
           },
@@ -147,7 +139,7 @@ async function emitOnChangeMetric(
     );
   } catch (err) {
     console.error(
-      'governance-graph-snapshot-on-change: metric emit failed',
+      "governance-graph-snapshot-on-change: metric emit failed",
       err,
     );
   }
@@ -161,12 +153,12 @@ export const handler = async (
   event: DynamoDBStreamEvent,
 ): Promise<OnChangeSnapshotResult> => {
   const recordCount = event.Records?.length ?? 0;
-  const env = process.env.ENVIRONMENT || 'unknown';
+  const env = process.env.ENVIRONMENT || "unknown";
 
   // 0. Empty batch — return early. The EventSourceMapping shouldn't
   //    invoke us with zero records but be defensive.
   if (recordCount === 0) {
-    return { ok: true, snapshotId: null, reason: 'empty', recordCount: 0 };
+    return { ok: true, snapshotId: null, reason: "empty", recordCount: 0 };
   }
 
   // 1. Read settings. Default OFF — operators opt in via the same SSM
@@ -180,7 +172,7 @@ export const handler = async (
     return {
       ok: true,
       snapshotId: null,
-      reason: 'disabled',
+      reason: "disabled",
       recordCount,
     };
   }
@@ -190,17 +182,14 @@ export const handler = async (
   //     scheduled handler skips on the inverse condition, so unknown
   //     values correctly cause BOTH handlers to skip rather than both
   //     run.
-  if (
-    settings.captureMode !== 'on-change' &&
-    settings.captureMode !== 'both'
-  ) {
+  if (settings.captureMode !== "on-change" && settings.captureMode !== "both") {
     console.log(
       `governance-graph-snapshot-on-change: skipped — captureMode='${settings.captureMode}' (recordCount=${recordCount})`,
     );
     return {
       ok: true,
       snapshotId: null,
-      reason: 'captureMode-skipped',
+      reason: "captureMode-skipped",
       recordCount,
     };
   }
@@ -208,13 +197,13 @@ export const handler = async (
   // 2. Resolve env-var inputs. Missing destination is fatal.
   const snapshotsTable = process.env.GRAPH_SNAPSHOTS_TABLE;
   if (!snapshotsTable) {
-    throw new Error('GRAPH_SNAPSHOTS_TABLE env var is not set');
+    throw new Error("GRAPH_SNAPSHOTS_TABLE env var is not set");
   }
   const sourceTables = {
-    authorityUnits: process.env.AUTHORITY_UNITS_TABLE ?? '',
-    compositionContracts: process.env.COMPOSITION_CONTRACTS_TABLE ?? '',
-    constitutionalLayers: process.env.CONSTITUTIONAL_LAYERS_TABLE ?? '',
-    caseLaw: process.env.CASE_LAW_TABLE ?? '',
+    authorityUnits: process.env.AUTHORITY_UNITS_TABLE ?? "",
+    compositionContracts: process.env.COMPOSITION_CONTRACTS_TABLE ?? "",
+    constitutionalLayers: process.env.CONSTITUTIONAL_LAYERS_TABLE ?? "",
+    caseLaw: process.env.CASE_LAW_TABLE ?? "",
   };
 
   // 3. Scan all 4 source tables in parallel. Failures are isolated
@@ -231,7 +220,10 @@ export const handler = async (
     }),
   );
 
-  const rows: Record<keyof typeof sourceTables, Array<Record<string, unknown>>> = {
+  const rows: Record<
+    keyof typeof sourceTables,
+    Array<Record<string, unknown>>
+  > = {
     authorityUnits: [],
     compositionContracts: [],
     constitutionalLayers: [],
@@ -246,14 +238,13 @@ export const handler = async (
   let successfulTables = 0;
   settled.forEach((outcome, idx) => {
     const [key] = tableEntries[idx];
-    if (outcome.status === 'fulfilled') {
+    if (outcome.status === "fulfilled") {
       rows[key] = outcome.value.items;
       truncated[key] = outcome.value.truncated;
       successfulTables += 1;
     } else {
       const reason = outcome.reason;
-      const message =
-        reason instanceof Error ? reason.message : String(reason);
+      const message = reason instanceof Error ? reason.message : String(reason);
       console.error(
         `governance-graph-snapshot-on-change: source-table read failed for "${key}": ${message}`,
       );
@@ -263,9 +254,9 @@ export const handler = async (
   // 4. All four tables failed — emit failure metric and throw so the
   //    EventSourceMapping retry+DLQ path catches it.
   if (successfulTables === 0) {
-    await emitOnChangeMetric('Failure');
+    await emitOnChangeMetric("Failure");
     throw new Error(
-      'governance-graph-snapshot-on-change: all 4 source-table reads failed',
+      "governance-graph-snapshot-on-change: all 4 source-table reads failed",
     );
   }
 
@@ -273,7 +264,7 @@ export const handler = async (
   const nowSec = Math.floor(Date.now() / 1000);
   const snapshot: OnChangeSnapshotPayload = {
     snapshotId: randomUUID(),
-    kind: 'full',
+    kind: "full",
     timestamp: nowSec,
     expiresAt: nowSec + Math.max(0, Math.trunc(settings.retentionDays)) * 86400,
     env,
@@ -283,7 +274,7 @@ export const handler = async (
     caseLaw: rows.caseLaw,
     truncated,
     ...(partial ? { partial: true } : {}),
-    trigger: 'OnChange',
+    trigger: "OnChange",
   };
 
   // 5. Write the snapshot. Failure here is fatal — the EventSourceMapping
@@ -297,11 +288,11 @@ export const handler = async (
       }),
     );
   } catch (err) {
-    await emitOnChangeMetric('Failure', partial);
+    await emitOnChangeMetric("Failure", partial);
     throw err;
   }
 
-  await emitOnChangeMetric('Success', partial);
+  await emitOnChangeMetric("Success", partial);
   console.log(
     `governance-graph-snapshot-on-change: wrote snapshot ${snapshot.snapshotId} (partial=${partial}, recordCount=${recordCount}, retention=${settings.retentionDays}d)`,
   );

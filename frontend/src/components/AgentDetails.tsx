@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, Suspense } from 'react';
 import { ArrowLeft, AlertTriangle } from 'lucide-react';
 import { agentConfigService, AgentConfig } from '../services/agentConfigService';
 import { tagPolicyService, TagPolicy } from '../services/tagPolicyService';
@@ -17,7 +17,9 @@ import {
   AlertDialogTitle,
 } from './ui/alert-dialog';
 import { AgentConfigTab } from './AgentConfig';
-import { AgentCodeTab } from './AgentCode';
+const AgentCodeTab = React.lazy(() =>
+  import('./AgentCode').then((mod) => ({ default: mod.AgentCodeTab }))
+);
 import { RequireReapprovalDialog } from './RequireReapprovalDialog';
 import { registryStatusLabel } from './registry-status-label';
 import { ApprovalHistory } from './ApprovalHistory';
@@ -593,15 +595,17 @@ def handler(event, context):
 
         {/* Hide code tab for fabricator agent */}
         {activeTab === 'code' && agent?.agentId !== 'fabricator' && (
-          <AgentCodeTab
-            isCreating={isCreating}
-            isEditing={isEditingCode}
-            agentCode={agentCode}
-            onCodeChange={setAgentCode}
-            onStartEdit={() => setIsEditingCode(true)}
-            onSave={handleSaveCodeClick}
-            onCancel={handleCancelCodeEdit}
-          />
+          <Suspense fallback={<div className="editor-loading">Loading editor...</div>}>
+            <AgentCodeTab
+              isCreating={isCreating}
+              isEditing={isEditingCode}
+              agentCode={agentCode}
+              onCodeChange={setAgentCode}
+              onStartEdit={() => setIsEditingCode(true)}
+              onSave={handleSaveCodeClick}
+              onCancel={handleCancelCodeEdit}
+            />
+          </Suspense>
         )}
       </div>
     </div>
