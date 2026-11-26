@@ -234,15 +234,13 @@ export class FrontendStack extends cdk.Stack {
               cloudfront.HeadersReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN,
             override: true,
           },
-        },
-        customHeadersBehavior: {
-          customHeaders: [
-            {
-              header: "Content-Security-Policy",
-              value: contentSecurityPolicy,
-              override: true,
-            },
-          ],
+          // CloudFront rejects managed security header names (including
+          // Content-Security-Policy) in customHeadersBehavior with
+          // InvalidRequest, so the policy is set here instead.
+          contentSecurityPolicy: {
+            contentSecurityPolicy,
+            override: true,
+          },
         },
       },
     );
