@@ -1,6 +1,7 @@
 from decimal import Decimal
 import json
 import os
+import re
 from typing import Any
 import boto3
 
@@ -37,6 +38,10 @@ def _with_approval_fields(config: dict, item: dict) -> dict:
     simply means absent on the config (resolve_record_approval already
     treats a missing 'registryStatus' key as MISSING_STATUS, not a crash).
     """
+    # Carry the row's agentId (never overriding one the config declares) so
+    # tool-spec validation warnings can name the offending record.
+    if 'agentId' in item:
+        config.setdefault('agentId', item['agentId'])
     if 'registryStatus' in item:
         config['registryStatus'] = item['registryStatus']
     if 'createdAt' in item:
@@ -230,8 +235,94 @@ def load_app_scoped_agents(app_id: str) -> dict:
 
 _TOOL_SPEC_FIELDS = ('name', 'description', 'schema')
 
+# Bedrock Converse toolSpec.name constraint.
+_TOOL_NAME_RE = re.compile(r'[a-zA-Z0-9_-]{1,64}')
 
-def create_agent_specs(agents_config):
+
+def _name_for_log(agent: dict) -> str:
+    name = agent.get('name')
+    return name if isinstance(name, str) else str(name)
+
+
+def _agent_id_for_log(agent: dict) -> str:
+    return str(agent.get('agentId') or agent.get('_canonicalRecordId') or 'unknown')
+
+
+def _validate_tool_schema(agent: dict, schema: Any):
+    """Return ``(schema, None)`` or ``(None, reason)``.
+
+    Converse requires ``inputSchema.json`` to be a JSON Schema object with
+    ``type: 'object'``. A schema with no ``type`` but a ``properties`` dict is
+    unambiguous, so it is normalised (on a copy) with a WARN; anything else
+    (non-dict, another ``type``, an OpenAPI document, a ``{'function': ...}``
+    wrapper) cannot be sent and the agent is skipped.
+    """
+    if not isinstance(schema, dict):
+        return None, 'schema_not_dict'
+    schema_type = schema.get('type')
+    if schema_type is None:
+        if isinstance(schema.get('properties'), dict):
+            _warn(
+                'normalised_schema_type',
+                agentId=_agent_id_for_log(agent),
+                name=_name_for_log(agent),
+            )
+            return {**schema, 'type': 'object'}, None
+        return None, 'schema_type_missing'
+    if schema_type != 'object':
+        return None, 'schema_type_not_object'
+    return schema, None
+
+
+def validate_tool_spec(agent: dict):
+    """Validate one agent config and build its Converse tool spec.
+
+    The single validation point for tool specs sent to Bedrock. Returns
+    ``(spec, None)`` or ``(None, reason)``; a skip is logged as WARN
+    ``skip_invalid_tool_schema`` (agentId, name, reason). Never raises and
+    never mutates ``agent``.
+
+    The name is validated, not rewritten: dispatch resolves the agent by the
+    tool name the model returns, and governance keys on it, so a sanitised
+    name would no longer match its own record.
+    """
+    name = agent.get('name')
+    if not isinstance(name, str) or not _TOOL_NAME_RE.fullmatch(name):
+        reason = 'invalid_tool_name'
+    else:
+        schema, reason = _validate_tool_schema(agent, parse_decimals(agent['schema']))
+    if reason is not None:
+        _warn(
+            'skip_invalid_tool_schema',
+            agentId=_agent_id_for_log(agent),
+            name=_name_for_log(agent),
+            reason=reason,
+        )
+        return None, reason
+
+    description = agent['description']
+    if not isinstance(description, str) or not description.strip():
+        _warn(
+            'description_fallback',
+            agentId=_agent_id_for_log(agent),
+            name=name,
+        )
+        description = name
+    return {
+        "toolSpec": {
+            "name": name,
+            "description": description,
+            "inputSchema": {"json": schema},
+        }
+    }, None
+
+
+def create_agent_specs(agents_config, skipped=None):
+    """Build Converse tool specs, skipping (never failing on) invalid agents.
+
+    ``skipped``, when given a list, receives one reason string per skipped
+    agent so the caller can report counts.
+    """
     specs = []
     for agent in agents_config["agents"]:
         # An agent that cannot form a valid tool spec (e.g. an empty projected
@@ -243,12 +334,13 @@ def create_agent_specs(agents_config):
                 name=agent.get('name', 'unknown'),
                 missing=missing,
             )
+            if skipped is not None:
+                skipped.append('missing_fields')
             continue
-        specs.append({
-            "toolSpec": {
-                "name": agent["name"],
-                "description": agent["description"],
-                "inputSchema": {"json": parse_decimals(agent["schema"])}
-            }
-        })
+        spec, reason = validate_tool_spec(agent)
+        if spec is None:
+            if skipped is not None:
+                skipped.append(reason)
+            continue
+        specs.append(spec)
     return specs

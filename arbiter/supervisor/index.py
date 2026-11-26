@@ -1646,8 +1646,24 @@ def _run_orchestration(orchestration, app_id=None):
         send_response("No active agents configured", callback=callback_info, org_id=orchestration.get('orgId'))
         return
     
-    agent_specs = create_agent_specs(agent_configs)
+    skipped_specs = []
+    agent_specs = create_agent_specs(agent_configs, skipped=skipped_specs)
     print(f"Agent specs created: {json.dumps(agent_specs, default=str)}")
+    if not agent_specs:
+        # Every active agent failed tool-spec validation (each already logged
+        # as a WARN). Converse rejects an empty toolConfig, so do not call it.
+        print(json.dumps({
+            'level': 'WARN',
+            'component': 'Supervisor',
+            'action': 'no_valid_tool_specs',
+            'skippedAgents': len(skipped_specs),
+        }))
+        send_response(
+            "No usable agents configured",
+            callback=orchestration.get('callback'),
+            org_id=orchestration.get('orgId'),
+        )
+        return
     print(f"Calling Bedrock with conversation: {json.dumps(orchestration['conversation'], default=str)}")
 
     _converse_start = time.perf_counter()
