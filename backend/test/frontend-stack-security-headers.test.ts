@@ -13,8 +13,8 @@
  * 2. The distribution's DefaultCacheBehavior references that policy via
  *    ResponseHeadersPolicyId.
  *
- * Finding 68019420 (PR #598 follow-up): adds a report-only Content-Security-
- * Policy built from stack values, and removes the /api/* behaviour +
+ * Finding 68019420 (PR #598 follow-up): adds a Content-Security-Policy
+ * (enforcing; first shipped report-only) built from stack values, and removes the /api/* behaviour +
  * appsync-origin, which were unused — the SPA never proxies AppSync calls
  * through the CloudFront distribution's own origin (it calls the AppSync
  * endpoint directly from the browser via Amplify, see
@@ -42,7 +42,14 @@
  *   - S3 presigned URLs (replay packages): frontend/src/services/
  *     replayService.ts:196-208 — `window.open(url, '_blank')`, a top-level
  *     navigation, not a fetch/XHR, so it is governed by navigation, not
- *     connect-src. No S3 host added to connect-src.
+ *     connect-src. No S3 host needed for that path.
+ *   - S3 presigned PUT (document upload): frontend/src/services/
+ *     documentService.ts:59 does `fetch(uploadUrl, { method: 'PUT' })` to a
+ *     URL minted by backend/src/lambda/document-upload-resolver.ts
+ *     (`getSignedUrl` on a default `S3Client`, so virtual-hosted regional:
+ *     https://<bucket>.s3.<region>.amazonaws.com). That is a browser fetch,
+ *     so the documents-bucket host is in connect-src (exact host, no
+ *     `*.s3.<region>` wildcard).
  *   - External fonts: frontend/index.html:11-13 (fonts.googleapis.com,
  *     fonts.gstatic.com) — font-src/style-src.
  *   - blob:: frontend/src/components/WorkflowPersistenceControls.tsx:36 and
@@ -79,10 +86,19 @@ fs.writeFileSync(
 
 import { FrontendStack } from "../lib/frontend-stack";
 
-function synthFrontendStack(): Template {
+interface SynthOverrides {
+  account?: string;
+  region?: string;
+  environment?: string;
+}
+
+function synthFrontendStack(overrides: SynthOverrides = {}): Template {
   const app = new cdk.App();
 
-  const env = { account: "123456789012", region: "us-east-1" };
+  const env = {
+    account: overrides.account ?? "123456789012",
+    region: overrides.region ?? "us-east-1",
+  };
   const stubStack = new cdk.Stack(app, "StubStackSH", { env });
 
   const userPool = new cognito.UserPool(stubStack, "TestUserPool");
@@ -104,11 +120,53 @@ function synthFrontendStack(): Template {
     appSyncApi: api,
     userPool,
     agentEventBus: eventBus,
-    environment: "test",
+    environment: overrides.environment ?? "test",
     costApiUrl: "https://cost.example.com",
   });
 
   return Template.fromStack(stack);
+}
+
+type CustomHeader = { Header: string; Value: unknown; Override?: boolean };
+
+function getCustomHeaders(template: Template): CustomHeader[] {
+  const policies = Object.values(
+    template.findResources("AWS::CloudFront::ResponseHeadersPolicy"),
+  );
+  expect(policies.length).toBeGreaterThan(0);
+  return (
+    policies[0].Properties?.ResponseHeadersPolicyConfig?.CustomHeadersConfig
+      ?.Items ?? []
+  );
+}
+
+// Renders a synthesized CFN value to a string: Fn::Join is resolved
+// recursively, literals pass through, and any other intrinsic (Fn::Select,
+// Ref, ...) becomes a `{{json}}` placeholder so its presence stays visible.
+function renderValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  const join = (value as { ["Fn::Join"]?: [string, unknown[]] })?.["Fn::Join"];
+  if (join) return join[1].map(renderValue).join(join[0]);
+  return `{{${JSON.stringify(value)}}}`;
+}
+
+function getEnforcingPolicy(template: Template): string {
+  const header = getCustomHeaders(template).find(
+    (h) => h.Header === "Content-Security-Policy",
+  );
+  expect(header).toBeDefined();
+  return renderValue(header?.Value);
+}
+
+function parseDirectives(policy: string): Map<string, string> {
+  const directives = new Map<string, string>();
+  for (const part of policy.split(";")) {
+    const directive = part.trim();
+    if (!directive) continue;
+    const [name, ...sources] = directive.split(/\s+/);
+    directives.set(name, sources.join(" "));
+  }
+  return directives;
 }
 
 describe("FrontendStack — security response headers policy (finding 82997842)", () => {
@@ -205,54 +263,106 @@ describe("FrontendStack — security response headers policy (finding 82997842)"
     expect(cacheBehaviors.length).toBe(0);
   });
 
-  test("ResponseHeadersPolicy carries a Content-Security-Policy-Report-Only custom header with the expected directives", () => {
-    const policies = template.findResources(
-      "AWS::CloudFront::ResponseHeadersPolicy",
+  test("the Content-Security-Policy custom header is enforcing: exact header name, override on", () => {
+    const customHeaders = getCustomHeaders(template);
+    const csp = customHeaders.find(
+      (h) => h.Header === "Content-Security-Policy",
     );
-    const entries = Object.values(policies);
-    expect(entries.length).toBeGreaterThan(0);
+    expect(csp).toBeDefined();
+    expect(csp?.Override).toBe(true);
+  });
 
-    const customHeaders: Array<{ Header: string; Value: unknown }> =
-      entries[0].Properties?.ResponseHeadersPolicyConfig?.CustomHeadersConfig
-        ?.Items ?? [];
+  test("no Content-Security-Policy-Report-Only header remains alongside the enforcing one", () => {
+    const names = getCustomHeaders(template).map((h) => h.Header);
+    expect(names).not.toContain("Content-Security-Policy-Report-Only");
+  });
 
-    const cspHeader = customHeaders.find(
-      (h) => h.Header === "Content-Security-Policy-Report-Only",
+  test("the static directives match the agreed policy exactly", () => {
+    const directives = parseDirectives(getEnforcingPolicy(template));
+
+    expect(directives.get("default-src")).toBe("'self'");
+    expect(directives.get("frame-ancestors")).toBe("'none'");
+    expect(directives.get("object-src")).toBe("'none'");
+    expect(directives.get("base-uri")).toBe("'self'");
+    expect(directives.get("img-src")).toBe("'self' data:");
+    expect(directives.get("font-src")).toBe("'self' https://fonts.gstatic.com");
+    expect(directives.get("style-src")).toBe(
+      "'self' 'unsafe-inline' https://fonts.googleapis.com",
     );
-    expect(cspHeader).toBeDefined();
+    expect(directives.get("script-src")).toBe("'self'");
+    expect(directives.get("worker-src")).toBe("'self' blob:");
+  });
 
-    // The header value is built from Fn::Join (Fn::Select/Fn::Split
-    // fragments for the AppSync + cost-API hosts), so assert on the
-    // flattened literal fragments within the Fn::Join parts array rather
-    // than a single string.
-    const joinParts: unknown[] =
-      (cspHeader?.Value as { ["Fn::Join"]?: [string, unknown[]] })?.[
-        "Fn::Join"
-      ]?.[1] ?? [];
-    const flattened = joinParts
-      .map((p) => (typeof p === "string" ? p : JSON.stringify(p)))
-      .join("");
+  test("script-src carries neither 'unsafe-inline' nor 'unsafe-eval'", () => {
+    const policy = getEnforcingPolicy(template);
+    const scriptSrc = parseDirectives(policy).get("script-src") ?? "";
 
-    expect(flattened).toContain("default-src 'self'");
-    expect(flattened).toContain("frame-ancestors 'none'");
-    expect(flattened).toContain("object-src 'none'");
-    expect(flattened).toContain("base-uri 'self'");
-    expect(flattened).toContain("connect-src");
-    expect(flattened).toContain("cognito-idp.us-east-1.amazonaws.com");
-    expect(flattened).toContain("style-src 'self' 'unsafe-inline'");
-    expect(flattened).toContain("fonts.googleapis.com");
-    expect(flattened).toContain("fonts.gstatic.com");
-    expect(flattened).toContain("img-src 'self' data:");
-    // execute-api is deliberately NOT present — no browser call targets
-    // published app endpoints (evidence in the file header comment above).
-    expect(flattened).not.toContain("execute-api");
-    // script-src must never carry 'unsafe-inline' — index.html has no
-    // inline scripts.
-    expect(flattened).not.toMatch(/script-src[^;]*unsafe-inline/);
+    expect(scriptSrc).not.toContain("unsafe-inline");
+    expect(scriptSrc).not.toContain("unsafe-eval");
+    expect(policy).not.toMatch(/script-src[^;]*unsafe-inline/);
+  });
 
+  test("connect-src lists the AppSync, Cognito and cost API hosts built from stack values", () => {
+    const connectSrc =
+      parseDirectives(getEnforcingPolicy(template)).get("connect-src") ?? "";
+
+    expect(connectSrc.startsWith("'self' ")).toBe(true);
+    expect(connectSrc).toContain("https://cognito-idp.us-east-1.amazonaws.com");
+    expect(connectSrc).toContain("wss://");
+    expect(connectSrc).toContain("appsync-realtime-api");
     // Cost-API host: synthesized from the test's costApiUrl
     // ("https://cost.example.com"), confirming the policy is built from
     // stack values rather than a hard-coded host.
-    expect(flattened).toContain("cost.example.com");
+    expect(connectSrc).toContain("cost.example.com");
+  });
+
+  test("connect-src carries the documents-bucket virtual-hosted regional host for presigned uploads", () => {
+    const connectSrc =
+      parseDirectives(getEnforcingPolicy(template)).get("connect-src") ?? "";
+
+    expect(connectSrc.split(" ")).toContain(
+      "https://citadel-documents-test-123456789012-us-east-1.s3.us-east-1.amazonaws.com",
+    );
+  });
+
+  test("the documents host follows the stack's account, region and environment (not hard-coded)", () => {
+    const other = synthFrontendStack({
+      account: "999999999999",
+      region: "eu-west-1",
+      environment: "prod",
+    });
+    const connectSrc =
+      parseDirectives(getEnforcingPolicy(other)).get("connect-src") ?? "";
+
+    expect(connectSrc.split(" ")).toContain(
+      "https://citadel-documents-prod-999999999999-eu-west-1.s3.eu-west-1.amazonaws.com",
+    );
+    expect(connectSrc).not.toContain("123456789012");
+    expect(connectSrc).toContain("https://cognito-idp.eu-west-1.amazonaws.com");
+  });
+
+  test("the documents bucket name formula matches the one BackendStack uses to create the bucket", () => {
+    const backendSource = fs.readFileSync(
+      path.join(backendDir, "lib", "backend-stack.ts"),
+      "utf8",
+    );
+    const frontendSource = fs.readFileSync(
+      path.join(backendDir, "lib", "frontend-stack.ts"),
+      "utf8",
+    );
+    const formula =
+      "`citadel-documents-${props.environment}-${this.account}-${this.region}`";
+
+    expect(backendSource).toContain(`bucketName: ${formula}`);
+    expect(frontendSource).toContain(formula);
+  });
+
+  test("the policy has no wildcard sources and no execute-api host", () => {
+    const policy = getEnforcingPolicy(template);
+
+    expect(policy).not.toContain("*");
+    // The test's cost API is cost.example.com, so any execute-api in the
+    // policy would be a hard-coded or wildcard published-app host.
+    expect(policy).not.toContain("execute-api");
   });
 });
