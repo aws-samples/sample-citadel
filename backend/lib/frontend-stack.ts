@@ -130,21 +130,25 @@ export class FrontendStack extends cdk.Stack {
     // Cognito tokens, so every response from the distribution must carry
     // HSTS, X-Content-Type-Options, X-Frame-Options and Referrer-Policy.
     //
-    // Finding 68019420 (PR #598 follow-up): adds a Content-Security-Policy
-    // as REPORT-ONLY first (Content-Security-Policy-Report-Only custom
-    // header, not the enforcing header), built entirely from stack values —
-    // no hard-coded account id, API id, or region literal. Origin
-    // inventory and evidence live in the file header comment of
+    // Finding 68019420: Content-Security-Policy, ENFORCING (it first shipped
+    // as a Content-Security-Policy-Report-Only custom header in PR #598's
+    // follow-up). Built entirely from stack values: no hard-coded account
+    // id, API id, or region literal. Origin inventory and evidence live in
+    // the file header comment of
     // backend/test/frontend-stack-security-headers.test.ts; summary:
     //   - connect-src: 'self' (same-origin fetches, e.g. /aws-exports.json)
     //     plus the AppSync GraphQL host and its paired realtime host
     //     (Amplify talks to AppSync directly from the browser — the SPA
     //     never proxies through this distribution), the Cognito IDP host
     //     (aws-amplify/auth calls cognito-idp directly for sign-in/session),
-    //     and the cost/trace/replay-metadata API host (costApiUrl).
+    //     the cost/trace/replay-metadata API host (costApiUrl), and the
+    //     documents bucket's virtual-hosted regional S3 host (the browser
+    //     PUTs a presigned URL there on document upload).
     //   - execute-api (published Agent App endpoints) is deliberately
     //     OMITTED: the UI only displays/copies endpointUrl to the
     //     clipboard, no browser fetch/XHR targets it.
+    //   - worker-src needs blob: for web workers created from blob URLs
+    //     (the Monaco editor spawns its language workers that way).
     //   - style-src needs 'unsafe-inline' (Tailwind/Radix inline `style={{}}`
     //     usage across ~25 files) plus the Google Fonts stylesheet host.
     //   - font-src needs the Google Fonts asset host.
@@ -155,12 +159,10 @@ export class FrontendStack extends cdk.Stack {
     //     unconditional hardening with no functional cost (no iframes,
     //     confirmed by PR #598's FrameOptions: DENY).
     //
-    // Promotion path: this ships as Content-Security-Policy-Report-Only so
-    // violations are observed (browser console + any configured
-    // report-uri/report-to collector) for at least one full deploy cycle
-    // before anything is blocked. Once a deploy shows zero unexpected
-    // violation reports, promote by renaming the header below from
-    // "Content-Security-Policy-Report-Only" to "Content-Security-Policy".
+    // No Content-Security-Policy-Report-Only companion is emitted: the same
+    // policy in both headers would be redundant, and a stricter report-only
+    // policy is only useful once a report endpoint (report-uri / report-to)
+    // exists to receive violations — there is none yet.
     const appSyncGraphqlHost = cdk.Fn.select(
       2,
       cdk.Fn.split("/", props.appSyncApi.graphqlUrl),
@@ -177,23 +179,36 @@ export class FrontendStack extends cdk.Stack {
     const costApiHost = cdk.Fn.select(2, cdk.Fn.split("/", props.costApiUrl));
     const cognitoIdpHost = `cognito-idp.${this.region}.amazonaws.com`;
 
-    const contentSecurityPolicyReportOnly = cdk.Fn.join("", [
-      "default-src 'self'; ",
-      "frame-ancestors 'none'; ",
-      "object-src 'none'; ",
-      "base-uri 'self'; ",
-      "img-src 'self' data:; ",
-      "font-src 'self' https://fonts.gstatic.com; ",
-      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; ",
-      "script-src 'self'; ",
-      "connect-src 'self' https://",
-      appSyncGraphqlHost,
-      " wss://",
-      appSyncRealtimeHost,
-      ` https://${cognitoIdpHost} https://`,
-      costApiHost,
-      ";",
-    ]);
+    // The documents bucket name is deterministic (BackendStack creates it as
+    // `citadel-documents-${environment}-${account}-${region}`), so the host is
+    // rebuilt here instead of adding a cross-stack export. The presigner in
+    // backend/src/lambda/document-upload-resolver.ts uses a default S3Client,
+    // which yields virtual-hosted regional URLs: <bucket>.s3.<region>.amazonaws.com.
+    // A test keeps this formula in step with BackendStack's.
+    const documentsBucketName = `citadel-documents-${props.environment}-${this.account}-${this.region}`;
+    const documentsBucketHost = `${documentsBucketName}.s3.${this.region}.amazonaws.com`;
+
+    const connectSources = [
+      "'self'",
+      `https://${appSyncGraphqlHost}`,
+      `wss://${appSyncRealtimeHost}`,
+      `https://${cognitoIdpHost}`,
+      `https://${costApiHost}`,
+      `https://${documentsBucketHost}`,
+    ];
+
+    const contentSecurityPolicy = [
+      "default-src 'self'",
+      "frame-ancestors 'none'",
+      "object-src 'none'",
+      "base-uri 'self'",
+      "img-src 'self' data:",
+      "font-src 'self' https://fonts.gstatic.com",
+      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+      "script-src 'self'",
+      "worker-src 'self' blob:",
+      `connect-src ${connectSources.join(" ")}`,
+    ].join("; ");
 
     const securityResponseHeaders = new cloudfront.ResponseHeadersPolicy(
       this,
@@ -223,8 +238,8 @@ export class FrontendStack extends cdk.Stack {
         customHeadersBehavior: {
           customHeaders: [
             {
-              header: "Content-Security-Policy-Report-Only",
-              value: contentSecurityPolicyReportOnly,
+              header: "Content-Security-Policy",
+              value: contentSecurityPolicy,
               override: true,
             },
           ],
