@@ -68,17 +68,17 @@ import type {
   DynamoDBStreamEvent,
   DynamoDBRecord,
   DynamoDBStreamHandler,
-} from 'aws-lambda';
-import { unmarshall } from '@aws-sdk/util-dynamodb';
-import type { AttributeValue as DdbAttributeValue } from '@aws-sdk/client-dynamodb';
-import { HttpRequest } from '@smithy/protocol-http';
-import { SignatureV4 } from '@smithy/signature-v4';
-import { Sha256 } from '@aws-crypto/sha256-js';
-import { defaultProvider } from '@aws-sdk/credential-provider-node';
+} from "aws-lambda";
+import { unmarshall } from "@aws-sdk/util-dynamodb";
+import type { AttributeValue as DdbAttributeValue } from "@aws-sdk/client-dynamodb";
+import { HttpRequest } from "@smithy/protocol-http";
+import { SignatureV4 } from "@smithy/signature-v4";
+import { Sha256 } from "@aws-crypto/sha256-js";
+import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import {
   CloudWatchClient,
   PutMetricDataCommand,
-} from '@aws-sdk/client-cloudwatch';
+} from "@aws-sdk/client-cloudwatch";
 
 const PUBLISH_MUTATION = `
   mutation PublishGovernanceFinding($input: PublishGovernanceFindingInput!) {
@@ -98,8 +98,8 @@ const PUBLISH_MUTATION = `
   }
 `;
 
-const METRIC_NAMESPACE = 'Citadel/Governance/Fanout';
-const METRIC_PUBLISH_FAILURE = 'PublishFailure';
+const METRIC_NAMESPACE = "Citadel/Governance/Fanout";
+const METRIC_PUBLISH_FAILURE = "PublishFailure";
 
 // Lazy-instantiate so unit tests can mock the constructors before first
 // use without racing module load.
@@ -114,8 +114,8 @@ function signer(): SignatureV4 {
   if (!_signer) {
     _signer = new SignatureV4({
       credentials: defaultProvider(),
-      region: process.env.AWS_REGION || 'us-east-1',
-      service: 'appsync',
+      region: process.env.AWS_REGION || "us-east-1",
+      service: "appsync",
       sha256: Sha256,
     });
   }
@@ -143,16 +143,16 @@ export interface PublishGovernanceFindingInput {
 }
 
 function asString(value: unknown): string | null {
-  return typeof value === 'string' && value.length > 0 ? value : null;
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 function asBool(value: unknown): boolean | null {
-  return typeof value === 'boolean' ? value : null;
+  return typeof value === "boolean" ? value : null;
 }
 
 function asNumber(value: unknown): number {
-  if (typeof value === 'number') return value;
-  if (typeof value === 'string') {
+  if (typeof value === "number") return value;
+  if (typeof value === "string") {
     const n = Number(value);
     return Number.isFinite(n) ? n : 0;
   }
@@ -183,13 +183,11 @@ export function projectRow(
   return {
     findingId,
     workflowId,
-    decision:
-      typeof row.decision === 'string' ? row.decision : '',
-    reason: typeof row.reason === 'string' ? row.reason : '',
+    decision: typeof row.decision === "string" ? row.decision : "",
+    reason: typeof row.reason === "string" ? row.reason : "",
     requestingAgent:
-      typeof row.requesting_agent === 'string' ? row.requesting_agent : '',
-    targetAgent:
-      typeof row.target_agent === 'string' ? row.target_agent : '',
+      typeof row.requesting_agent === "string" ? row.requesting_agent : "",
+    targetAgent: typeof row.target_agent === "string" ? row.target_agent : "",
     scopeEvaluated: asString(row.scope_evaluated),
     contractEvaluated: asString(row.contract_evaluated),
     escalationTarget: asString(row.escalation_target),
@@ -210,7 +208,7 @@ async function emitFailureMetric(): Promise<void> {
           {
             MetricName: METRIC_PUBLISH_FAILURE,
             Value: 1,
-            Unit: 'Count',
+            Unit: "Count",
             Timestamp: new Date(),
           },
         ],
@@ -218,7 +216,7 @@ async function emitFailureMetric(): Promise<void> {
     );
   } catch (metricErr) {
     console.warn(
-      'governance-finding-fanout: failed to emit PublishFailure metric',
+      "governance-finding-fanout: failed to emit PublishFailure metric",
       metricErr,
     );
   }
@@ -229,7 +227,7 @@ async function publishFinding(
 ): Promise<void> {
   const endpoint = process.env.APPSYNC_ENDPOINT;
   if (!endpoint) {
-    throw new Error('APPSYNC_ENDPOINT env var is required');
+    throw new Error("APPSYNC_ENDPOINT env var is required");
   }
   const url = new URL(endpoint);
   const body = JSON.stringify({
@@ -238,11 +236,11 @@ async function publishFinding(
   });
 
   const request = new HttpRequest({
-    method: 'POST',
+    method: "POST",
     hostname: url.hostname,
     path: url.pathname,
     headers: {
-      'Content-Type': 'application/json',
+      "Content-Type": "application/json",
       host: url.hostname,
     },
     body,
@@ -251,7 +249,7 @@ async function publishFinding(
   const signed = await signer().sign(request);
 
   const response = await fetch(`https://${url.hostname}${url.pathname}`, {
-    method: 'POST',
+    method: "POST",
     headers: signed.headers as Record<string, string>,
     body,
   });
@@ -267,7 +265,7 @@ async function processRecord(record: DynamoDBRecord): Promise<void> {
   // Skip non-INSERT records. The EventSourceMapping FilterCriteria already
   // narrows to INSERT, but a defence-in-depth check here keeps the Lambda
   // safe if the filter is ever loosened (e.g. for backfill replays).
-  if (record.eventName !== 'INSERT') return;
+  if (record.eventName !== "INSERT") return;
 
   const newImage = record.dynamodb?.NewImage;
   if (!newImage) return;
@@ -281,10 +279,9 @@ async function processRecord(record: DynamoDBRecord): Promise<void> {
 
   const input = projectRow(row);
   if (!input) {
-    console.warn(
-      'governance-finding-fanout: skipping malformed ledger row',
-      { keys: Object.keys(row) },
-    );
+    console.warn("governance-finding-fanout: skipping malformed ledger row", {
+      keys: Object.keys(row),
+    });
     await emitFailureMetric();
     return;
   }
@@ -302,14 +299,11 @@ export const handler: DynamoDBStreamHandler = async (
     } catch (err) {
       // Best-effort: log and emit metric, but never throw. The ledger
       // write is authoritative; this fanout is soft-realtime only.
-      console.error(
-        'governance-finding-fanout: per-record failure',
-        {
-          eventName: record.eventName,
-          eventID: record.eventID,
-          err: err instanceof Error ? err.message : String(err),
-        },
-      );
+      console.error("governance-finding-fanout: per-record failure", {
+        eventName: record.eventName,
+        eventID: record.eventID,
+        err: err instanceof Error ? err.message : String(err),
+      });
       await emitFailureMetric();
     }
   }

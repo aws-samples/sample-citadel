@@ -9,7 +9,7 @@
  * DynamoDB conditional-put semantics (first key wins, duplicates are skipped),
  * so this unit isolates the KEY-SELECTION decision in the handler.
  */
-jest.mock('../../utils/idempotency', () => {
+jest.mock("../../utils/idempotency", () => {
   const records: Array<{ key: string; executed: boolean }> = [];
   const seen = new Set<string>();
   return {
@@ -29,9 +29,9 @@ jest.mock('../../utils/idempotency', () => {
   };
 });
 
-import { handler } from '../agent-message-handler';
+import { handler } from "../agent-message-handler";
 
-const idem = jest.requireMock('../../utils/idempotency') as {
+const idem = jest.requireMock("../../utils/idempotency") as {
   __records: Array<{ key: string; executed: boolean }>;
   __reset: () => void;
 };
@@ -40,39 +40,39 @@ const makeEvent = (id: string, messageId?: string) =>
   ({
     id,
     detail: {
-      projectId: 'proj-1',
-      agentId: 'agent_intake_single',
-      message: 'A document has been uploaded and indexed.',
+      projectId: "proj-1",
+      agentId: "agent_intake_single",
+      message: "A document has been uploaded and indexed.",
       messageId,
-      userId: 'system',
+      userId: "system",
       timestamp: new Date().toISOString(),
     },
   }) as unknown as Parameters<typeof handler>[0];
 
-describe('agent-message-handler idempotency key (Finding #1)', () => {
+describe("agent-message-handler idempotency key (Finding #1)", () => {
   beforeEach(() => {
     idem.__reset();
   });
 
-  test('uses detail.messageId as the idempotency key', async () => {
-    await handler(makeEvent('evt-1', 'doc-indexed-proj-1-proj-1/a.pdf'));
-    expect(idem.__records[0].key).toBe('doc-indexed-proj-1-proj-1/a.pdf');
+  test("uses detail.messageId as the idempotency key", async () => {
+    await handler(makeEvent("evt-1", "doc-indexed-proj-1-proj-1/a.pdf"));
+    expect(idem.__records[0].key).toBe("doc-indexed-proj-1-proj-1/a.pdf");
   });
 
-  test('dedupes a second event with the same messageId but a different event.id', async () => {
-    await handler(makeEvent('evt-1', 'doc-indexed-proj-1-proj-1/a.pdf'));
-    await handler(makeEvent('evt-2', 'doc-indexed-proj-1-proj-1/a.pdf'));
+  test("dedupes a second event with the same messageId but a different event.id", async () => {
+    await handler(makeEvent("evt-1", "doc-indexed-proj-1-proj-1/a.pdf"));
+    await handler(makeEvent("evt-2", "doc-indexed-proj-1-proj-1/a.pdf"));
     expect(idem.__records.map((r) => r.executed)).toEqual([true, false]);
   });
 
-  test('two events with different messageIds both execute', async () => {
-    await handler(makeEvent('evt-1', 'doc-indexed-proj-1-proj-1/a.pdf'));
-    await handler(makeEvent('evt-2', 'doc-indexed-proj-1-proj-1/b.pdf'));
+  test("two events with different messageIds both execute", async () => {
+    await handler(makeEvent("evt-1", "doc-indexed-proj-1-proj-1/a.pdf"));
+    await handler(makeEvent("evt-2", "doc-indexed-proj-1-proj-1/b.pdf"));
     expect(idem.__records.map((r) => r.executed)).toEqual([true, true]);
   });
 
-  test('falls back to event.id when detail.messageId is absent', async () => {
-    await handler(makeEvent('evt-1', undefined));
-    expect(idem.__records[0].key).toBe('evt-1');
+  test("falls back to event.id when detail.messageId is absent", async () => {
+    await handler(makeEvent("evt-1", undefined));
+    expect(idem.__records[0].key).toBe("evt-1");
   });
 });

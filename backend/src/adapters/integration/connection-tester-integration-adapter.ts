@@ -31,12 +31,12 @@
  *    propagate to the caller so failures stay visible.
  */
 
-import { BaseIntegrationAdapter } from './base-integration-adapter';
-import { ConnectionTestResult, ConnectorSpec } from '../base';
-import { testConnection as runConnectionTest } from '../../utils/connection-tester';
+import { BaseIntegrationAdapter } from "./base-integration-adapter";
+import { ConnectionTestResult, ConnectorSpec } from "../base";
+import { testConnection as runConnectionTest } from "../../utils/connection-tester";
 
 export class ConnectionTesterIntegrationAdapter extends BaseIntegrationAdapter {
-  constructor(spec: Omit<ConnectorSpec, 'category'>) {
+  constructor(spec: Omit<ConnectorSpec, "category">) {
     super(spec);
   }
 
@@ -50,12 +50,12 @@ export class ConnectionTesterIntegrationAdapter extends BaseIntegrationAdapter {
    */
   async testConnection(
     config: Record<string, unknown>,
-    credentials?: Record<string, unknown>
+    credentials?: Record<string, unknown>,
   ): Promise<ConnectionTestResult> {
     return runConnectionTest(
       this.spec.type,
       credentials as Parameters<typeof runConnectionTest>[1],
-      config as Parameters<typeof runConnectionTest>[2]
+      config as Parameters<typeof runConnectionTest>[2],
     );
   }
 }

@@ -134,10 +134,12 @@ export function normaliseEnvString(s: string): string {
 function canonicalStringify(value: unknown): string {
   return JSON.stringify(value, (_key, val) => {
     if (val !== null && typeof val === "object" && !Array.isArray(val)) {
-      return Object.keys(val).sort().reduce<Record<string, unknown>>((acc, k) => {
-        acc[k] = val[k];
-        return acc;
-      }, {});
+      return Object.keys(val)
+        .sort()
+        .reduce<Record<string, unknown>>((acc, k) => {
+          acc[k] = val[k];
+          return acc;
+        }, {});
     }
     return val;
   });
@@ -176,10 +178,11 @@ export function compareStatefulBaselines(
   const diffs: BaselineDifference[] = [];
 
   // --- resources ---
-  const sharedResIds = [...new Set([
-    ...Object.keys(a.resources),
-    ...Object.keys(b.resources),
-  ])].filter((id) => id in a.resources && id in b.resources).sort();
+  const sharedResIds = [
+    ...new Set([...Object.keys(a.resources), ...Object.keys(b.resources)]),
+  ]
+    .filter((id) => id in a.resources && id in b.resources)
+    .sort();
 
   for (const logicalId of sharedResIds) {
     const ra = a.resources[logicalId];
@@ -207,10 +210,9 @@ export function compareStatefulBaselines(
   ] as const) {
     const sa = (a[section] ?? {}) as Record<string, unknown>;
     const sb = (b[section] ?? {}) as Record<string, unknown>;
-    const sharedKeys = [...new Set([
-      ...Object.keys(sa),
-      ...Object.keys(sb),
-    ])].filter((k) => k in sa && k in sb).sort();
+    const sharedKeys = [...new Set([...Object.keys(sa), ...Object.keys(sb)])]
+      .filter((k) => k in sa && k in sb)
+      .sort();
 
     for (const key of sharedKeys) {
       const va = normaliseValue(sa[key]);
@@ -265,9 +267,7 @@ describe("compareStatefulBaselines — unit tests", () => {
       properties: { TableName: "my-table-test" },
     };
     const result = compareStatefulBaselines(a, b);
-    expect(result).toEqual([
-      { logicalId: "TableA", property: "properties" },
-    ]);
+    expect(result).toEqual([{ logicalId: "TableA", property: "properties" }]);
   });
 
   it("resource missing on one side → NOT reported (env-level feature difference)", () => {
@@ -309,9 +309,7 @@ describe("compareStatefulBaselines — unit tests", () => {
     });
     expect(withIgnore).toEqual([]);
     const without = compareStatefulBaselines(a, b);
-    expect(without).toEqual([
-      { logicalId: "Res", property: "properties" },
-    ]);
+    expect(without).toEqual([{ logicalId: "Res", property: "properties" }]);
   });
 
   it("env normalisation handles CDK hash-embedded stack names", () => {
@@ -336,13 +334,13 @@ describe("compareStatefulBaselines — unit tests", () => {
     const a: Baseline = {
       ...emptyBaseline(),
       exports: {
-        "ExportA": { exportName: "citadel-backend-dev:ExportA", value: "x" },
+        ExportA: { exportName: "citadel-backend-dev:ExportA", value: "x" },
       },
     };
     const b: Baseline = {
       ...emptyBaseline(),
       exports: {
-        "ExportA": { exportName: "citadel-backend-test:ExportA", value: "x" },
+        ExportA: { exportName: "citadel-backend-test:ExportA", value: "x" },
       },
     };
     expect(compareStatefulBaselines(a, b)).toEqual([]);
@@ -362,13 +360,15 @@ describe("compareStatefulBaselines — unit tests", () => {
     const a: Baseline = {
       ...emptyBaseline(),
       lambdaRolePolicies: {
-        "FuncA": [{ actions: ["dynamodb:GetItem"], effect: "Allow" }],
+        FuncA: [{ actions: ["dynamodb:GetItem"], effect: "Allow" }],
       },
     };
     const b: Baseline = {
       ...emptyBaseline(),
       lambdaRolePolicies: {
-        "FuncA": [{ actions: ["dynamodb:GetItem", "sqs:SendMessage"], effect: "Allow" }],
+        FuncA: [
+          { actions: ["dynamodb:GetItem", "sqs:SendMessage"], effect: "Allow" },
+        ],
       },
     };
     const result = compareStatefulBaselines(a, b);
@@ -382,14 +382,18 @@ describe("compareStatefulBaselines — unit tests", () => {
     a.resources["R"] = {
       type: "AWS::IAM::Policy",
       properties: {
-        resources: ["arn:aws:ssm:us-west-2:000:parameter/citadel/governance/enforce/dev"],
+        resources: [
+          "arn:aws:ssm:us-west-2:000:parameter/citadel/governance/enforce/dev",
+        ],
       },
     };
     const b = emptyBaseline();
     b.resources["R"] = {
       type: "AWS::IAM::Policy",
       properties: {
-        resources: ["arn:aws:ssm:us-west-2:000:parameter/citadel/governance/enforce/test"],
+        resources: [
+          "arn:aws:ssm:us-west-2:000:parameter/citadel/governance/enforce/test",
+        ],
       },
     };
     expect(compareStatefulBaselines(a, b)).toEqual([]);
@@ -400,14 +404,16 @@ describe("compareStatefulBaselines — unit tests", () => {
     a.resources["Schema"] = {
       type: "AWS::AppSync::GraphQLSchema",
       properties: {
-        DefinitionS3Location: "s3://cdk-hnb659fds-assets-000-us-west-2/aaa111.graphql",
+        DefinitionS3Location:
+          "s3://cdk-hnb659fds-assets-000-us-west-2/aaa111.graphql",
       },
     };
     const b = emptyBaseline();
     b.resources["Schema"] = {
       type: "AWS::AppSync::GraphQLSchema",
       properties: {
-        DefinitionS3Location: "s3://cdk-hnb659fds-assets-000-us-west-2/bbb222.graphql",
+        DefinitionS3Location:
+          "s3://cdk-hnb659fds-assets-000-us-west-2/bbb222.graphql",
       },
     };
     expect(compareStatefulBaselines(a, b)).toEqual([]);
@@ -453,16 +459,12 @@ describe("rail 2 — dual-baseline parity (real files)", () => {
   }
 
   const devBaseline: Baseline = JSON.parse(fs.readFileSync(devPath, "utf-8"));
-  const testBaseline: Baseline = JSON.parse(
-    fs.readFileSync(testPath, "utf-8"),
-  );
+  const testBaseline: Baseline = JSON.parse(fs.readFileSync(testPath, "utf-8"));
 
   it("dev and test baselines agree on all structural properties after env normalisation", () => {
-    const diffs = compareStatefulBaselines(
-      devBaseline,
-      testBaseline,
-      { ignoreFields: BASELINE_IGNORE_FIELDS },
-    );
+    const diffs = compareStatefulBaselines(devBaseline, testBaseline, {
+      ignoreFields: BASELINE_IGNORE_FIELDS,
+    });
 
     if (diffs.length > 0) {
       const summary = diffs

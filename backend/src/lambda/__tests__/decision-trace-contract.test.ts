@@ -17,14 +17,14 @@
  * between the two implementations without diverging in behaviour.
  */
 
-import { readFileSync } from 'fs';
-import { join } from 'path';
+import { readFileSync } from "fs";
+import { join } from "path";
 import {
   buildSteps,
   detectArbitrationPattern,
   detectScopeReduction,
   parseReasonTokens,
-} from '../governance-ui-resolver';
+} from "../governance-ui-resolver";
 
 interface ExpectedStepStatus {
   stepNumber: number;
@@ -58,21 +58,21 @@ interface ContractFixture {
   };
 }
 
-describe('decision-trace decomposition contract (backend)', () => {
+describe("decision-trace decomposition contract (backend)", () => {
   const fixturesPath = join(
     __dirname,
-    '..',
-    '..',
-    '..',
-    'test',
-    'fixtures',
-    'decision-trace-contract.json',
+    "..",
+    "..",
+    "..",
+    "test",
+    "fixtures",
+    "decision-trace-contract.json",
   );
   const fixtures = JSON.parse(
-    readFileSync(fixturesPath, 'utf8'),
+    readFileSync(fixturesPath, "utf8"),
   ) as ContractFixture[];
 
-  it('loads the 5 contract fixtures', () => {
+  it("loads the 5 contract fixtures", () => {
     expect(fixtures).toHaveLength(5);
   });
 

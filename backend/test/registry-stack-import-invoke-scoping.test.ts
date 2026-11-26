@@ -92,20 +92,33 @@ describe("CIT-176 — AgentImportResolver invoke & assume-role scoping", () => {
       agentEventBus,
       appsTable: makeTable("AppsTable", "citadel-apps-test"),
       workflowsTable: makeTable("WorkflowsTable", "citadel-workflows-test"),
-      agentConfigTable: makeTable("AgentConfigTable", "citadel-agent-config-test"),
-      modelCatalogTable: makeTable("ModelCatalogTable", "citadel-model-catalog-test"),
-      idempotencyTable: makeTable("IdempotencyTable", "citadel-idempotency-test"),
+      agentConfigTable: makeTable(
+        "AgentConfigTable",
+        "citadel-agent-config-test",
+      ),
+      modelCatalogTable: makeTable(
+        "ModelCatalogTable",
+        "citadel-model-catalog-test",
+      ),
+      idempotencyTable: makeTable(
+        "IdempotencyTable",
+        "citadel-idempotency-test",
+      ),
       userPool: new cognito.UserPool(backendStack, "UserPool"),
       adrsTable: makeTable("AdrsTable", "citadel-adrs-test"),
-      organisationTable: makeTable("OrganisationTable", "citadel-organisations-test"),
+      organisationTable: makeTable(
+        "OrganisationTable",
+        "citadel-organisations-test",
+      ),
     });
 
     const template = Template.fromStack(stack);
 
     // Find the agent-import resolver Lambda's role
-    const lambdas = template.findResources(
-      "AWS::Lambda::Function",
-    ) as Record<string, CfnLambdaFunctionResource>;
+    const lambdas = template.findResources("AWS::Lambda::Function") as Record<
+      string,
+      CfnLambdaFunctionResource
+    >;
     const importLambda = Object.values(lambdas).find(
       (l) => l.Properties?.Handler === "agent-import-resolver.handler",
     );
@@ -113,9 +126,10 @@ describe("CIT-176 — AgentImportResolver invoke & assume-role scoping", () => {
     const roleLogicalId = importLambda!.Properties!.Role!["Fn::GetAtt"]![0];
 
     // Collect all IAM policy statements attached to that role
-    const policies = template.findResources(
-      "AWS::IAM::Policy",
-    ) as Record<string, CfnIamPolicyResource>;
+    const policies = template.findResources("AWS::IAM::Policy") as Record<
+      string,
+      CfnIamPolicyResource
+    >;
     importPolicyStatements = [];
     for (const policy of Object.values(policies)) {
       const roles = policy.Properties?.Roles ?? [];
@@ -137,9 +151,9 @@ describe("CIT-176 — AgentImportResolver invoke & assume-role scoping", () => {
     expect(invokeStmt).toBeDefined();
     expect(invokeStmt!.Condition).toBeDefined();
     expect(invokeStmt!.Condition!.StringEquals).toBeDefined();
-    expect(
-      invokeStmt!.Condition!.StringEquals["aws:ResourceAccount"],
-    ).toBe(ACCOUNT);
+    expect(invokeStmt!.Condition!.StringEquals["aws:ResourceAccount"]).toBe(
+      ACCOUNT,
+    );
   });
 
   test("lambda:InvokeFunction and bedrock-agentcore:InvokeAgentRuntime are on separate statements", () => {
@@ -151,9 +165,7 @@ describe("CIT-176 — AgentImportResolver invoke & assume-role scoping", () => {
       const hasBedrockAgentcore = actions.includes(
         "bedrock-agentcore:InvokeAgentRuntime",
       );
-      expect(
-        hasLambdaInvoke && hasBedrockAgentcore,
-      ).toBe(false);
+      expect(hasLambdaInvoke && hasBedrockAgentcore).toBe(false);
     }
   });
 

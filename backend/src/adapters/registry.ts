@@ -5,43 +5,43 @@
  * Wraps existing implementations to conform to the ConnectorAdapter interface.
  */
 
-import { ConnectorAdapter, ConnectorCategory, ConnectorSpec } from './base';
-import { ValidationError } from './errors';
-import { BaseIntegrationAdapter } from './integration/base-integration-adapter';
-import { ConnectionTesterIntegrationAdapter } from './integration/connection-tester-integration-adapter';
+import { ConnectorAdapter, ConnectorCategory, ConnectorSpec } from "./base";
+import { ValidationError } from "./errors";
+import { BaseIntegrationAdapter } from "./integration/base-integration-adapter";
+import { ConnectionTesterIntegrationAdapter } from "./integration/connection-tester-integration-adapter";
 
 // Import datastore adapters (now implement ConnectorAdapter directly)
-import { S3Adapter } from '../lambda/adapters/s3-adapter';
-import { DynamoDBAdapter } from '../lambda/adapters/dynamodb-adapter';
-import { RdsAdapter } from '../lambda/adapters/rds-adapter';
-import { AuroraAdapter } from '../lambda/adapters/aurora-adapter';
-import { RedshiftAdapter } from '../lambda/adapters/redshift-adapter';
-import { OpenSearchAdapter } from '../lambda/adapters/opensearch-adapter';
-import { NeptuneAdapter } from '../lambda/adapters/neptune-adapter';
-import { TimestreamAdapter } from '../lambda/adapters/timestream-adapter';
-import { ElastiCacheAdapter } from '../lambda/adapters/elasticache-adapter';
-import { KeyspacesAdapter } from '../lambda/adapters/keyspaces-adapter';
-import { DocumentDBAdapter } from '../lambda/adapters/documentdb-adapter';
-import { LakeFormationAdapter } from '../lambda/adapters/lake-formation-adapter';
-import { S3TablesAdapter } from '../lambda/adapters/s3-tables-adapter';
-import { SageMakerLakehouseAdapter } from '../lambda/adapters/sagemaker-lakehouse-adapter';
-import { SageMakerFeatureStoreAdapter } from '../lambda/adapters/sagemaker-feature-store-adapter';
-import { KnowledgeBaseAdapter } from '../lambda/adapters/knowledge-base-adapter';
-import { SnowflakeAdapter } from '../lambda/adapters/snowflake-adapter';
-import { DatabricksAdapter } from '../lambda/adapters/databricks-adapter';
-import { ExternalDatabaseAdapter } from '../lambda/adapters/external-adapter';
+import { S3Adapter } from "../lambda/adapters/s3-adapter";
+import { DynamoDBAdapter } from "../lambda/adapters/dynamodb-adapter";
+import { RdsAdapter } from "../lambda/adapters/rds-adapter";
+import { AuroraAdapter } from "../lambda/adapters/aurora-adapter";
+import { RedshiftAdapter } from "../lambda/adapters/redshift-adapter";
+import { OpenSearchAdapter } from "../lambda/adapters/opensearch-adapter";
+import { NeptuneAdapter } from "../lambda/adapters/neptune-adapter";
+import { TimestreamAdapter } from "../lambda/adapters/timestream-adapter";
+import { ElastiCacheAdapter } from "../lambda/adapters/elasticache-adapter";
+import { KeyspacesAdapter } from "../lambda/adapters/keyspaces-adapter";
+import { DocumentDBAdapter } from "../lambda/adapters/documentdb-adapter";
+import { LakeFormationAdapter } from "../lambda/adapters/lake-formation-adapter";
+import { S3TablesAdapter } from "../lambda/adapters/s3-tables-adapter";
+import { SageMakerLakehouseAdapter } from "../lambda/adapters/sagemaker-lakehouse-adapter";
+import { SageMakerFeatureStoreAdapter } from "../lambda/adapters/sagemaker-feature-store-adapter";
+import { KnowledgeBaseAdapter } from "../lambda/adapters/knowledge-base-adapter";
+import { SnowflakeAdapter } from "../lambda/adapters/snowflake-adapter";
+import { DatabricksAdapter } from "../lambda/adapters/databricks-adapter";
+import { ExternalDatabaseAdapter } from "../lambda/adapters/external-adapter";
 
 // Import integration connector specs
-import { BACKEND_CONNECTOR_REGISTRY } from '../utils/connector-registry';
+import { BACKEND_CONNECTOR_REGISTRY } from "../utils/connector-registry";
 
 function buildDataStoreAdapters(): Record<string, ConnectorAdapter> {
   return {
     S3: new S3Adapter(),
     DYNAMODB: new DynamoDBAdapter(),
-    RDS_POSTGRESQL: new RdsAdapter('postgres'),
-    RDS_MYSQL: new RdsAdapter('mysql'),
-    AURORA_POSTGRESQL: new AuroraAdapter('postgres'),
-    AURORA_MYSQL: new AuroraAdapter('mysql'),
+    RDS_POSTGRESQL: new RdsAdapter("postgres"),
+    RDS_MYSQL: new RdsAdapter("mysql"),
+    AURORA_POSTGRESQL: new AuroraAdapter("postgres"),
+    AURORA_MYSQL: new AuroraAdapter("mysql"),
     REDSHIFT: new RedshiftAdapter(),
     OPENSEARCH: new OpenSearchAdapter(),
     NEPTUNE: new NeptuneAdapter(),
@@ -56,12 +56,12 @@ function buildDataStoreAdapters(): Record<string, ConnectorAdapter> {
     KNOWLEDGE_BASE: new KnowledgeBaseAdapter(),
     SNOWFLAKE: new SnowflakeAdapter(),
     DATABRICKS: new DatabricksAdapter(),
-    EXTERNAL_POSTGRESQL: new ExternalDatabaseAdapter('postgresql'),
-    EXTERNAL_MYSQL: new ExternalDatabaseAdapter('mysql'),
-    EXTERNAL_MONGODB: new ExternalDatabaseAdapter('mongodb'),
-    EXTERNAL_ELASTICSEARCH: new ExternalDatabaseAdapter('elasticsearch'),
-    EXTERNAL_REDIS: new ExternalDatabaseAdapter('redis'),
-    EXTERNAL_API: new ExternalDatabaseAdapter('api'),
+    EXTERNAL_POSTGRESQL: new ExternalDatabaseAdapter("postgresql"),
+    EXTERNAL_MYSQL: new ExternalDatabaseAdapter("mysql"),
+    EXTERNAL_MONGODB: new ExternalDatabaseAdapter("mongodb"),
+    EXTERNAL_ELASTICSEARCH: new ExternalDatabaseAdapter("elasticsearch"),
+    EXTERNAL_REDIS: new ExternalDatabaseAdapter("redis"),
+    EXTERNAL_API: new ExternalDatabaseAdapter("api"),
   };
 }
 
@@ -78,16 +78,16 @@ function buildDataStoreAdapters(): Record<string, ConnectorAdapter> {
  * `utils/connection-tester.ts` first, then add its key to this set.
  */
 const CONNECTION_TESTER_BACKED_TYPES = new Set<string>([
-  'CONFLUENCE',
-  'SERVICENOW',
-  'JIRA',
-  'SLACK',
-  'MICROSOFT',
-  'ZENDESK',
-  'PAGERDUTY',
-  'AWS_LAMBDA',
-  'AWS_SMITHY',
-  'MCP_SERVER',
+  "CONFLUENCE",
+  "SERVICENOW",
+  "JIRA",
+  "SLACK",
+  "MICROSOFT",
+  "ZENDESK",
+  "PAGERDUTY",
+  "AWS_LAMBDA",
+  "AWS_SMITHY",
+  "MCP_SERVER",
 ]);
 
 function buildIntegrationAdapters(): Record<string, ConnectorAdapter> {

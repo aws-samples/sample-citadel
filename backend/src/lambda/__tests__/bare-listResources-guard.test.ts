@@ -63,12 +63,12 @@ describe("bare listResources( guard — no mutating call sites", () => {
       for (const entry of entries) {
         if (entry.isDirectory()) {
           scanDir(path.join(dir, entry.name), `${prefix}${entry.name}/`);
-        } else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".d.ts")) {
+        } else if (
+          entry.name.endsWith(".ts") &&
+          !entry.name.endsWith(".d.ts")
+        ) {
           if (ADAPTER_ALLOWLIST[entry.name]) continue;
-          const content = fs.readFileSync(
-            path.join(dir, entry.name),
-            "utf-8",
-          );
+          const content = fs.readFileSync(path.join(dir, entry.name), "utf-8");
           const barePattern = /\.listResources\s*\(/g;
           const checkedPattern = /\.listResourcesChecked\s*\(/g;
           const bareMatches = content.match(barePattern) ?? [];

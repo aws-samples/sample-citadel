@@ -483,11 +483,26 @@ describe("agent-config-resolver — tenancy + role gate (finding 1fcfd11e)", () 
       mockAssertProjectOrgAccess.mockResolvedValue(undefined);
       // Provide one GSI row so the zero-records ValidationError does not fire.
       dynamoMock.on(QueryCommand).resolves({
-        Items: [{ agentId: "cache-r1", registryRecordId: "r1", sourceProjectId: "proj-1", orgId: "test-org-a", name: "Agent One" }],
+        Items: [
+          {
+            agentId: "cache-r1",
+            registryRecordId: "r1",
+            sourceProjectId: "proj-1",
+            orgId: "test-org-a",
+            name: "Agent One",
+          },
+        ],
       });
       mockGetResource.mockResolvedValue({
-        recordId: "r1", name: "Agent One", status: "APPROVED",
-        customDescriptorContent: JSON.stringify({ orgId: "test-org-a", categories: [], state: "active", manifest: {} }),
+        recordId: "r1",
+        name: "Agent One",
+        status: "APPROVED",
+        customDescriptorContent: JSON.stringify({
+          orgId: "test-org-a",
+          categories: [],
+          state: "active",
+          manifest: {},
+        }),
       });
 
       await handler(
@@ -526,13 +541,28 @@ describe("agent-config-resolver — tenancy + role gate (finding 1fcfd11e)", () 
     test("PINNING: activateProjectAgents(projectId) itself remains callable with NO event (intake-orchestration-resolver.ts's internal call site)", async () => {
       // Provide one GSI row so the zero-records ValidationError does not fire.
       dynamoMock.on(QueryCommand).resolves({
-        Items: [{ agentId: "cache-r1", registryRecordId: "r1", sourceProjectId: "proj-1", orgId: "org-a", name: "Agent One" }],
+        Items: [
+          {
+            agentId: "cache-r1",
+            registryRecordId: "r1",
+            sourceProjectId: "proj-1",
+            orgId: "org-a",
+            name: "Agent One",
+          },
+        ],
       });
       // The record is already APPROVED, so it lands in alreadyActive.
       // manifest:{} is required for resolveKind to infer kind=agent (not tool).
       mockGetResource.mockResolvedValue({
-        recordId: "r1", name: "Agent One", status: "APPROVED",
-        customDescriptorContent: JSON.stringify({ orgId: "org-a", categories: [], state: "active", manifest: {} }),
+        recordId: "r1",
+        name: "Agent One",
+        status: "APPROVED",
+        customDescriptorContent: JSON.stringify({
+          orgId: "org-a",
+          categories: [],
+          state: "active",
+          manifest: {},
+        }),
       });
 
       const result = await activateProjectAgents("proj-1");
