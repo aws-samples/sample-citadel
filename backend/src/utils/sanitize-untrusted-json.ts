@@ -29,7 +29,7 @@
  * sanitizeUntrustedAgentOutput are reused safely (String.prototype.replace
  * resets lastIndex per call).
  */
-import { sanitizeUntrustedAgentOutput } from "./sanitize-agent-output";
+import { sanitizeUntrustedAgentOutput } from './sanitize-agent-output';
 
 export type JsonPrimitive = string | number | boolean | null;
 export interface JsonObject {
@@ -105,7 +105,7 @@ export function sanitizeUntrustedJson(
   };
 
   const sanitizeKey = (key: string): string => {
-    let k = key.replace(CONTROL_CHARS, "");
+    let k = key.replace(CONTROL_CHARS, '');
     if (k.length > maxKeyLength) {
       k = k.slice(0, maxKeyLength);
       truncated = true;
@@ -131,10 +131,9 @@ export function sanitizeUntrustedJson(
     if (node === null) return null;
 
     const t = typeof node;
-    if (t === "string") return sanitizeStringValue(node as string);
-    if (t === "number")
-      return Number.isFinite(node as number) ? (node as number) : null;
-    if (t === "boolean") return node as boolean;
+    if (t === 'string') return sanitizeStringValue(node as string);
+    if (t === 'number') return Number.isFinite(node as number) ? (node as number) : null;
+    if (t === 'boolean') return node as boolean;
 
     if (Array.isArray(node)) {
       const out: JsonArray = [];
@@ -151,11 +150,9 @@ export function sanitizeUntrustedJson(
       return out;
     }
 
-    if (t === "object") {
+    if (t === 'object') {
       const out: JsonObject = {};
-      for (const [rawKey, rawVal] of Object.entries(
-        node as Record<string, unknown>,
-      )) {
+      for (const [rawKey, rawVal] of Object.entries(node as Record<string, unknown>)) {
         if (nodeCount >= maxNodes) {
           truncated = true;
           break;

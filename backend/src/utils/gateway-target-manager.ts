@@ -34,8 +34,8 @@ import {
   GetGatewayTargetCommand,
   GetGatewayTargetCommandOutput,
   OAuthCredentialProvider,
-} from "@aws-sdk/client-bedrock-agentcore-control";
-import type { McpServerOauth2Config } from "./connector-registry";
+} from '@aws-sdk/client-bedrock-agentcore-control';
+import type { McpServerOauth2Config } from './connector-registry';
 import {
   createOrUpsertApiKeyProvider,
   createOrUpsertOauth2Provider,
@@ -43,8 +43,8 @@ import {
   deleteOauth2Provider,
   type CredentialProviderResult,
   type ResolvedOauth2Endpoints,
-} from "./credential-provider-manager";
-import { discoverOAuthEndpoints } from "./oauth-metadata";
+} from './credential-provider-manager';
+import { discoverOAuthEndpoints } from './oauth-metadata';
 
 // ────────────────────────────────────────────────────────────────────────
 // Public types
@@ -52,7 +52,7 @@ import { discoverOAuthEndpoints } from "./oauth-metadata";
 
 export interface GatewayTargetConfig {
   gatewayId: string;
-  targetType: "lambda" | "smithyModel" | "mcpServer";
+  targetType: 'lambda' | 'smithyModel' | 'mcpServer';
   targetPayload: unknown;
   credentials?: unknown;
 }
@@ -87,11 +87,11 @@ export interface BuildTargetPayloadInput {
   /** Required for MCP_SERVER (API_KEY or OAUTH2). Ignored by Lambda/Smithy. */
   credentialProviderArn?: string;
   /** Required for MCP_SERVER. Ignored by Lambda/Smithy. */
-  credentialProviderType?: "API_KEY" | "OAUTH2";
+  credentialProviderType?: 'API_KEY' | 'OAUTH2';
   /** Required for MCP_SERVER + OAUTH2. */
   oauthSettings?: {
     scopes: string[];
-    grantType: "CLIENT_CREDENTIALS" | "AUTHORIZATION_CODE" | "TOKEN_EXCHANGE";
+    grantType: 'CLIENT_CREDENTIALS' | 'AUTHORIZATION_CODE' | 'TOKEN_EXCHANGE';
     defaultReturnUrl?: string;
   };
 }
@@ -109,19 +109,19 @@ export function validateToolSchema(schema: {
   inputSchema?: { type?: unknown; [key: string]: unknown } | null;
   [key: string]: unknown;
 }): void {
-  if (!schema.name || typeof schema.name !== "string") {
+  if (!schema.name || typeof schema.name !== 'string') {
     throw new Error('Tool schema must include "name" field');
   }
 
-  if (!schema.description || typeof schema.description !== "string") {
+  if (!schema.description || typeof schema.description !== 'string') {
     throw new Error('Tool schema must include "description" field');
   }
 
-  if (!schema.inputSchema || typeof schema.inputSchema !== "object") {
+  if (!schema.inputSchema || typeof schema.inputSchema !== 'object') {
     throw new Error('Tool schema must include "inputSchema" field');
   }
 
-  if (schema.inputSchema.type !== "object") {
+  if (schema.inputSchema.type !== 'object') {
     throw new Error('Tool schema inputSchema must be of type "object"');
   }
 }
@@ -146,7 +146,7 @@ export function validateToolSchema(schema: {
 export async function resolveOauth2Endpoints(
   config: McpServerOauth2Config,
 ): Promise<ResolvedOauth2Endpoints> {
-  const requirePKCE = config.grantType === "AUTHORIZATION_CODE";
+  const requirePKCE = config.grantType === 'AUTHORIZATION_CODE';
 
   let resolved: ResolvedOauth2Endpoints | null = null;
 
@@ -168,7 +168,7 @@ export async function resolveOauth2Endpoints(
   if (!resolved) {
     if (!config.tokenUrl) {
       throw new Error(
-        "Cannot resolve OAuth endpoints: discovery returned no metadata and no explicit tokenUrl was provided",
+        'Cannot resolve OAuth endpoints: discovery returned no metadata and no explicit tokenUrl was provided',
       );
     }
     resolved = {
@@ -181,7 +181,7 @@ export async function resolveOauth2Endpoints(
 
   if (requirePKCE && !resolved.authorizationEndpoint) {
     throw new Error(
-      "Cannot resolve OAuth endpoints: AUTHORIZATION_CODE grant requires an authorizationEndpoint (set authorizationUrl or use a discoveryUrl that exposes one)",
+      'Cannot resolve OAuth endpoints: AUTHORIZATION_CODE grant requires an authorizationEndpoint (set authorizationUrl or use a discoveryUrl that exposes one)',
     );
   }
 
@@ -207,16 +207,13 @@ export async function resolveOauth2Endpoints(
  */
 export async function provisionCredentialProvider(
   integrationId: string,
-  type: "API_KEY" | "OAUTH2",
+  type: 'API_KEY' | 'OAUTH2',
   credentials: unknown,
 ): Promise<CredentialProviderResult> {
-  if (type === "API_KEY") {
-    const apiKey = (credentials as { apiKey?: unknown } | null | undefined)
-      ?.apiKey;
-    if (!credentials || typeof apiKey !== "string" || apiKey.length === 0) {
-      throw new Error(
-        "provisionCredentialProvider(API_KEY): credentials.apiKey is required",
-      );
+  if (type === 'API_KEY') {
+    const apiKey = (credentials as { apiKey?: unknown } | null | undefined)?.apiKey;
+    if (!credentials || typeof apiKey !== 'string' || apiKey.length === 0) {
+      throw new Error('provisionCredentialProvider(API_KEY): credentials.apiKey is required');
     }
     return createOrUpsertApiKeyProvider({
       integrationId,
@@ -253,9 +250,9 @@ export async function provisionCredentialProvider(
  */
 export async function deprovisionCredentialProvider(
   integrationId: string,
-  type: "API_KEY" | "OAUTH2",
+  type: 'API_KEY' | 'OAUTH2',
 ): Promise<void> {
-  if (type === "OAUTH2") {
+  if (type === 'OAUTH2') {
     await deleteOauth2Provider(integrationId);
     return;
   }
@@ -292,7 +289,7 @@ export function buildLambdaTargetPayload(
       },
     },
     credentialProviderConfigurations: [
-      { credentialProviderType: "GATEWAY_IAM_ROLE" as const },
+      { credentialProviderType: 'GATEWAY_IAM_ROLE' as const },
     ],
   };
 }
@@ -317,9 +314,9 @@ export function buildSmithyTargetPayload(
           serviceType: config.serviceType as string,
         },
       },
-    } as unknown as CreateGatewayTargetCommandInput["targetConfiguration"],
+    } as unknown as CreateGatewayTargetCommandInput['targetConfiguration'],
     credentialProviderConfigurations: [
-      { credentialProviderType: "GATEWAY_IAM_ROLE" as const },
+      { credentialProviderType: 'GATEWAY_IAM_ROLE' as const },
     ],
   };
 }
@@ -349,22 +346,20 @@ export function buildMCPServerTargetPayload(
         serverUrl: config.serverUrl as string,
       },
     },
-  } as unknown as CreateGatewayTargetCommandInput["targetConfiguration"];
+  } as unknown as CreateGatewayTargetCommandInput['targetConfiguration'];
 
   let credentialProviderConfigurations: NonNullable<
-    CreateGatewayTargetCommandInput["credentialProviderConfigurations"]
+    CreateGatewayTargetCommandInput['credentialProviderConfigurations']
   >;
 
-  if (input.credentialProviderType === "OAUTH2") {
+  if (input.credentialProviderType === 'OAUTH2') {
     if (!input.credentialProviderArn) {
       throw new Error(
-        "buildMCPServerTargetPayload(OAUTH2): credentialProviderArn is required",
+        'buildMCPServerTargetPayload(OAUTH2): credentialProviderArn is required',
       );
     }
     if (!input.oauthSettings) {
-      throw new Error(
-        "buildMCPServerTargetPayload(OAUTH2): oauthSettings is required",
-      );
+      throw new Error('buildMCPServerTargetPayload(OAUTH2): oauthSettings is required');
     }
     const oauthCredentialProvider: OAuthCredentialProvider = {
       providerArn: input.credentialProviderArn,
@@ -372,30 +367,29 @@ export function buildMCPServerTargetPayload(
       grantType: input.oauthSettings.grantType,
     };
     if (input.oauthSettings.defaultReturnUrl) {
-      oauthCredentialProvider.defaultReturnUrl =
-        input.oauthSettings.defaultReturnUrl;
+      oauthCredentialProvider.defaultReturnUrl = input.oauthSettings.defaultReturnUrl;
     }
     credentialProviderConfigurations = [
       {
-        credentialProviderType: "OAUTH",
+        credentialProviderType: 'OAUTH',
         credentialProvider: { oauthCredentialProvider },
       },
     ];
-  } else if (input.credentialProviderType === "API_KEY") {
+  } else if (input.credentialProviderType === 'API_KEY') {
     if (!input.credentialProviderArn) {
       throw new Error(
-        "buildMCPServerTargetPayload(API_KEY): credentialProviderArn is required",
+        'buildMCPServerTargetPayload(API_KEY): credentialProviderArn is required',
       );
     }
     credentialProviderConfigurations = [
       {
-        credentialProviderType: "API_KEY",
+        credentialProviderType: 'API_KEY',
         credentialProvider: {
           apiKeyCredentialProvider: {
             providerArn: input.credentialProviderArn,
-            credentialLocation: "HEADER",
-            credentialParameterName: "Authorization",
-            credentialPrefix: "Bearer",
+            credentialLocation: 'HEADER',
+            credentialParameterName: 'Authorization',
+            credentialPrefix: 'Bearer',
           },
         },
       },
@@ -439,7 +433,7 @@ async function deleteTargetInternal(targetId: string): Promise<void> {
     }),
   );
 
-  console.log("Gateway target deleted:", { targetId });
+  console.log('Gateway target deleted:', { targetId });
 }
 
 /**
@@ -457,7 +451,7 @@ async function deleteTargetInternal(targetId: string): Promise<void> {
 export async function deleteTargetAndProvider(input: {
   targetId: string;
   integrationId: string;
-  credentialProviderType: "API_KEY" | "OAUTH2";
+  credentialProviderType: 'API_KEY' | 'OAUTH2';
 }): Promise<void> {
   // 1. Delete the gateway target FIRST. If this throws, we do NOT proceed —
   //    the credential provider is still required by the live target.
@@ -465,18 +459,13 @@ export async function deleteTargetAndProvider(input: {
 
   // 2. Now that the target is gone, delete the credential provider.
   //    Errors here are surfaced to the caller (no silent swallow).
-  await deprovisionCredentialProvider(
-    input.integrationId,
-    input.credentialProviderType,
-  );
+  await deprovisionCredentialProvider(input.integrationId, input.credentialProviderType);
 }
 
 /**
  * Get an AgentCore Gateway target by id.
  */
-export async function getTarget(
-  targetId: string,
-): Promise<GetGatewayTargetCommandOutput> {
+export async function getTarget(targetId: string): Promise<GetGatewayTargetCommandOutput> {
   const gatewayId = getRequiredGatewayId();
 
   const agentCoreClient = new BedrockAgentCoreControlClient({
@@ -501,7 +490,7 @@ function getRequiredGatewayId(): string {
   const gatewayId = process.env.AGENTCORE_GATEWAY_ID;
   if (!gatewayId) {
     throw new Error(
-      "AgentCore Gateway not configured. Please set AGENTCORE_GATEWAY_ID environment variable",
+      'AgentCore Gateway not configured. Please set AGENTCORE_GATEWAY_ID environment variable',
     );
   }
   return gatewayId;

@@ -7,7 +7,7 @@
  *
  * Requirements: 2.3, 2.4, 2.5, 2.6
  */
-import { v4 as uuidv4 } from "uuid";
+import { v4 as uuidv4 } from 'uuid';
 
 export interface AppContext {
   appId: string;
@@ -18,10 +18,10 @@ export interface AppContext {
 export interface InvokeEventDetail {
   body: Record<string, unknown>;
   headers: {
-    "x-citadel-group-id": string;
-    "x-citadel-app-name": string;
-    "x-citadel-api-key-id": string;
-    "x-citadel-timestamp": string;
+    'x-citadel-group-id': string;
+    'x-citadel-app-name': string;
+    'x-citadel-api-key-id': string;
+    'x-citadel-timestamp': string;
   };
   requestId: string;
 }
@@ -42,10 +42,10 @@ export function buildInvokeEventDetail(
   return {
     body: requestBody,
     headers: {
-      "x-citadel-group-id": `APP#${appContext.appId}`,
-      "x-citadel-app-name": appContext.appName,
-      "x-citadel-api-key-id": apiKeyId,
-      "x-citadel-timestamp": new Date().toISOString(),
+      'x-citadel-group-id': `APP#${appContext.appId}`,
+      'x-citadel-app-name': appContext.appName,
+      'x-citadel-api-key-id': apiKeyId,
+      'x-citadel-timestamp': new Date().toISOString(),
     },
     requestId: uuidv4(),
   };

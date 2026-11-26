@@ -44,6 +44,7 @@ interface AssignUserRoleInput {
   organization?: string;
 }
 
+
 interface AdminCreateUserInput {
   email: string;
   givenName: string;
@@ -654,8 +655,7 @@ async function adminResetUserPassword(
 
     return {
       success: true,
-      message:
-        "Password reset successfully. All existing sessions have been revoked.",
+      message: "Password reset successfully. All existing sessions have been revoked.",
     };
   } catch (error: unknown) {
     console.error("Error resetting password:", error);

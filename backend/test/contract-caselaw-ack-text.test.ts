@@ -11,36 +11,36 @@
  * literal value (mirrors the Wave 2.B / 2.E / 4.C.2 ack drift tests).
  */
 
-import * as fs from "fs";
-import * as path from "path";
+import * as fs from 'fs';
+import * as path from 'path';
 
-describe("CASELAW_ACKNOWLEDGEMENT_TEXT cross-package contract", () => {
+describe('CASELAW_ACKNOWLEDGEMENT_TEXT cross-package contract', () => {
   const ACK =
-    "I understand this changes the case-law precedent used at engine step 1";
+    'I understand this changes the case-law precedent used at engine step 1';
 
-  it("appears verbatim in the backend resolver", () => {
+  it('appears verbatim in the backend resolver', () => {
     const file = fs.readFileSync(
-      path.resolve(__dirname, "../src/lambda/governance-ui-resolver.ts"),
-      "utf8",
+      path.resolve(__dirname, '../src/lambda/governance-ui-resolver.ts'),
+      'utf8',
     );
     expect(file).toContain(ACK);
   });
 
-  it("appears verbatim in the frontend service", () => {
+  it('appears verbatim in the frontend service', () => {
     const file = fs.readFileSync(
       path.resolve(
         __dirname,
-        "../../frontend/src/services/governanceService.ts",
+        '../../frontend/src/services/governanceService.ts',
       ),
-      "utf8",
+      'utf8',
     );
     expect(file).toContain(ACK);
   });
 
-  it("the constant exported from the backend resolver matches the verbatim text", () => {
+  it('the constant exported from the backend resolver matches the verbatim text', () => {
     const file = fs.readFileSync(
-      path.resolve(__dirname, "../src/lambda/governance-ui-resolver.ts"),
-      "utf8",
+      path.resolve(__dirname, '../src/lambda/governance-ui-resolver.ts'),
+      'utf8',
     );
     const match = /CASELAW_ACKNOWLEDGEMENT_TEXT\s*=\s*['"]([^'"]+)['"]/.exec(
       file,
@@ -49,13 +49,13 @@ describe("CASELAW_ACKNOWLEDGEMENT_TEXT cross-package contract", () => {
     expect(match![1]).toEqual(ACK);
   });
 
-  it("the constant exported from the frontend service matches the verbatim text", () => {
+  it('the constant exported from the frontend service matches the verbatim text', () => {
     const file = fs.readFileSync(
       path.resolve(
         __dirname,
-        "../../frontend/src/services/governanceService.ts",
+        '../../frontend/src/services/governanceService.ts',
       ),
-      "utf8",
+      'utf8',
     );
     const match = /CASELAW_ACKNOWLEDGEMENT_TEXT\s*=\s*['"]([^'"]+)['"]/.exec(
       file,

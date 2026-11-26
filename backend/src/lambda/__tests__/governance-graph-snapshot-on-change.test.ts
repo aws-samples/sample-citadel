@@ -10,43 +10,43 @@
  * Trigger=OnChange CloudWatch dimension.
  */
 
-process.env.ENVIRONMENT = "test";
-process.env.AUTHORITY_UNITS_TABLE = "citadel-authority-units-test";
-process.env.COMPOSITION_CONTRACTS_TABLE = "citadel-composition-contracts-test";
-process.env.CONSTITUTIONAL_LAYERS_TABLE = "citadel-constitutional-layers-test";
-process.env.CASE_LAW_TABLE = "citadel-case-law-test";
-process.env.GRAPH_SNAPSHOTS_TABLE = "citadel-governance-graph-snapshots-test";
+process.env.ENVIRONMENT = 'test';
+process.env.AUTHORITY_UNITS_TABLE = 'citadel-authority-units-test';
+process.env.COMPOSITION_CONTRACTS_TABLE =
+  'citadel-composition-contracts-test';
+process.env.CONSTITUTIONAL_LAYERS_TABLE =
+  'citadel-constitutional-layers-test';
+process.env.CASE_LAW_TABLE = 'citadel-case-law-test';
+process.env.GRAPH_SNAPSHOTS_TABLE =
+  'citadel-governance-graph-snapshots-test';
 
-import type { DynamoDBRecord, DynamoDBStreamEvent } from "aws-lambda";
-import { mockClient } from "aws-sdk-client-mock";
+import type { DynamoDBRecord, DynamoDBStreamEvent } from 'aws-lambda';
+import { mockClient } from 'aws-sdk-client-mock';
 import {
   DynamoDBDocumentClient,
   PutCommand,
   ScanCommand,
   type ScanCommandInput,
-} from "@aws-sdk/lib-dynamodb";
-import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
+} from '@aws-sdk/lib-dynamodb';
+import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import {
   CloudWatchClient,
   PutMetricDataCommand,
-} from "@aws-sdk/client-cloudwatch";
+} from '@aws-sdk/client-cloudwatch';
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 const ssmMock = mockClient(SSMClient);
 const cwMock = mockClient(CloudWatchClient);
 
-import {
-  handler,
-  __resetClientsForTest,
-} from "../governance-graph-snapshot-on-change";
+import { handler, __resetClientsForTest } from '../governance-graph-snapshot-on-change';
 
 beforeEach(() => {
   ddbMock.reset();
   ssmMock.reset();
   cwMock.reset();
   __resetClientsForTest();
-  jest.spyOn(console, "error").mockImplementation();
-  jest.spyOn(console, "log").mockImplementation();
+  jest.spyOn(console, 'error').mockImplementation();
+  jest.spyOn(console, 'log').mockImplementation();
 });
 
 afterEach(() => {
@@ -75,35 +75,32 @@ interface SnapshotRow {
 }
 
 /** Build a minimal DynamoDB stream event with N synthetic records. */
-function streamEvent(
-  n: number,
-  eventName: "INSERT" | "MODIFY" | "REMOVE" = "MODIFY",
-): DynamoDBStreamEvent {
+function streamEvent(n: number, eventName: 'INSERT' | 'MODIFY' | 'REMOVE' = 'MODIFY'): DynamoDBStreamEvent {
   const records: DynamoDBRecord[] = Array.from({ length: n }, (_, i) => ({
     eventID: `evt-${i}`,
     eventName,
-    eventVersion: "1.1",
-    eventSource: "aws:dynamodb",
-    awsRegion: "us-east-1",
+    eventVersion: '1.1',
+    eventSource: 'aws:dynamodb',
+    awsRegion: 'us-east-1',
     dynamodb: {
       ApproximateCreationDateTime: 1700000000 + i,
       Keys: { unitId: { S: `u-${i}` } },
       NewImage: { unitId: { S: `u-${i}` }, name: { S: `unit-${i}` } },
       SequenceNumber: `${1000 + i}`,
       SizeBytes: 64,
-      StreamViewType: "NEW_AND_OLD_IMAGES",
+      StreamViewType: 'NEW_AND_OLD_IMAGES',
     },
   }));
   return { Records: records };
 }
 
-describe("governance-graph-snapshot-on-change handler", () => {
-  test("empty event — returns ok with reason=empty, no scans, no put, no metric", async () => {
+describe('governance-graph-snapshot-on-change handler', () => {
+  test('empty event — returns ok with reason=empty, no scans, no put, no metric', async () => {
     const result = await handler({ Records: [] });
 
     expect(result.ok).toBe(true);
     expect(result.snapshotId).toBeNull();
-    expect(result.reason).toBe("empty");
+    expect(result.reason).toBe('empty');
     expect(result.recordCount).toBe(0);
     expect(ddbMock.commandCalls(ScanCommand)).toHaveLength(0);
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
@@ -111,37 +108,39 @@ describe("governance-graph-snapshot-on-change handler", () => {
     expect(cwMock.commandCalls(PutMetricDataCommand)).toHaveLength(0);
   });
 
-  test("settings disabled — reason=disabled, no scans, no put, no metric", async () => {
-    stubSettings('{"enabled":false,"retentionDays":30,"captureMode":"daily"}');
+  test('settings disabled — reason=disabled, no scans, no put, no metric', async () => {
+    stubSettings(
+      '{"enabled":false,"retentionDays":30,"captureMode":"daily"}',
+    );
 
     const result = await handler(streamEvent(1));
 
     expect(result.ok).toBe(true);
     expect(result.snapshotId).toBeNull();
-    expect(result.reason).toBe("disabled");
+    expect(result.reason).toBe('disabled');
     expect(result.recordCount).toBe(1);
     expect(ddbMock.commandCalls(ScanCommand)).toHaveLength(0);
     expect(ddbMock.commandCalls(PutCommand)).toHaveLength(0);
     expect(cwMock.commandCalls(PutMetricDataCommand)).toHaveLength(0);
   });
 
-  test("settings enabled, single record — scans all 4 tables, writes 1 snapshot", async () => {
+  test('settings enabled, single record — scans all 4 tables, writes 1 snapshot', async () => {
     stubSettings(
       '{"enabled":true,"retentionDays":7,"captureMode":"on-change"}',
     );
     ddbMock.on(ScanCommand).callsFake((input: ScanCommandInput) => {
-      const t: string = input?.TableName ?? "";
-      if (t === "citadel-authority-units-test") {
-        return Promise.resolve({ Items: [{ unitId: "u-1" }] });
+      const t: string = input?.TableName ?? '';
+      if (t === 'citadel-authority-units-test') {
+        return Promise.resolve({ Items: [{ unitId: 'u-1' }] });
       }
-      if (t === "citadel-composition-contracts-test") {
-        return Promise.resolve({ Items: [{ contractId: "c-1" }] });
+      if (t === 'citadel-composition-contracts-test') {
+        return Promise.resolve({ Items: [{ contractId: 'c-1' }] });
       }
-      if (t === "citadel-constitutional-layers-test") {
-        return Promise.resolve({ Items: [{ layerId: "l-1" }] });
+      if (t === 'citadel-constitutional-layers-test') {
+        return Promise.resolve({ Items: [{ layerId: 'l-1' }] });
       }
-      if (t === "citadel-case-law-test") {
-        return Promise.resolve({ Items: [{ entryId: "e-1" }] });
+      if (t === 'citadel-case-law-test') {
+        return Promise.resolve({ Items: [{ entryId: 'e-1' }] });
       }
       return Promise.resolve({ Items: [] });
     });
@@ -152,40 +151,42 @@ describe("governance-graph-snapshot-on-change handler", () => {
     const after = Math.floor(Date.now() / 1000);
 
     expect(result.ok).toBe(true);
-    expect(typeof result.snapshotId).toBe("string");
+    expect(typeof result.snapshotId).toBe('string');
     expect(result.recordCount).toBe(1);
 
     const scanCalls = ddbMock.commandCalls(ScanCommand);
-    const tables = new Set(scanCalls.map((c) => c.args[0].input.TableName));
-    expect(tables).toContain("citadel-authority-units-test");
-    expect(tables).toContain("citadel-composition-contracts-test");
-    expect(tables).toContain("citadel-constitutional-layers-test");
-    expect(tables).toContain("citadel-case-law-test");
+    const tables = new Set(
+      scanCalls.map((c) => c.args[0].input.TableName),
+    );
+    expect(tables).toContain('citadel-authority-units-test');
+    expect(tables).toContain('citadel-composition-contracts-test');
+    expect(tables).toContain('citadel-constitutional-layers-test');
+    expect(tables).toContain('citadel-case-law-test');
 
     const puts = ddbMock.commandCalls(PutCommand);
     expect(puts).toHaveLength(1);
     const item = puts[0].args[0].input.Item as unknown as SnapshotRow;
-    expect(item.kind).toBe("full");
-    expect(item.trigger).toBe("OnChange");
+    expect(item.kind).toBe('full');
+    expect(item.trigger).toBe('OnChange');
     expect(item.snapshotId).toBe(result.snapshotId);
     expect(item.timestamp).toBeGreaterThanOrEqual(before);
     expect(item.timestamp).toBeLessThanOrEqual(after);
     expect(item.expiresAt).toBe(item.timestamp + 7 * 86400);
-    expect(item.env).toBe("test");
-    expect(item.authorityUnits).toEqual([{ unitId: "u-1" }]);
-    expect(item.compositionContracts).toEqual([{ contractId: "c-1" }]);
-    expect(item.constitutionalLayers).toEqual([{ layerId: "l-1" }]);
-    expect(item.caseLaw).toEqual([{ entryId: "e-1" }]);
+    expect(item.env).toBe('test');
+    expect(item.authorityUnits).toEqual([{ unitId: 'u-1' }]);
+    expect(item.compositionContracts).toEqual([{ contractId: 'c-1' }]);
+    expect(item.constitutionalLayers).toEqual([{ layerId: 'l-1' }]);
+    expect(item.caseLaw).toEqual([{ entryId: 'e-1' }]);
   });
 
-  test("debounce — 5 stream records in one invocation produce exactly 1 snapshot row", async () => {
+  test('debounce — 5 stream records in one invocation produce exactly 1 snapshot row', async () => {
     stubSettings(
       '{"enabled":true,"retentionDays":30,"captureMode":"on-change"}',
     );
     ddbMock.on(ScanCommand).resolves({ Items: [] });
     ddbMock.on(PutCommand).resolves({});
 
-    const result = await handler(streamEvent(5, "MODIFY"));
+    const result = await handler(streamEvent(5, 'MODIFY'));
 
     expect(result.ok).toBe(true);
     expect(result.recordCount).toBe(5);
@@ -196,7 +197,7 @@ describe("governance-graph-snapshot-on-change handler", () => {
     expect(puts).toHaveLength(1);
   });
 
-  test("writes snapshot to GRAPH_SNAPSHOTS_TABLE", async () => {
+  test('writes snapshot to GRAPH_SNAPSHOTS_TABLE', async () => {
     stubSettings(
       '{"enabled":true,"retentionDays":30,"captureMode":"on-change"}',
     );
@@ -208,11 +209,11 @@ describe("governance-graph-snapshot-on-change handler", () => {
     const puts = ddbMock.commandCalls(PutCommand);
     expect(puts).toHaveLength(1);
     expect(puts[0].args[0].input.TableName).toBe(
-      "citadel-governance-graph-snapshots-test",
+      'citadel-governance-graph-snapshots-test',
     );
   });
 
-  test("emits CloudWatch metric with Trigger=OnChange dimension on success", async () => {
+  test('emits CloudWatch metric with Trigger=OnChange dimension on success', async () => {
     stubSettings(
       '{"enabled":true,"retentionDays":30,"captureMode":"on-change"}',
     );
@@ -224,25 +225,25 @@ describe("governance-graph-snapshot-on-change handler", () => {
     const metrics = cwMock.commandCalls(PutMetricDataCommand);
     expect(metrics).toHaveLength(1);
     const md = metrics[0].args[0].input.MetricData![0];
-    expect(md.MetricName).toBe("Count");
+    expect(md.MetricName).toBe('Count');
     expect(md.Value).toBe(1);
     const dims = md.Dimensions ?? [];
-    const triggerDim = dims.find((d) => d.Name === "Trigger");
-    expect(triggerDim?.Value).toBe("OnChange");
-    const statusDim = dims.find((d) => d.Name === "Status");
-    expect(statusDim?.Value).toBe("Success");
-    const partialDim = dims.find((d) => d.Name === "Partial");
-    expect(partialDim?.Value).toBe("false");
+    const triggerDim = dims.find((d) => d.Name === 'Trigger');
+    expect(triggerDim?.Value).toBe('OnChange');
+    const statusDim = dims.find((d) => d.Name === 'Status');
+    expect(statusDim?.Value).toBe('Success');
+    const partialDim = dims.find((d) => d.Name === 'Partial');
+    expect(partialDim?.Value).toBe('false');
   });
 
-  test("single-table read failure — snapshot marked partial:true and continues", async () => {
+  test('single-table read failure — snapshot marked partial:true and continues', async () => {
     stubSettings(
       '{"enabled":true,"retentionDays":30,"captureMode":"on-change"}',
     );
     ddbMock.on(ScanCommand).callsFake((input: ScanCommandInput) => {
-      const t: string = input?.TableName ?? "";
-      if (t === "citadel-case-law-test") {
-        return Promise.reject(new Error("throttled"));
+      const t: string = input?.TableName ?? '';
+      if (t === 'citadel-case-law-test') {
+        return Promise.reject(new Error('throttled'));
       }
       return Promise.resolve({ Items: [] });
     });
@@ -264,17 +265,17 @@ describe("governance-graph-snapshot-on-change handler", () => {
     expect(metrics).toHaveLength(1);
     const md = metrics[0].args[0].input.MetricData![0];
     const dims = md.Dimensions ?? [];
-    const statusDim = dims.find((d) => d.Name === "Status");
-    expect(statusDim?.Value).toBe("Success");
-    const partialDim = dims.find((d) => d.Name === "Partial");
-    expect(partialDim?.Value).toBe("true");
+    const statusDim = dims.find((d) => d.Name === 'Status');
+    expect(statusDim?.Value).toBe('Success');
+    const partialDim = dims.find((d) => d.Name === 'Partial');
+    expect(partialDim?.Value).toBe('true');
   });
 
-  test("all 4 source tables fail — throws and emits failure metric", async () => {
+  test('all 4 source tables fail — throws and emits failure metric', async () => {
     stubSettings(
       '{"enabled":true,"retentionDays":30,"captureMode":"on-change"}',
     );
-    ddbMock.on(ScanCommand).rejects(new Error("throttled"));
+    ddbMock.on(ScanCommand).rejects(new Error('throttled'));
 
     await expect(handler(streamEvent(1))).rejects.toThrow(
       /all 4 source-table reads failed/,
@@ -285,16 +286,16 @@ describe("governance-graph-snapshot-on-change handler", () => {
     expect(metrics).toHaveLength(1);
     const md = metrics[0].args[0].input.MetricData![0];
     const dims = md.Dimensions ?? [];
-    const statusDim = dims.find((d) => d.Name === "Status");
-    expect(statusDim?.Value).toBe("Failure");
+    const statusDim = dims.find((d) => d.Name === 'Status');
+    expect(statusDim?.Value).toBe('Failure');
   });
 
-  test("PutCommand failure — throws and emits failure metric", async () => {
+  test('PutCommand failure — throws and emits failure metric', async () => {
     stubSettings(
       '{"enabled":true,"retentionDays":30,"captureMode":"on-change"}',
     );
     ddbMock.on(ScanCommand).resolves({ Items: [] });
-    ddbMock.on(PutCommand).rejects(new Error("write failure"));
+    ddbMock.on(PutCommand).rejects(new Error('write failure'));
 
     await expect(handler(streamEvent(1))).rejects.toThrow(/write failure/);
 
@@ -302,18 +303,20 @@ describe("governance-graph-snapshot-on-change handler", () => {
     expect(metrics).toHaveLength(1);
     const md = metrics[0].args[0].input.MetricData![0];
     const dims = md.Dimensions ?? [];
-    const statusDim = dims.find((d) => d.Name === "Status");
-    expect(statusDim?.Value).toBe("Failure");
+    const statusDim = dims.find((d) => d.Name === 'Status');
+    expect(statusDim?.Value).toBe('Failure');
   });
 
   test('skips when captureMode === "daily"', async () => {
-    stubSettings('{"enabled":true,"retentionDays":30,"captureMode":"daily"}');
+    stubSettings(
+      '{"enabled":true,"retentionDays":30,"captureMode":"daily"}',
+    );
 
     const result = await handler(streamEvent(3));
 
     expect(result.ok).toBe(true);
     expect(result.snapshotId).toBeNull();
-    expect(result.reason).toBe("captureMode-skipped");
+    expect(result.reason).toBe('captureMode-skipped');
     expect(result.recordCount).toBe(3);
     // No DDB scans + no PutItem.
     expect(ddbMock.commandCalls(ScanCommand)).toHaveLength(0);
@@ -323,14 +326,16 @@ describe("governance-graph-snapshot-on-change handler", () => {
   });
 
   test('runs when captureMode === "both"', async () => {
-    stubSettings('{"enabled":true,"retentionDays":30,"captureMode":"both"}');
+    stubSettings(
+      '{"enabled":true,"retentionDays":30,"captureMode":"both"}',
+    );
     ddbMock.on(ScanCommand).resolves({ Items: [] });
     ddbMock.on(PutCommand).resolves({});
 
     const result = await handler(streamEvent(1));
 
     expect(result.ok).toBe(true);
-    expect(typeof result.snapshotId).toBe("string");
+    expect(typeof result.snapshotId).toBe('string');
 
     const scanCalls = ddbMock.commandCalls(ScanCommand);
     expect(scanCalls.length).toBeGreaterThanOrEqual(4);
@@ -338,6 +343,6 @@ describe("governance-graph-snapshot-on-change handler", () => {
     const puts = ddbMock.commandCalls(PutCommand);
     expect(puts).toHaveLength(1);
     const item = puts[0].args[0].input.Item as unknown as SnapshotRow;
-    expect(item.trigger).toBe("OnChange");
+    expect(item.trigger).toBe('OnChange');
   });
 });

@@ -720,11 +720,7 @@ async function dispatchImportedInvocation(
   // assumed credentials here. Cross-account wiring for the test-invoke
   // (testImportedAgent), cross-account discovery, and HTTP/MCP SIGV4
   // cross-account signing are deliberate follow-ups.
-  const registry = await resolveImportRegistry(
-    invocation,
-    agentId,
-    recordOrgId,
-  );
+  const registry = await resolveImportRegistry(invocation, agentId, recordOrgId);
 
   // Explicit invocation block: resolve the protocol adapter. An unknown
   // protocol is a real configuration error, so log a structured error and

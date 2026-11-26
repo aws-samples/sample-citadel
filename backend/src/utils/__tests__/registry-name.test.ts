@@ -14,34 +14,37 @@
  * (service/agent_intake_single/tests/test_registry_name.py) so the TS and
  * Python implementations provably agree — update BOTH when changing either.
  */
-import * as fc from "fast-check";
-import { REGISTRY_NAME_PATTERN, sanitizeRegistryName } from "../registry-name";
+import * as fc from 'fast-check';
+import {
+  REGISTRY_NAME_PATTERN,
+  sanitizeRegistryName,
+} from '../registry-name';
 
 /** Must match the registry constraint exactly. */
 const CONSTRAINT = /^[a-zA-Z0-9][a-zA-Z0-9_\-./]*$/;
 
 /** Keep in sync with test_registry_name.py SHARED_VECTORS. */
 const SHARED_VECTORS: Array<[string, string]> = [
-  ["Test - Ingest", "Test-Ingest"],
-  ["Test Ingest 1", "Test-Ingest-1"],
-  ["  café app! ", "caf-app"],
-  ["---", "app"],
-  ["9lives", "9lives"],
-  ["ok_name-1.2/x", "ok_name-1.2/x"],
+  ['Test - Ingest', 'Test-Ingest'],
+  ['Test Ingest 1', 'Test-Ingest-1'],
+  ['  café app! ', 'caf-app'],
+  ['---', 'app'],
+  ['9lives', '9lives'],
+  ['ok_name-1.2/x', 'ok_name-1.2/x'],
 ];
 
-describe("sanitizeRegistryName", () => {
-  it("exports a pattern identical to the registry constraint", () => {
+describe('sanitizeRegistryName', () => {
+  it('exports a pattern identical to the registry constraint', () => {
     expect(REGISTRY_NAME_PATTERN.source).toBe(CONSTRAINT.source);
   });
 
-  it.each(SHARED_VECTORS)("shared vector: %j → %j", (input, expected) => {
+  it.each(SHARED_VECTORS)('shared vector: %j → %j', (input, expected) => {
     expect(sanitizeRegistryName(input)).toBe(expected);
   });
 
-  it("property: output matches the registry regex for arbitrary unicode strings", () => {
+  it('property: output matches the registry regex for arbitrary unicode strings', () => {
     fc.assert(
-      fc.property(fc.string({ unit: "binary" }), (s) => {
+      fc.property(fc.string({ unit: 'binary' }), (s) => {
         const out = sanitizeRegistryName(s);
         expect(out.length).toBeGreaterThan(0);
         expect(CONSTRAINT.test(out)).toBe(true);
@@ -50,9 +53,9 @@ describe("sanitizeRegistryName", () => {
     );
   });
 
-  it("property: idempotent — sanitize(sanitize(s)) === sanitize(s)", () => {
+  it('property: idempotent — sanitize(sanitize(s)) === sanitize(s)', () => {
     fc.assert(
-      fc.property(fc.string({ unit: "binary" }), (s) => {
+      fc.property(fc.string({ unit: 'binary' }), (s) => {
         const once = sanitizeRegistryName(s);
         expect(sanitizeRegistryName(once)).toBe(once);
       }),
@@ -60,14 +63,14 @@ describe("sanitizeRegistryName", () => {
     );
   });
 
-  it("property: legal inputs pass through unchanged", () => {
+  it('property: legal inputs pass through unchanged', () => {
     const alnum =
-      "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    const rest = alnum + "_-./";
+      'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    const rest = alnum + '_-./';
     const legalArb = fc
       .tuple(
-        fc.constantFrom(...alnum.split("")),
-        fc.string({ unit: fc.constantFrom(...rest.split("")), maxLength: 60 }),
+        fc.constantFrom(...alnum.split('')),
+        fc.string({ unit: fc.constantFrom(...rest.split('')), maxLength: 60 }),
       )
       .map(([first, tail]) => first + tail);
     fc.assert(
@@ -79,9 +82,9 @@ describe("sanitizeRegistryName", () => {
     );
   });
 
-  it("empty and whitespace-only inputs fall back deterministically", () => {
-    expect(sanitizeRegistryName("")).toBe("app");
-    expect(sanitizeRegistryName("   ")).toBe("app");
-    expect(sanitizeRegistryName("!!!")).toBe("app");
+  it('empty and whitespace-only inputs fall back deterministically', () => {
+    expect(sanitizeRegistryName('')).toBe('app');
+    expect(sanitizeRegistryName('   ')).toBe('app');
+    expect(sanitizeRegistryName('!!!')).toBe('app');
   });
 });

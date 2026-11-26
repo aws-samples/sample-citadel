@@ -101,14 +101,6 @@ export function applyGitProvenanceTags(
   const tagOptions: cdk.TagProps = {
     excludeResourceTypes: [...PROVENANCE_TAG_EXCLUDED_RESOURCE_TYPES],
   };
-  cdk.Tags.of(scope).add(
-    GIT_PROVENANCE_TAGS.SHA,
-    provenance.gitSha,
-    tagOptions,
-  );
-  cdk.Tags.of(scope).add(
-    GIT_PROVENANCE_TAGS.REF,
-    provenance.gitRef,
-    tagOptions,
-  );
+  cdk.Tags.of(scope).add(GIT_PROVENANCE_TAGS.SHA, provenance.gitSha, tagOptions);
+  cdk.Tags.of(scope).add(GIT_PROVENANCE_TAGS.REF, provenance.gitRef, tagOptions);
 }

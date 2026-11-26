@@ -2268,8 +2268,7 @@ export async function testImportedAgent(
       resolveSecret = async () => rawSecret;
     } else if (secretRef) {
       if (!callerOrgId) throw new Error("Access denied");
-      resolveSecret = (ref: string) =>
-        getAgentInvocationSecret(ref, callerOrgId);
+      resolveSecret = (ref: string) => getAgentInvocationSecret(ref, callerOrgId);
     }
 
     // Build the candidate's invocation descriptor first so its (possibly

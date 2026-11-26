@@ -56,7 +56,7 @@ export interface ChecklistQuestion {
 export class ChecklistParseError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = "ChecklistParseError";
+    this.name = 'ChecklistParseError';
     // Restore prototype for instanceof across TS downlevel targets.
     Object.setPrototypeOf(this, ChecklistParseError.prototype);
   }
@@ -84,12 +84,12 @@ const SOURCE_RE = /^Source:\s*(.*?)\s*$/;
  *         cluster H2 heading.
  */
 export function parseChecklist(markdown: string): ChecklistQuestion[] {
-  if (typeof markdown !== "string") {
-    throw new ChecklistParseError("markdown must be a string");
+  if (typeof markdown !== 'string') {
+    throw new ChecklistParseError('markdown must be a string');
   }
 
   // Normalise line endings so CRLF inputs parse identically to LF.
-  const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
+  const lines = markdown.replace(/\r\n?/g, '\n').split('\n');
 
   const results: ChecklistQuestion[] = [];
   let currentCluster: string | null = null;
@@ -167,8 +167,8 @@ export function parseChecklist(markdown: string): ChecklistQuestion[] {
       // non-empty, non-heading lines. We join multi-line paragraphs with
       // a single space so the result is a clean single-line string.
       const proseScanEnd =
-        evidenceLineIdx >= 0 ? evidenceLineIdx : bodyLines.length;
-      let questionText = "";
+        evidenceLineIdx >= 0 ? evidenceLineIdx: bodyLines.length;
+      let questionText = '';
       const paragraph: string[] = [];
       for (let k = 0; k < proseScanEnd; k++) {
         const pLine = bodyLines[k];
@@ -190,7 +190,7 @@ export function parseChecklist(markdown: string): ChecklistQuestion[] {
         }
         paragraph.push(pLine.trim());
       }
-      questionText = paragraph.join(" ").trim();
+      questionText = paragraph.join(' ').trim();
 
       results.push({
         questionId,

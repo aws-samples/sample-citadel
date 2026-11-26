@@ -10,7 +10,7 @@
 import type {
   AgentInvocationBlock,
   AgentOrigin,
-} from "../../services/registry-service";
+} from '../../services/registry-service';
 
 /** An open JSON Schema document (input/output contracts). */
 export type JsonSchema = Record<string, unknown>;
@@ -19,7 +19,7 @@ export type JsonSchema = Record<string, unknown>;
  * Confidence attached to an inferred descriptor field. Self-described fields
  * are 'high'; probe-derived 'medium'; LLM-inferred 'low' (invariant 3).
  */
-export type Confidence = "high" | "medium" | "low";
+export type Confidence = 'high' | 'medium' | 'low';
 
 /**
  * A discovered-but-not-yet-described agent. `reference` is the adapter's

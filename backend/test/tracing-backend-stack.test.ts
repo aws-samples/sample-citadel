@@ -47,10 +47,7 @@ const templateExists = fs.existsSync(TEMPLATE_PATH);
 
 describe("tracing foundation — citadel-backend-<env> stack", () => {
   if (!templateExists) {
-    guardCdkOutInCi(
-      TEMPLATE_PATH,
-      `npm run build && npx cdk synth ${STACK_NAME}`,
-    );
+    guardCdkOutInCi(TEMPLATE_PATH, `npm run build && npx cdk synth ${STACK_NAME}`);
     it.skip(`skipped: fresh template missing at ${TEMPLATE_PATH} (run 'npm run build && npx cdk synth ${STACK_NAME}' first)`, () => {});
     return;
   }

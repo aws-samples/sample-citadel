@@ -26,11 +26,7 @@ import {
   AdminSetUserPasswordCommand,
   ListUsersCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
-import {
-  DynamoDBDocumentClient,
-  PutCommand,
-  ScanCommand,
-} from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, PutCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { mockClient } from "aws-sdk-client-mock";
 
 const cognitoMock = mockClient(CognitoIdentityProviderClient);
@@ -87,10 +83,10 @@ describe("finding (a): admin gate reads JWT cognito:groups, not cache", () => {
       .on(AdminListGroupsForUserCommand, { Username: "demoted-admin" })
       .resolves({ Groups: [{ GroupName: "admin" }] });
 
-    const warmEvent = buildEvent("listUsers", {
-      username: "demoted-admin",
-      claims: { "cognito:groups": ["admin"] },
-    });
+    const warmEvent = buildEvent(
+      "listUsers",
+      { username: "demoted-admin", claims: { "cognito:groups": ["admin"] } },
+    );
     // Warm the cache
     await handler(warmEvent);
 
@@ -99,10 +95,7 @@ describe("finding (a): admin gate reads JWT cognito:groups, not cache", () => {
     // The resolver MUST read from the JWT claim, not the cache.
     const demotedEvent = buildEvent(
       "assignUserRole",
-      {
-        username: "demoted-admin",
-        claims: { "cognito:groups": ["developer"] },
-      },
+      { username: "demoted-admin", claims: { "cognito:groups": ["developer"] } },
       { input: { userId: "target-user", role: "developer" } },
     );
 
@@ -151,9 +144,7 @@ describe("finding (b): role change triggers AdminUserGlobalSignOut", () => {
     const result = (await handler(event)) as { success: boolean };
     expect(result.success).toBe(true);
 
-    const signOutCalls = cognitoMock.commandCalls(
-      AdminUserGlobalSignOutCommand,
-    );
+    const signOutCalls = cognitoMock.commandCalls(AdminUserGlobalSignOutCommand);
     expect(signOutCalls.length).toBeGreaterThanOrEqual(1);
     expect(signOutCalls[0].args[0].input).toMatchObject({
       UserPoolId: "us-east-1_testpool",
@@ -171,9 +162,7 @@ describe("finding (b): role change triggers AdminUserGlobalSignOut", () => {
     const result = (await handler(event)) as { success: boolean };
     expect(result.success).toBe(true);
 
-    const signOutCalls = cognitoMock.commandCalls(
-      AdminUserGlobalSignOutCommand,
-    );
+    const signOutCalls = cognitoMock.commandCalls(AdminUserGlobalSignOutCommand);
     expect(signOutCalls).toHaveLength(1);
     expect(signOutCalls[0].args[0].input).toMatchObject({
       UserPoolId: "us-east-1_testpool",

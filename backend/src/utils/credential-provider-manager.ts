@@ -58,9 +58,9 @@ import {
   UpdateApiKeyCredentialProviderCommand,
   UpdateApiKeyCredentialProviderCommandOutput,
   DeleteApiKeyCredentialProviderCommand,
-} from "@aws-sdk/client-bedrock-agentcore-control";
+} from '@aws-sdk/client-bedrock-agentcore-control';
 
-import { logger } from "./logger";
+import { logger } from './logger';
 
 // ────────────────────────────────────────────────────────────────────────
 // Public types
@@ -86,9 +86,9 @@ export interface CreateOauth2ProviderInput {
   clientSecret: string;
   endpoints: ResolvedOauth2Endpoints;
   scopes: string[];
-  grantType: "CLIENT_CREDENTIALS" | "AUTHORIZATION_CODE" | "TOKEN_EXCHANGE";
+  grantType: 'CLIENT_CREDENTIALS' | 'AUTHORIZATION_CODE' | 'TOKEN_EXCHANGE';
   /** Default: CLIENT_SECRET_BASIC. */
-  clientAuthenticationMethod?: "CLIENT_SECRET_BASIC" | "CLIENT_SECRET_POST";
+  clientAuthenticationMethod?: 'CLIENT_SECRET_BASIC' | 'CLIENT_SECRET_POST';
   /** For 3LO; supplied by Phase 2 from SSM. Currently informational only — see TODO. */
   defaultReturnUrl?: string;
 }
@@ -109,12 +109,12 @@ export interface CredentialProviderResult {
 }
 
 export type CredentialProviderErrorCode =
-  | "CONFLICT"
-  | "NOT_FOUND"
-  | "THROTTLED"
-  | "VALIDATION"
-  | "INTERNAL"
-  | "SDK_SHAPE_MISMATCH";
+  | 'CONFLICT'
+  | 'NOT_FOUND'
+  | 'THROTTLED'
+  | 'VALIDATION'
+  | 'INTERNAL'
+  | 'SDK_SHAPE_MISMATCH';
 
 export class CredentialProviderError extends Error {
   constructor(
@@ -123,7 +123,7 @@ export class CredentialProviderError extends Error {
     public readonly cause?: unknown,
   ) {
     super(message);
-    this.name = "CredentialProviderError";
+    this.name = 'CredentialProviderError';
   }
 }
 
@@ -133,13 +133,9 @@ export class CredentialProviderError extends Error {
 
 let _client: BedrockAgentCoreControlClient | null = null;
 
-function getClient(
-  override?: BedrockAgentCoreControlClient,
-): BedrockAgentCoreControlClient {
+function getClient(override?: BedrockAgentCoreControlClient): BedrockAgentCoreControlClient {
   if (override) return override;
-  return (_client ??= new BedrockAgentCoreControlClient({
-    region: process.env.AWS_REGION,
-  }));
+  return (_client ??= new BedrockAgentCoreControlClient({ region: process.env.AWS_REGION }));
 }
 
 /** @internal — test hook to drop the cached client. */
@@ -163,25 +159,20 @@ const MAX_THROTTLE_RETRIES = 4;
 const THROTTLE_BASE_MS = 200;
 
 function isThrottling(err: unknown): boolean {
-  return (err as { name?: string } | null)?.name === "ThrottlingException";
+  return (err as { name?: string } | null)?.name === 'ThrottlingException';
 }
 function isConflict(err: unknown): boolean {
-  return (err as { name?: string } | null)?.name === "ConflictException";
+  return (err as { name?: string } | null)?.name === 'ConflictException';
 }
 function isNotFound(err: unknown): boolean {
-  return (
-    (err as { name?: string } | null)?.name === "ResourceNotFoundException"
-  );
+  return (err as { name?: string } | null)?.name === 'ResourceNotFoundException';
 }
 function isValidation(err: unknown): boolean {
-  return (err as { name?: string } | null)?.name === "ValidationException";
+  return (err as { name?: string } | null)?.name === 'ValidationException';
 }
 
 /** Run `fn`; on ThrottlingException retry up to MAX_THROTTLE_RETRIES times with exp+jitter. */
-async function withThrottlingRetry<T>(
-  fn: () => Promise<T>,
-  opName: string,
-): Promise<T> {
+async function withThrottlingRetry<T>(fn: () => Promise<T>, opName: string): Promise<T> {
   let attempt = 0;
   // eslint-disable-next-line no-constant-condition
   while (true) {
@@ -191,20 +182,20 @@ async function withThrottlingRetry<T>(
       if (!isThrottling(err)) throw err;
       if (attempt >= MAX_THROTTLE_RETRIES) {
         logger.error(
-          "credential-provider-manager throttled after retries",
+          'credential-provider-manager throttled after retries',
           { opName, attempts: attempt + 1 },
           err as Error,
         );
         throw new CredentialProviderError(
           `AgentCore Identity API throttled after ${attempt + 1} attempts`,
-          "THROTTLED",
+          'THROTTLED',
           err,
         );
       }
       // Exponential back-off with full jitter: 200ms, 400ms, 800ms, 1600ms (× random ∈ [0,1)).
       const exp = THROTTLE_BASE_MS * Math.pow(2, attempt);
       const delay = Math.random() * exp;
-      logger.warn("credential-provider-manager throttled — backing off", {
+      logger.warn('credential-provider-manager throttled — backing off', {
         opName,
         attempt: attempt + 1,
         delayMs: Math.round(delay),
@@ -238,37 +229,28 @@ function deriveIssuer(endpoints: ResolvedOauth2Endpoints): string {
   } catch {
     throw new CredentialProviderError(
       `endpoints.tokenEndpoint is not a valid URL: ${endpoints.tokenEndpoint}`,
-      "VALIDATION",
+      'VALIDATION',
     );
   }
 }
 
 function validateOauth2Input(input: CreateOauth2ProviderInput): void {
   if (!input.integrationId) {
-    throw new CredentialProviderError(
-      "integrationId is required",
-      "VALIDATION",
-    );
+    throw new CredentialProviderError('integrationId is required', 'VALIDATION');
   }
   if (!input.clientId || !input.clientSecret) {
     throw new CredentialProviderError(
-      "clientId and clientSecret are required for OAuth2",
-      "VALIDATION",
+      'clientId and clientSecret are required for OAuth2',
+      'VALIDATION',
     );
   }
   if (!input.endpoints?.tokenEndpoint) {
-    throw new CredentialProviderError(
-      "endpoints.tokenEndpoint is required",
-      "VALIDATION",
-    );
+    throw new CredentialProviderError('endpoints.tokenEndpoint is required', 'VALIDATION');
   }
-  if (
-    input.grantType === "AUTHORIZATION_CODE" &&
-    !input.endpoints.authorizationEndpoint
-  ) {
+  if (input.grantType === 'AUTHORIZATION_CODE' && !input.endpoints.authorizationEndpoint) {
     throw new CredentialProviderError(
-      "AUTHORIZATION_CODE grantType requires endpoints.authorizationEndpoint",
-      "VALIDATION",
+      'AUTHORIZATION_CODE grantType requires endpoints.authorizationEndpoint',
+      'VALIDATION',
     );
   }
 }
@@ -300,7 +282,7 @@ function buildOauth2RequestInput(
 
   return {
     name: oauth2ProviderName(input.integrationId),
-    credentialProviderVendor: "CustomOauth2",
+    credentialProviderVendor: 'CustomOauth2',
     oauth2ProviderConfigInput: {
       customOauth2ProviderConfig: {
         oauthDiscovery: {
@@ -312,46 +294,39 @@ function buildOauth2RequestInput(
         },
         clientId: input.clientId,
         clientSecret: input.clientSecret,
-        clientAuthenticationMethod:
-          input.clientAuthenticationMethod ?? "CLIENT_SECRET_BASIC",
+        clientAuthenticationMethod: input.clientAuthenticationMethod ?? 'CLIENT_SECRET_BASIC',
       },
     },
   };
 }
 
 function mapOauth2Response(
-  resp:
-    | CreateOauth2CredentialProviderCommandOutput
-    | UpdateOauth2CredentialProviderCommandOutput,
+  resp: CreateOauth2CredentialProviderCommandOutput | UpdateOauth2CredentialProviderCommandOutput,
 ): CredentialProviderResult {
   if (!resp.credentialProviderArn) {
     throw new CredentialProviderError(
-      "AgentCore Identity returned no credentialProviderArn",
-      "SDK_SHAPE_MISMATCH",
+      'AgentCore Identity returned no credentialProviderArn',
+      'SDK_SHAPE_MISMATCH',
       resp,
     );
   }
-  const internalSecretArn = (
-    resp as CreateOauth2CredentialProviderCommandOutput
-  ).clientSecretArn?.secretArn;
+  const internalSecretArn = (resp as CreateOauth2CredentialProviderCommandOutput).clientSecretArn
+    ?.secretArn;
   return {
     credentialProviderArn: resp.credentialProviderArn,
-    callbackUrl: (resp as CreateOauth2CredentialProviderCommandOutput)
-      .callbackUrl,
+    callbackUrl: (resp as CreateOauth2CredentialProviderCommandOutput).callbackUrl,
     internalSecretArn,
     rawResponse: resp,
   };
 }
 
 function mapApiKeyResponse(
-  resp:
-    | CreateApiKeyCredentialProviderCommandOutput
-    | UpdateApiKeyCredentialProviderCommandOutput,
+  resp: CreateApiKeyCredentialProviderCommandOutput | UpdateApiKeyCredentialProviderCommandOutput,
 ): CredentialProviderResult {
   if (!resp.credentialProviderArn) {
     throw new CredentialProviderError(
-      "AgentCore Identity returned no credentialProviderArn",
-      "SDK_SHAPE_MISMATCH",
+      'AgentCore Identity returned no credentialProviderArn',
+      'SDK_SHAPE_MISMATCH',
       resp,
     );
   }
@@ -371,21 +346,21 @@ function mapSdkError(err: unknown, opName: string): CredentialProviderError {
   if (isValidation(err)) {
     return new CredentialProviderError(
       `AgentCore Identity validation failed during ${opName}: ${(err as Error).message}`,
-      "VALIDATION",
+      'VALIDATION',
       err,
     );
   }
   if (isConflict(err)) {
     return new CredentialProviderError(
       `AgentCore Identity conflict during ${opName}: ${(err as Error).message}`,
-      "CONFLICT",
+      'CONFLICT',
       err,
     );
   }
   if (isNotFound(err)) {
     return new CredentialProviderError(
       `AgentCore Identity resource not found during ${opName}: ${(err as Error).message}`,
-      "NOT_FOUND",
+      'NOT_FOUND',
       err,
     );
   }
@@ -393,7 +368,7 @@ function mapSdkError(err: unknown, opName: string): CredentialProviderError {
     `AgentCore Identity SDK error during ${opName}: ${
       err instanceof Error ? err.message : String(err)
     }`,
-    "INTERNAL",
+    'INTERNAL',
     err,
   );
 }
@@ -422,15 +397,13 @@ export async function createOrUpsertOauth2Provider(
   // Update accepts the same shape as Create.
   const updateInput: UpdateOauth2CredentialProviderCommandInput = sdkInput;
   const c = getClient(client);
-  const opName = "createOrUpsertOauth2Provider";
+  const opName = 'createOrUpsertOauth2Provider';
 
   try {
     return await withThrottlingRetry(async () => {
       try {
-        const resp = await c.send(
-          new CreateOauth2CredentialProviderCommand(sdkInput),
-        );
-        logger.info("oauth2 credential provider created", {
+        const resp = await c.send(new CreateOauth2CredentialProviderCommand(sdkInput));
+        logger.info('oauth2 credential provider created', {
           integrationId: input.integrationId,
           name: sdkInput.name,
         });
@@ -438,25 +411,21 @@ export async function createOrUpsertOauth2Provider(
       } catch (err) {
         if (!isConflict(err)) throw err;
 
-        logger.info("oauth2 credential provider exists — updating", {
+        logger.info('oauth2 credential provider exists — updating', {
           integrationId: input.integrationId,
           name: sdkInput.name,
         });
         try {
-          const resp = await c.send(
-            new UpdateOauth2CredentialProviderCommand(updateInput),
-          );
+          const resp = await c.send(new UpdateOauth2CredentialProviderCommand(updateInput));
           return mapOauth2Response(resp);
         } catch (updateErr) {
           if (!isNotFound(updateErr)) throw updateErr;
           // Race: provider was deleted between our create-conflict and update.
-          logger.warn("oauth2 update raced with delete — retrying create", {
+          logger.warn('oauth2 update raced with delete — retrying create', {
             integrationId: input.integrationId,
             name: sdkInput.name,
           });
-          const retry = await c.send(
-            new CreateOauth2CredentialProviderCommand(sdkInput),
-          );
+          const retry = await c.send(new CreateOauth2CredentialProviderCommand(sdkInput));
           return mapOauth2Response(retry);
         }
       }
@@ -472,32 +441,23 @@ export async function deleteOauth2Provider(
   client?: BedrockAgentCoreControlClient,
 ): Promise<void> {
   if (!integrationId) {
-    throw new CredentialProviderError(
-      "integrationId is required",
-      "VALIDATION",
-    );
+    throw new CredentialProviderError('integrationId is required', 'VALIDATION');
   }
   const name = oauth2ProviderName(integrationId);
   const c = getClient(client);
-  const opName = "deleteOauth2Provider";
+  const opName = 'deleteOauth2Provider';
 
   try {
     await withThrottlingRetry(async () => {
       try {
         await c.send(new DeleteOauth2CredentialProviderCommand({ name }));
-        logger.info("oauth2 credential provider deleted", {
-          integrationId,
-          name,
-        });
+        logger.info('oauth2 credential provider deleted', { integrationId, name });
       } catch (err) {
         if (isNotFound(err)) {
-          logger.info(
-            "oauth2 credential provider already absent — idempotent delete",
-            {
-              integrationId,
-              name,
-            },
-          );
+          logger.info('oauth2 credential provider already absent — idempotent delete', {
+            integrationId,
+            name,
+          });
           return;
         }
         throw err;
@@ -518,58 +478,46 @@ export async function createOrUpsertApiKeyProvider(
   client?: BedrockAgentCoreControlClient,
 ): Promise<CredentialProviderResult> {
   if (!input.integrationId) {
-    throw new CredentialProviderError(
-      "integrationId is required",
-      "VALIDATION",
-    );
+    throw new CredentialProviderError('integrationId is required', 'VALIDATION');
   }
   if (!input.apiKey) {
-    throw new CredentialProviderError("apiKey is required", "VALIDATION");
+    throw new CredentialProviderError('apiKey is required', 'VALIDATION');
   }
 
   const name = apiKeyProviderName(input.integrationId);
   const c = getClient(client);
-  const opName = "createOrUpsertApiKeyProvider";
+  const opName = 'createOrUpsertApiKeyProvider';
 
   try {
     return await withThrottlingRetry(async () => {
       try {
         const resp = await c.send(
-          new CreateApiKeyCredentialProviderCommand({
-            name,
-            apiKey: input.apiKey,
-          }),
+          new CreateApiKeyCredentialProviderCommand({ name, apiKey: input.apiKey }),
         );
-        logger.info("api_key credential provider created", {
+        logger.info('api_key credential provider created', {
           integrationId: input.integrationId,
           name,
         });
         return mapApiKeyResponse(resp);
       } catch (err) {
         if (!isConflict(err)) throw err;
-        logger.info("api_key credential provider exists — updating", {
+        logger.info('api_key credential provider exists — updating', {
           integrationId: input.integrationId,
           name,
         });
         try {
           const resp = await c.send(
-            new UpdateApiKeyCredentialProviderCommand({
-              name,
-              apiKey: input.apiKey,
-            }),
+            new UpdateApiKeyCredentialProviderCommand({ name, apiKey: input.apiKey }),
           );
           return mapApiKeyResponse(resp);
         } catch (updateErr) {
           if (!isNotFound(updateErr)) throw updateErr;
-          logger.warn("api_key update raced with delete — retrying create", {
+          logger.warn('api_key update raced with delete — retrying create', {
             integrationId: input.integrationId,
             name,
           });
           const retry = await c.send(
-            new CreateApiKeyCredentialProviderCommand({
-              name,
-              apiKey: input.apiKey,
-            }),
+            new CreateApiKeyCredentialProviderCommand({ name, apiKey: input.apiKey }),
           );
           return mapApiKeyResponse(retry);
         }
@@ -586,32 +534,23 @@ export async function deleteApiKeyProvider(
   client?: BedrockAgentCoreControlClient,
 ): Promise<void> {
   if (!integrationId) {
-    throw new CredentialProviderError(
-      "integrationId is required",
-      "VALIDATION",
-    );
+    throw new CredentialProviderError('integrationId is required', 'VALIDATION');
   }
   const name = apiKeyProviderName(integrationId);
   const c = getClient(client);
-  const opName = "deleteApiKeyProvider";
+  const opName = 'deleteApiKeyProvider';
 
   try {
     await withThrottlingRetry(async () => {
       try {
         await c.send(new DeleteApiKeyCredentialProviderCommand({ name }));
-        logger.info("api_key credential provider deleted", {
-          integrationId,
-          name,
-        });
+        logger.info('api_key credential provider deleted', { integrationId, name });
       } catch (err) {
         if (isNotFound(err)) {
-          logger.info(
-            "api_key credential provider already absent — idempotent delete",
-            {
-              integrationId,
-              name,
-            },
-          );
+          logger.info('api_key credential provider already absent — idempotent delete', {
+            integrationId,
+            name,
+          });
           return;
         }
         throw err;

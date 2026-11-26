@@ -30,7 +30,9 @@ import {
   type NativeAttributeValue,
 } from "@aws-sdk/lib-dynamodb";
 import { resolveRegionOrExit } from "./lib/resolve-region";
-import { coerceAgentConfig } from "../src/lambda/registry-sync";
+import {
+  coerceAgentConfig,
+} from "../src/lambda/registry-sync";
 
 // ---------------------------------------------------------------------------
 // Types (exported for tests)
@@ -1411,10 +1413,7 @@ export async function runReconcileSourceProjectId(
           : undefined;
 
       const needsConfig = isConfigAbsentOrEmpty(item.config);
-      const descriptorConfig = coerceAgentConfig(
-        registryRecordId,
-        parsed.config,
-      );
+      const descriptorConfig = coerceAgentConfig(registryRecordId, parsed.config);
 
       // Skip entirely if the descriptor can't satisfy either need.
       if (needsSourceProjectId && !sourceProjectId && !needsConfig) {
@@ -1424,12 +1423,7 @@ export async function runReconcileSourceProjectId(
         );
         continue;
       }
-      if (
-        needsSourceProjectId &&
-        !sourceProjectId &&
-        needsConfig &&
-        !descriptorConfig
-      ) {
+      if (needsSourceProjectId && !sourceProjectId && needsConfig && !descriptorConfig) {
         summary.skippedNoProjectId++;
         console.log(
           `  [skip] ${agentId}: registry record has neither sourceProjectId nor config`,
@@ -1466,8 +1460,7 @@ export async function runReconcileSourceProjectId(
       }
 
       const parts: string[] = [];
-      if (willSetSourceProjectId)
-        parts.push(`sourceProjectId=${sourceProjectId}`);
+      if (willSetSourceProjectId) parts.push(`sourceProjectId=${sourceProjectId}`);
       if (willSetConfig) parts.push("config=<from descriptor>");
 
       if (dryRun) {
@@ -1484,7 +1477,9 @@ export async function runReconcileSourceProjectId(
         summary.updated++;
         if (willSetSourceProjectId) summary.sourceProjectIdSet++;
         if (willSetConfig) summary.configSet++;
-        console.log(`  [updated] ${agentId} → ${parts.join(", ")}`);
+        console.log(
+          `  [updated] ${agentId} → ${parts.join(", ")}`,
+        );
       }
     } catch (err) {
       summary.errors++;

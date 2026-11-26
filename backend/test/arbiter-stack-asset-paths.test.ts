@@ -25,31 +25,26 @@
  * covered by the other `arbiter-stack-*.test.ts` suites and would only
  * duplicate cost here.
  */
-import * as fs from "fs";
-import * as path from "path";
+import * as fs from 'fs';
+import * as path from 'path';
 
 // Importing the stack module executes `resolveArbiterRoot(__dirname)` at
 // module load time. If the resolver cannot locate a repo-root `arbiter/`
 // containing a `catalog/` subfolder, this `require` will throw and the
 // whole test file will fail with a clear error — which is the intent.
-require("../lib/arbiter-stack");
+require('../lib/arbiter-stack');
 
-describe("ArbiterStack asset path resolution", () => {
-  const repoRoot = path.resolve(__dirname, "..", "..");
-  const stackSourcePath = path.resolve(
-    __dirname,
-    "..",
-    "lib",
-    "arbiter-stack.ts",
-  );
+describe('ArbiterStack asset path resolution', () => {
+  const repoRoot = path.resolve(__dirname, '..', '..');
+  const stackSourcePath = path.resolve(__dirname, '..', 'lib', 'arbiter-stack.ts');
 
-  it("repo-root arbiter/catalog directory exists", () => {
-    const catalogDir = path.join(repoRoot, "arbiter", "catalog");
+  it('repo-root arbiter/catalog directory exists', () => {
+    const catalogDir = path.join(repoRoot, 'arbiter', 'catalog');
     expect(fs.existsSync(catalogDir)).toBe(true);
   });
 
   it('arbiter-stack.ts contains no "../../arbiter" literals', () => {
-    const source = fs.readFileSync(stackSourcePath, "utf8");
+    const source = fs.readFileSync(stackSourcePath, 'utf8');
     expect(source.includes("'../../arbiter'")).toBe(false);
     expect(source.includes("'../../arbiter/")).toBe(false);
   });

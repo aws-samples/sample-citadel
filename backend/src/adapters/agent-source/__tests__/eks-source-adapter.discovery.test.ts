@@ -14,9 +14,9 @@
  * a {key,value}[] array); the cluster's own `endpoint` field is the KUBERNETES
  * API server and is NEVER used as the agent invocation target.
  */
-import { EksSourceAdapter } from "../eks-source-adapter";
-import { NotImplementedError } from "../not-implemented";
-import type { AgentInvocationBlock } from "../base";
+import { EksSourceAdapter } from '../eks-source-adapter';
+import { NotImplementedError } from '../not-implemented';
+import type { AgentInvocationBlock } from '../base';
 
 interface SentCommand {
   constructor: { name: string };
@@ -31,8 +31,7 @@ function senderDouble(
     const c = command as SentCommand;
     const kind = c.constructor.name;
     const handler = handlers[kind];
-    if (!handler)
-      return Promise.reject(new Error(`unexpected command: ${kind}`));
+    if (!handler) return Promise.reject(new Error(`unexpected command: ${kind}`));
     return Promise.resolve(handler(c.input));
   });
   return { send };
@@ -40,37 +39,30 @@ function senderDouble(
 
 const asFetch = (fn: jest.Mock): typeof fetch => fn as unknown as typeof fetch;
 
-const CLUSTER_NAME = "my-agent-cluster";
-const CLUSTER_ARN =
-  "arn:aws:eks:us-east-1:123456789012:cluster/my-agent-cluster";
-const LB_ARN =
-  "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/my-alb/def456";
-const LB_DNS = "my-alb-123456.us-east-1.elb.amazonaws.com";
+const CLUSTER_NAME = 'my-agent-cluster';
+const CLUSTER_ARN = 'arn:aws:eks:us-east-1:123456789012:cluster/my-agent-cluster';
+const LB_ARN = 'arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/my-alb/def456';
+const LB_DNS = 'my-alb-123456.us-east-1.elb.amazonaws.com';
 /** The cluster's own k8s API server endpoint — must NEVER be the invocation target. */
-const K8S_API = "https://ABC123DEF456.gr7.us-east-1.eks.amazonaws.com";
+const K8S_API = 'https://ABC123DEF456.gr7.us-east-1.eks.amazonaws.com';
 /** Certificate-authority data — must NEVER appear in any produced field. */
-const CA_DATA = "LS0tLS1CRUdJTi1TRUNSRVQtQ0EtREFUQQ==";
+const CA_DATA = 'LS0tLS1CRUdJTi1TRUNSRVQtQ0EtREFUQQ==';
 
 // ---------------------------------------------------------------------------
 // discover
 // ---------------------------------------------------------------------------
 
-describe("EksSourceAdapter.discover (US-IMP-019)", () => {
-  it("lists clusters -> describeCluster and maps each cluster to an eks candidate", async () => {
+describe('EksSourceAdapter.discover (US-IMP-019)', () => {
+  it('lists clusters -> describeCluster and maps each cluster to an eks candidate', async () => {
     const eksSender = senderDouble({
       ListClustersCommand: () => ({ clusters: [CLUSTER_NAME] }),
       DescribeClusterCommand: (input) => ({
-        cluster: {
-          name: input.name,
-          arn: CLUSTER_ARN,
-          version: "1.29",
-          status: "ACTIVE",
-        },
+        cluster: { name: input.name, arn: CLUSTER_ARN, version: '1.29', status: 'ACTIVE' },
       }),
     });
     const adapter = new EksSourceAdapter({ eksSender });
 
-    const candidates = await adapter.discover({ region: "us-east-1" });
+    const candidates = await adapter.discover({ region: 'us-east-1' });
 
     expect(candidates).toHaveLength(1);
     expect(candidates[0]).toMatchObject({
@@ -78,19 +70,19 @@ describe("EksSourceAdapter.discover (US-IMP-019)", () => {
       reference: CLUSTER_ARN,
       origin: {
         sourceArn: CLUSTER_ARN,
-        substrate: "eks",
-        region: "us-east-1",
-        account: "123456789012",
-        ownership: "external",
+        substrate: 'eks',
+        region: 'us-east-1',
+        account: '123456789012',
+        ownership: 'external',
       },
     });
-    expect(typeof candidates[0].origin.discoveredAt).toBe("string");
+    expect(typeof candidates[0].origin.discoveredAt).toBe('string');
   });
 
-  it("paginates clusters across pages (nextToken)", async () => {
+  it('paginates clusters across pages (nextToken)', async () => {
     const clusterPages: Record<string, unknown>[] = [
-      { clusters: [CLUSTER_NAME], nextToken: "c2" },
-      { clusters: ["other-cluster"] },
+      { clusters: [CLUSTER_NAME], nextToken: 'c2' },
+      { clusters: ['other-cluster'] },
     ];
     let clusterCall = 0;
     const eksSender = senderDouble({
@@ -104,48 +96,44 @@ describe("EksSourceAdapter.discover (US-IMP-019)", () => {
     });
     const adapter = new EksSourceAdapter({ eksSender });
 
-    const candidates = await adapter.discover({ region: "us-east-1" });
+    const candidates = await adapter.discover({ region: 'us-east-1' });
 
     expect(candidates.map((c) => c.reference)).toEqual([
       CLUSTER_ARN,
-      "arn:aws:eks:us-east-1:123456789012:cluster/other-cluster",
+      'arn:aws:eks:us-east-1:123456789012:cluster/other-cluster',
     ]);
-    expect(candidates.every((c) => c.origin.substrate === "eks")).toBe(true);
+    expect(candidates.every((c) => c.origin.substrate === 'eks')).toBe(true);
   });
 
-  it("filters by scope.tagKey/tagValue using the cluster tags (string map)", async () => {
+  it('filters by scope.tagKey/tagValue using the cluster tags (string map)', async () => {
     const eksSender = senderDouble({
-      ListClustersCommand: () => ({ clusters: [CLUSTER_NAME, "drop-cluster"] }),
+      ListClustersCommand: () => ({ clusters: [CLUSTER_NAME, 'drop-cluster'] }),
       DescribeClusterCommand: (input) => ({
         cluster: {
           name: input.name,
           arn: `arn:aws:eks:us-east-1:123456789012:cluster/${String(input.name)}`,
           tags:
             input.name === CLUSTER_NAME
-              ? { "citadel:agent": "true" }
-              : { team: "other" },
+              ? { 'citadel:agent': 'true' }
+              : { team: 'other' },
         },
       }),
     });
     const adapter = new EksSourceAdapter({ eksSender });
 
     const candidates = await adapter.discover({
-      region: "us-east-1",
-      tagKey: "citadel:agent",
-      tagValue: "true",
+      region: 'us-east-1',
+      tagKey: 'citadel:agent',
+      tagValue: 'true',
     });
 
     expect(candidates.map((c) => c.displayName)).toEqual([CLUSTER_NAME]);
   });
 
-  it("returns [] when there are no clusters", async () => {
-    const eksSender = senderDouble({
-      ListClustersCommand: () => ({ clusters: [] }),
-    });
+  it('returns [] when there are no clusters', async () => {
+    const eksSender = senderDouble({ ListClustersCommand: () => ({ clusters: [] }) });
     const adapter = new EksSourceAdapter({ eksSender });
-    await expect(adapter.discover({ region: "us-east-1" })).resolves.toEqual(
-      [],
-    );
+    await expect(adapter.discover({ region: 'us-east-1' })).resolves.toEqual([]);
   });
 });
 
@@ -153,19 +141,19 @@ describe("EksSourceAdapter.discover (US-IMP-019)", () => {
 // describe
 // ---------------------------------------------------------------------------
 
-describe("EksSourceAdapter.describe (US-IMP-019)", () => {
-  it("builds a low-confidence Tier-1 descriptor and resolves the endpoint from the citadel:endpoint tag (precedence a)", async () => {
+describe('EksSourceAdapter.describe (US-IMP-019)', () => {
+  it('builds a low-confidence Tier-1 descriptor and resolves the endpoint from the citadel:endpoint tag (precedence a)', async () => {
     const eksSender = senderDouble({
       DescribeClusterCommand: () => ({
         cluster: {
           name: CLUSTER_NAME,
           arn: CLUSTER_ARN,
-          version: "1.29",
-          status: "ACTIVE",
-          platformVersion: "eks.5",
+          version: '1.29',
+          status: 'ACTIVE',
+          platformVersion: 'eks.5',
           endpoint: K8S_API, // k8s API server — must NOT be used as the target
           certificateAuthority: { data: CA_DATA }, // must NEVER leak
-          tags: { "citadel:endpoint": "https://agent.example.com/run" },
+          tags: { 'citadel:endpoint': 'https://agent.example.com/run' },
         },
       }),
     });
@@ -177,37 +165,29 @@ describe("EksSourceAdapter.describe (US-IMP-019)", () => {
 
     expect(d.name).toBe(CLUSTER_NAME);
     expect(d.invocation).toMatchObject({
-      protocol: "HTTP_ENDPOINT",
-      target: "https://agent.example.com/run",
-      auth: { mode: "NONE" },
-      mode: "sync",
-      region: "us-east-1",
-      account: "123456789012",
+      protocol: 'HTTP_ENDPOINT',
+      target: 'https://agent.example.com/run',
+      auth: { mode: 'NONE' },
+      mode: 'sync',
+      region: 'us-east-1',
+      account: '123456789012',
     });
-    expect(d.origin).toMatchObject({
-      substrate: "eks",
-      sourceArn: CLUSTER_ARN,
-    });
+    expect(d.origin).toMatchObject({ substrate: 'eks', sourceArn: CLUSTER_ARN });
     // Tier-1 facts inferred from the cluster appear in the description.
-    expect(d.description).toContain("1.29");
+    expect(d.description).toContain('1.29');
     // The descriptor version is the k8s version.
-    expect(d.version).toBe("1.29");
+    expect(d.version).toBe('1.29');
     // Inferred fields are low confidence.
-    expect(d.fieldConfidence?.name).toBe("low");
+    expect(d.fieldConfidence?.name).toBe('low');
     // NEVER leak CA / secret data, and NEVER use the k8s API endpoint as target.
     expect(JSON.stringify(d)).not.toContain(CA_DATA);
-    expect(d.invocation.target).not.toContain("eks.amazonaws.com");
+    expect(d.invocation.target).not.toContain('eks.amazonaws.com');
   });
 
-  it("falls back to a cluster-tagged ELBv2 load balancer DNS (kubernetes.io/cluster=owned) when no endpoint tag is set (precedence b)", async () => {
+  it('falls back to a cluster-tagged ELBv2 load balancer DNS (kubernetes.io/cluster=owned) when no endpoint tag is set (precedence b)', async () => {
     const eksSender = senderDouble({
       DescribeClusterCommand: () => ({
-        cluster: {
-          name: CLUSTER_NAME,
-          arn: CLUSTER_ARN,
-          version: "1.29",
-          tags: {},
-        },
+        cluster: { name: CLUSTER_NAME, arn: CLUSTER_ARN, version: '1.29', tags: {} },
       }),
     });
     const elbSender = senderDouble({
@@ -218,9 +198,7 @@ describe("EksSourceAdapter.describe (US-IMP-019)", () => {
         TagDescriptions: [
           {
             ResourceArn: LB_ARN,
-            Tags: [
-              { Key: `kubernetes.io/cluster/${CLUSTER_NAME}`, Value: "owned" },
-            ],
+            Tags: [{ Key: `kubernetes.io/cluster/${CLUSTER_NAME}`, Value: 'owned' }],
           },
         ],
       }),
@@ -230,10 +208,33 @@ describe("EksSourceAdapter.describe (US-IMP-019)", () => {
     const d = await adapter.describe(CLUSTER_ARN);
 
     expect(d.invocation.target).toBe(`http://${LB_DNS}`);
-    expect(d.invocation.protocol).toBe("HTTP_ENDPOINT");
+    expect(d.invocation.protocol).toBe('HTTP_ENDPOINT');
   });
 
-  it("matches a load balancer via the elbv2.k8s.aws/cluster tag", async () => {
+  it('matches a load balancer via the elbv2.k8s.aws/cluster tag', async () => {
+    const eksSender = senderDouble({
+      DescribeClusterCommand: () => ({
+        cluster: { name: CLUSTER_NAME, arn: CLUSTER_ARN, tags: {} },
+      }),
+    });
+    const elbSender = senderDouble({
+      DescribeLoadBalancersCommand: () => ({
+        LoadBalancers: [{ LoadBalancerArn: LB_ARN, DNSName: LB_DNS }],
+      }),
+      DescribeTagsCommand: () => ({
+        TagDescriptions: [
+          { ResourceArn: LB_ARN, Tags: [{ Key: 'elbv2.k8s.aws/cluster', Value: CLUSTER_NAME }] },
+        ],
+      }),
+    });
+    const adapter = new EksSourceAdapter({ eksSender, elbSender });
+
+    const d = await adapter.describe(CLUSTER_ARN);
+
+    expect(d.invocation.target).toBe(`http://${LB_DNS}`);
+  });
+
+  it('ignores load balancers tagged for a DIFFERENT cluster', async () => {
     const eksSender = senderDouble({
       DescribeClusterCommand: () => ({
         cluster: { name: CLUSTER_NAME, arn: CLUSTER_ARN, tags: {} },
@@ -247,7 +248,7 @@ describe("EksSourceAdapter.describe (US-IMP-019)", () => {
         TagDescriptions: [
           {
             ResourceArn: LB_ARN,
-            Tags: [{ Key: "elbv2.k8s.aws/cluster", Value: CLUSTER_NAME }],
+            Tags: [{ Key: 'kubernetes.io/cluster/some-other-cluster', Value: 'owned' }],
           },
         ],
       }),
@@ -256,48 +257,17 @@ describe("EksSourceAdapter.describe (US-IMP-019)", () => {
 
     const d = await adapter.describe(CLUSTER_ARN);
 
-    expect(d.invocation.target).toBe(`http://${LB_DNS}`);
+    expect(d.invocation.target).toBe('');
+    expect(d.description.toLowerCase()).toContain('endpoint');
   });
 
-  it("ignores load balancers tagged for a DIFFERENT cluster", async () => {
-    const eksSender = senderDouble({
-      DescribeClusterCommand: () => ({
-        cluster: { name: CLUSTER_NAME, arn: CLUSTER_ARN, tags: {} },
-      }),
-    });
-    const elbSender = senderDouble({
-      DescribeLoadBalancersCommand: () => ({
-        LoadBalancers: [{ LoadBalancerArn: LB_ARN, DNSName: LB_DNS }],
-      }),
-      DescribeTagsCommand: () => ({
-        TagDescriptions: [
-          {
-            ResourceArn: LB_ARN,
-            Tags: [
-              {
-                Key: "kubernetes.io/cluster/some-other-cluster",
-                Value: "owned",
-              },
-            ],
-          },
-        ],
-      }),
-    });
-    const adapter = new EksSourceAdapter({ eksSender, elbSender });
-
-    const d = await adapter.describe(CLUSTER_ARN);
-
-    expect(d.invocation.target).toBe("");
-    expect(d.description.toLowerCase()).toContain("endpoint");
-  });
-
-  it("leaves the endpoint empty and adds an operator note when nothing resolves (precedence c); cluster.endpoint is NOT used", async () => {
+  it('leaves the endpoint empty and adds an operator note when nothing resolves (precedence c); cluster.endpoint is NOT used', async () => {
     const eksSender = senderDouble({
       DescribeClusterCommand: () => ({
         cluster: {
           name: CLUSTER_NAME,
           arn: CLUSTER_ARN,
-          version: "1.29",
+          version: '1.29',
           endpoint: K8S_API, // present, but is the k8s API server — never the target
           tags: {},
         },
@@ -310,10 +280,10 @@ describe("EksSourceAdapter.describe (US-IMP-019)", () => {
 
     const d = await adapter.describe(CLUSTER_ARN);
 
-    expect(d.invocation.target).toBe("");
-    expect(d.invocation.protocol).toBe("HTTP_ENDPOINT");
-    expect(d.invocation.target).not.toContain("eks.amazonaws.com");
-    expect(d.description.toLowerCase()).toContain("endpoint");
+    expect(d.invocation.target).toBe('');
+    expect(d.invocation.protocol).toBe('HTTP_ENDPOINT');
+    expect(d.invocation.target).not.toContain('eks.amazonaws.com');
+    expect(d.description.toLowerCase()).toContain('endpoint');
   });
 });
 
@@ -321,34 +291,30 @@ describe("EksSourceAdapter.describe (US-IMP-019)", () => {
 // healthCheck
 // ---------------------------------------------------------------------------
 
-describe("EksSourceAdapter.healthCheck (US-IMP-019)", () => {
+describe('EksSourceAdapter.healthCheck (US-IMP-019)', () => {
   function endpointTagEksSender(): { send: jest.Mock } {
     return senderDouble({
       DescribeClusterCommand: () => ({
         cluster: {
           name: CLUSTER_NAME,
           arn: CLUSTER_ARN,
-          tags: { "citadel:endpoint": "https://agent.example.com/run" },
+          tags: { 'citadel:endpoint': 'https://agent.example.com/run' },
         },
       }),
     });
   }
 
-  it("probes the resolved endpoint and returns reachable:true on a 2xx", async () => {
+  it('probes the resolved endpoint and returns reachable:true on a 2xx', async () => {
     const fetchFn = jest.fn(async () => ({ ok: true, status: 200 }));
     const adapter = new EksSourceAdapter({
       eksSender: endpointTagEksSender(),
       fetchFn: asFetch(fetchFn),
     });
-    await expect(adapter.healthCheck(CLUSTER_ARN)).resolves.toEqual({
-      reachable: true,
-    });
-    expect(String(fetchFn.mock.calls[0][0])).toBe(
-      "https://agent.example.com/run",
-    );
+    await expect(adapter.healthCheck(CLUSTER_ARN)).resolves.toEqual({ reachable: true });
+    expect(String(fetchFn.mock.calls[0][0])).toBe('https://agent.example.com/run');
   });
 
-  it("returns reachable:false (with detail) on a non-2xx WITHOUT throwing", async () => {
+  it('returns reachable:false (with detail) on a non-2xx WITHOUT throwing', async () => {
     const fetchFn = jest.fn(async () => ({ ok: false, status: 503 }));
     const adapter = new EksSourceAdapter({
       eksSender: endpointTagEksSender(),
@@ -356,28 +322,20 @@ describe("EksSourceAdapter.healthCheck (US-IMP-019)", () => {
     });
     const res = await adapter.healthCheck(CLUSTER_ARN);
     expect(res.reachable).toBe(false);
-    expect(res.detail).toContain("503");
+    expect(res.detail).toContain('503');
   });
 
-  it("returns reachable:false with a clear detail when no endpoint resolves (fetch not called)", async () => {
+  it('returns reachable:false with a clear detail when no endpoint resolves (fetch not called)', async () => {
     const eksSender = senderDouble({
-      DescribeClusterCommand: () => ({
-        cluster: { name: CLUSTER_NAME, arn: CLUSTER_ARN, tags: {} },
-      }),
+      DescribeClusterCommand: () => ({ cluster: { name: CLUSTER_NAME, arn: CLUSTER_ARN, tags: {} } }),
     });
-    const elbSender = senderDouble({
-      DescribeLoadBalancersCommand: () => ({ LoadBalancers: [] }),
-    });
+    const elbSender = senderDouble({ DescribeLoadBalancersCommand: () => ({ LoadBalancers: [] }) });
     const fetchFn = jest.fn();
-    const adapter = new EksSourceAdapter({
-      eksSender,
-      elbSender,
-      fetchFn: asFetch(fetchFn),
-    });
+    const adapter = new EksSourceAdapter({ eksSender, elbSender, fetchFn: asFetch(fetchFn) });
 
     await expect(adapter.healthCheck(CLUSTER_ARN)).resolves.toEqual({
       reachable: false,
-      detail: "no endpoint resolved",
+      detail: 'no endpoint resolved',
     });
     expect(fetchFn).not.toHaveBeenCalled();
   });
@@ -387,46 +345,40 @@ describe("EksSourceAdapter.healthCheck (US-IMP-019)", () => {
 // invoke / vendCredentials — NotImplemented (EKS invokes via HTTP_ENDPOINT)
 // ---------------------------------------------------------------------------
 
-describe("EksSourceAdapter invoke/vendCredentials are NotImplemented stubs", () => {
+describe('EksSourceAdapter invoke/vendCredentials are NotImplemented stubs', () => {
   const invocation: AgentInvocationBlock = {
-    protocol: "HTTP_ENDPOINT",
-    target: "https://agent.example.com",
-    auth: { mode: "NONE" },
-    mode: "sync",
+    protocol: 'HTTP_ENDPOINT',
+    target: 'https://agent.example.com',
+    auth: { mode: 'NONE' },
+    mode: 'sync',
   };
 
-  it("vendCredentials throws NotImplementedError (no AWS invoke role for EKS)", async () => {
+  it('vendCredentials throws NotImplementedError (no AWS invoke role for EKS)', async () => {
     const adapter = new EksSourceAdapter({});
-    await expect(adapter.vendCredentials(invocation)).rejects.toBeInstanceOf(
-      NotImplementedError,
-    );
+    await expect(adapter.vendCredentials(invocation)).rejects.toBeInstanceOf(NotImplementedError);
   });
 
-  it("invoke throws NotImplementedError (invoke flows through the HTTP adapter)", async () => {
+  it('invoke throws NotImplementedError (invoke flows through the HTTP adapter)', async () => {
     const adapter = new EksSourceAdapter({});
     await expect(
       adapter.invoke(
-        { prompt: "ping" },
+        { prompt: 'ping' },
         {
-          name: "x",
-          description: "",
-          version: "1",
+          name: 'x',
+          description: '',
+          version: '1',
           skills: [],
           categories: [],
           inputSchema: {},
           outputSchema: {},
           invocation,
-          origin: {
-            substrate: "eks",
-            discoveredAt: "now",
-            ownership: "external",
-          },
+          origin: { substrate: 'eks', discoveredAt: 'now', ownership: 'external' },
         },
       ),
     ).rejects.toBeInstanceOf(NotImplementedError);
   });
 
   it("declares protocol HTTP_ENDPOINT (the candidate's invocation protocol)", () => {
-    expect(new EksSourceAdapter({}).protocol).toBe("HTTP_ENDPOINT");
+    expect(new EksSourceAdapter({}).protocol).toBe('HTTP_ENDPOINT');
   });
 });

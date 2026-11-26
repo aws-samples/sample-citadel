@@ -11,56 +11,45 @@ import {
   resolveSourceRef,
   getDiscoveryAdapterForSubstrate,
   UnsupportedSourceError,
-} from "../agent-discovery";
-import { EcsSourceAdapter } from "../../adapters/agent-source/ecs-source-adapter";
+} from '../agent-discovery';
+import { EcsSourceAdapter } from '../../adapters/agent-source/ecs-source-adapter';
 
 const ECS_SERVICE_ARN =
-  "arn:aws:ecs:us-east-1:123456789012:service/my-cluster/my-agent-svc";
-const ECS_SERVICE_ARN_OLD =
-  "arn:aws:ecs:us-east-1:123456789012:service/my-agent-svc";
-const ECS_TASK_ARN =
-  "arn:aws:ecs:us-east-1:123456789012:task/my-cluster/abc123";
+  'arn:aws:ecs:us-east-1:123456789012:service/my-cluster/my-agent-svc';
+const ECS_SERVICE_ARN_OLD = 'arn:aws:ecs:us-east-1:123456789012:service/my-agent-svc';
+const ECS_TASK_ARN = 'arn:aws:ecs:us-east-1:123456789012:task/my-cluster/abc123';
 
-describe("resolveSourceRef — ECS service ARN (US-IMP-018)", () => {
+describe('resolveSourceRef — ECS service ARN (US-IMP-018)', () => {
   it.each([ECS_SERVICE_ARN, ECS_SERVICE_ARN_OLD])(
-    "maps an ECS service ARN %s to { HTTP_ENDPOINT, ecs, <arn> }",
+    'maps an ECS service ARN %s to { HTTP_ENDPOINT, ecs, <arn> }',
     (arn) => {
       const r = resolveSourceRef(arn);
-      expect(r.protocol).toBe("HTTP_ENDPOINT");
-      expect(r.substrate).toBe("ecs");
+      expect(r.protocol).toBe('HTTP_ENDPOINT');
+      expect(r.substrate).toBe('ecs');
       expect(r.target).toBe(arn);
     },
   );
 
-  it("still throws UnsupportedSourceError for a non-service ECS ARN (task)", () => {
-    expect(() => resolveSourceRef(ECS_TASK_ARN)).toThrow(
-      UnsupportedSourceError,
-    );
-    expect(() => resolveSourceRef(ECS_TASK_ARN)).toThrow(
-      /ecs not supported in phase 1/,
-    );
+  it('still throws UnsupportedSourceError for a non-service ECS ARN (task)', () => {
+    expect(() => resolveSourceRef(ECS_TASK_ARN)).toThrow(UnsupportedSourceError);
+    expect(() => resolveSourceRef(ECS_TASK_ARN)).toThrow(/ecs not supported in phase 1/);
   });
 });
 
-describe("getDiscoveryAdapterForSubstrate (US-IMP-018)", () => {
+describe('getDiscoveryAdapterForSubstrate (US-IMP-018)', () => {
   it("returns an EcsSourceAdapter for substrate 'ecs'", () => {
-    const adapter = getDiscoveryAdapterForSubstrate("ecs");
+    const adapter = getDiscoveryAdapterForSubstrate('ecs');
     expect(adapter).toBeInstanceOf(EcsSourceAdapter);
   });
 
-  it("threads a credentialProvider into the ECS adapter (cross-account describe)", () => {
-    const credentialProvider = {
-      accessKeyId: "AKIA",
-      secretAccessKey: "secret",
-    };
-    const adapter = getDiscoveryAdapterForSubstrate("ecs", {
-      credentialProvider,
-    });
+  it('threads a credentialProvider into the ECS adapter (cross-account describe)', () => {
+    const credentialProvider = { accessKeyId: 'AKIA', secretAccessKey: 'secret' };
+    const adapter = getDiscoveryAdapterForSubstrate('ecs', { credentialProvider });
     expect(adapter).toBeInstanceOf(EcsSourceAdapter);
   });
 
-  it.each(["lambda", "http", "bedrock_agent", "mcp", "unknown"])(
-    "returns undefined for non-discovery substrate %s",
+  it.each(['lambda', 'http', 'bedrock_agent', 'mcp', 'unknown'])(
+    'returns undefined for non-discovery substrate %s',
     (substrate) => {
       expect(getDiscoveryAdapterForSubstrate(substrate)).toBeUndefined();
     },

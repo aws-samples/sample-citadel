@@ -138,10 +138,7 @@ describe("listUsers — org scoping", () => {
       .on(AdminListGroupsForUserCommand, { Username: "carol" })
       .resolves({ Groups: [{ GroupName: "developer" }] });
 
-    const event = buildEvent("listUsers", {
-      username: "alice",
-      "custom:organization": "org-a",
-    });
+    const event = buildEvent("listUsers", { username: "alice", "custom:organization": "org-a" });
     const result = (await handler(event)) as UserResult[];
 
     const ids = result.map((u) => u.userId).sort();
@@ -164,10 +161,7 @@ describe("listUsers — org scoping", () => {
       .on(AdminListGroupsForUserCommand, { Username: "carol" })
       .resolves({ Groups: [{ GroupName: "developer" }] });
 
-    const event = buildEvent("listUsers", {
-      username: "admin-user",
-      claims: { "cognito:groups": ["admin"] },
-    });
+    const event = buildEvent("listUsers", { username: "admin-user", claims: { "cognito:groups": ["admin"] } });
     const result = (await handler(event)) as UserResult[];
 
     const ids = result.map((u) => u.userId).sort();
@@ -323,10 +317,7 @@ describe("listOrganizations — org scoping", () => {
     });
     dynamoMock.on(ScanCommand).resolves({ Items: orgItems });
 
-    const event = buildEvent("listOrganizations", {
-      username: "alice",
-      "custom:organization": "Org A",
-    });
+    const event = buildEvent("listOrganizations", { username: "alice", "custom:organization": "Org A" });
     const result = (await handler(event)) as OrganizationResult[];
 
     expect(result.map((o) => o.name)).toEqual(["Org A"]);
@@ -338,10 +329,7 @@ describe("listOrganizations — org scoping", () => {
       .resolves({ Groups: [{ GroupName: "admin" }] });
     dynamoMock.on(ScanCommand).resolves({ Items: orgItems });
 
-    const event = buildEvent("listOrganizations", {
-      username: "admin-user",
-      claims: { "cognito:groups": ["admin"] },
-    });
+    const event = buildEvent("listOrganizations", { username: "admin-user", claims: { "cognito:groups": ["admin"] } });
     const result = (await handler(event)) as OrganizationResult[];
 
     expect(result.map((o) => o.name).sort()).toEqual(["Org A", "Org B"]);

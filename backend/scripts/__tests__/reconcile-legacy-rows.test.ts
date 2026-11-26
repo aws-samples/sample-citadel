@@ -834,7 +834,10 @@ describe("runReconcilePlaceholderCopies", () => {
 
     // Deletable rows correctly identified
     const deletable = rows.filter((r) => !r.boundSkipped);
-    expect(deletable.map((r) => r.workflowId).sort()).toEqual(["pc-1", "pc-2"]);
+    expect(deletable.map((r) => r.workflowId).sort()).toEqual([
+      "pc-1",
+      "pc-2",
+    ]);
   });
 
   test("--apply deletes only eligible placeholder copies", async () => {
@@ -1069,7 +1072,10 @@ describe("runReconcileUntitledDrafts", () => {
     );
 
     // 1 untitled DRAFT with execution reference — must survive
-    workflowsTable.put("ut-exec", untitledDraftWorkflow("ut-exec"));
+    workflowsTable.put(
+      "ut-exec",
+      untitledDraftWorkflow("ut-exec"),
+    );
     executionsTable.put("exec-ut", {
       executionId: "exec-ut",
       workflowId: "ut-exec",
@@ -1083,7 +1089,10 @@ describe("runReconcileUntitledDrafts", () => {
     );
 
     // 1 untitled DRAFT bound via apps table — must be skipped
-    workflowsTable.put("ut-bound-app", untitledDraftWorkflow("ut-bound-app"));
+    workflowsTable.put(
+      "ut-bound-app",
+      untitledDraftWorkflow("ut-bound-app"),
+    );
     appsTable.put("app-abc", {
       appId: "app-abc",
       workflowIds: ["ut-bound-app"],
@@ -1170,7 +1179,9 @@ describe("runReconcileUntitledDrafts", () => {
 
   test("dry-run identifies untitled drafts but writes nothing", async () => {
     const initial = workflowsTable.size();
-    const { summary, rows } = await runReconcileUntitledDrafts(makeOpts(true));
+    const { summary, rows } = await runReconcileUntitledDrafts(
+      makeOpts(true),
+    );
 
     expect(summary.found).toBe(5);
     expect(summary.boundSkipped).toBe(2);

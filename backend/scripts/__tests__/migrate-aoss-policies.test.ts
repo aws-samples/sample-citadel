@@ -70,9 +70,7 @@ describe("migrate-aoss-policies", () => {
     stsMock.on(GetCallerIdentityCommand).resolves({ Account: ACCOUNT_ID });
   });
 
-  function setupKbRow(
-    overrides?: Partial<{ dataStoreId: string; name: string; config: string }>,
-  ) {
+  function setupKbRow(overrides?: Partial<{ dataStoreId: string; name: string; config: string }>) {
     dynamoMock.on(ScanCommand).resolves({
       Items: [
         {

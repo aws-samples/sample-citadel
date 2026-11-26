@@ -15,7 +15,7 @@
 
 // Mirrors isWorkflowNodeDefinition in frontend/src/types/workflow.ts.
 export function isWorkflowNodeDefinition(node: unknown): boolean {
-  if (node === null || typeof node !== "object") {
+  if (node === null || typeof node !== 'object') {
     return false;
   }
   const candidate = node as {
@@ -25,24 +25,24 @@ export function isWorkflowNodeDefinition(node: unknown): boolean {
     position?: unknown;
     configuration?: unknown;
   };
-  if (candidate.position === null || typeof candidate.position !== "object") {
+  if (candidate.position === null || typeof candidate.position !== 'object') {
     return false;
   }
   const position = candidate.position as { x?: unknown; y?: unknown };
   return (
-    typeof candidate.id === "string" &&
-    typeof candidate.agentId === "string" &&
-    (candidate.name === undefined || typeof candidate.name === "string") &&
-    typeof position.x === "number" &&
-    typeof position.y === "number" &&
+    typeof candidate.id === 'string' &&
+    typeof candidate.agentId === 'string' &&
+    (candidate.name === undefined || typeof candidate.name === 'string') &&
+    typeof position.x === 'number' &&
+    typeof position.y === 'number' &&
     candidate.configuration !== null &&
-    typeof candidate.configuration === "object"
+    typeof candidate.configuration === 'object'
   );
 }
 
 // Mirrors isWorkflowEdgeDefinition in frontend/src/types/workflow.ts.
 export function isWorkflowEdgeDefinition(edge: unknown): boolean {
-  if (edge === null || typeof edge !== "object") {
+  if (edge === null || typeof edge !== 'object') {
     return false;
   }
   const candidate = edge as {
@@ -53,17 +53,17 @@ export function isWorkflowEdgeDefinition(edge: unknown): boolean {
     targetHandle?: unknown;
   };
   return (
-    typeof candidate.id === "string" &&
-    typeof candidate.source === "string" &&
-    typeof candidate.target === "string" &&
-    typeof candidate.sourceHandle === "string" &&
-    typeof candidate.targetHandle === "string"
+    typeof candidate.id === 'string' &&
+    typeof candidate.source === 'string' &&
+    typeof candidate.target === 'string' &&
+    typeof candidate.sourceHandle === 'string' &&
+    typeof candidate.targetHandle === 'string'
   );
 }
 
 // Mirrors isWorkflowDefinition in frontend/src/types/workflow.ts.
 export function isWorkflowDefinitionEnvelope(workflow: unknown): boolean {
-  if (workflow === null || typeof workflow !== "object") {
+  if (workflow === null || typeof workflow !== 'object') {
     return false;
   }
   const candidate = workflow as {
@@ -76,11 +76,11 @@ export function isWorkflowDefinitionEnvelope(workflow: unknown): boolean {
     edges?: unknown;
   };
   if (
-    typeof candidate.version !== "string" ||
-    typeof candidate.id !== "string" ||
-    typeof candidate.name !== "string" ||
-    typeof candidate.createdAt !== "string" ||
-    typeof candidate.updatedAt !== "string" ||
+    typeof candidate.version !== 'string' ||
+    typeof candidate.id !== 'string' ||
+    typeof candidate.name !== 'string' ||
+    typeof candidate.createdAt !== 'string' ||
+    typeof candidate.updatedAt !== 'string' ||
     !Array.isArray(candidate.nodes) ||
     !Array.isArray(candidate.edges)
   ) {

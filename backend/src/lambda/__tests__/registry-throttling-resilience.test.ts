@@ -25,10 +25,7 @@ import type { ListResourcesResult } from "../../services/registry-service";
 const registryMock = mockClient(AgentRegistryControlClient);
 
 function makeService(): RegistryService {
-  return new RegistryService({
-    registryId: "test-registry",
-    region: "us-east-1",
-  });
+  return new RegistryService({ registryId: "test-registry", region: "us-east-1" });
 }
 
 /**
@@ -87,23 +84,23 @@ describe("RegistryService.listResourcesChecked", () => {
     const svc = makeService();
 
     // List returns 3 summaries
-    registryMock.on(ListRegistryRecordsCommand).resolves(listResponse(3));
+    registryMock
+      .on(ListRegistryRecordsCommand)
+      .resolves(listResponse(3));
 
     // Detail calls: first two records succeed, third ALWAYS throws
     // ThrottlingException (even across retries). The mock identifies the
     // record by its recordId from the request input.
-    registryMock
-      .on(GetRegistryRecordCommand)
-      .callsFake((input: { recordId: string }) => {
-        const id = input.recordId;
-        // The 3rd summary has index 2; its recordId starts with "rec00000000"
-        if (id.startsWith("rec00000000") && id.endsWith("2")) {
-          throw throttlingError();
-        }
-        // For the first two, return a valid agent detail
-        const index = id.endsWith("0") ? 0 : 1;
-        return detailResponse(index);
-      });
+    registryMock.on(GetRegistryRecordCommand).callsFake((input: { recordId: string }) => {
+      const id = input.recordId;
+      // The 3rd summary has index 2; its recordId starts with "rec00000000"
+      if (id.startsWith("rec00000000") && id.endsWith("2")) {
+        throw throttlingError();
+      }
+      // For the first two, return a valid agent detail
+      const index = id.endsWith("0") ? 0 : 1;
+      return detailResponse(index);
+    });
 
     const result: ListResourcesResult = await svc.listResourcesChecked("agent");
 
@@ -117,7 +114,9 @@ describe("RegistryService.listResourcesChecked", () => {
   it("returns partial=false, throttled=false when all detail fetches succeed", async () => {
     const svc = makeService();
 
-    registryMock.on(ListRegistryRecordsCommand).resolves(listResponse(2));
+    registryMock
+      .on(ListRegistryRecordsCommand)
+      .resolves(listResponse(2));
 
     let callIdx = 0;
     registryMock.on(GetRegistryRecordCommand).callsFake(() => {
@@ -135,7 +134,9 @@ describe("RegistryService.listResourcesChecked", () => {
   it("returns partial=true but throttled=false when a non-throttle error drops a record", async () => {
     const svc = makeService();
 
-    registryMock.on(ListRegistryRecordsCommand).resolves(listResponse(2));
+    registryMock
+      .on(ListRegistryRecordsCommand)
+      .resolves(listResponse(2));
 
     let callIdx = 0;
     registryMock.on(GetRegistryRecordCommand).callsFake(() => {
@@ -183,11 +184,7 @@ describe("RegistryService.withMutationRetry", () => {
   it("retries with exponential backoff (base 500ms, 5 attempts)", async () => {
     const svc = makeService();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- test-only access to private sleep
-    const sleepSpy = jest
-      .spyOn(
-        svc as unknown as Record<string, (...args: unknown[]) => unknown>,
-        "sleep" as never,
-      )
+    const sleepSpy = jest.spyOn(svc as unknown as Record<string, (...args: unknown[]) => unknown>, "sleep" as never)
       .mockResolvedValue(undefined as never);
 
     let attempts = 0;
@@ -213,11 +210,7 @@ describe("RegistryService.withMutationRetry", () => {
   it("throws after exhausting all 5 attempts", async () => {
     const svc = makeService();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- test-only access to private sleep
-    jest
-      .spyOn(
-        svc as unknown as Record<string, (...args: unknown[]) => unknown>,
-        "sleep" as never,
-      )
+    jest.spyOn(svc as unknown as Record<string, (...args: unknown[]) => unknown>, "sleep" as never)
       .mockResolvedValue(undefined as never);
 
     const operation = jest.fn(async () => {
@@ -245,11 +238,7 @@ describe("submitForApproval uses mutation retry", () => {
   it("retries throttled submits up to 5 times", async () => {
     const svc = makeService();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- test-only access to private sleep
-    jest
-      .spyOn(
-        svc as unknown as Record<string, (...args: unknown[]) => unknown>,
-        "sleep" as never,
-      )
+    jest.spyOn(svc as unknown as Record<string, (...args: unknown[]) => unknown>, "sleep" as never)
       .mockResolvedValue(undefined as never);
 
     let submitCalls = 0;

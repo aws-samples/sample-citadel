@@ -3,15 +3,11 @@
  * implementations. Kept substrate-agnostic (type-only imports, erased at
  * compile time) so each adapter stays minimal and free of duplicated logic.
  */
-import type {
-  AgentInvocationBlock,
-  JsonSchema,
-  VendedCredentials,
-} from "./base";
-import { PolicyManager } from "../../utils/policy-manager";
+import type { AgentInvocationBlock, JsonSchema, VendedCredentials } from './base';
+import { PolicyManager } from '../../utils/policy-manager';
 
 /** Placeholder returned when a substrate yields no usable response text. */
-export const NO_RESPONSE_TEXT = "Agent processing completed (no response text)";
+export const NO_RESPONSE_TEXT = 'Agent processing completed (no response text)';
 
 /**
  * A minimal "send a command" surface. Real AWS SDK clients satisfy this
@@ -24,25 +20,20 @@ export interface CommandSender {
 }
 
 /** Narrowing guard for substrate responses delivered as async streams. */
-export function isAsyncIterable(
-  value: unknown,
-): value is AsyncIterable<unknown> {
+export function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
   return (
-    typeof value === "object" &&
+    typeof value === 'object' &&
     value !== null &&
-    typeof (value as Record<symbol, unknown>)[Symbol.asyncIterator] ===
-      "function"
+    typeof (value as Record<symbol, unknown>)[Symbol.asyncIterator] === 'function'
   );
 }
 
 /** Decode a byte-ish payload (Uint8Array | number[] | string) to UTF-8 text. */
 export function bytesToString(payload: unknown): string {
-  if (payload == null) return "";
-  if (typeof payload === "string") return payload;
-  if (payload instanceof Uint8Array)
-    return Buffer.from(payload).toString("utf-8");
-  if (Array.isArray(payload))
-    return Buffer.from(payload as number[]).toString("utf-8");
+  if (payload == null) return '';
+  if (typeof payload === 'string') return payload;
+  if (payload instanceof Uint8Array) return Buffer.from(payload).toString('utf-8');
+  if (Array.isArray(payload)) return Buffer.from(payload as number[]).toString('utf-8');
   return String(payload);
 }
 
@@ -52,16 +43,16 @@ export function bytesToString(payload: unknown): string {
  * AgentCore handler (`response` then `output`).
  */
 export function extractTextOutput(text: string): string {
-  if (!text) return "";
+  if (!text) return '';
   try {
     const parsed: unknown = JSON.parse(text);
-    if (typeof parsed === "string") return parsed;
-    if (parsed && typeof parsed === "object") {
+    if (typeof parsed === 'string') return parsed;
+    if (parsed && typeof parsed === 'object') {
       const o = parsed as Record<string, unknown>;
-      if (typeof o.response === "string") return o.response;
-      if (typeof o.output === "string") return o.output;
-      if (typeof o.completion === "string") return o.completion;
-      if (typeof o.text === "string") return o.text;
+      if (typeof o.response === 'string') return o.response;
+      if (typeof o.output === 'string') return o.output;
+      if (typeof o.completion === 'string') return o.completion;
+      if (typeof o.text === 'string') return o.text;
     }
     return text;
   } catch {
@@ -73,7 +64,7 @@ export function extractTextOutput(text: string): string {
 
 /** Local object guard for the OpenAPI walk; kept private to this module. */
 function isObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
 /**
@@ -99,7 +90,7 @@ export function collectOpenApi(doc: unknown): {
     for (const [method, op] of Object.entries(item)) {
       if (!isObject(op)) continue;
       const opKey =
-        typeof op.operationId === "string" && op.operationId.length > 0
+        typeof op.operationId === 'string' && op.operationId.length > 0
           ? op.operationId
           : `${method.toUpperCase()} ${path}`;
       ops.push(opKey);
@@ -114,9 +105,8 @@ export function collectOpenApi(doc: unknown): {
 
 /** Pick the `application/json` schema from an OpenAPI requestBody, if present. */
 function requestJsonSchema(requestBody: unknown): JsonSchema | undefined {
-  if (!isObject(requestBody) || !isObject(requestBody.content))
-    return undefined;
-  const aj = requestBody.content["application/json"];
+  if (!isObject(requestBody) || !isObject(requestBody.content)) return undefined;
+  const aj = requestBody.content['application/json'];
   return isObject(aj) && isObject(aj.schema) ? aj.schema : undefined;
 }
 
@@ -129,13 +119,13 @@ function responseJsonSchema(responses: unknown): JsonSchema | undefined {
   const pick = (code: string): JsonSchema | undefined => {
     const r = responses[code];
     if (!isObject(r) || !isObject(r.content)) return undefined;
-    const aj = r.content["application/json"];
+    const aj = r.content['application/json'];
     return isObject(aj) && isObject(aj.schema) ? aj.schema : undefined;
   };
-  const direct = pick("200");
+  const direct = pick('200');
   if (direct) return direct;
   for (const code of Object.keys(responses)) {
-    if (code.startsWith("2")) {
+    if (code.startsWith('2')) {
       const s = pick(code);
       if (s) return s;
     }
@@ -168,19 +158,18 @@ export interface AuthHeader {
  * matching HTTP's case-insensitive header semantics.
  */
 export function authHeaderScheme(
-  mode: AgentInvocationBlock["auth"]["mode"],
+  mode: AgentInvocationBlock['auth']['mode'],
   secret: string,
   customHeader?: string,
 ): AuthHeader | null {
   switch (mode) {
-    case "BEARER":
-    case "OAUTH2":
-    case "COGNITO":
-      return { name: "Authorization", value: `Bearer ${secret}` };
-    case "API_KEY":
+    case 'BEARER':
+    case 'OAUTH2':
+    case 'COGNITO':
+      return { name: 'Authorization', value: `Bearer ${secret}` };
+    case 'API_KEY':
       return {
-        name:
-          customHeader && customHeader.trim() ? customHeader : "Authorization",
+        name: customHeader && customHeader.trim() ? customHeader : 'Authorization',
         value: secret,
       };
     default:
@@ -215,7 +204,8 @@ export interface InvokeCredentials {
  * `credentials` config, so the adapter passes it straight through.
  */
 export type AdapterCredentialProvider =
-  InvokeCredentials | (() => Promise<InvokeCredentials>);
+  | InvokeCredentials
+  | (() => Promise<InvokeCredentials>);
 
 /**
  * Map the {@link VendedCredentials} returned by {@link vendImportCredentials}
@@ -232,14 +222,14 @@ export function toInvokeCredentials(
   const accessKeyId = vended.accessKeyId;
   const secretAccessKey = vended.secretAccessKey;
   const sessionToken = vended.sessionToken;
-  if (typeof accessKeyId !== "string" || typeof secretAccessKey !== "string") {
+  if (typeof accessKeyId !== 'string' || typeof secretAccessKey !== 'string') {
     return undefined;
   }
   return {
     accessKeyId,
     secretAccessKey,
-    ...(typeof sessionToken === "string" ? { sessionToken } : {}),
-    ...(typeof vended.expiresAt === "string"
+    ...(typeof sessionToken === 'string' ? { sessionToken } : {}),
+    ...(typeof vended.expiresAt === 'string'
       ? { expiration: new Date(vended.expiresAt) }
       : {}),
   };
@@ -259,7 +249,7 @@ function roleNameFromArn(arn: string): string | undefined {
 
 /** Extract the 12-digit account id from any ARN, when present. */
 function accountFromArn(arn: string): string | undefined {
-  const parts = arn.split(":");
+  const parts = arn.split(':');
   return parts.length >= 5 && /^\d{12}$/.test(parts[4]) ? parts[4] : undefined;
 }
 
@@ -291,13 +281,13 @@ export async function vendImportCredentials(
   }
 
   const policyManager = deps.policyManager ?? new PolicyManager();
-  const account = invocation.account ?? accountFromArn(roleArn) ?? "";
-  const resourceId = roleNameFromArn(roleArn) ?? "imported-agent";
+  const account = invocation.account ?? accountFromArn(roleArn) ?? '';
+  const resourceId = roleNameFromArn(roleArn) ?? 'imported-agent';
 
   const creds = await policyManager.assumeScopedRole(
     resourceId,
     account,
-    "agent",
+    'agent',
     roleArn,
     invocation.externalId,
   );

@@ -810,7 +810,9 @@ export const handler = async (
     const isIntentionalDedupeDrop =
       source === "task.completion" &&
       detailType === "task.completion" &&
-      Boolean((event.detail as TaskCompletionDetail).workflowExecutionId) &&
+      Boolean(
+        (event.detail as TaskCompletionDetail).workflowExecutionId,
+      ) &&
       Boolean((event.detail as TaskCompletionDetail).nodeId);
 
     if (!isIntentionalDedupeDrop) {

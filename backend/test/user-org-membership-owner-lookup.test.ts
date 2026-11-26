@@ -256,9 +256,7 @@ describe("CIT-216 — release resolver reads UserOrgMembershipTable", () => {
 
     const hit = statementsWithAction(backendTemplate, "dynamodb:GetItem").find(
       (st) =>
-        JSON.stringify(st.Resource).includes(
-          `"Fn::GetAtt":["${tableId}","Arn"]`,
-        ),
+        JSON.stringify(st.Resource).includes(`"Fn::GetAtt":["${tableId}","Arn"]`),
     );
     expect(hit).toBeDefined();
     expect(hit!.Effect).toBe("Allow");

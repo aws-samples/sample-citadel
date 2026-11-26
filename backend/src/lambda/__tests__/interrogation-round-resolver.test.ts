@@ -166,14 +166,16 @@ describe("interrogation-round-resolver", () => {
     test("redacts email + phone BEFORE S3 write; transitions row to STABILISED; emits governance.round.completed", async () => {
       const existing = baseRow({ status: "IN_PROGRESS" });
       ddbMock.on(GetCommand).resolves({ Item: existing });
-      ddbMock.on(UpdateCommand).resolves({
-        Attributes: {
-          ...existing,
-          status: "STABILISED",
-          completedAt: "2026-04-30T00:00:01.000Z",
-          transcriptSizeBytes: 42,
-        },
-      });
+      ddbMock
+        .on(UpdateCommand)
+        .resolves({
+          Attributes: {
+            ...existing,
+            status: "STABILISED",
+            completedAt: "2026-04-30T00:00:01.000Z",
+            transcriptSizeBytes: 42,
+          },
+        });
 
       const auth = mockAuthContextFor("architect");
       const transcript = [

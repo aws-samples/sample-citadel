@@ -20,20 +20,20 @@
  * verifies that callee's own function body actually threads `event` to
  * the handler AND contains an `assertProjectOrgAccess(` call.
  */
-import * as fs from "fs";
-import * as path from "path";
+import * as fs from 'fs';
+import * as path from 'path';
 
-const HANDLER_PATH = path.join(__dirname, "..", "execspec-resolver.ts");
+const HANDLER_PATH = path.join(__dirname, '..', 'execspec-resolver.ts');
 
 function extractDispatchCases(source: string): string[] {
-  const switchStart = source.indexOf("switch (fieldName)");
+  const switchStart = source.indexOf('switch (fieldName)');
   if (switchStart === -1) {
     throw new Error(
-      "Could not locate `switch (fieldName)` in execspec-resolver.ts — " +
+      'Could not locate `switch (fieldName)` in execspec-resolver.ts — ' +
         "dispatch structure changed; update this guard's parsing.",
     );
   }
-  const defaultIdx = source.indexOf("default:", switchStart);
+  const defaultIdx = source.indexOf('default:', switchStart);
   if (defaultIdx === -1) {
     throw new Error(
       "Could not locate the dispatch switch's `default:` case — " +
@@ -52,8 +52,8 @@ function extractDispatchCases(source: string): string[] {
 
 /** Slices out a single `case '<fieldName>': ... case` (or default) block. */
 function extractCaseBody(source: string, fieldName: string): string {
-  const switchStart = source.indexOf("switch (fieldName)");
-  const defaultIdx = source.indexOf("default:", switchStart);
+  const switchStart = source.indexOf('switch (fieldName)');
+  const defaultIdx = source.indexOf('default:', switchStart);
   const switchBody = source.slice(switchStart, defaultIdx);
 
   const caseIdx =
@@ -63,7 +63,7 @@ function extractCaseBody(source: string, fieldName: string): string {
   if (caseIdx === -1) {
     throw new Error(`Could not locate case '${fieldName}' in dispatch switch`);
   }
-  const nextCaseIdx = switchBody.indexOf("case ", caseIdx + 1);
+  const nextCaseIdx = switchBody.indexOf('case ', caseIdx + 1);
   return switchBody.slice(
     caseIdx,
     nextCaseIdx === -1 ? undefined : nextCaseIdx,
@@ -96,22 +96,22 @@ function extractFunctionBody(source: string, fnName: string): string {
       `Could not locate function declaration for '${fnName}' in execspec-resolver.ts`,
     );
   }
-  const paramsOpenIdx = source.indexOf("(", declMatch.index);
+  const paramsOpenIdx = source.indexOf('(', declMatch.index);
   let parenDepth = 0;
   let j = paramsOpenIdx;
   for (; j < source.length; j++) {
-    if (source[j] === "(") parenDepth++;
-    else if (source[j] === ")") {
+    if (source[j] === '(') parenDepth++;
+    else if (source[j] === ')') {
       parenDepth--;
       if (parenDepth === 0) break;
     }
   }
-  const bodyStart = source.indexOf("{", j);
+  const bodyStart = source.indexOf('{', j);
   let depth = 0;
   let i = bodyStart;
   for (; i < source.length; i++) {
-    if (source[i] === "{") depth++;
-    else if (source[i] === "}") {
+    if (source[i] === '{') depth++;
+    else if (source[i] === '}') {
       depth--;
       if (depth === 0) break;
     }
@@ -127,13 +127,13 @@ const EVENT_PARAM_RE = /event\?\s*:\s*unknown/;
  * function body.
  */
 const GATED_OPS: Record<string, { fn: string }> = {
-  createExecutionSpecification: { fn: "createExecutionSpecification" },
-  submitExecutionSpecification: { fn: "submitExecutionSpecification" },
-  approveExecutionSpecification: { fn: "approveExecutionSpecification" },
-  rejectExecutionSpecification: { fn: "rejectExecutionSpecification" },
-  reviseExecutionSpecification: { fn: "reviseExecutionSpecification" },
-  getExecutionSpecification: { fn: "getExecutionSpecification" },
-  listExecutionSpecifications: { fn: "listExecutionSpecifications" },
+  createExecutionSpecification: { fn: 'createExecutionSpecification' },
+  submitExecutionSpecification: { fn: 'submitExecutionSpecification' },
+  approveExecutionSpecification: { fn: 'approveExecutionSpecification' },
+  rejectExecutionSpecification: { fn: 'rejectExecutionSpecification' },
+  reviseExecutionSpecification: { fn: 'reviseExecutionSpecification' },
+  getExecutionSpecification: { fn: 'getExecutionSpecification' },
+  listExecutionSpecifications: { fn: 'listExecutionSpecifications' },
 };
 
 /**
@@ -143,28 +143,30 @@ const GATED_OPS: Record<string, { fn: string }> = {
  */
 const EXEMPT_OPS: Record<string, string> = {};
 
-describe("execspec-resolver — dispatch enumeration completeness", () => {
-  const source = fs.readFileSync(HANDLER_PATH, "utf-8");
+describe('execspec-resolver — dispatch enumeration completeness', () => {
+  const source = fs.readFileSync(HANDLER_PATH, 'utf-8');
   const cases = extractDispatchCases(source);
 
-  test("the dispatch switch actually has cases to check (sanity check on the parser itself)", () => {
+  test('the dispatch switch actually has cases to check (sanity check on the parser itself)', () => {
     expect(cases.length).toBeGreaterThanOrEqual(7);
-    expect(cases).toEqual(expect.arrayContaining(Object.keys(GATED_OPS)));
+    expect(cases).toEqual(
+      expect.arrayContaining(Object.keys(GATED_OPS)),
+    );
   });
 
-  test("every dispatch case is accounted for in GATED_OPS or EXEMPT_OPS", () => {
+  test('every dispatch case is accounted for in GATED_OPS or EXEMPT_OPS', () => {
     const unaccounted = cases.filter(
       (c) => !(c in GATED_OPS) && !(c in EXEMPT_OPS),
     );
     expect(unaccounted).toEqual([]);
   });
 
-  test("GATED_OPS and EXEMPT_OPS do not both claim the same op", () => {
+  test('GATED_OPS and EXEMPT_OPS do not both claim the same op', () => {
     const overlap = Object.keys(GATED_OPS).filter((k) => k in EXEMPT_OPS);
     expect(overlap).toEqual([]);
   });
 
-  test("no GATED_OPS/EXEMPT_OPS entry references a case that no longer exists in the switch", () => {
+  test('no GATED_OPS/EXEMPT_OPS entry references a case that no longer exists in the switch', () => {
     const known = new Set(cases);
     const staleGated = Object.keys(GATED_OPS).filter((k) => !known.has(k));
     const staleExempt = Object.keys(EXEMPT_OPS).filter((k) => !known.has(k));
@@ -205,48 +207,48 @@ describe("execspec-resolver — dispatch enumeration completeness", () => {
     },
   );
 
-  describe("write-path ops gate BEFORE their DynamoDB write side effect", () => {
+  describe('write-path ops gate BEFORE their DynamoDB write side effect', () => {
     test("createExecutionSpecification's gate call precedes its PutCommand", () => {
-      const body = extractFunctionBody(source, "createExecutionSpecification");
+      const body = extractFunctionBody(source, 'createExecutionSpecification');
       const gateIdx = body.search(GATE_CALL_RE);
-      const putIdx = body.indexOf("new PutCommand(");
+      const putIdx = body.indexOf('new PutCommand(');
       expect(gateIdx).toBeGreaterThan(-1);
       expect(putIdx).toBeGreaterThan(-1);
       expect(gateIdx).toBeLessThan(putIdx);
     });
 
     test("approveExecutionSpecification's gate call precedes its updateStatus call (sharpest op)", () => {
-      const body = extractFunctionBody(source, "approveExecutionSpecification");
+      const body = extractFunctionBody(source, 'approveExecutionSpecification');
       const gateIdx = body.search(GATE_CALL_RE);
-      const updateIdx = body.indexOf("updateStatus(");
+      const updateIdx = body.indexOf('updateStatus(');
       expect(gateIdx).toBeGreaterThan(-1);
       expect(updateIdx).toBeGreaterThan(-1);
       expect(gateIdx).toBeLessThan(updateIdx);
     });
 
     test("reviseExecutionSpecification's gate call precedes its updateStatus call", () => {
-      const body = extractFunctionBody(source, "reviseExecutionSpecification");
+      const body = extractFunctionBody(source, 'reviseExecutionSpecification');
       const gateIdx = body.search(GATE_CALL_RE);
-      const updateIdx = body.indexOf("updateStatus(");
+      const updateIdx = body.indexOf('updateStatus(');
       expect(gateIdx).toBeGreaterThan(-1);
       expect(updateIdx).toBeGreaterThan(-1);
       expect(gateIdx).toBeLessThan(updateIdx);
     });
 
     test("submitExecutionSpecification's gate call precedes its updateStatus call", () => {
-      const body = extractFunctionBody(source, "submitExecutionSpecification");
+      const body = extractFunctionBody(source, 'submitExecutionSpecification');
       const gateIdx = body.search(GATE_CALL_RE);
-      const updateIdx = body.indexOf("updateStatus(");
+      const updateIdx = body.indexOf('updateStatus(');
       expect(gateIdx).toBeGreaterThan(-1);
       expect(updateIdx).toBeGreaterThan(-1);
       expect(gateIdx).toBeLessThan(updateIdx);
     });
 
     test("rejectExecutionSpecification's gate call precedes its updateStatus call, but follows the pre-existing audit-before-auth emit", () => {
-      const body = extractFunctionBody(source, "rejectExecutionSpecification");
+      const body = extractFunctionBody(source, 'rejectExecutionSpecification');
       const gateIdx = body.search(GATE_CALL_RE);
-      const updateIdx = body.indexOf("updateStatus(");
-      const emitIdx = body.indexOf("emitGovernanceEvent(");
+      const updateIdx = body.indexOf('updateStatus(');
+      const emitIdx = body.indexOf('emitGovernanceEvent(');
       expect(gateIdx).toBeGreaterThan(-1);
       expect(updateIdx).toBeGreaterThan(-1);
       expect(emitIdx).toBeGreaterThan(-1);
@@ -257,20 +259,20 @@ describe("execspec-resolver — dispatch enumeration completeness", () => {
     });
   });
 
-  describe("read-path ops return/query nothing before the gate resolves", () => {
+  describe('read-path ops return/query nothing before the gate resolves', () => {
     test("getExecutionSpecification's gate call precedes its `return spec` statement", () => {
-      const body = extractFunctionBody(source, "getExecutionSpecification");
+      const body = extractFunctionBody(source, 'getExecutionSpecification');
       const gateIdx = body.search(GATE_CALL_RE);
-      const returnIdx = body.lastIndexOf("return spec;");
+      const returnIdx = body.lastIndexOf('return spec;');
       expect(gateIdx).toBeGreaterThan(-1);
       expect(returnIdx).toBeGreaterThan(-1);
       expect(gateIdx).toBeLessThan(returnIdx);
     });
 
     test("listExecutionSpecifications's gate call precedes its QueryCommand (no foreign-data read at all)", () => {
-      const body = extractFunctionBody(source, "listExecutionSpecifications");
+      const body = extractFunctionBody(source, 'listExecutionSpecifications');
       const gateIdx = body.search(GATE_CALL_RE);
-      const queryIdx = body.indexOf("new QueryCommand(");
+      const queryIdx = body.indexOf('new QueryCommand(');
       expect(gateIdx).toBeGreaterThan(-1);
       expect(queryIdx).toBeGreaterThan(-1);
       expect(gateIdx).toBeLessThan(queryIdx);
@@ -278,8 +280,6 @@ describe("execspec-resolver — dispatch enumeration completeness", () => {
   });
 
   test("handler's hasPermission('spec:approve') check is not removed by this fix (additive, not a replacement)", () => {
-    expect(source).toMatch(
-      /hasPermission\(authContext, ['"]spec:approve['"]\)/,
-    );
+    expect(source).toMatch(/hasPermission\(authContext, ['"]spec:approve['"]\)/);
   });
 });

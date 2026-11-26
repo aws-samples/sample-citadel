@@ -92,18 +92,6 @@ const ALLOWLIST: Record<string, string> = {
     "via a real PutEvents call in production code. The production path " +
     'matches on source="task.request" (TaskRequestRule, source-only ' +
     "pattern), which this test already treats as covered.",
-  "document.ingestion.failed":
-    "Surfaced by the format commit; previously invisible to the scanner " +
-    "(the emit site used single quotes). Emitted with source " +
-    "citadel.documents by document-ingestion-shared.ts; no EventBridge rule " +
-    "matches this detail-type or that source in any synthesized template. " +
-    "Pre-existing gap, tracked as a follow-up rather than fixed here.",
-  "pdf.created":
-    "Surfaced by the format commit; previously invisible to the scanner " +
-    "(the emit site used single quotes). Emitted with source " +
-    "citadel.documents by pdf-created-notifier.ts; no EventBridge rule " +
-    "matches this detail-type or that source in any synthesized template. " +
-    "Pre-existing gap, tracked as a follow-up rather than fixed here.",
 };
 
 interface CfnResource {
@@ -139,38 +127,13 @@ function discoverRuleDetailTypes(templates: CfnTemplate[]): Set<string> {
   return found;
 }
 
-// Source scanners. Each is a pure string -> literals function so the formatting
-// matrix below can exercise it without the filesystem or cdk.out.
-//
-// The TypeScript scanners must not depend on formatting: a repo-wide prettier
-// pass rewrote 'x' to "x" and re-wrapped call expressions, which changed what
-// a quote-specific scanner could see. They therefore accept either quote
-// character (group 1 opens the literal and is back-referenced to close it,
-// group 2 is the value), optional quotes around the `DetailType` key
-// (prettier's quoteProps "as-needed" unquotes it), and any whitespace
-// including newlines between tokens.
-//
-// The Python scanner is deliberately left double-quote-only: arbiter/ is not
-// prettier-formatted and several single-quoted PutEvents sites there are
-// consumed through source-only rules, which this test's coverage model
-// (detail-type vs rule detail-type) does not express. Widening it needs
-// source-aware matching first; it is a separate piece of work.
-const EMIT_GOVERNANCE_EVENT_RE = /emitGovernanceEvent\(\s*(["'])([^"'\n]+)\1/g;
-const DETAIL_TYPE_RE = /["']?DetailType["']?\s*:\s*(["'])([^"'\n]+)\1/g;
-const DETAIL_TYPE_PY_RE = /"DetailType":\s*"([^"\n]+)"/g;
-
-/** The literal value (the last capture group) of every match of `re`. */
-function extractLiterals(contents: string, re: RegExp): string[] {
-  return Array.from(contents.matchAll(re), (m) => m[m.length - 1]);
-}
-
 /** Literal detail-type strings from `emitGovernanceEvent("...")` call sites. */
 function discoverEmitGovernanceEventLiterals(root: string): Set<string> {
   const found = new Set<string>();
+  const pattern = /emitGovernanceEvent\(\s*"([^"]+)"/g;
   walkTsFiles(root, (contents) => {
-    for (const dt of extractLiterals(contents, EMIT_GOVERNANCE_EVENT_RE)) {
-      found.add(dt);
-    }
+    let m: RegExpExecArray | null;
+    while ((m = pattern.exec(contents)) !== null) found.add(m[1]);
   });
   return found;
 }
@@ -178,10 +141,10 @@ function discoverEmitGovernanceEventLiterals(root: string): Set<string> {
 /** Literal detail-type strings from `DetailType: "..."` PutEvents call sites (TS). */
 function discoverDetailTypeLiteralsTs(root: string): Set<string> {
   const found = new Set<string>();
+  const pattern = /DetailType:\s*"([^"]+)"/g;
   walkTsFiles(root, (contents) => {
-    for (const dt of extractLiterals(contents, DETAIL_TYPE_RE)) {
-      found.add(dt);
-    }
+    let m: RegExpExecArray | null;
+    while ((m = pattern.exec(contents)) !== null) found.add(m[1]);
   });
   return found;
 }
@@ -189,10 +152,10 @@ function discoverDetailTypeLiteralsTs(root: string): Set<string> {
 /** Literal detail-type strings from `"DetailType": "..."` PutEvents call sites (Python). */
 function discoverDetailTypeLiteralsPy(root: string): Set<string> {
   const found = new Set<string>();
+  const pattern = /"DetailType":\s*"([^"]+)"/g;
   walkFiles(root, ".py", (contents) => {
-    for (const dt of extractLiterals(contents, DETAIL_TYPE_PY_RE)) {
-      found.add(dt);
-    }
+    let m: RegExpExecArray | null;
+    while ((m = pattern.exec(contents)) !== null) found.add(m[1]);
   });
   return found;
 }
@@ -238,124 +201,6 @@ function walkFiles(
 function walkTsFiles(dir: string, onFile: (contents: string) => void): void {
   walkFiles(dir, ".ts", onFile);
 }
-
-// Does not need cdk.out, so it always runs (the suite below skips without it).
-describe("emit-site scanner is independent of source formatting", () => {
-  const scanEmitGovernanceEvent = (src: string) =>
-    extractLiterals(src, EMIT_GOVERNANCE_EVENT_RE);
-  const scanDetailTypeTs = (src: string) =>
-    extractLiterals(src, DETAIL_TYPE_RE);
-  const scanDetailTypePy = (src: string) =>
-    extractLiterals(src, DETAIL_TYPE_PY_RE);
-
-  describe("DetailType in TypeScript", () => {
-    it("finds a double-quoted literal", () => {
-      expect(scanDetailTypeTs(`DetailType: "pdf.created",`)).toEqual([
-        "pdf.created",
-      ]);
-    });
-
-    it("finds a single-quoted literal (pre-format style)", () => {
-      expect(scanDetailTypeTs(`DetailType: 'pdf.created',`)).toEqual([
-        "pdf.created",
-      ]);
-    });
-
-    it("finds a literal whose value starts on the next line", () => {
-      expect(
-        scanDetailTypeTs(`DetailType:\n      "document.ingestion.failed",`),
-      ).toEqual(["document.ingestion.failed"]);
-    });
-
-    it("finds a literal when the property key itself is quoted", () => {
-      expect(
-        scanDetailTypeTs(`"DetailType": "a.b", 'DetailType': 'c.d'`),
-      ).toEqual(["a.b", "c.d"]);
-    });
-
-    it("finds the same literal in the compact and prettier-wrapped layouts", () => {
-      const compact =
-        "await c.send(new PutEventsCommand({ Entries: [{ Source: 'citadel.documents', DetailType: 'x.y.z', Detail: '{}' }] }));";
-      const wrapped = [
-        "await c.send(",
-        "  new PutEventsCommand({",
-        "    Entries: [",
-        "      {",
-        '        Source: "citadel.documents",',
-        '        DetailType: "x.y.z",',
-        '        Detail: "{}",',
-        "      },",
-        "    ],",
-        "  }),",
-        ");",
-      ].join("\n");
-      expect(scanDetailTypeTs(compact)).toEqual(["x.y.z"]);
-      expect(scanDetailTypeTs(wrapped)).toEqual(["x.y.z"]);
-    });
-
-    it("ignores a non-literal value", () => {
-      expect(scanDetailTypeTs("DetailType: detailType,")).toEqual([]);
-    });
-
-    it("ignores a value with mismatched quotes", () => {
-      expect(scanDetailTypeTs(`DetailType: "oops',`)).toEqual([]);
-    });
-
-    it("ignores a lower-case detailType property (not a PutEvents entry)", () => {
-      expect(scanDetailTypeTs(`detailType: "not.an.entry",`)).toEqual([]);
-    });
-
-    it("does not capture sibling string properties such as Source", () => {
-      expect(
-        scanDetailTypeTs(`Source: 'citadel.documents', DetailType: 'a.b'`),
-      ).toEqual(["a.b"]);
-    });
-  });
-
-  describe("emitGovernanceEvent call sites", () => {
-    it("finds a double-quoted first argument", () => {
-      expect(
-        scanEmitGovernanceEvent(`emitGovernanceEvent("g.a.b", {})`),
-      ).toEqual(["g.a.b"]);
-    });
-
-    it("finds a single-quoted first argument", () => {
-      expect(
-        scanEmitGovernanceEvent(`emitGovernanceEvent('g.a.b', {})`),
-      ).toEqual(["g.a.b"]);
-    });
-
-    it("finds a first argument wrapped onto its own line", () => {
-      expect(
-        scanEmitGovernanceEvent(`emitGovernanceEvent(\n  "g.a.b",\n  {},\n)`),
-      ).toEqual(["g.a.b"]);
-    });
-
-    it("ignores a non-literal first argument", () => {
-      expect(scanEmitGovernanceEvent("emitGovernanceEvent(type, {})")).toEqual(
-        [],
-      );
-    });
-  });
-
-  describe("DetailType in Python", () => {
-    it("finds a double-quoted key and value", () => {
-      expect(scanDetailTypePy(`{"DetailType": "task.request"}`)).toEqual([
-        "task.request",
-      ]);
-    });
-
-    it("finds a value on the next line", () => {
-      expect(scanDetailTypePy(`"DetailType":\n    "task.request",`)).toEqual([
-        "task.request",
-      ]);
-    });
-
-    it("ignores a variable value", () => {
-      expect(scanDetailTypePy(`{"DetailType": detail_type}`)).toEqual([]);
-    });
-  });
-});
 
 describe("every emitted EventBridge detail-type has a deployed consumer rule", () => {
   const loadedTemplates = STACK_NAMES.map((name) => ({

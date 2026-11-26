@@ -62,9 +62,11 @@ const mockAdapter = {
     configuration: { required: [], optional: [], ssmParameters: [] },
   },
   requiredPolicies: jest.fn().mockReturnValue({ provision: [], connect: [] }),
-  provision: jest.fn().mockResolvedValue({
-    resourceArn: "arn:aws:bedrock:us-east-1:123:knowledge-base/KB1",
-  }),
+  provision: jest
+    .fn()
+    .mockResolvedValue({
+      resourceArn: "arn:aws:bedrock:us-east-1:123:knowledge-base/KB1",
+    }),
   connect: jest.fn().mockResolvedValue(undefined),
   disconnect: jest.fn().mockResolvedValue(undefined),
   deprovision: jest.fn().mockResolvedValue(undefined),

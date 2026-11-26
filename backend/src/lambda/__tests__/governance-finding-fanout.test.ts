@@ -14,36 +14,36 @@ global.fetch = mockFetch as unknown as typeof fetch;
 // Mock SignatureV4 + Sha256 + credential provider so the signer never
 // reaches AWS in unit tests.
 const mockSign = jest.fn();
-jest.mock("@smithy/signature-v4", () => ({
+jest.mock('@smithy/signature-v4', () => ({
   SignatureV4: jest.fn().mockImplementation(() => ({
     sign: mockSign,
   })),
 }));
 
-jest.mock("@aws-crypto/sha256-js", () => ({
+jest.mock('@aws-crypto/sha256-js', () => ({
   Sha256: jest.fn(),
 }));
 
-jest.mock("@aws-sdk/credential-provider-node", () => ({
-  defaultProvider: jest.fn().mockReturnValue("mock-credentials"),
+jest.mock('@aws-sdk/credential-provider-node', () => ({
+  defaultProvider: jest.fn().mockReturnValue('mock-credentials'),
 }));
 
 import type {
   AttributeValue,
   DynamoDBRecord,
   DynamoDBStreamEvent,
-} from "aws-lambda";
-import { mockClient } from "aws-sdk-client-mock";
+} from 'aws-lambda';
+import { mockClient } from 'aws-sdk-client-mock';
 import {
   CloudWatchClient,
   PutMetricDataCommand,
-} from "@aws-sdk/client-cloudwatch";
+} from '@aws-sdk/client-cloudwatch';
 
 import {
   handler,
   projectRow,
   __resetForTest,
-} from "../governance-finding-fanout";
+} from '../governance-finding-fanout';
 
 // aws-lambda's DynamoDBStreamHandler type declares legacy required context
 // and callback parameters, but the implementation is a one-parameter async
@@ -66,43 +66,42 @@ function BOOL(v: boolean) {
 }
 
 function makeRecord(opts: {
-  eventName?: "INSERT" | "MODIFY" | "REMOVE";
+  eventName?: 'INSERT' | 'MODIFY' | 'REMOVE';
   newImage?: Record<string, AttributeValue>;
   eventID?: string;
 }): DynamoDBRecord {
   return {
-    eventID: opts.eventID ?? "rec-1",
-    eventName: opts.eventName ?? "INSERT",
-    eventVersion: "1.1",
-    eventSource: "aws:dynamodb",
-    awsRegion: "us-east-1",
+    eventID: opts.eventID ?? 'rec-1',
+    eventName: opts.eventName ?? 'INSERT',
+    eventVersion: '1.1',
+    eventSource: 'aws:dynamodb',
+    awsRegion: 'us-east-1',
     dynamodb: {
       ApproximateCreationDateTime: 1715000000,
-      Keys: { findingId: S("f-1") },
+      Keys: { findingId: S('f-1') },
       NewImage: opts.newImage,
-      SequenceNumber: "1",
+      SequenceNumber: '1',
       SizeBytes: 100,
-      StreamViewType: "NEW_AND_OLD_IMAGES",
+      StreamViewType: 'NEW_AND_OLD_IMAGES',
     },
   };
 }
 
 const validNewImage = {
-  findingId: S("f-1"),
-  workflowId: S("wf-1"),
-  decision: S("permit"),
-  reason: S("unit_match:unit-a"),
-  requesting_agent: S("agent-a"),
-  target_agent: S("agent-b"),
-  scope_evaluated: S("unit-a"),
+  findingId: S('f-1'),
+  workflowId: S('wf-1'),
+  decision: S('permit'),
+  reason: S('unit_match:unit-a'),
+  requesting_agent: S('agent-a'),
+  target_agent: S('agent-b'),
+  scope_evaluated: S('unit-a'),
   residual_authority_denial: BOOL(false),
   timestamp: N(1715000000.5),
 };
 
 beforeAll(() => {
-  process.env.APPSYNC_ENDPOINT =
-    "https://test-api.appsync-api.us-east-1.amazonaws.com/graphql";
-  process.env.AWS_REGION = "us-east-1";
+  process.env.APPSYNC_ENDPOINT = 'https://test-api.appsync-api.us-east-1.amazonaws.com/graphql';
+  process.env.AWS_REGION = 'us-east-1';
 });
 
 beforeEach(() => {
@@ -112,10 +111,10 @@ beforeEach(() => {
   __resetForTest();
   mockSign.mockResolvedValue({
     headers: {
-      "Content-Type": "application/json",
-      host: "test-api.appsync-api.us-east-1.amazonaws.com",
-      authorization: "AWS4-HMAC-SHA256 Credential=test/...",
-      "x-amz-date": "20260519T000000Z",
+      'Content-Type': 'application/json',
+      host: 'test-api.appsync-api.us-east-1.amazonaws.com',
+      authorization: 'AWS4-HMAC-SHA256 Credential=test/...',
+      'x-amz-date': '20260519T000000Z',
     },
   });
   mockFetch.mockResolvedValue({
@@ -124,8 +123,8 @@ beforeEach(() => {
     json: async () => ({ data: { publishGovernanceFinding: {} } }),
   });
   // Silence the per-record warn/error logs to keep test output clean.
-  jest.spyOn(console, "warn").mockImplementation(() => {});
-  jest.spyOn(console, "error").mockImplementation(() => {});
+  jest.spyOn(console, 'warn').mockImplementation(() => {});
+  jest.spyOn(console, 'error').mockImplementation(() => {});
 });
 
 afterEach(() => {
@@ -142,59 +141,59 @@ afterAll(() => {
 // Pure projection
 // ---------------------------------------------------------------------------
 
-describe("projectRow", () => {
-  test("maps snake_case ledger fields to camelCase mutation input", () => {
+describe('projectRow', () => {
+  test('maps snake_case ledger fields to camelCase mutation input', () => {
     const result = projectRow({
-      findingId: "f-1",
-      workflowId: "wf-1",
-      decision: "deny",
-      reason: "rivalrous_claim:winner=X",
-      requesting_agent: "agent-a",
-      target_agent: "agent-b",
-      scope_evaluated: "unit-1",
-      contract_evaluated: "contract-1",
+      findingId: 'f-1',
+      workflowId: 'wf-1',
+      decision: 'deny',
+      reason: 'rivalrous_claim:winner=X',
+      requesting_agent: 'agent-a',
+      target_agent: 'agent-b',
+      scope_evaluated: 'unit-1',
+      contract_evaluated: 'contract-1',
       escalation_target: null,
       residual_authority_denial: true,
       timestamp: 1715000000.25,
     });
 
     expect(result).toEqual({
-      findingId: "f-1",
-      workflowId: "wf-1",
-      decision: "deny",
-      reason: "rivalrous_claim:winner=X",
-      requestingAgent: "agent-a",
-      targetAgent: "agent-b",
-      scopeEvaluated: "unit-1",
-      contractEvaluated: "contract-1",
+      findingId: 'f-1',
+      workflowId: 'wf-1',
+      decision: 'deny',
+      reason: 'rivalrous_claim:winner=X',
+      requestingAgent: 'agent-a',
+      targetAgent: 'agent-b',
+      scopeEvaluated: 'unit-1',
+      contractEvaluated: 'contract-1',
       escalationTarget: null,
       residualAuthorityDenial: true,
       timestamp: 1715000000.25,
     });
   });
 
-  test("returns null when findingId is missing", () => {
-    expect(projectRow({ workflowId: "wf-1" })).toBeNull();
+  test('returns null when findingId is missing', () => {
+    expect(projectRow({ workflowId: 'wf-1' })).toBeNull();
   });
 
-  test("returns null when workflowId is missing", () => {
-    expect(projectRow({ findingId: "f-1" })).toBeNull();
+  test('returns null when workflowId is missing', () => {
+    expect(projectRow({ findingId: 'f-1' })).toBeNull();
   });
 
-  test("coerces string-typed timestamp to number", () => {
+  test('coerces string-typed timestamp to number', () => {
     const result = projectRow({
-      findingId: "f-1",
-      workflowId: "wf-1",
-      timestamp: "1715000000",
+      findingId: 'f-1',
+      workflowId: 'wf-1',
+      timestamp: '1715000000',
     });
     expect(result?.timestamp).toBe(1715000000);
   });
 
-  test("falls back to 0 timestamp when malformed", () => {
+  test('falls back to 0 timestamp when malformed', () => {
     const result = projectRow({
-      findingId: "f-1",
-      workflowId: "wf-1",
-      timestamp: "not-a-number",
+      findingId: 'f-1',
+      workflowId: 'wf-1',
+      timestamp: 'not-a-number',
     });
     expect(result?.timestamp).toBe(0);
   });
@@ -204,24 +203,26 @@ describe("projectRow", () => {
 // Handler — happy path
 // ---------------------------------------------------------------------------
 
-describe("governance-finding-fanout handler", () => {
-  test("projects an INSERT record and POSTs the publishGovernanceFinding mutation", async () => {
-    await invokeHandler({ Records: [makeRecord({ newImage: validNewImage })] });
+describe('governance-finding-fanout handler', () => {
+  test('projects an INSERT record and POSTs the publishGovernanceFinding mutation', async () => {
+    await invokeHandler(
+      { Records: [makeRecord({ newImage: validNewImage })] },
+    );
 
     expect(mockSign).toHaveBeenCalledTimes(1);
     expect(mockFetch).toHaveBeenCalledTimes(1);
 
     const fetchCall = mockFetch.mock.calls[0];
     const body = JSON.parse(fetchCall[1].body);
-    expect(body.query).toContain("publishGovernanceFinding");
+    expect(body.query).toContain('publishGovernanceFinding');
     expect(body.variables.input).toEqual({
-      findingId: "f-1",
-      workflowId: "wf-1",
-      decision: "permit",
-      reason: "unit_match:unit-a",
-      requestingAgent: "agent-a",
-      targetAgent: "agent-b",
-      scopeEvaluated: "unit-a",
+      findingId: 'f-1',
+      workflowId: 'wf-1',
+      decision: 'permit',
+      reason: 'unit_match:unit-a',
+      requestingAgent: 'agent-a',
+      targetAgent: 'agent-b',
+      scopeEvaluated: 'unit-a',
       contractEvaluated: null,
       escalationTarget: null,
       residualAuthorityDenial: false,
@@ -231,7 +232,7 @@ describe("governance-finding-fanout handler", () => {
     // SigV4 headers reach the fetch call.
     expect(fetchCall[1].headers).toEqual(
       expect.objectContaining({
-        authorization: expect.stringContaining("AWS4-HMAC-SHA256"),
+        authorization: expect.stringContaining('AWS4-HMAC-SHA256'),
       }),
     );
 
@@ -239,38 +240,50 @@ describe("governance-finding-fanout handler", () => {
     expect(cwMock.commandCalls(PutMetricDataCommand)).toHaveLength(0);
   });
 
-  test("skips MODIFY records (defence-in-depth past the EventSourceMapping filter)", async () => {
-    await invokeHandler({
-      Records: [makeRecord({ eventName: "MODIFY", newImage: validNewImage })],
-    });
+  test('skips MODIFY records (defence-in-depth past the EventSourceMapping filter)', async () => {
+    await invokeHandler(
+      {
+        Records: [
+          makeRecord({ eventName: 'MODIFY', newImage: validNewImage }),
+        ],
+      },
+    );
 
     expect(mockFetch).not.toHaveBeenCalled();
     expect(cwMock.commandCalls(PutMetricDataCommand)).toHaveLength(0);
   });
 
-  test("skips REMOVE records", async () => {
-    await invokeHandler({
-      Records: [makeRecord({ eventName: "REMOVE", newImage: undefined })],
-    });
+  test('skips REMOVE records', async () => {
+    await invokeHandler(
+      {
+        Records: [
+          makeRecord({ eventName: 'REMOVE', newImage: undefined }),
+        ],
+      },
+    );
 
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  test("skips records with missing NewImage and does not metricise", async () => {
-    await invokeHandler({ Records: [makeRecord({ newImage: undefined })] });
+  test('skips records with missing NewImage and does not metricise', async () => {
+    await invokeHandler(
+      { Records: [makeRecord({ newImage: undefined })] },
+    );
     expect(mockFetch).not.toHaveBeenCalled();
     expect(cwMock.commandCalls(PutMetricDataCommand)).toHaveLength(0);
   });
 
-  test("skips malformed rows (missing findingId) and emits PublishFailure metric", async () => {
+  test('skips malformed rows (missing findingId) and emits PublishFailure metric', async () => {
     const malformed = {
       // findingId intentionally omitted
-      workflowId: S("wf-1"),
-      decision: S("permit"),
+      workflowId: S('wf-1'),
+      decision: S('permit'),
       timestamp: N(1715000000),
     };
 
-    await invokeHandler({ Records: [makeRecord({ newImage: malformed })] });
+    await invokeHandler(
+      { Records: [makeRecord({ newImage: malformed })] },
+    );
 
     // No AppSync call (projectRow returned null).
     expect(mockFetch).not.toHaveBeenCalled();
@@ -278,8 +291,8 @@ describe("governance-finding-fanout handler", () => {
     const cwCalls = cwMock.commandCalls(PutMetricDataCommand);
     expect(cwCalls).toHaveLength(1);
     const cmdInput = cwCalls[0].args[0].input;
-    expect(cmdInput.Namespace).toBe("Citadel/Governance/Fanout");
-    expect(cmdInput.MetricData?.[0].MetricName).toBe("PublishFailure");
+    expect(cmdInput.Namespace).toBe('Citadel/Governance/Fanout');
+    expect(cmdInput.MetricData?.[0].MetricName).toBe('PublishFailure');
     expect(cmdInput.MetricData?.[0].Value).toBe(1);
   });
 });
@@ -288,48 +301,50 @@ describe("governance-finding-fanout handler", () => {
 // Handler — failure paths (best-effort)
 // ---------------------------------------------------------------------------
 
-describe("governance-finding-fanout handler — failure paths", () => {
-  test("emits PublishFailure metric on 5xx and returns success (no throw)", async () => {
+describe('governance-finding-fanout handler — failure paths', () => {
+  test('emits PublishFailure metric on 5xx and returns success (no throw)', async () => {
     mockFetch.mockResolvedValue({ ok: false, status: 500 });
 
     await expect(
-      invokeHandler({ Records: [makeRecord({ newImage: validNewImage })] }),
+      invokeHandler(
+        { Records: [makeRecord({ newImage: validNewImage })] },
+      ),
     ).resolves.toBeUndefined();
 
     const cwCalls = cwMock.commandCalls(PutMetricDataCommand);
     expect(cwCalls).toHaveLength(1);
-    expect(cwCalls[0].args[0].input.Namespace).toBe(
-      "Citadel/Governance/Fanout",
-    );
-    expect(cwCalls[0].args[0].input.MetricData?.[0].MetricName).toBe(
-      "PublishFailure",
-    );
+    expect(cwCalls[0].args[0].input.Namespace).toBe('Citadel/Governance/Fanout');
+    expect(cwCalls[0].args[0].input.MetricData?.[0].MetricName).toBe('PublishFailure');
   });
 
-  test("emits PublishFailure metric on 4xx and returns success", async () => {
+  test('emits PublishFailure metric on 4xx and returns success', async () => {
     mockFetch.mockResolvedValue({ ok: false, status: 400 });
 
     await expect(
-      invokeHandler({ Records: [makeRecord({ newImage: validNewImage })] }),
+      invokeHandler(
+        { Records: [makeRecord({ newImage: validNewImage })] },
+      ),
     ).resolves.toBeUndefined();
 
     expect(cwMock.commandCalls(PutMetricDataCommand)).toHaveLength(1);
   });
 
-  test("absorbs signer rejection and continues to next record", async () => {
-    mockSign.mockRejectedValueOnce(new Error("credentials unavailable"));
+  test('absorbs signer rejection and continues to next record', async () => {
+    mockSign.mockRejectedValueOnce(new Error('credentials unavailable'));
     // Second record will succeed.
     mockSign.mockResolvedValue({
-      headers: { authorization: "AWS4-HMAC-SHA256 ok" },
+      headers: { authorization: 'AWS4-HMAC-SHA256 ok' },
     });
 
     await expect(
-      invokeHandler({
-        Records: [
-          makeRecord({ eventID: "rec-a", newImage: validNewImage }),
-          makeRecord({ eventID: "rec-b", newImage: validNewImage }),
-        ],
-      }),
+      invokeHandler(
+        {
+          Records: [
+            makeRecord({ eventID: 'rec-a', newImage: validNewImage }),
+            makeRecord({ eventID: 'rec-b', newImage: validNewImage }),
+          ],
+        },
+      ),
     ).resolves.toBeUndefined();
 
     // Second record succeeds → fetch only called once.
@@ -338,40 +353,46 @@ describe("governance-finding-fanout handler — failure paths", () => {
     expect(cwMock.commandCalls(PutMetricDataCommand)).toHaveLength(1);
   });
 
-  test("absorbs CloudWatch metric failures (never throws)", async () => {
+  test('absorbs CloudWatch metric failures (never throws)', async () => {
     mockFetch.mockResolvedValue({ ok: false, status: 500 });
-    cwMock.on(PutMetricDataCommand).rejects(new Error("cw down"));
+    cwMock.on(PutMetricDataCommand).rejects(new Error('cw down'));
 
     await expect(
-      invokeHandler({ Records: [makeRecord({ newImage: validNewImage })] }),
+      invokeHandler(
+        { Records: [makeRecord({ newImage: validNewImage })] },
+      ),
     ).resolves.toBeUndefined();
   });
 
-  test("processes multiple records independently — one failure does not block the rest", async () => {
+  test('processes multiple records independently — one failure does not block the rest', async () => {
     // First record succeeds, second fails on AppSync, third succeeds.
     mockFetch
       .mockResolvedValueOnce({ ok: true, status: 200 })
       .mockResolvedValueOnce({ ok: false, status: 502 })
       .mockResolvedValueOnce({ ok: true, status: 200 });
 
-    await invokeHandler({
-      Records: [
-        makeRecord({ eventID: "r-1", newImage: validNewImage }),
-        makeRecord({ eventID: "r-2", newImage: validNewImage }),
-        makeRecord({ eventID: "r-3", newImage: validNewImage }),
-      ],
-    });
+    await invokeHandler(
+      {
+        Records: [
+          makeRecord({ eventID: 'r-1', newImage: validNewImage }),
+          makeRecord({ eventID: 'r-2', newImage: validNewImage }),
+          makeRecord({ eventID: 'r-3', newImage: validNewImage }),
+        ],
+      },
+    );
 
     expect(mockFetch).toHaveBeenCalledTimes(3);
     // Exactly one PublishFailure for the 5xx — not three.
     expect(cwMock.commandCalls(PutMetricDataCommand)).toHaveLength(1);
   });
 
-  test("throws synchronously when APPSYNC_ENDPOINT is missing — but handler still returns success", async () => {
+  test('throws synchronously when APPSYNC_ENDPOINT is missing — but handler still returns success', async () => {
     delete process.env.APPSYNC_ENDPOINT;
 
     await expect(
-      invokeHandler({ Records: [makeRecord({ newImage: validNewImage })] }),
+      invokeHandler(
+        { Records: [makeRecord({ newImage: validNewImage })] },
+      ),
     ).resolves.toBeUndefined();
 
     // The publish attempt threw inside the per-record try/catch and
@@ -379,12 +400,13 @@ describe("governance-finding-fanout handler — failure paths", () => {
     expect(cwMock.commandCalls(PutMetricDataCommand)).toHaveLength(1);
 
     // Restore for subsequent tests.
-    process.env.APPSYNC_ENDPOINT =
-      "https://test-api.appsync-api.us-east-1.amazonaws.com/graphql";
+    process.env.APPSYNC_ENDPOINT = 'https://test-api.appsync-api.us-east-1.amazonaws.com/graphql';
   });
 
-  test("handles an empty Records array", async () => {
-    await expect(invokeHandler({ Records: [] })).resolves.toBeUndefined();
+  test('handles an empty Records array', async () => {
+    await expect(
+      invokeHandler({ Records: [] }),
+    ).resolves.toBeUndefined();
     expect(mockFetch).not.toHaveBeenCalled();
   });
 });
