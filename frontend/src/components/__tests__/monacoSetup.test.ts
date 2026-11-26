@@ -1,7 +1,8 @@
 /**
- * monacoSetup self-hosting contract: loader.config must be called with
- * the locally bundled monaco-editor module, so @monaco-editor/react never
- * falls back to fetching monaco from the jsdelivr CDN.
+ * monacoSetup self-hosting contract: the module exposes the locally bundled
+ * monaco-editor namespace and routes web workers to the app's own bundle.
+ * It must not go through @monaco-editor/loader, whose default config
+ * hardcodes a jsdelivr CDN path.
  *
  * monaco-editor's package.json resolves `require()` to its AMD bundle
  * (min/vs/index.js), which errors outside an AMD loader. Vite (the real
@@ -10,26 +11,59 @@
  * mocked here to a stable sentinel object so the test can assert
  * reference identity without depending on CJS/ESM resolution behavior.
  */
-const configMock = jest.fn();
-const monacoSentinel = { editor: {}, languages: {} };
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 
-jest.mock('@monaco-editor/react', () => ({
-  loader: { config: configMock },
-}));
+const monacoSentinel = { editor: {}, languages: {} };
+const mockWorkerCreated = jest.fn();
+
+class MockEditorWorker {
+  constructor() {
+    mockWorkerCreated();
+  }
+}
 
 jest.mock('monaco-editor/editor/editor.api', () => monacoSentinel);
 
-jest.mock('monaco-editor/editor/editor.worker.js?worker', () => {
-  return { default: jest.fn() };
-}, { virtual: true });
+jest.mock(
+  'monaco-editor/editor/editor.worker.js?worker',
+  () => ({ __esModule: true, default: MockEditorWorker }),
+  { virtual: true }
+);
+
+const collectSourceFiles = (dir: string): string[] =>
+  readdirSync(dir).flatMap((name) => {
+    const fullPath = join(dir, name);
+    if (statSync(fullPath).isDirectory()) {
+      return name === '__tests__' ? [] : collectSourceFiles(fullPath);
+    }
+    return /\.(ts|tsx)$/.test(name) ? [fullPath] : [];
+  });
 
 describe('monacoSetup', () => {
-  it('configures the monaco loader with the locally imported monaco-editor module', async () => {
-    await import('../monacoSetup');
+  it('exports the locally imported monaco-editor namespace', async () => {
+    const setup = await import('../monacoSetup');
 
-    expect(configMock).toHaveBeenCalledTimes(1);
-    const callArg = configMock.mock.calls[0][0];
-    expect(callArg.monaco.editor).toBe(monacoSentinel.editor);
-    expect(callArg.monaco.languages).toBe(monacoSentinel.languages);
+    expect(setup.monaco.editor).toBe(monacoSentinel.editor);
+    expect(setup.monaco.languages).toBe(monacoSentinel.languages);
+  });
+
+  it('routes every worker request to the bundled editor worker', async () => {
+    await import('../monacoSetup');
+    const environment = (self as unknown as {
+      MonacoEnvironment: { getWorker: (workerId: string, label: string) => unknown };
+    }).MonacoEnvironment;
+
+    expect(environment.getWorker('1', 'python')).toBeInstanceOf(MockEditorWorker);
+    expect(mockWorkerCreated).toHaveBeenCalledTimes(1);
+  });
+
+  it('no application source imports an @monaco-editor package', () => {
+    const srcRoot = join(__dirname, '..', '..');
+    const offenders = collectSourceFiles(srcRoot).filter((filePath) =>
+      /from\s+['"]@monaco-editor\//.test(readFileSync(filePath, 'utf8'))
+    );
+
+    expect(offenders).toEqual([]);
   });
 });

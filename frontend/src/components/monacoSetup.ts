@@ -1,13 +1,11 @@
-import { loader } from '@monaco-editor/react';
 import * as monaco from 'monaco-editor/editor/editor.api';
 import EditorWorker from 'monaco-editor/editor/editor.worker.js?worker';
 
-// Self-hosted Monaco setup: avoids the default CDN fallback
-// (@monaco-editor/react otherwise loads monaco from jsdelivr, see the
-// strip-monaco-loader-cdn-default plugin in vite.config.ts) by pointing
-// loader.config at the locally bundled monaco-editor package, and wires
-// up MonacoEnvironment so the editor's web workers are served from this
-// app's own bundle instead of being fetched remotely.
+// Self-hosted Monaco setup. MonacoEditor.tsx creates editors straight from
+// the locally bundled monaco-editor package (no @monaco-editor/loader, whose
+// default config hardcodes a jsdelivr CDN path), and this module wires
+// MonacoEnvironment so the editor's web workers are served from this app's
+// own bundle instead of being fetched remotely.
 //
 // Imports `editor.api` (core editor + languages namespace) rather than
 // the `monaco-editor` package barrel, which eagerly registers all 60+
@@ -28,7 +26,5 @@ self.MonacoEnvironment = {
     return new EditorWorker();
   },
 };
-
-loader.config({ monaco });
 
 export { monaco };
