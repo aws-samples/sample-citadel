@@ -1564,6 +1564,72 @@ def orchestrate(initial_message=None, orchestration=None, callback=None, app_id=
             forbidden_tools=forbidden_tools,
         )
 
+    try:
+        _run_orchestration(orchestration, app_id)
+    except Exception as exc:
+        _report_orchestration_failure(orchestration, exc)
+        raise
+
+
+# Cap on the error text echoed to the caller and persisted on the row, so a
+# huge exception message can neither bloat the EventBridge entry (256 KB
+# limit) nor the DynamoDB item.
+FAILURE_MESSAGE_MAX_CHARS = 500
+
+
+def _report_orchestration_failure(orchestration, exc):
+    """Tell the caller an orchestration failed and record it on the row.
+
+    Best effort on both legs: a failure while reporting must never mask the
+    original exception, which the caller of this function re-raises so the
+    Lambda invocation still counts as an error.
+
+    The idempotency claim taken in ``handler()`` is deliberately NOT released
+    here. A failure can happen after some agents were already dispatched
+    (partial dispatch), so letting the redelivered event re-run the whole
+    orchestration could double-dispatch work. The caller learns of the
+    failure through the 'failed' task.response and resubmits if it wants to.
+    """
+    error = {
+        'type': type(exc).__name__,
+        'message': str(exc)[:FAILURE_MESSAGE_MAX_CHARS],
+    }
+    logger.error(
+        "orchestration %s failed: %s: %s",
+        orchestration.get('orchestrationId', 'unknown'),
+        error['type'], error['message'],
+        exc_info=exc,
+    )
+
+    orchestration['status'] = 'failed'
+    orchestration['error'] = error
+    orchestration['failedAt'] = int(time.time())
+    try:
+        save_orchestration(orchestration=orchestration)
+    except Exception:
+        logger.exception(
+            "could not persist failed orchestration %s",
+            orchestration.get('orchestrationId', 'unknown'),
+        )
+
+    try:
+        send_response(
+            f"Task failed: {error['type']}: {error['message']}",
+            callback=orchestration.get('callback'),
+            org_id=orchestration.get('orgId'),
+            status='failed',
+            error=error,
+            orchestration_id=orchestration.get('orchestrationId'),
+            run_id=orchestration.get('runId'),
+        )
+    except Exception:
+        logger.exception(
+            "could not publish failure response for orchestration %s",
+            orchestration.get('orchestrationId', 'unknown'),
+        )
+
+
+def _run_orchestration(orchestration, app_id=None):
     if app_id is not None:
         agent_configs = load_app_scoped_agents(app_id)
     else:
@@ -1634,7 +1700,8 @@ def orchestrate(initial_message=None, orchestration=None, callback=None, app_id=
 
     save_orchestration(orchestration=orchestration)
 
-def send_response(message, callback=None, org_id=None):
+def send_response(message, callback=None, org_id=None, *, status=None, error=None,
+                  orchestration_id=None, run_id=None):
     """Send response to the default event bus or to a specific callback address.
 
     Security (finding 87a171ad, items g/h): every event this function emits
@@ -1653,6 +1720,11 @@ def send_response(message, callback=None, org_id=None):
     absent/empty org_id skips the EventBridge put entirely (both the
     default-bus and 'eventbridge' callback branches), logged at error
     level, rather than publishing an org-less task.response.
+
+    ``status`` / ``error`` / ``orchestration_id`` / ``run_id`` are additive
+    and omitted from the event Detail when not given, so the success-path
+    shape is unchanged. A failure report passes status='failed' and an
+    ``error`` dict ({'type', 'message'}).
     """
 
     if not isinstance(org_id, str) or not org_id:
@@ -1664,6 +1736,16 @@ def send_response(message, callback=None, org_id=None):
             callback,
         )
         return
+
+    extra = {}
+    if status:
+        extra['status'] = status
+    if error:
+        extra['error'] = error
+    if orchestration_id:
+        extra['orchestrationId'] = orchestration_id
+    if run_id:
+        extra['runId'] = run_id
 
     # If no callback specified, send to default event bus
     if not callback:
@@ -1680,7 +1762,8 @@ def send_response(message, callback=None, org_id=None):
                         'Detail': json.dumps({
                             'message': message,
                             'timestamp': time.time(),
-                            'orgId': org_id
+                            'orgId': org_id,
+                            **extra
                         }, default=str),
                         'EventBusName': EVENT_BUS_NAME
                     }
@@ -1709,7 +1792,8 @@ def send_response(message, callback=None, org_id=None):
                             'message': message,
                             'timestamp': time.time(),
                             'callback': callback,
-                            'orgId': org_id
+                            'orgId': org_id,
+                            **extra
                         }, default=str),
                         'EventBusName': EVENT_BUS_NAME
                     }
