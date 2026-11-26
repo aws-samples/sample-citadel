@@ -51,6 +51,91 @@ def _with_approval_fields(config: dict, item: dict) -> dict:
     return config
 
 
+# Keys on the raw agent-config item consulted, in order, when the projected
+# ``config`` carries no usable ``name``. Registry-projected rows can have an
+# empty or differently keyed config, but always keep the item identifiers.
+_NAME_FALLBACK_KEYS = ('agentId', 'registryRecordId', '_canonicalRecordId')
+
+
+def _warn(action: str, **fields: Any) -> None:
+    print(json.dumps({
+        'level': 'WARN',
+        'component': 'SupervisorAgentConfig',
+        'action': action,
+        **fields,
+    }))
+
+
+def _ensure_agent_name(config: dict, item: dict) -> bool:
+    """Guarantee ``config['name']`` is set; this is the one normalisation point.
+
+    Fallback chain: ``config['name']`` -> ``item['agentId']`` ->
+    ``item['registryRecordId']`` -> ``item['_canonicalRecordId']``. A WARN
+    (``name_fallback``) is logged whenever a fallback supplies the name.
+    Returns False (after logging ``skip_unnamed_config``) only when no
+    identifier exists at all, so the caller can skip the agent.
+
+    Every downstream consumer (tool specs, dispatch lookup by name) reads the
+    normalised ``name`` and so needs no fallback logic of its own.
+    """
+    name = config.get('name')
+    if isinstance(name, str) and name.strip():
+        return True
+    for key in _NAME_FALLBACK_KEYS:
+        candidate = item.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            config['name'] = candidate
+            _warn(
+                'name_fallback',
+                agentId=item.get('agentId', 'unknown'),
+                source=key,
+                name=candidate,
+            )
+            return True
+    _warn(
+        'skip_unnamed_config',
+        agentId=item.get('agentId', 'unknown'),
+        orgId=item.get('orgId', 'unknown'),
+        _canonicalRecordId=item.get('_canonicalRecordId', 'unknown'),
+    )
+    return False
+
+
+def _prepare_agent_config(item: dict):
+    """Turn a raw agent-config item into a normalised config dict.
+
+    Returns ``(config, None)`` on success or ``(None, action)`` when the item
+    is skipped, where ``action`` is the WARN action already logged
+    (``skip_missing_config``, ``skip_malformed_config`` or
+    ``skip_unnamed_config``).
+    """
+    cfg = item.get('config')
+    if cfg is None:
+        # Name-keyed projection/stub rows can be 'active' without a config
+        # attribute; they cannot be dispatched, so skip them rather than
+        # failing every supervisor task with a KeyError.
+        _warn(
+            'skip_missing_config',
+            agentId=item.get('agentId', 'unknown'),
+            orgId=item.get('orgId', 'unknown'),
+            _canonicalRecordId=item.get('_canonicalRecordId', 'unknown'),
+        )
+        return None, 'skip_missing_config'
+    # Live DynamoDB rows may store config as a JSON string; parse it.
+    if isinstance(cfg, str):
+        try:
+            cfg = json.loads(cfg)
+        except (json.JSONDecodeError, TypeError):
+            cfg = None
+    if not isinstance(cfg, dict):
+        _warn('skip_malformed_config', agentId=item.get('agentId', 'unknown'))
+        return None, 'skip_malformed_config'
+    cfg = _with_approval_fields(cfg, item)
+    if not _ensure_agent_name(cfg, item):
+        return None, 'skip_unnamed_config'
+    return cfg, None
+
+
 def load_config_from_dynamodb(org_id: str | None = None):
     print(CONFIG_TABLE)
     table = dynamodb.Table(CONFIG_TABLE)
@@ -61,34 +146,12 @@ def load_config_from_dynamodb(org_id: str | None = None):
     for item in items:
         # Only load agents with state 'active'
         if item.get('state') == 'active':
-            cfg = item.get('config')
+            cfg, skipped = _prepare_agent_config(item)
             if cfg is None:
-                # Name-keyed projection/stub rows can be 'active' without a
-                # config attribute; they cannot be dispatched, so skip them
-                # rather than failing every supervisor task with a KeyError.
-                skipped_missing_config += 1
-                print(json.dumps({
-                    'level': 'WARN',
-                    'component': 'SupervisorAgentConfig',
-                    'action': 'skip_missing_config',
-                    'agentId': item.get('agentId', 'unknown'),
-                    'orgId': item.get('orgId', 'unknown'),
-                    '_canonicalRecordId': item.get('_canonicalRecordId', 'unknown'),
-                }))
+                if skipped == 'skip_missing_config':
+                    skipped_missing_config += 1
                 continue
-            # Live DynamoDB rows may store config as a JSON string; parse it.
-            if isinstance(cfg, str):
-                try:
-                    cfg = json.loads(cfg)
-                except (json.JSONDecodeError, TypeError):
-                    print(json.dumps({
-                        'level': 'WARN',
-                        'component': 'SupervisorAgentConfig',
-                        'action': 'skip_malformed_config',
-                        'agentId': item.get('agentId', 'unknown'),
-                    }))
-                    continue
-            configs.append(_with_approval_fields(cfg, item))
+            configs.append(cfg)
 
     if skipped_missing_config:
         print(json.dumps({
@@ -149,20 +212,9 @@ def load_app_scoped_agents(app_id: str) -> dict:
             print(f"Skipping agent {agent_id}: not found or not active")
             continue
 
-        config = item['config']
-        # Live DynamoDB rows may store config as a JSON string; parse it.
-        if isinstance(config, str):
-            try:
-                config = json.loads(config)
-            except (json.JSONDecodeError, TypeError):
-                print(json.dumps({
-                    'level': 'WARN',
-                    'component': 'SupervisorAgentConfig',
-                    'action': 'skip_malformed_config',
-                    'agentId': agent_id,
-                }))
-                continue
-        config = _with_approval_fields(config, item)
+        config, _ = _prepare_agent_config(item)
+        if config is None:
+            continue
 
         # Apply binding overrides
         if binding.get('systemPromptAddition'):
@@ -176,11 +228,27 @@ def load_app_scoped_agents(app_id: str) -> dict:
     return {'agents': agents}
 
 
+_TOOL_SPEC_FIELDS = ('name', 'description', 'schema')
+
+
 def create_agent_specs(agents_config):
-    return [{
-        "toolSpec": {
-            "name": agent["name"],
-            "description": agent["description"],
-            "inputSchema": {"json": parse_decimals(agent["schema"])}
-        }
-    } for agent in agents_config["agents"]]
+    specs = []
+    for agent in agents_config["agents"]:
+        # An agent that cannot form a valid tool spec (e.g. an empty projected
+        # config with only a fallback name) must not fail every task.
+        missing = [f for f in _TOOL_SPEC_FIELDS if agent.get(f) is None]
+        if missing:
+            _warn(
+                'skip_unusable_agent_spec',
+                name=agent.get('name', 'unknown'),
+                missing=missing,
+            )
+            continue
+        specs.append({
+            "toolSpec": {
+                "name": agent["name"],
+                "description": agent["description"],
+                "inputSchema": {"json": parse_decimals(agent["schema"])}
+            }
+        })
+    return specs
