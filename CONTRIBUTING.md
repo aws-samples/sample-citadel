@@ -69,3 +69,28 @@ If you discover a potential security issue in this project we ask that you notif
 ## Licensing
 
 See the [LICENSE](LICENSE) file for our project's licensing. We will ask you to confirm the licensing of your contribution.
+
+## Formatting
+
+This repository uses [Prettier](https://prettier.io) to format `backend/**/*.{ts,js}` (the
+files the lint-staged config in the root `package.json` formats on commit). `.prettierrc.json`
+is the authoritative configuration. It pins the Prettier 3 defaults (double quotes, 80
+columns, semicolons, trailing commas everywhere), which matched the existing code when the
+config was introduced. `.prettierignore` excludes generated and vendored output
+(`node_modules`, `dist`, `build`, `cdk.out`, `coverage`, `.venv`, `**/split-baseline/**`,
+lockfiles).
+
+`lint-staged` runs `prettier --write` on staged files through the pre-commit hook, so you do
+not need to run Prettier by hand before committing. To format on demand, run this from the
+repository root:
+
+```bash
+npx prettier --write 'backend/**/*.{ts,js}'
+```
+
+The repository-wide formatting commits are listed in `.git-blame-ignore-revs`. Run this once
+per clone so `git blame` skips them (GitHub's blame view reads the file automatically):
+
+```bash
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
