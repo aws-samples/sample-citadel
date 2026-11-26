@@ -1,7 +1,15 @@
-import React, { useRef, useEffect } from 'react';
-import Editor from '@monaco-editor/react';
+import React, { Suspense, useMemo } from 'react';
 import type { editor } from 'monaco-editor';
+import type { MonacoNamespace } from './MonacoEditor';
 import { Button } from './ui/button';
+
+// Monaco is large; load the wrapper (and with it the monaco-editor package)
+// lazily so it lands in its own chunk, fetched only when the editor renders.
+const MonacoEditor = React.lazy(() =>
+  import('./MonacoEditor').then((mod) => ({ default: mod.MonacoEditor }))
+);
+
+const editorLoading = <div className="editor-loading">Loading editor...</div>;
 
 interface AgentCodeProps {
   isCreating: boolean;
@@ -22,18 +30,7 @@ export const AgentCodeTab: React.FC<AgentCodeProps> = ({
   onSave,
   onCancel,
 }) => {
-  const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
-
-  useEffect(() => {
-    // Update editor when code changes externally
-    if (editorRef.current && editorRef.current.getValue() !== agentCode) {
-      editorRef.current.setValue(agentCode);
-    }
-  }, [agentCode]);
-
-  const handleEditorMount = (editor: editor.IStandaloneCodeEditor, monaco: any) => {
-    editorRef.current = editor;
-    
+  const handleEditorMount = (_editor: editor.IStandaloneCodeEditor, monaco: MonacoNamespace) => {
     // Configure Python language for better f-string support
     monaco.languages.setLanguageConfiguration('python', {
       brackets: [
@@ -158,12 +155,23 @@ export const AgentCodeTab: React.FC<AgentCodeProps> = ({
         ],
       },
     });
-    
-    // Set the value when editor mounts
-    if (agentCode) {
-      editor.setValue(agentCode);
-    }
   };
+
+  const editorOptions = useMemo<editor.IStandaloneEditorConstructionOptions>(
+    () => ({
+      readOnly: !isEditing && !isCreating,
+      minimap: { enabled: true },
+      fontSize: 14,
+      lineNumbers: 'on',
+      scrollBeyondLastLine: false,
+      automaticLayout: true,
+      tabSize: 4,
+      wordWrap: 'on',
+      formatOnPaste: true,
+      formatOnType: true,
+    }),
+    [isEditing, isCreating]
+  );
 
   return (
     <div className="agent-code-editor">
@@ -202,27 +210,17 @@ export const AgentCodeTab: React.FC<AgentCodeProps> = ({
         </div>
       </div>
       <div className="monaco-editor-wrapper">
-        <Editor
-          height="650px"
-          defaultLanguage="python"
-          defaultValue={agentCode}
-          onMount={handleEditorMount}
-          onChange={(value) => onCodeChange(value || '')}
-          theme="vs-dark"
-          options={{
-            readOnly: !isEditing && !isCreating,
-            minimap: { enabled: true },
-            fontSize: 14,
-            lineNumbers: 'on',
-            scrollBeyondLastLine: false,
-            automaticLayout: true,
-            tabSize: 4,
-            wordWrap: 'on',
-            formatOnPaste: true,
-            formatOnType: true,
-          }}
-          loading={<div className="editor-loading">Loading editor...</div>}
-        />
+        <Suspense fallback={editorLoading}>
+          <MonacoEditor
+            height="650px"
+            language="python"
+            value={agentCode}
+            onMount={handleEditorMount}
+            onChange={onCodeChange}
+            theme="vs-dark"
+            options={editorOptions}
+          />
+        </Suspense>
       </div>
     </div>
   );
