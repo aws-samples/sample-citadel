@@ -5,15 +5,15 @@
  * without a registered adapter (A2A, STEP_FUNCTIONS, SAGEMAKER_ENDPOINT,
  * SQS_ASYNC) resolve to UnknownProtocolError by design.
  */
-import { AgentSourceAdapterRegistry } from "./base";
-import { AgentCoreRuntimeAdapter } from "./agentcore-runtime-adapter";
-import { LambdaInvokeAdapter } from "./lambda-invoke-adapter";
-import { HttpEndpointAdapter } from "./http-endpoint-adapter";
-import { BedrockAgentAdapter } from "./bedrock-agent-adapter";
-import { McpAdapter } from "./mcp-adapter";
-import type { AdapterCredentialProvider } from "./invoke-support";
+import { AgentSourceAdapterRegistry } from './base';
+import { AgentCoreRuntimeAdapter } from './agentcore-runtime-adapter';
+import { LambdaInvokeAdapter } from './lambda-invoke-adapter';
+import { HttpEndpointAdapter } from './http-endpoint-adapter';
+import { BedrockAgentAdapter } from './bedrock-agent-adapter';
+import { McpAdapter } from './mcp-adapter';
+import type { AdapterCredentialProvider } from './invoke-support';
 
-export { NotImplementedError } from "./not-implemented";
+export { NotImplementedError } from './not-implemented';
 
 /** Optional dependencies threaded into the per-protocol adapters. */
 export interface AgentSourceRegistryDeps {
@@ -39,21 +39,13 @@ export function buildDefaultAgentSourceRegistry(
 ): AgentSourceAdapterRegistry {
   const registry = new AgentSourceAdapterRegistry();
   registry.register(
-    new AgentCoreRuntimeAdapter(undefined, {
-      credentialProvider: deps.credentialProvider,
-    }),
+    new AgentCoreRuntimeAdapter(undefined, { credentialProvider: deps.credentialProvider }),
   );
   registry.register(
-    new LambdaInvokeAdapter(undefined, {
-      credentialProvider: deps.credentialProvider,
-    }),
+    new LambdaInvokeAdapter(undefined, { credentialProvider: deps.credentialProvider }),
   );
-  registry.register(
-    new HttpEndpointAdapter({ resolveSecret: deps.resolveSecret }),
-  );
-  registry.register(
-    new BedrockAgentAdapter({ credentialProvider: deps.credentialProvider }),
-  );
+  registry.register(new HttpEndpointAdapter({ resolveSecret: deps.resolveSecret }));
+  registry.register(new BedrockAgentAdapter({ credentialProvider: deps.credentialProvider }));
   registry.register(new McpAdapter({ resolveSecret: deps.resolveSecret }));
   return registry;
 }

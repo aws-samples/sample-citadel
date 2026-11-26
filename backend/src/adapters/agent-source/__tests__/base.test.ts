@@ -17,7 +17,7 @@ import {
   type InvokeResponse,
   type AgentInvocationProtocol,
   type AgentInvocationBlock,
-} from "../base";
+} from '../base';
 
 /**
  * Minimal in-memory adapter double. Builds its capability descriptor from its
@@ -36,9 +36,9 @@ class FakeAdapter implements AgentSourceAdapter {
     return [
       {
         origin: {
-          substrate: "fake",
-          discoveredAt: "2026-06-25T00:00:00.000Z",
-          ownership: "external",
+          substrate: 'fake',
+          discoveredAt: '2026-06-25T00:00:00.000Z',
+          ownership: 'external',
         },
         displayName: `fake-${this.protocol}`,
         reference: `ref-${this.protocol}`,
@@ -46,29 +46,27 @@ class FakeAdapter implements AgentSourceAdapter {
     ];
   }
 
-  async describe(
-    _ref: AgentCandidate | string,
-  ): Promise<AgentCapabilityDescriptor> {
+  async describe(_ref: AgentCandidate | string): Promise<AgentCapabilityDescriptor> {
     return {
-      name: "fake",
-      description: "fake agent",
-      version: "1.0.0",
+      name: 'fake',
+      description: 'fake agent',
+      version: '1.0.0',
       skills: [],
       categories: [],
       inputSchema: {},
       outputSchema: {},
       invocation: {
         protocol: this.protocol,
-        target: "fake-target",
-        auth: { mode: "NONE" },
-        mode: "sync",
+        target: 'fake-target',
+        auth: { mode: 'NONE' },
+        mode: 'sync',
       },
       origin: {
-        substrate: "fake",
-        discoveredAt: "2026-06-25T00:00:00.000Z",
-        ownership: "external",
+        substrate: 'fake',
+        discoveredAt: '2026-06-25T00:00:00.000Z',
+        ownership: 'external',
       },
-      fieldConfidence: { name: "high" },
+      fieldConfidence: { name: 'high' },
     };
   }
 
@@ -76,10 +74,8 @@ class FakeAdapter implements AgentSourceAdapter {
     return { reachable: true };
   }
 
-  async vendCredentials(
-    _invocation: AgentInvocationBlock,
-  ): Promise<VendedCredentials> {
-    return { roleArn: "arn:aws:iam::123456789012:role/fake" };
+  async vendCredentials(_invocation: AgentInvocationBlock): Promise<VendedCredentials> {
+    return { roleArn: 'arn:aws:iam::123456789012:role/fake' };
   }
 
   async invoke(
@@ -90,77 +86,75 @@ class FakeAdapter implements AgentSourceAdapter {
   }
 }
 
-describe("AgentSourceAdapterRegistry (US-IMP-002)", () => {
+describe('AgentSourceAdapterRegistry (US-IMP-002)', () => {
   let registry: AgentSourceAdapterRegistry;
 
   beforeEach(() => {
     registry = new AgentSourceAdapterRegistry();
   });
 
-  it("resolve() returns the exact instance that was registered", () => {
-    const adapter = new FakeAdapter("LAMBDA_INVOKE");
+  it('resolve() returns the exact instance that was registered', () => {
+    const adapter = new FakeAdapter('LAMBDA_INVOKE');
     registry.register(adapter);
-    expect(registry.resolve("LAMBDA_INVOKE")).toBe(adapter);
+    expect(registry.resolve('LAMBDA_INVOKE')).toBe(adapter);
   });
 
-  it("has() reflects registration state", () => {
-    expect(registry.has("MCP")).toBe(false);
-    registry.register(new FakeAdapter("MCP"));
-    expect(registry.has("MCP")).toBe(true);
+  it('has() reflects registration state', () => {
+    expect(registry.has('MCP')).toBe(false);
+    registry.register(new FakeAdapter('MCP'));
+    expect(registry.has('MCP')).toBe(true);
   });
 
-  it("resolve() throws a typed UnknownProtocolError for an unregistered protocol", () => {
-    expect(() => registry.resolve("A2A")).toThrow(UnknownProtocolError);
+  it('resolve() throws a typed UnknownProtocolError for an unregistered protocol', () => {
+    expect(() => registry.resolve('A2A')).toThrow(UnknownProtocolError);
 
     let caught: unknown;
     try {
-      registry.resolve("A2A");
+      registry.resolve('A2A');
     } catch (err) {
       caught = err;
     }
     expect(caught).toBeInstanceOf(UnknownProtocolError);
     expect(caught).toBeInstanceOf(Error);
-    expect((caught as UnknownProtocolError).protocol).toBe("A2A");
+    expect((caught as UnknownProtocolError).protocol).toBe('A2A');
   });
 
-  it("UnknownProtocolError has the expected name", () => {
-    const err = new UnknownProtocolError("SQS_ASYNC");
-    expect(err.name).toBe("UnknownProtocolError");
-    expect(err.message).toContain("SQS_ASYNC");
+  it('UnknownProtocolError has the expected name', () => {
+    const err = new UnknownProtocolError('SQS_ASYNC');
+    expect(err.name).toBe('UnknownProtocolError');
+    expect(err.message).toContain('SQS_ASYNC');
   });
 
-  it("register() replaces a prior adapter for the same protocol", () => {
-    const first = new FakeAdapter("HTTP_ENDPOINT");
-    const second = new FakeAdapter("HTTP_ENDPOINT");
+  it('register() replaces a prior adapter for the same protocol', () => {
+    const first = new FakeAdapter('HTTP_ENDPOINT');
+    const second = new FakeAdapter('HTTP_ENDPOINT');
     registry.register(first);
     registry.register(second);
-    expect(registry.resolve("HTTP_ENDPOINT")).toBe(second);
+    expect(registry.resolve('HTTP_ENDPOINT')).toBe(second);
   });
 
-  it("exposes the full AgentSourceAdapter surface through the registry", async () => {
-    const adapter = new FakeAdapter("AGENTCORE_RUNTIME");
+  it('exposes the full AgentSourceAdapter surface through the registry', async () => {
+    const adapter = new FakeAdapter('AGENTCORE_RUNTIME');
     registry.register(adapter);
-    const resolved = registry.resolve("AGENTCORE_RUNTIME");
+    const resolved = registry.resolve('AGENTCORE_RUNTIME');
 
     const candidates = await resolved.discover(undefined);
     expect(candidates).toHaveLength(1);
-    expect(candidates[0].origin.ownership).toBe("external");
+    expect(candidates[0].origin.ownership).toBe('external');
 
-    const descriptor = await resolved.describe("ref");
-    expect(descriptor.invocation.protocol).toBe("AGENTCORE_RUNTIME");
+    const descriptor = await resolved.describe('ref');
+    expect(descriptor.invocation.protocol).toBe('AGENTCORE_RUNTIME');
 
-    expect(await resolved.healthCheck("ref")).toEqual({ reachable: true });
+    expect(await resolved.healthCheck('ref')).toEqual({ reachable: true });
     const vendInvocation: AgentInvocationBlock = {
-      protocol: "AGENTCORE_RUNTIME",
-      target: "fake-target",
-      auth: { mode: "NONE" },
-      mode: "sync",
+      protocol: 'AGENTCORE_RUNTIME',
+      target: 'fake-target',
+      auth: { mode: 'NONE' },
+      mode: 'sync',
     };
-    expect((await resolved.vendCredentials(vendInvocation)).roleArn).toContain(
-      "role/fake",
-    );
+    expect((await resolved.vendCredentials(vendInvocation)).roleArn).toContain('role/fake');
 
-    const response = await resolved.invoke({ prompt: "hi" }, descriptor);
-    expect(response.output).toBe("echo:hi");
+    const response = await resolved.invoke({ prompt: 'hi' }, descriptor);
+    expect(response.output).toBe('echo:hi');
   });
 });

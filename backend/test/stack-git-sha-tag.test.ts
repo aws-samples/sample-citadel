@@ -102,9 +102,9 @@ describe("resolveGitProvenance", () => {
   });
 
   test("neither context nor env -> 'unknown' for both, without throwing", () => {
-    expect(resolveGitProvenance({ context: () => undefined, env: {} })).toEqual(
-      { gitSha: UNKNOWN_GIT_VALUE, gitRef: UNKNOWN_GIT_VALUE },
-    );
+    expect(
+      resolveGitProvenance({ context: () => undefined, env: {} }),
+    ).toEqual({ gitSha: UNKNOWN_GIT_VALUE, gitRef: UNKNOWN_GIT_VALUE });
   });
 
   test("blank / non-string values are treated as unset", () => {
@@ -129,10 +129,8 @@ describe("resolveGitProvenance", () => {
         gitRef: UNKNOWN_GIT_VALUE,
       });
     } finally {
-      if (saved.sha !== undefined)
-        process.env[GIT_PROVENANCE_ENV.SHA] = saved.sha;
-      if (saved.ref !== undefined)
-        process.env[GIT_PROVENANCE_ENV.REF] = saved.ref;
+      if (saved.sha !== undefined) process.env[GIT_PROVENANCE_ENV.SHA] = saved.sha;
+      if (saved.ref !== undefined) process.env[GIT_PROVENANCE_ENV.REF] = saved.ref;
     }
   });
 });
@@ -238,8 +236,7 @@ describe("provenance tags skip Update-requires-Replacement resource types", () =
     );
     const collectionIds = Object.keys(collections);
     expect(collectionIds).toHaveLength(1);
-    const tags = (collections[collectionIds[0]].Properties?.Tags ??
-      []) as Array<{
+    const tags = (collections[collectionIds[0]].Properties?.Tags ?? []) as Array<{
       Key: string;
       Value: string;
     }>;

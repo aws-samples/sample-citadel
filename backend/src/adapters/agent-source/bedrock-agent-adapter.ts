@@ -26,7 +26,7 @@ import {
   ListAgentActionGroupsCommand,
   GetAgentActionGroupCommand,
   ListAgentKnowledgeBasesCommand,
-} from "@aws-sdk/client-bedrock-agent";
+} from '@aws-sdk/client-bedrock-agent';
 import type {
   ListAgentsCommandOutput,
   ListAgentAliasesCommandOutput,
@@ -35,8 +35,8 @@ import type {
   ListAgentActionGroupsCommandOutput,
   GetAgentActionGroupCommandOutput,
   ListAgentKnowledgeBasesCommandOutput,
-} from "@aws-sdk/client-bedrock-agent";
-import type { AgentSourceAdapter, AgentRef } from "./base";
+} from '@aws-sdk/client-bedrock-agent';
+import type { AgentSourceAdapter, AgentRef } from './base';
 import type {
   AgentCandidate,
   AgentCapabilityDescriptor,
@@ -49,19 +49,19 @@ import type {
   InvokeResponse,
   JsonSchema,
   VendedCredentials,
-} from "./base";
-import type { CommandSender } from "./invoke-support";
+} from './base';
+import type { CommandSender } from './invoke-support';
 import {
   NO_RESPONSE_TEXT,
   bytesToString,
   collectOpenApi,
   isAsyncIterable,
   vendImportCredentials,
-} from "./invoke-support";
-import type { AdapterCredentialProvider } from "./invoke-support";
+} from './invoke-support';
+import type { AdapterCredentialProvider } from './invoke-support';
 
-const DEFAULT_REGION = process.env.AWS_REGION || "ap-southeast-2";
-const MODULE_NAME = "@aws-sdk/client-bedrock-agent-runtime";
+const DEFAULT_REGION = process.env.AWS_REGION || 'ap-southeast-2';
+const MODULE_NAME = '@aws-sdk/client-bedrock-agent-runtime';
 
 /** Structural sender for the lazily-loaded bedrock-agent-runtime client. */
 interface AgentRuntimeSender {
@@ -110,16 +110,13 @@ interface ActionGroupDetail {
     functions?: Array<{
       name?: string;
       description?: string;
-      parameters?: Record<
-        string,
-        { type?: string; description?: string; required?: boolean }
-      >;
+      parameters?: Record<string, { type?: string; description?: string; required?: boolean }>;
     }>;
   };
 }
 
 export class BedrockAgentAdapter implements AgentSourceAdapter {
-  public readonly protocol: AgentInvocationProtocol = "BEDROCK_AGENT";
+  public readonly protocol: AgentInvocationProtocol = 'BEDROCK_AGENT';
 
   constructor(private readonly deps: BedrockAgentAdapterDeps = {}) {}
 
@@ -128,9 +125,9 @@ export class BedrockAgentAdapter implements AgentSourceAdapter {
     descriptor: AgentCapabilityDescriptor,
   ): Promise<InvokeResponse> {
     const { target, region } = descriptor.invocation;
-    const slash = target.indexOf("/");
+    const slash = target.indexOf('/');
     const agentId = slash >= 0 ? target.slice(0, slash) : target;
-    const agentAliasId = slash >= 0 ? target.slice(slash + 1) : "TSTALIASID";
+    const agentAliasId = slash >= 0 ? target.slice(slash + 1) : 'TSTALIASID';
 
     const input: Record<string, unknown> = {
       agentId,
@@ -147,10 +144,7 @@ export class BedrockAgentAdapter implements AgentSourceAdapter {
         client ??
         new mod.BedrockAgentRuntimeClient(
           this.deps.credentialProvider
-            ? {
-                region: region || DEFAULT_REGION,
-                credentials: this.deps.credentialProvider,
-              }
+            ? { region: region || DEFAULT_REGION, credentials: this.deps.credentialProvider }
             : { region: region || DEFAULT_REGION },
         );
       createCommand = createCommand ?? ((i) => new mod.InvokeAgentCommand(i));
@@ -196,17 +190,13 @@ export class BedrockAgentAdapter implements AgentSourceAdapter {
             candidates.push({
               origin: {
                 sourceArn: buildAliasArn(region, account, agentId, aliasId),
-                substrate: "bedrock_agent",
+                substrate: 'bedrock_agent',
                 region,
                 account,
                 discoveredAt,
-                ownership: "external",
+                ownership: 'external',
               },
-              displayName: displayName(
-                agent.agentName,
-                alias.agentAliasName,
-                `${agentId}/${aliasId}`,
-              ),
+              displayName: displayName(agent.agentName, alias.agentAliasName, `${agentId}/${aliasId}`),
               reference: `${agentId}/${aliasId}`,
             });
           }
@@ -229,8 +219,7 @@ export class BedrockAgentAdapter implements AgentSourceAdapter {
    */
   async describe(ref: AgentRef): Promise<AgentCapabilityDescriptor> {
     const { agentId, aliasId } = parseHandle(refToString(ref));
-    const region =
-      originRegionOf(ref) ?? this.deps.defaultRegion ?? DEFAULT_REGION;
+    const region = originRegionOf(ref) ?? this.deps.defaultRegion ?? DEFAULT_REGION;
     const account = originAccountOf(ref) ?? this.deps.defaultAccount;
     const sender = this.controlClient(region);
 
@@ -243,10 +232,9 @@ export class BedrockAgentAdapter implements AgentSourceAdapter {
       new GetAgentAliasCommand({ agentId, agentAliasId: aliasId }),
     )) as GetAgentAliasCommandOutput;
     const alias = aliasOut.agentAlias;
-    const servedVersion = alias?.routingConfiguration?.find(
-      (r) => typeof r.agentVersion === "string",
-    )?.agentVersion;
-    const version = servedVersion ?? agent?.agentVersion ?? "DRAFT";
+    const servedVersion =
+      alias?.routingConfiguration?.find((r) => typeof r.agentVersion === 'string')?.agentVersion;
+    const version = servedVersion ?? agent?.agentVersion ?? 'DRAFT';
 
     // Action groups (served version) -> skills + input/output schemas.
     const skills: string[] = [];
@@ -255,28 +243,19 @@ export class BedrockAgentAdapter implements AgentSourceAdapter {
     let agToken: string | undefined;
     do {
       const agOut = (await sender.send(
-        new ListAgentActionGroupsCommand({
-          agentId,
-          agentVersion: version,
-          nextToken: agToken,
-        }),
+        new ListAgentActionGroupsCommand({ agentId, agentVersion: version, nextToken: agToken }),
       )) as ListAgentActionGroupsCommandOutput;
       for (const summary of agOut.actionGroupSummaries ?? []) {
         const actionGroupId = summary.actionGroupId;
         if (!actionGroupId) continue;
         const detailOut = (await sender.send(
-          new GetAgentActionGroupCommand({
-            agentId,
-            agentVersion: version,
-            actionGroupId,
-          }),
+          new GetAgentActionGroupCommand({ agentId, agentVersion: version, actionGroupId }),
         )) as GetAgentActionGroupCommandOutput;
-        const ag = detailOut.agentActionGroup as unknown as
-          ActionGroupDetail | undefined;
+        const ag = detailOut.agentActionGroup as unknown as ActionGroupDetail | undefined;
         if (!ag) continue;
         if (ag.actionGroupName) skills.push(ag.actionGroupName);
         const payload = ag.apiSchema?.payload;
-        if (typeof payload === "string") {
+        if (typeof payload === 'string') {
           const { inputs, outputs } = collectOpenApi(tryParseJson(payload));
           Object.assign(inputProps, inputs);
           Object.assign(outputProps, outputs);
@@ -294,11 +273,7 @@ export class BedrockAgentAdapter implements AgentSourceAdapter {
     let kbToken: string | undefined;
     do {
       const kbOut = (await sender.send(
-        new ListAgentKnowledgeBasesCommand({
-          agentId,
-          agentVersion: version,
-          nextToken: kbToken,
-        }),
+        new ListAgentKnowledgeBasesCommand({ agentId, agentVersion: version, nextToken: kbToken }),
       )) as ListAgentKnowledgeBasesCommandOutput;
       for (const kb of kbOut.agentKnowledgeBaseSummaries ?? []) {
         if (kb.knowledgeBaseId) categories.push(kb.knowledgeBaseId);
@@ -307,46 +282,40 @@ export class BedrockAgentAdapter implements AgentSourceAdapter {
     } while (kbToken);
 
     const inputSchema: JsonSchema =
-      Object.keys(inputProps).length > 0
-        ? { type: "object", properties: inputProps }
-        : {};
+      Object.keys(inputProps).length > 0 ? { type: 'object', properties: inputProps } : {};
     const outputSchema: JsonSchema =
-      Object.keys(outputProps).length > 0
-        ? { type: "object", properties: outputProps }
-        : {};
+      Object.keys(outputProps).length > 0 ? { type: 'object', properties: outputProps } : {};
 
     const origin: AgentOrigin = {
-      sourceArn:
-        alias?.agentAliasArn ??
-        buildAliasArn(region, account, agentId, aliasId),
-      substrate: "bedrock_agent",
+      sourceArn: alias?.agentAliasArn ?? buildAliasArn(region, account, agentId, aliasId),
+      substrate: 'bedrock_agent',
       region,
       account,
       discoveredAt: new Date().toISOString(),
-      ownership: "external",
+      ownership: 'external',
     };
     const invocation: AgentInvocationBlock = {
-      protocol: "BEDROCK_AGENT",
+      protocol: 'BEDROCK_AGENT',
       target: `${agentId}/${aliasId}`,
-      auth: { mode: "SIGV4" },
-      mode: "sync",
+      auth: { mode: 'SIGV4' },
+      mode: 'sync',
       region,
       account,
     };
     // Self-described control-plane facts: high confidence across the board.
     const fieldConfidence: Record<string, Confidence> = {
-      name: "high",
-      description: "high",
-      version: "high",
-      skills: "high",
-      categories: "high",
-      inputSchema: "high",
-      outputSchema: "high",
+      name: 'high',
+      description: 'high',
+      version: 'high',
+      skills: 'high',
+      categories: 'high',
+      inputSchema: 'high',
+      outputSchema: 'high',
     };
 
     return {
       name: agent?.agentName ?? displayNameOf(ref) ?? agentId,
-      description: agent?.description || agent?.instruction || "",
+      description: agent?.description || agent?.instruction || '',
       version,
       skills,
       categories,
@@ -365,13 +334,10 @@ export class BedrockAgentAdapter implements AgentSourceAdapter {
    */
   async healthCheck(ref: AgentRef): Promise<HealthCheckResult> {
     const { agentId, aliasId } = parseHandle(refToString(ref));
-    const region =
-      originRegionOf(ref) ?? this.deps.defaultRegion ?? DEFAULT_REGION;
+    const region = originRegionOf(ref) ?? this.deps.defaultRegion ?? DEFAULT_REGION;
     const sender = this.controlClient(region);
     try {
-      await sender.send(
-        new GetAgentAliasCommand({ agentId, agentAliasId: aliasId }),
-      );
+      await sender.send(new GetAgentAliasCommand({ agentId, agentAliasId: aliasId }));
       return { reachable: true };
     } catch (err) {
       if (isResourceNotFound(err)) {
@@ -381,9 +347,7 @@ export class BedrockAgentAdapter implements AgentSourceAdapter {
     }
   }
 
-  async vendCredentials(
-    invocation: AgentInvocationBlock,
-  ): Promise<VendedCredentials> {
+  async vendCredentials(invocation: AgentInvocationBlock): Promise<VendedCredentials> {
     return vendImportCredentials(invocation);
   }
 
@@ -409,7 +373,7 @@ function loadBedrockAgentRuntime(): BedrockAgentRuntimeModule {
 
 /** Concatenate the InvokeAgent completion event-stream into a single string. */
 async function parseAgentResponse(response: unknown): Promise<string> {
-  if (!response || typeof response !== "object") return NO_RESPONSE_TEXT;
+  if (!response || typeof response !== 'object') return NO_RESPONSE_TEXT;
   const r = response as { completion?: unknown; output?: unknown };
 
   if (isAsyncIterable(r.completion)) {
@@ -418,9 +382,9 @@ async function parseAgentResponse(response: unknown): Promise<string> {
       const e = event as { chunk?: { bytes?: unknown } };
       if (e.chunk?.bytes != null) chunks.push(bytesToString(e.chunk.bytes));
     }
-    if (chunks.length > 0) return chunks.join("");
+    if (chunks.length > 0) return chunks.join('');
   }
-  if (typeof r.output === "string") return r.output;
+  if (typeof r.output === 'string') return r.output;
   return NO_RESPONSE_TEXT;
 }
 
@@ -429,32 +393,32 @@ async function parseAgentResponse(response: unknown): Promise<string> {
 function readScope(scope: unknown): BedrockDiscoverScope {
   if (!isObject(scope)) return {};
   return {
-    region: typeof scope.region === "string" ? scope.region : undefined,
-    account: typeof scope.account === "string" ? scope.account : undefined,
+    region: typeof scope.region === 'string' ? scope.region : undefined,
+    account: typeof scope.account === 'string' ? scope.account : undefined,
   };
 }
 
 /** Parse the "agentId/aliasId" handle exactly as invoke() does. */
 function parseHandle(handle: string): { agentId: string; aliasId: string } {
-  const slash = handle.indexOf("/");
-  if (slash < 0) return { agentId: handle, aliasId: "TSTALIASID" };
+  const slash = handle.indexOf('/');
+  if (slash < 0) return { agentId: handle, aliasId: 'TSTALIASID' };
   return { agentId: handle.slice(0, slash), aliasId: handle.slice(slash + 1) };
 }
 
 function refToString(ref: AgentRef): string {
-  return typeof ref === "string" ? ref : ref.reference;
+  return typeof ref === 'string' ? ref : ref.reference;
 }
 
 function originRegionOf(ref: AgentRef): string | undefined {
-  return typeof ref === "string" ? undefined : ref.origin.region;
+  return typeof ref === 'string' ? undefined : ref.origin.region;
 }
 
 function originAccountOf(ref: AgentRef): string | undefined {
-  return typeof ref === "string" ? undefined : ref.origin.account;
+  return typeof ref === 'string' ? undefined : ref.origin.account;
 }
 
 function displayNameOf(ref: AgentRef): string | undefined {
-  return typeof ref === "string" ? undefined : ref.displayName;
+  return typeof ref === 'string' ? undefined : ref.displayName;
 }
 
 function displayName(
@@ -490,35 +454,29 @@ function tryParseJson(text: string): unknown {
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
 function functionParamsSchema(fn: {
-  parameters?: Record<
-    string,
-    { type?: string; description?: string; required?: boolean }
-  >;
+  parameters?: Record<string, { type?: string; description?: string; required?: boolean }>;
 }): JsonSchema {
   const properties: Record<string, JsonSchema> = {};
   const required: string[] = [];
   for (const [pname, detail] of Object.entries(fn.parameters ?? {})) {
-    const prop: JsonSchema = { type: detail?.type ?? "string" };
+    const prop: JsonSchema = { type: detail?.type ?? 'string' };
     if (detail?.description) prop.description = detail.description;
     properties[pname] = prop;
     if (detail?.required) required.push(pname);
   }
-  const schema: JsonSchema = { type: "object", properties };
+  const schema: JsonSchema = { type: 'object', properties };
   if (required.length > 0) schema.required = required;
   return schema;
 }
 
 function isResourceNotFound(err: unknown): boolean {
-  if (typeof err !== "object" || err === null) return false;
+  if (typeof err !== 'object' || err === null) return false;
   const e = err as { name?: unknown; $metadata?: { httpStatusCode?: unknown } };
-  return (
-    e.name === "ResourceNotFoundException" ||
-    e.$metadata?.httpStatusCode === 404
-  );
+  return e.name === 'ResourceNotFoundException' || e.$metadata?.httpStatusCode === 404;
 }
 
 function errMessage(err: unknown): string {

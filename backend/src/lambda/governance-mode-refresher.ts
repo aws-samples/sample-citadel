@@ -23,16 +23,16 @@
  * EventBridge to retry per its retry policy.
  */
 
-import type { EventBridgeEvent } from "aws-lambda";
+import type { EventBridgeEvent } from 'aws-lambda';
 import {
   LambdaClient,
   GetFunctionConfigurationCommand,
   UpdateFunctionConfigurationCommand,
-} from "@aws-sdk/client-lambda";
+} from '@aws-sdk/client-lambda';
 import {
   CloudWatchClient,
   PutMetricDataCommand,
-} from "@aws-sdk/client-cloudwatch";
+} from '@aws-sdk/client-cloudwatch';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -66,7 +66,7 @@ const cwClient = new CloudWatchClient({});
 // Constants
 // ---------------------------------------------------------------------------
 
-const METRIC_NAMESPACE = "Citadel/Governance/Refresher";
+const METRIC_NAMESPACE = 'Citadel/Governance/Refresher';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -77,21 +77,21 @@ const METRIC_NAMESPACE = "Citadel/Governance/Refresher";
  * or a human-readable error message describing the missing/invalid field.
  */
 export function validateDetail(detail: unknown): string | null {
-  if (!detail || typeof detail !== "object") {
-    return "detail is missing or not an object";
+  if (!detail || typeof detail !== 'object') {
+    return 'detail is missing or not an object';
   }
   const d = detail as Record<string, unknown>;
-  if (typeof d.previousMode !== "string" || d.previousMode.length === 0) {
-    return "detail.previousMode missing or not a non-empty string";
+  if (typeof d.previousMode !== 'string' || d.previousMode.length === 0) {
+    return 'detail.previousMode missing or not a non-empty string';
   }
-  if (typeof d.newMode !== "string" || d.newMode.length === 0) {
-    return "detail.newMode missing or not a non-empty string";
+  if (typeof d.newMode !== 'string' || d.newMode.length === 0) {
+    return 'detail.newMode missing or not a non-empty string';
   }
-  if (typeof d.env !== "string" || d.env.length === 0) {
-    return "detail.env missing or not a non-empty string";
+  if (typeof d.env !== 'string' || d.env.length === 0) {
+    return 'detail.env missing or not a non-empty string';
   }
-  if (typeof d.timestamp !== "string" || d.timestamp.length === 0) {
-    return "detail.timestamp missing or not a non-empty string";
+  if (typeof d.timestamp !== 'string' || d.timestamp.length === 0) {
+    return 'detail.timestamp missing or not a non-empty string';
   }
   return null;
 }
@@ -112,7 +112,7 @@ export function readGovernanceAwareFunctions(): string[] | null {
       return null;
     }
     const names = parsed.filter(
-      (n): n is string => typeof n === "string" && n.length > 0,
+      (n): n is string => typeof n === 'string' && n.length > 0,
     );
     return names;
   } catch {
@@ -164,28 +164,28 @@ async function emitRefresherMetrics(
         Namespace: METRIC_NAMESPACE,
         MetricData: [
           {
-            MetricName: "RefreshAttempt",
+            MetricName: 'RefreshAttempt',
             Value: totalAttempted,
-            Unit: "Count",
+            Unit: 'Count',
             Timestamp: now,
           },
           {
-            MetricName: "RefreshSuccess",
+            MetricName: 'RefreshSuccess',
             Value: succeeded,
-            Unit: "Count",
+            Unit: 'Count',
             Timestamp: now,
           },
           {
-            MetricName: "RefreshFailure",
+            MetricName: 'RefreshFailure',
             Value: failed,
-            Unit: "Count",
+            Unit: 'Count',
             Timestamp: now,
           },
         ],
       }),
     );
   } catch (err) {
-    console.error("Failed to emit refresher metrics:", err);
+    console.error('Failed to emit refresher metrics:', err);
   }
 }
 
@@ -195,15 +195,15 @@ async function emitRefresherMetrics(
 
 export const handler = async (
   event: EventBridgeEvent<
-    "governance.mode.transition",
+    'governance.mode.transition',
     GovernanceModeTransitionDetail
   >,
 ): Promise<RefresherResult> => {
   console.log(
-    "Governance mode refresher invoked:",
+    'Governance mode refresher invoked:',
     JSON.stringify({
       source: event.source,
-      detailType: event["detail-type"],
+      detailType: event['detail-type'],
       detail: event.detail,
     }),
   );
@@ -224,13 +224,13 @@ export const handler = async (
   const functionNames = readGovernanceAwareFunctions();
   if (functionNames === null) {
     console.warn(
-      "governance-mode-refresher: GOVERNANCE_AWARE_FUNCTIONS unset or invalid, no-op",
+      'governance-mode-refresher: GOVERNANCE_AWARE_FUNCTIONS unset or invalid, no-op',
     );
     return { totalAttempted: 0, succeeded: 0, failed: 0, errors: {} };
   }
   if (functionNames.length === 0) {
     console.warn(
-      "governance-mode-refresher: GOVERNANCE_AWARE_FUNCTIONS is empty, no-op",
+      'governance-mode-refresher: GOVERNANCE_AWARE_FUNCTIONS is empty, no-op',
     );
     return { totalAttempted: 0, succeeded: 0, failed: 0, errors: {} };
   }
@@ -250,12 +250,13 @@ export const handler = async (
   let failed = 0;
   settled.forEach((outcome, idx) => {
     const name = functionNames[idx];
-    if (outcome.status === "fulfilled") {
+    if (outcome.status === 'fulfilled') {
       succeeded++;
     } else {
       failed++;
       const reason = outcome.reason;
-      const message = reason instanceof Error ? reason.message : String(reason);
+      const message =
+        reason instanceof Error ? reason.message : String(reason);
       errors[name] = message;
       console.error(
         `governance-mode-refresher: refresh failed for "${name}": ${message}`,

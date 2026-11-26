@@ -18,66 +18,66 @@
  * wired through this subclass and not the bare base.
  */
 
-import { ConnectionTesterIntegrationAdapter } from "../connection-tester-integration-adapter";
+import { ConnectionTesterIntegrationAdapter } from '../connection-tester-integration-adapter';
 import {
   AuthenticationMethod,
   ConnectorSpec,
   ConnectionTestResult,
-} from "../../base";
+} from '../../base';
 
 const mockRunConnectionTest = jest.fn();
-jest.mock("../../../utils/connection-tester", () => ({
+jest.mock('../../../utils/connection-tester', () => ({
   testConnection: (...args: unknown[]) => mockRunConnectionTest(...args),
 }));
 
-const baseSpec: Omit<ConnectorSpec, "category"> = {
-  type: "CONFLUENCE",
-  provider: "Atlassian",
+const baseSpec: Omit<ConnectorSpec, 'category'> = {
+  type: 'CONFLUENCE',
+  provider: 'Atlassian',
   authentication: {
     method: AuthenticationMethod.API_KEY,
-    fields: ["email", "apiToken"],
-    secretStructure: { email: "string", apiToken: "string" },
+    fields: ['email', 'apiToken'],
+    secretStructure: { email: 'string', apiToken: 'string' },
   },
   configuration: {
-    required: ["baseUrl"],
+    required: ['baseUrl'],
     optional: [],
     ssmParameters: [],
   },
-  testEndpoint: "/wiki/api/v2/spaces?limit=1",
+  testEndpoint: '/wiki/api/v2/spaces?limit=1',
 };
 
-describe("ConnectionTesterIntegrationAdapter", () => {
+describe('ConnectionTesterIntegrationAdapter', () => {
   beforeEach(() => {
     mockRunConnectionTest.mockReset();
   });
 
-  describe("testConnection delegation", () => {
-    it("delegates to connection-tester.testConnection with spec.type, credentials, config", async () => {
+  describe('testConnection delegation', () => {
+    it('delegates to connection-tester.testConnection with spec.type, credentials, config', async () => {
       mockRunConnectionTest.mockResolvedValueOnce({
         success: true,
-        message: "OK",
+        message: 'OK',
         details: {},
       });
 
       const adapter = new ConnectionTesterIntegrationAdapter(baseSpec);
-      const config = { baseUrl: "https://example.atlassian.net" };
-      const credentials = { email: "a@b.com", apiToken: "tok" };
+      const config = { baseUrl: 'https://example.atlassian.net' };
+      const credentials = { email: 'a@b.com', apiToken: 'tok' };
 
       await adapter.testConnection(config, credentials);
 
       expect(mockRunConnectionTest).toHaveBeenCalledTimes(1);
       expect(mockRunConnectionTest).toHaveBeenCalledWith(
-        "CONFLUENCE",
+        'CONFLUENCE',
         credentials,
-        config,
+        config
       );
     });
 
-    it("returns the connection-tester result unchanged", async () => {
+    it('returns the connection-tester result unchanged', async () => {
       const expected: ConnectionTestResult = {
         success: true,
-        message: "Connection successful",
-        details: { statusCode: 200, endpoint: "/wiki/api/v2/spaces?limit=1" },
+        message: 'Connection successful',
+        details: { statusCode: 200, endpoint: '/wiki/api/v2/spaces?limit=1' },
       };
       mockRunConnectionTest.mockResolvedValueOnce(expected);
 
@@ -87,24 +87,24 @@ describe("ConnectionTesterIntegrationAdapter", () => {
       expect(result).toBe(expected);
     });
 
-    it("passes spec.type for each registered connector (e.g. JIRA)", async () => {
+    it('passes spec.type for each registered connector (e.g. JIRA)', async () => {
       mockRunConnectionTest.mockResolvedValueOnce({
         success: false,
-        message: "no",
+        message: 'no',
         details: {},
       });
       const adapter = new ConnectionTesterIntegrationAdapter({
         ...baseSpec,
-        type: "JIRA",
+        type: 'JIRA',
       });
 
       await adapter.testConnection({}, {});
 
-      expect(mockRunConnectionTest).toHaveBeenCalledWith("JIRA", {}, {});
+      expect(mockRunConnectionTest).toHaveBeenCalledWith('JIRA', {}, {});
     });
 
-    it("propagates errors thrown by connection-tester (does not swallow)", async () => {
-      const boom = new Error("network exploded");
+    it('propagates errors thrown by connection-tester (does not swallow)', async () => {
+      const boom = new Error('network exploded');
       mockRunConnectionTest.mockRejectedValueOnce(boom);
 
       const adapter = new ConnectionTesterIntegrationAdapter(baseSpec);
@@ -112,48 +112,48 @@ describe("ConnectionTesterIntegrationAdapter", () => {
       await expect(adapter.testConnection({}, {})).rejects.toBe(boom);
     });
 
-    it("forwards undefined credentials when caller omits them", async () => {
+    it('forwards undefined credentials when caller omits them', async () => {
       mockRunConnectionTest.mockResolvedValueOnce({
         success: true,
-        message: "ok",
+        message: 'ok',
         details: {},
       });
       const adapter = new ConnectionTesterIntegrationAdapter(baseSpec);
 
-      await adapter.testConnection({ baseUrl: "https://x" });
+      await adapter.testConnection({ baseUrl: 'https://x' });
 
       expect(mockRunConnectionTest).toHaveBeenCalledWith(
-        "CONFLUENCE",
+        'CONFLUENCE',
         undefined,
-        { baseUrl: "https://x" },
+        { baseUrl: 'https://x' }
       );
     });
   });
 
-  describe("inherited connect/disconnect remain EventBridge no-ops", () => {
+  describe('inherited connect/disconnect remain EventBridge no-ops', () => {
     const adapter = new ConnectionTesterIntegrationAdapter(baseSpec);
 
-    it("connect resolves without throwing", async () => {
+    it('connect resolves without throwing', async () => {
       await expect(adapter.connect({}, {})).resolves.toBeUndefined();
     });
 
-    it("disconnect resolves without throwing", async () => {
+    it('disconnect resolves without throwing', async () => {
       await expect(adapter.disconnect({})).resolves.toBeUndefined();
     });
 
-    it("does NOT call connection-tester from connect/disconnect", async () => {
+    it('does NOT call connection-tester from connect/disconnect', async () => {
       await adapter.connect({}, {});
       await adapter.disconnect({});
       expect(mockRunConnectionTest).not.toHaveBeenCalled();
     });
   });
 
-  describe("spec wiring", () => {
+  describe('spec wiring', () => {
     it('preserves the spec on the instance with category="integration"', () => {
       const adapter = new ConnectionTesterIntegrationAdapter(baseSpec);
-      expect(adapter.spec.type).toBe("CONFLUENCE");
-      expect(adapter.spec.category).toBe("integration");
-      expect(adapter.category).toBe("integration");
+      expect(adapter.spec.type).toBe('CONFLUENCE');
+      expect(adapter.spec.category).toBe('integration');
+      expect(adapter.category).toBe('integration');
     });
   });
 });

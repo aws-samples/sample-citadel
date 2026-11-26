@@ -7,9 +7,9 @@
  * import stories and throw this until then.
  */
 export class NotImplementedError extends Error {
-  constructor(message = "implemented in a later story") {
+  constructor(message = 'implemented in a later story') {
     super(message);
-    this.name = "NotImplementedError";
+    this.name = 'NotImplementedError';
     // Preserve the prototype chain so `instanceof NotImplementedError` holds
     // even when transpiled to a lower target.
     Object.setPrototypeOf(this, NotImplementedError.prototype);

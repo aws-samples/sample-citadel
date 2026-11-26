@@ -332,27 +332,29 @@ function installFakeDdb(): void {
     .callsFake((input: FakeUpdateInput) => applyUpdate(input));
   // CIT-286: binding service uses TransactWriteCommand for atomic dual-write.
   // Apply each Update item using the existing applyUpdate helper.
-  ddbMock.on(TransactWriteCommand).callsFake(
-    (input: {
-      TransactItems: Array<{
-        Update?: FakeUpdateInput;
-        Put?: { TableName: string; Item: Record<string, unknown> };
-      }>;
-    }) => {
-      for (const item of input.TransactItems) {
-        if (item.Update) {
-          applyUpdate(item.Update);
+  ddbMock
+    .on(TransactWriteCommand)
+    .callsFake(
+      (input: {
+        TransactItems: Array<{
+          Update?: FakeUpdateInput;
+          Put?: { TableName: string; Item: Record<string, unknown> };
+        }>;
+      }) => {
+        for (const item of input.TransactItems) {
+          if (item.Update) {
+            applyUpdate(item.Update);
+          }
+          if (item.Put) {
+            const attr = keyAttrOf(item.Put.TableName);
+            store(item.Put.TableName).set(item.Put.Item[attr] as string, {
+              ...item.Put.Item,
+            });
+          }
         }
-        if (item.Put) {
-          const attr = keyAttrOf(item.Put.TableName);
-          store(item.Put.TableName).set(item.Put.Item[attr] as string, {
-            ...item.Put.Item,
-          });
-        }
-      }
-      return {};
-    },
-  );
+        return {};
+      },
+    );
   ddbMock
     .on(BatchGetCommand)
     .callsFake(

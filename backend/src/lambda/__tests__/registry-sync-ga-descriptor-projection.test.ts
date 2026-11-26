@@ -75,10 +75,7 @@ const FABRICATOR_CONFIG = {
   },
   version: 1,
   description: "Route energy settlement tickets (Project: proj-es-001)",
-  action: {
-    type: "sqs",
-    target: "https://sqs.us-east-1.amazonaws.com/123/worker",
-  },
+  action: { type: "sqs", target: "https://sqs.us-east-1.amazonaws.com/123/worker" },
 };
 
 const fabricatorRecord: RegistryRecord = {
@@ -147,18 +144,12 @@ function makeGaFabricatorEvent(): unknown {
 
 describe("buildGaMergeFields — fabricator descriptor projection", () => {
   test("extracts sourceProjectId from Citadel descriptor when present", () => {
-    const fields = buildGaMergeFields(
-      "agent" as ResourceType,
-      fabricatorRecord,
-    );
+    const fields = buildGaMergeFields("agent" as ResourceType, fabricatorRecord);
     expect(fields.sourceProjectId).toBe("proj-es-001");
   });
 
   test("extracts config from Citadel descriptor when present", () => {
-    const fields = buildGaMergeFields(
-      "agent" as ResourceType,
-      fabricatorRecord,
-    );
+    const fields = buildGaMergeFields("agent" as ResourceType, fabricatorRecord);
     expect(fields.config).toEqual(FABRICATOR_CONFIG);
   });
 
@@ -237,9 +228,7 @@ describe("handleGaUpsert — fabricator descriptor projection", () => {
     expect(input.UpdateExpression).not.toContain("#config = :config");
     expect(input.UpdateExpression).toContain("if_not_exists(#config,");
     // sourceProjectId should NOT appear
-    expect(
-      input.ExpressionAttributeValues![":sourceProjectId"],
-    ).toBeUndefined();
+    expect(input.ExpressionAttributeValues![":sourceProjectId"]).toBeUndefined();
   });
 
   test("existing different sourceProjectId is preserved (not overwritten), and a warning is logged", async () => {

@@ -484,9 +484,7 @@ describe("ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)",
         }
       }
       expect(putStatements.length).toBe(4);
-      const trioStatements = putStatements.filter(
-        (s) => s.actions.length === 3,
-      );
+      const trioStatements = putStatements.filter((s) => s.actions.length === 3);
       const singleActionStatements = putStatements.filter(
         (s) => s.actions.length === 1,
       );
@@ -510,9 +508,7 @@ describe("ArbiterStack — Step Runner Lambda and EventBridge rules (Task 1.6)",
       // anywhere in this statement.
       const breakerStatement = trioStatements.find((s) => {
         const arn = s.resources?.["Fn::GetAtt"]?.[0];
-        return (
-          typeof arn === "string" && arn.startsWith("ToolBreakerStateTable")
-        );
+        return typeof arn === "string" && arn.startsWith("ToolBreakerStateTable");
       });
       expect(breakerStatement).toBeDefined();
       expect(breakerStatement.actions).toEqual([

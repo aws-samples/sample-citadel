@@ -29,26 +29,26 @@
  * describe runs in the target account; absent ⇒ the default provider chain
  * (same-account).
  */
-import { EC2Client, DescribeInstancesCommand } from "@aws-sdk/client-ec2";
+import { EC2Client, DescribeInstancesCommand } from '@aws-sdk/client-ec2';
 import type {
   DescribeInstancesCommandOutput,
   Instance,
   Filter,
   Tag,
-} from "@aws-sdk/client-ec2";
+} from '@aws-sdk/client-ec2';
 import {
   ElasticLoadBalancingV2Client,
   DescribeTargetGroupsCommand,
   DescribeTargetHealthCommand,
   DescribeLoadBalancersCommand,
-} from "@aws-sdk/client-elastic-load-balancing-v2";
+} from '@aws-sdk/client-elastic-load-balancing-v2';
 import type {
   DescribeTargetGroupsCommandOutput,
   DescribeTargetHealthCommandOutput,
   DescribeLoadBalancersCommandOutput,
   TargetGroup,
-} from "@aws-sdk/client-elastic-load-balancing-v2";
-import type { AgentSourceAdapter, AgentRef } from "./base";
+} from '@aws-sdk/client-elastic-load-balancing-v2';
+import type { AgentSourceAdapter, AgentRef } from './base';
 import type {
   AgentCandidate,
   AgentCapabilityDescriptor,
@@ -60,22 +60,19 @@ import type {
   InvokeRequest,
   InvokeResponse,
   VendedCredentials,
-} from "./base";
-import type {
-  AdapterCredentialProvider,
-  CommandSender,
-} from "./invoke-support";
-import { NotImplementedError } from "./not-implemented";
+} from './base';
+import type { AdapterCredentialProvider, CommandSender } from './invoke-support';
+import { NotImplementedError } from './not-implemented';
 
-const DEFAULT_REGION = process.env.AWS_REGION || "ap-southeast-2";
+const DEFAULT_REGION = process.env.AWS_REGION || 'ap-southeast-2';
 
 /** Resource tag an operator can set to declare an instance's agent endpoint. */
-const ENDPOINT_TAG = "citadel:endpoint";
+const ENDPOINT_TAG = 'citadel:endpoint';
 
 /** Note appended when no agent endpoint could be resolved at all (precedence d). */
 const NO_ENDPOINT_NOTE =
-  "no invocation endpoint could be resolved from the EC2 instance — the operator " +
-  "must supply the endpoint at import";
+  'no invocation endpoint could be resolved from the EC2 instance — the operator ' +
+  'must supply the endpoint at import';
 
 /** Optional discovery scope for {@link Ec2SourceAdapter.discover}. */
 interface Ec2DiscoverScope {
@@ -121,14 +118,13 @@ export class Ec2SourceAdapter implements AgentSourceAdapter {
    * adapter is dispatched by SUBSTRATE (not via the protocol registry), and its
    * own invoke() is a NotImplemented stub.
    */
-  public readonly protocol: AgentInvocationProtocol = "HTTP_ENDPOINT";
+  public readonly protocol: AgentInvocationProtocol = 'HTTP_ENDPOINT';
 
   private readonly fetchFn: typeof fetch;
 
   constructor(private readonly deps: Ec2SourceAdapterDeps = {}) {
     // Late-bind to the current global fetch so test stubs are honoured.
-    this.fetchFn =
-      deps.fetchFn ?? ((input, init) => globalThis.fetch(input, init));
+    this.fetchFn = deps.fetchFn ?? ((input, init) => globalThis.fetch(input, init));
   }
 
   /**
@@ -151,14 +147,10 @@ export class Ec2SourceAdapter implements AgentSourceAdapter {
     let nextToken: string | undefined;
     do {
       const out = (await ec2.send(
-        new DescribeInstancesCommand({
-          Filters: filters,
-          NextToken: nextToken,
-        }),
+        new DescribeInstancesCommand({ Filters: filters, NextToken: nextToken }),
       )) as DescribeInstancesCommandOutput;
       for (const reservation of out.Reservations ?? []) {
-        const account =
-          reservation.OwnerId ?? s.account ?? this.deps.defaultAccount;
+        const account = reservation.OwnerId ?? s.account ?? this.deps.defaultAccount;
         for (const instance of reservation.Instances ?? []) {
           const instanceId = instance.InstanceId;
           if (!instanceId) continue;
@@ -166,11 +158,11 @@ export class Ec2SourceAdapter implements AgentSourceAdapter {
           candidates.push({
             origin: {
               sourceArn: arn,
-              substrate: "ec2",
+              substrate: 'ec2',
               region,
               account,
               discoveredAt,
-              ownership: "external",
+              ownership: 'external',
             },
             displayName: nameTag(instance.Tags) ?? instanceId,
             reference: arn,
@@ -209,28 +201,28 @@ export class Ec2SourceAdapter implements AgentSourceAdapter {
     const endpoint = await this.resolveEndpoint(instance, instanceId, region);
 
     const tierOne = summarizeInstance(instance);
-    const description = [tierOne, endpoint.note ?? ""]
+    const description = [tierOne, endpoint.note ?? '']
       .filter((part) => part.length > 0)
-      .join(" ");
+      .join(' ');
 
     const invocation: AgentInvocationBlock = {
-      protocol: "HTTP_ENDPOINT",
+      protocol: 'HTTP_ENDPOINT',
       target: endpoint.target,
-      auth: { mode: "NONE" },
-      mode: "sync",
+      auth: { mode: 'NONE' },
+      mode: 'sync',
       region,
       account,
     };
     const origin: AgentOrigin = {
       sourceArn: instanceArn,
-      substrate: "ec2",
+      substrate: 'ec2',
       region,
       account,
       discoveredAt: new Date().toISOString(),
-      ownership: "external",
+      ownership: 'external',
     };
     // Every produced field is inferred (describe/probe-derived), so 'low'.
-    const low: Confidence = "low";
+    const low: Confidence = 'low';
     const fieldConfidence: Record<string, Confidence> = {
       name: low,
       description: low,
@@ -242,7 +234,7 @@ export class Ec2SourceAdapter implements AgentSourceAdapter {
 
     return {
       name: nameTag(instance?.Tags) ?? deriveName(instanceArn),
-      version: "1",
+      version: '1',
       description,
       skills: [],
       categories: [],
@@ -265,25 +257,23 @@ export class Ec2SourceAdapter implements AgentSourceAdapter {
    */
   async healthCheck(ref: AgentRef): Promise<HealthCheckResult> {
     const instanceArn = refToString(ref);
-    const region =
-      parseArn(instanceArn).region ?? this.deps.defaultRegion ?? DEFAULT_REGION;
+    const region = parseArn(instanceArn).region ?? this.deps.defaultRegion ?? DEFAULT_REGION;
     const instanceId = instanceIdFromArn(instanceArn) ?? instanceArn;
     const ec2 = this.ec2Client(region);
     const instance = await this.resolveInstance(ec2, instanceId);
     const endpoint = await this.resolveEndpoint(instance, instanceId, region);
     if (!endpoint.target) {
-      return { reachable: false, detail: "no endpoint resolved" };
+      return { reachable: false, detail: 'no endpoint resolved' };
     }
     if (!isAbsoluteHttpUrl(endpoint.target)) {
       // A bare private host without a scheme/port cannot be probed here.
       return {
         reachable: false,
-        detail:
-          "endpoint is not an absolute http(s) URL — operator must supply scheme/port",
+        detail: 'endpoint is not an absolute http(s) URL — operator must supply scheme/port',
       };
     }
     try {
-      const res = await this.fetchFn(endpoint.target, { method: "GET" });
+      const res = await this.fetchFn(endpoint.target, { method: 'GET' });
       if (res.ok) return { reachable: true };
       return { reachable: false, detail: `HTTP ${res.status}` };
     } catch (err) {
@@ -295,11 +285,9 @@ export class Ec2SourceAdapter implements AgentSourceAdapter {
    * Not applicable: EC2 candidates invoke over HTTP_ENDPOINT, which needs no
    * AWS invoke role to vend.
    */
-  async vendCredentials(
-    _invocation: AgentInvocationBlock,
-  ): Promise<VendedCredentials> {
+  async vendCredentials(_invocation: AgentInvocationBlock): Promise<VendedCredentials> {
     throw new NotImplementedError(
-      "Ec2SourceAdapter.vendCredentials: EC2 candidates invoke via HTTP_ENDPOINT — no AWS invoke role",
+      'Ec2SourceAdapter.vendCredentials: EC2 candidates invoke via HTTP_ENDPOINT — no AWS invoke role',
     );
   }
 
@@ -308,12 +296,9 @@ export class Ec2SourceAdapter implements AgentSourceAdapter {
    * HTTP_ENDPOINT adapter (the candidate's invocation protocol), never this
    * discovery adapter.
    */
-  async invoke(
-    _req: InvokeRequest,
-    _descriptor: AgentCapabilityDescriptor,
-  ): Promise<InvokeResponse> {
+  async invoke(_req: InvokeRequest, _descriptor: AgentCapabilityDescriptor): Promise<InvokeResponse> {
     throw new NotImplementedError(
-      "Ec2SourceAdapter.invoke: EC2 candidates invoke via the HTTP_ENDPOINT adapter",
+      'Ec2SourceAdapter.invoke: EC2 candidates invoke via the HTTP_ENDPOINT adapter',
     );
   }
 
@@ -351,7 +336,7 @@ export class Ec2SourceAdapter implements AgentSourceAdapter {
     instanceId: string,
     region: string,
   ): Promise<ResolvedEndpoint> {
-    if (!instance) return { target: "", note: NO_ENDPOINT_NOTE };
+    if (!instance) return { target: '', note: NO_ENDPOINT_NOTE };
 
     // (a) explicit operator hint.
     const explicit = endpointTag(instance.Tags);
@@ -369,12 +354,12 @@ export class Ec2SourceAdapter implements AgentSourceAdapter {
         target: privateHost,
         note:
           `only a private host (${privateHost}) was resolved from the EC2 instance — ` +
-          "the operator must supply the scheme and port at import",
+          'the operator must supply the scheme and port at import',
       };
     }
 
     // (d) nothing resolved.
-    return { target: "", note: NO_ENDPOINT_NOTE };
+    return { target: '', note: NO_ENDPOINT_NOTE };
   }
 
   /**
@@ -403,9 +388,7 @@ export class Ec2SourceAdapter implements AgentSourceAdapter {
   }
 
   /** Enumerate every target group in the region, paginating via Marker. */
-  private async describeAllTargetGroups(
-    elb: CommandSender,
-  ): Promise<TargetGroup[]> {
+  private async describeAllTargetGroups(elb: CommandSender): Promise<TargetGroup[]> {
     const groups: TargetGroup[] = [];
     let marker: string | undefined;
     do {
@@ -470,10 +453,9 @@ export class Ec2SourceAdapter implements AgentSourceAdapter {
 // --- helpers (scope / ARN / tags / instance summary / endpoint / errors) ---
 
 function readScope(scope: unknown): Ec2DiscoverScope {
-  if (typeof scope !== "object" || scope === null) return {};
+  if (typeof scope !== 'object' || scope === null) return {};
   const o = scope as Record<string, unknown>;
-  const str = (v: unknown): string | undefined =>
-    typeof v === "string" ? v : undefined;
+  const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
   return {
     region: str(o.region),
     account: str(o.account),
@@ -483,13 +465,13 @@ function readScope(scope: unknown): Ec2DiscoverScope {
 }
 
 function refToString(ref: AgentRef): string {
-  return typeof ref === "string" ? ref : ref.reference;
+  return typeof ref === 'string' ? ref : ref.reference;
 }
 
 /** Parse the standard ARN layout `arn:partition:service:region:account:resource`. */
 function parseArn(arn: string): { region?: string; account?: string } {
-  const parts = arn.split(":");
-  if (parts[0] !== "arn" || parts.length < 6) return {};
+  const parts = arn.split(':');
+  if (parts[0] !== 'arn' || parts.length < 6) return {};
   return { region: parts[3] || undefined, account: parts[4] || undefined };
 }
 
@@ -499,13 +481,11 @@ function parseArn(arn: string): { region?: string; account?: string } {
  * `*` — when tagValue is omitted).
  */
 function buildInstanceFilters(s: Ec2DiscoverScope): Filter[] {
-  const filters: Filter[] = [
-    { Name: "instance-state-name", Values: ["running"] },
-  ];
+  const filters: Filter[] = [{ Name: 'instance-state-name', Values: ['running'] }];
   if (s.tagKey) {
     filters.push({
       Name: `tag:${s.tagKey}`,
-      Values: s.tagValue !== undefined ? [s.tagValue] : ["*"],
+      Values: s.tagValue !== undefined ? [s.tagValue] : ['*'],
     });
   }
   return filters;
@@ -522,7 +502,7 @@ function buildInstanceArn(
   ownerId: string | undefined,
   instanceId: string,
 ): string {
-  return `arn:aws:ec2:${region}:${ownerId ?? ""}:instance/${instanceId}`;
+  return `arn:aws:ec2:${region}:${ownerId ?? ''}:instance/${instanceId}`;
 }
 
 /**
@@ -531,15 +511,15 @@ function buildInstanceArn(
  * undefined.
  */
 function instanceIdFromArn(arn: string): string | undefined {
-  const parts = arn.split(":");
-  const resource = parts.length >= 6 ? parts.slice(5).join(":") : "";
+  const parts = arn.split(':');
+  const resource = parts.length >= 6 ? parts.slice(5).join(':') : '';
   const match = /^instance\/(.+)$/.exec(resource);
   return match ? match[1] : undefined;
 }
 
 /** Value of the `Name` tag (EC2 {Key,Value}[] array), when non-empty. */
 function nameTag(tags: Tag[] | undefined): string | undefined {
-  const t = (tags ?? []).find((x) => x.Key === "Name");
+  const t = (tags ?? []).find((x) => x.Key === 'Name');
   return t?.Value && t.Value.length > 0 ? t.Value : undefined;
 }
 
@@ -559,15 +539,10 @@ function isAbsoluteHttpUrl(target: string): boolean {
  * Protocol is HTTPS; the port is appended only when present and not the scheme
  * default (80 for http, 443 for https). Mirrors the ECS adapter's helper.
  */
-function buildLbEndpoint(
-  dnsName: string,
-  protocol?: string,
-  port?: number,
-): string {
-  const scheme = (protocol ?? "").toUpperCase() === "HTTPS" ? "https" : "http";
-  const defaultPort = scheme === "https" ? 443 : 80;
-  const portSuffix =
-    typeof port === "number" && port !== defaultPort ? `:${port}` : "";
+function buildLbEndpoint(dnsName: string, protocol?: string, port?: number): string {
+  const scheme = (protocol ?? '').toUpperCase() === 'HTTPS' ? 'https' : 'http';
+  const defaultPort = scheme === 'https' ? 443 : 80;
+  const portSuffix = typeof port === 'number' && port !== defaultPort ? `:${port}` : '';
   return `${scheme}://${dnsName}${portSuffix}`;
 }
 
@@ -579,27 +554,20 @@ function buildLbEndpoint(
  * surface. Returns '' when there is no instance / no notable facts.
  */
 function summarizeInstance(instance: Instance | undefined): string {
-  if (!instance) return "";
+  if (!instance) return '';
   const seg: string[] = [];
-  if (instance.InstanceType)
-    seg.push(`instanceType=${String(instance.InstanceType)}`);
+  if (instance.InstanceType) seg.push(`instanceType=${String(instance.InstanceType)}`);
   const platform = instance.PlatformDetails ?? instance.Platform;
   if (platform) seg.push(`platform=${String(platform)}`);
-  if (instance.Architecture)
-    seg.push(`architecture=${String(instance.Architecture)}`);
+  if (instance.Architecture) seg.push(`architecture=${String(instance.Architecture)}`);
   const name = nameTag(instance.Tags);
   if (name) seg.push(`name=${name}`);
-  return seg.length > 0 ? `[ec2 ${seg.join(" ")}]` : "";
+  return seg.length > 0 ? `[ec2 ${seg.join(' ')}]` : '';
 }
 
 /** Trailing segment of an ARN resource, used as a display-name fallback. */
 function deriveName(arn: string): string {
-  return (
-    arn
-      .split(/[/:]/)
-      .filter((s) => s.length > 0)
-      .pop() ?? arn
-  );
+  return arn.split(/[/:]/).filter((s) => s.length > 0).pop() ?? arn;
 }
 
 function errMessage(err: unknown): string {

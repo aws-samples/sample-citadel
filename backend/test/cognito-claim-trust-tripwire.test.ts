@@ -678,11 +678,7 @@ describe("cognito claim-trust tripwire (finding 7aa877f8, escalation 2026-09-30)
 
     test("T6(b) matcher detects the identifier as a declaration, import, or call — and ignores comments and string literals", () => {
       expect(
-        identifierOccurrences(
-          BAD_AUTH_EVENT,
-          "fixture.ts",
-          "lookupUserOrganization",
-        ),
+        identifierOccurrences(BAD_AUTH_EVENT, "fixture.ts", "lookupUserOrganization"),
       ).toHaveLength(3); // declaration + call inside + call outside
       expect(
         identifierOccurrences(

@@ -22,22 +22,16 @@ import {
   BedrockAgentClient,
   IngestKnowledgeBaseDocumentsCommand,
   GetKnowledgeBaseDocumentsCommand,
-} from "@aws-sdk/client-bedrock-agent";
-import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
-import {
-  EventBridgeClient,
-  PutEventsCommand,
-} from "@aws-sdk/client-eventbridge";
+} from '@aws-sdk/client-bedrock-agent';
+import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
+import { EventBridgeClient, PutEventsCommand } from '@aws-sdk/client-eventbridge';
 
 const bedrockAgentClient = new BedrockAgentClient({});
 const ssmClient = new SSMClient({});
 const eventBridgeClient = new EventBridgeClient({});
 
 /** Bedrock statuses that mean the document is usable for the assessment. */
-export const SUCCESS_STATUSES = new Set<string>([
-  "INDEXED",
-  "PARTIALLY_INDEXED",
-]);
+export const SUCCESS_STATUSES = new Set<string>(['INDEXED', 'PARTIALLY_INDEXED']);
 
 /**
  * Bedrock statuses that are terminal failures.
@@ -47,42 +41,33 @@ export const SUCCESS_STATUSES = new Set<string>([
  * for the true status — so classifyStatus('IGNORED') is TRANSIENT and
  * isTerminal('IGNORED') is false.
  */
-export const FAILED_STATUSES = new Set<string>([
-  "FAILED",
-  "METADATA_UPDATE_FAILED",
-]);
+export const FAILED_STATUSES = new Set<string>(['FAILED', 'METADATA_UPDATE_FAILED']);
 
 /**
  * Statuses the poller keeps re-polling. The jobs-table GSI is partitioned on
  * `status`, so transient rows are normalized into this bounded set to keep the
  * GSI query surface finite (see normalizeTransientStatus).
  */
-export const POLLABLE_STATUSES = [
-  "STARTING",
-  "IN_PROGRESS",
-  "PENDING",
-] as const;
+export const POLLABLE_STATUSES = ['STARTING', 'IN_PROGRESS', 'PENDING'] as const;
 
 /** Our own terminal markers layered on top of the Bedrock failure set. */
 export const TERMINAL_STATUSES = new Set<string>([
   ...SUCCESS_STATUSES,
   ...FAILED_STATUSES,
-  "TIMEOUT",
+  'TIMEOUT',
 ]);
 
-export type IngestionDisposition = "SUCCESS" | "FAILED" | "TRANSIENT";
+export type IngestionDisposition = 'SUCCESS' | 'FAILED' | 'TRANSIENT';
 
 /**
  * Total mapping from any Bedrock (or internal) status string to a disposition.
  * Defined over every possible string input — unknown/empty inputs map to
  * TRANSIENT so the poller keeps watching rather than silently dropping them.
  */
-export function classifyStatus(
-  status: string | undefined | null,
-): IngestionDisposition {
-  if (status && SUCCESS_STATUSES.has(status)) return "SUCCESS";
-  if (status && FAILED_STATUSES.has(status)) return "FAILED";
-  return "TRANSIENT";
+export function classifyStatus(status: string | undefined | null): IngestionDisposition {
+  if (status && SUCCESS_STATUSES.has(status)) return 'SUCCESS';
+  if (status && FAILED_STATUSES.has(status)) return 'FAILED';
+  return 'TRANSIENT';
 }
 
 /** True if the row's status is terminal and should not be re-polled. */
@@ -94,12 +79,9 @@ export function isTerminal(status: string | undefined | null): boolean {
  * Map an observed transient Bedrock status to one of POLLABLE_STATUSES so the
  * GSI partition stays bounded and the poller can always re-query the row.
  */
-export function normalizeTransientStatus(
-  status: string | undefined | null,
-): string {
-  if (status && (POLLABLE_STATUSES as readonly string[]).includes(status))
-    return status;
-  return "IN_PROGRESS";
+export function normalizeTransientStatus(status: string | undefined | null): string {
+  if (status && (POLLABLE_STATUSES as readonly string[]).includes(status)) return status;
+  return 'IN_PROGRESS';
 }
 
 let _kbId: string | undefined;
@@ -109,12 +91,8 @@ let _dsId: string | undefined;
 export async function getKbIds(): Promise<{ kbId: string; dsId: string }> {
   if (!_kbId || !_dsId) {
     const [kb, ds] = await Promise.all([
-      ssmClient.send(
-        new GetParameterCommand({ Name: process.env.KB_ID_PARAM! }),
-      ),
-      ssmClient.send(
-        new GetParameterCommand({ Name: process.env.DS_ID_PARAM! }),
-      ),
+      ssmClient.send(new GetParameterCommand({ Name: process.env.KB_ID_PARAM! })),
+      ssmClient.send(new GetParameterCommand({ Name: process.env.DS_ID_PARAM! })),
     ]);
     _kbId = kb.Parameter!.Value!;
     _dsId = ds.Parameter!.Value!;
@@ -145,88 +123,53 @@ export interface StartIngestionResult {
  * layouts are modelled; the reader guards each access.
  */
 interface IngestionDetailView {
-  status?: {
-    status?: string;
-    statusReason?: string;
-    failureReasons?: string[];
-  };
+  status?: { status?: string; statusReason?: string; failureReasons?: string[] };
   statusReason?: string;
   failureReasons?: string[];
 }
 
-export async function startIngestion(
-  projectId: string,
-  documentKey: string,
-): Promise<StartIngestionResult> {
+export async function startIngestion(projectId: string, documentKey: string): Promise<StartIngestionResult> {
   const { kbId, dsId } = await getKbIds();
   const bucket = process.env.DOCUMENT_BUCKET!;
   const s3Uri = `s3://${bucket}/${documentKey}`;
-  const parts = documentKey.split("/");
-  const filename = parts.slice(1).join("/");
+  const parts = documentKey.split('/');
+  const filename = parts.slice(1).join('/');
 
   const command = new IngestKnowledgeBaseDocumentsCommand({
     knowledgeBaseId: kbId,
     dataSourceId: dsId,
-    documents: [
-      {
-        content: {
-          dataSourceType: "CUSTOM",
-          custom: {
-            customDocumentIdentifier: { id: documentKey },
-            sourceType: "S3_LOCATION",
-            s3Location: { uri: s3Uri },
-          },
-        },
-        metadata: {
-          type: "IN_LINE_ATTRIBUTE",
-          inlineAttributes: [
-            {
-              key: "session_id",
-              value: { type: "STRING", stringValue: projectId },
-            },
-            {
-              key: "filename",
-              value: { type: "STRING", stringValue: filename },
-            },
-          ],
+    documents: [{
+      content: {
+        dataSourceType: 'CUSTOM',
+        custom: {
+          customDocumentIdentifier: { id: documentKey },
+          sourceType: 'S3_LOCATION',
+          s3Location: { uri: s3Uri },
         },
       },
-    ],
+      metadata: {
+        type: 'IN_LINE_ATTRIBUTE',
+        inlineAttributes: [
+          { key: 'session_id', value: { type: 'STRING', stringValue: projectId } },
+          { key: 'filename', value: { type: 'STRING', stringValue: filename } },
+        ],
+      },
+    }],
   });
 
   const response = (await bedrockAgentClient.send(command)) as {
     documentDetails?: IngestionDetailView[];
     ingestedDocuments?: IngestionDetailView[];
   };
-  console.log("startIngestion Bedrock response:", JSON.stringify(response));
-  const detail =
-    response.documentDetails?.[0] ?? response.ingestedDocuments?.[0];
-  const status =
-    (typeof detail?.status === "string"
-      ? detail?.status
-      : detail?.status?.status) ?? "UNKNOWN";
+  console.log('startIngestion Bedrock response:', JSON.stringify(response));
+  const detail = response.documentDetails?.[0] ?? response.ingestedDocuments?.[0];
+  const status = (typeof detail?.status === 'string' ? detail?.status : detail?.status?.status) ?? 'UNKNOWN';
   const statusReason = detail?.statusReason ?? detail?.status?.statusReason;
-  const failureReasons =
-    detail?.failureReasons ?? detail?.status?.failureReasons;
-  if (
-    status === "FAILED" ||
-    statusReason ||
-    (failureReasons && failureReasons.length)
-  ) {
-    console.error("startIngestion document ingestion problem:", {
-      documentKey,
-      status,
-      statusReason,
-      failureReasons,
-    });
+  const failureReasons = detail?.failureReasons ?? detail?.status?.failureReasons;
+  if (status === 'FAILED' || statusReason || (failureReasons && failureReasons.length)) {
+    console.error('startIngestion document ingestion problem:', { documentKey, status, statusReason, failureReasons });
   }
-  return {
-    documentKey,
-    status,
-    statusReason:
-      statusReason ??
-      (failureReasons?.length ? String(failureReasons[0]) : undefined),
-  };
+  return { documentKey, status, statusReason: statusReason ?? (failureReasons?.length ? String(failureReasons[0]) : undefined) };
 }
 
 export interface PolledStatus {
@@ -242,7 +185,7 @@ export interface PolledStatus {
  * never actually started (the start Lambda died after creating the jobs row).
  */
 export function isDocumentAbsent(polled: PolledStatus | undefined): boolean {
-  return !polled || !polled.status || polled.status === "NOT_FOUND";
+  return !polled || !polled.status || polled.status === 'NOT_FOUND';
 }
 
 /**
@@ -250,30 +193,23 @@ export function isDocumentAbsent(polled: PolledStatus | undefined): boolean {
  * The GetKnowledgeBaseDocuments API caps identifiers per call, so we chunk in
  * groups of <=10. Returns a map keyed by documentKey.
  */
-export async function pollStatuses(
-  documentKeys: string[],
-): Promise<Map<string, PolledStatus>> {
+export async function pollStatuses(documentKeys: string[]): Promise<Map<string, PolledStatus>> {
   const statusMap = new Map<string, PolledStatus>();
   if (documentKeys.length === 0) return statusMap;
 
   const { kbId, dsId } = await getKbIds();
   for (let i = 0; i < documentKeys.length; i += 10) {
     const chunk = documentKeys.slice(i, i + 10);
-    const resp = await bedrockAgentClient.send(
-      new GetKnowledgeBaseDocumentsCommand({
-        knowledgeBaseId: kbId,
-        dataSourceId: dsId,
-        documentIdentifiers: chunk.map((id) => ({
-          dataSourceType: "CUSTOM",
-          custom: { id },
-        })),
-      }),
-    );
+    const resp = await bedrockAgentClient.send(new GetKnowledgeBaseDocumentsCommand({
+      knowledgeBaseId: kbId,
+      dataSourceId: dsId,
+      documentIdentifiers: chunk.map((id) => ({ dataSourceType: 'CUSTOM', custom: { id } })),
+    }));
     for (const detail of resp.documentDetails || []) {
       const id = detail.identifier?.custom?.id;
       if (id) {
         statusMap.set(id, {
-          status: detail.status ?? "UNKNOWN",
+          status: detail.status ?? 'UNKNOWN',
           statusReason: detail.statusReason,
           updatedAt: detail.updatedAt?.toISOString(),
         });
@@ -296,32 +232,28 @@ export async function emitAssessmentTrigger(
 ): Promise<void> {
   const eventBusName = process.env.EVENT_BUS_NAME!;
   const sizeKB = Math.round((fileSize || 0) / 1024);
-  await eventBridgeClient.send(
-    new PutEventsCommand({
-      Entries: [
-        {
-          Source: "citadel",
-          DetailType: "message.sent_to_agent",
-          Detail: JSON.stringify({
-            projectId,
-            agentId: "agent_intake_single",
-            message: `A document has been uploaded and indexed: ${fileName} (${sizeKB}KB, ${fileType}). Extract information from it.`,
-            // Deterministic id derived from the document identity. The poller emits
-            // this trigger BEFORE the conditional `triggered=true` claim, so two
-            // overlapping runs can emit twice for the same document; a stable
-            // messageId lets the consumer (agent-message-handler) dedupe logical
-            // duplicates rather than treating each unique EventBridge envelope id
-            // as a distinct message.
-            messageId: `doc-indexed-${projectId}-${documentKey}`,
-            userId: "system",
-            timestamp: new Date().toISOString(),
-            metadata: { documentKey, trigger: "document_indexed" },
-          }),
-          EventBusName: eventBusName,
-        },
-      ],
-    }),
-  );
+  await eventBridgeClient.send(new PutEventsCommand({
+    Entries: [{
+      Source: 'citadel',
+      DetailType: 'message.sent_to_agent',
+      Detail: JSON.stringify({
+        projectId,
+        agentId: 'agent_intake_single',
+        message: `A document has been uploaded and indexed: ${fileName} (${sizeKB}KB, ${fileType}). Extract information from it.`,
+        // Deterministic id derived from the document identity. The poller emits
+        // this trigger BEFORE the conditional `triggered=true` claim, so two
+        // overlapping runs can emit twice for the same document; a stable
+        // messageId lets the consumer (agent-message-handler) dedupe logical
+        // duplicates rather than treating each unique EventBridge envelope id
+        // as a distinct message.
+        messageId: `doc-indexed-${projectId}-${documentKey}`,
+        userId: 'system',
+        timestamp: new Date().toISOString(),
+        metadata: { documentKey, trigger: 'document_indexed' },
+      }),
+      EventBusName: eventBusName,
+    }],
+  }));
 }
 
 /** Emit a failure event when a document ingestion terminally fails. */
@@ -333,23 +265,19 @@ export async function emitIngestionFailed(
   statusReason?: string,
 ): Promise<void> {
   const eventBusName = process.env.EVENT_BUS_NAME!;
-  await eventBridgeClient.send(
-    new PutEventsCommand({
-      Entries: [
-        {
-          Source: "citadel.documents",
-          DetailType: "document.ingestion.failed",
-          Detail: JSON.stringify({
-            projectId,
-            documentKey,
-            fileName,
-            status,
-            statusReason: statusReason ?? null,
-            timestamp: new Date().toISOString(),
-          }),
-          EventBusName: eventBusName,
-        },
-      ],
-    }),
-  );
+  await eventBridgeClient.send(new PutEventsCommand({
+    Entries: [{
+      Source: 'citadel.documents',
+      DetailType: 'document.ingestion.failed',
+      Detail: JSON.stringify({
+        projectId,
+        documentKey,
+        fileName,
+        status,
+        statusReason: statusReason ?? null,
+        timestamp: new Date().toISOString(),
+      }),
+      EventBusName: eventBusName,
+    }],
+  }));
 }

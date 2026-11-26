@@ -6,20 +6,20 @@
  */
 
 const mockRunReconciliation = jest.fn();
-jest.mock("../../../scripts/reconcile-apps-meta", () => ({
+jest.mock('../../../scripts/reconcile-apps-meta', () => ({
   runReconciliation: mockRunReconciliation,
 }));
 
-import { handler } from "../reconcile-apps-meta-scheduled-handler";
+import { handler } from '../reconcile-apps-meta-scheduled-handler';
 
-describe("reconcile-apps-meta-scheduled-handler", () => {
+describe('reconcile-apps-meta-scheduled-handler', () => {
   let logSpy: jest.SpyInstance;
   let errSpy: jest.SpyInstance;
 
   beforeEach(() => {
     mockRunReconciliation.mockReset();
-    logSpy = jest.spyOn(console, "log").mockImplementation(() => {});
-    errSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+    errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -27,9 +27,9 @@ describe("reconcile-apps-meta-scheduled-handler", () => {
     errSpy.mockRestore();
   });
 
-  it("returns statusCode 200 with the summary body on success", async () => {
+  it('returns statusCode 200 with the summary body on success', async () => {
     const summary = {
-      mode: "apply" as const,
+      mode: 'apply' as const,
       scannedRegistry: 3,
       scannedMeta: 3,
       inSync: 3,
@@ -47,9 +47,9 @@ describe("reconcile-apps-meta-scheduled-handler", () => {
     expect(JSON.parse(result.body)).toEqual(summary);
   });
 
-  it("always passes apply:true to runReconciliation", async () => {
+  it('always passes apply:true to runReconciliation', async () => {
     mockRunReconciliation.mockResolvedValue({
-      mode: "apply",
+      mode: 'apply',
       scannedRegistry: 0,
       scannedMeta: 0,
       inSync: 0,
@@ -66,13 +66,13 @@ describe("reconcile-apps-meta-scheduled-handler", () => {
     expect(mockRunReconciliation).toHaveBeenCalledWith({ apply: true });
   });
 
-  it("re-throws and logs when runReconciliation rejects", async () => {
-    const boom = new Error("registry exploded");
+  it('re-throws and logs when runReconciliation rejects', async () => {
+    const boom = new Error('registry exploded');
     mockRunReconciliation.mockRejectedValue(boom);
 
-    await expect(handler()).rejects.toThrow("registry exploded");
+    await expect(handler()).rejects.toThrow('registry exploded');
     expect(errSpy).toHaveBeenCalledWith(
-      "[reconcile-apps-meta-scheduled] failed:",
+      '[reconcile-apps-meta-scheduled] failed:',
       boom,
     );
   });

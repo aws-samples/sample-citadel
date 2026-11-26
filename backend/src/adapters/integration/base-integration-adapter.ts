@@ -14,12 +14,12 @@ import {
   ConnectionTestResult,
   ValidationResult,
   AuthenticationMethod,
-} from "../base";
-import { NotImplementedError } from "../errors";
-import { computeIntegrationPolicies } from "../../utils/policy-helpers";
+} from '../base';
+import { NotImplementedError } from '../errors';
+import { computeIntegrationPolicies } from '../../utils/policy-helpers';
 
 export class BaseIntegrationAdapter implements ConnectorAdapter {
-  readonly category: ConnectorCategory = "integration";
+  readonly category: ConnectorCategory = 'integration';
   readonly spec: ConnectorSpec;
 
   /**
@@ -32,40 +32,40 @@ export class BaseIntegrationAdapter implements ConnectorAdapter {
    * `connect`/`disconnect`) — see the existing concrete datastore adapters
    * (s3-adapter.ts, dynamodb-adapter.ts, etc.) for the override pattern.
    */
-  constructor(spec: Omit<ConnectorSpec, "category">) {
-    this.spec = { ...spec, category: "integration" };
+  constructor(spec: Omit<ConnectorSpec, 'category'>) {
+    this.spec = { ...spec, category: 'integration' };
   }
 
   requiredPolicies(
     config: Record<string, unknown>,
     accountId: string,
-    region: string,
+    region: string
   ): RequiredPolicies {
     const connect = computeIntegrationPolicies(
-      (config.integrationId as string | undefined) || "",
+      (config.integrationId as string | undefined) || '',
       this.spec.type,
       config as Parameters<typeof computeIntegrationPolicies>[2],
       accountId,
-      region,
+      region
     );
     return { provision: [], connect };
   }
 
   async testConnection(
     _config: Record<string, unknown>,
-    _credentials?: Record<string, unknown>,
+    _credentials?: Record<string, unknown>
   ): Promise<ConnectionTestResult> {
     // Fail loudly for any connector type that has not provided a real
     // implementation. Previously this returned `{ success: true, message: '...
     // placeholder' }`, which masked every integration test failure across
     // BACKEND_CONNECTOR_REGISTRY. Subclasses MUST override this method to
     // provide real behavior.
-    throw new NotImplementedError(this.spec.type, "testConnection");
+    throw new NotImplementedError(this.spec.type, 'testConnection');
   }
 
   async connect(
     _config: Record<string, unknown>,
-    _credentials?: Record<string, unknown>,
+    _credentials?: Record<string, unknown>
   ): Promise<void> {
     // Default no-op; integrations connect via EventBridge events
   }
@@ -76,28 +76,20 @@ export class BaseIntegrationAdapter implements ConnectorAdapter {
 
   validate(
     credentials: Record<string, unknown> | undefined,
-    config: Record<string, unknown> | undefined,
+    config: Record<string, unknown> | undefined
   ): ValidationResult {
     const errors: string[] = [];
     const auth = this.spec.authentication;
 
     if (auth.method === AuthenticationMethod.CONFIGURABLE) {
       if (!credentials?.authMethod) {
-        errors.push("Missing required field: authMethod");
+        errors.push('Missing required field: authMethod');
       } else {
-        if (credentials.authMethod === "API_KEY" && !credentials.apiKey) {
-          errors.push(
-            "Missing required field: apiKey for API_KEY authentication",
-          );
-        } else if (credentials.authMethod === "OAUTH2") {
-          if (!credentials.clientId)
-            errors.push(
-              "Missing required field: clientId for OAUTH2 authentication",
-            );
-          if (!credentials.clientSecret)
-            errors.push(
-              "Missing required field: clientSecret for OAUTH2 authentication",
-            );
+        if (credentials.authMethod === 'API_KEY' && !credentials.apiKey) {
+          errors.push('Missing required field: apiKey for API_KEY authentication');
+        } else if (credentials.authMethod === 'OAUTH2') {
+          if (!credentials.clientId) errors.push('Missing required field: clientId for OAUTH2 authentication');
+          if (!credentials.clientSecret) errors.push('Missing required field: clientSecret for OAUTH2 authentication');
         }
       }
     } else {

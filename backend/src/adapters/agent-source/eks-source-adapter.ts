@@ -25,28 +25,24 @@
  * describe runs in the target account; absent ⇒ the default provider chain
  * (same-account).
  */
-import {
-  EKSClient,
-  ListClustersCommand,
-  DescribeClusterCommand,
-} from "@aws-sdk/client-eks";
+import { EKSClient, ListClustersCommand, DescribeClusterCommand } from '@aws-sdk/client-eks';
 import type {
   ListClustersCommandOutput,
   DescribeClusterCommandOutput,
   Cluster,
-} from "@aws-sdk/client-eks";
+} from '@aws-sdk/client-eks';
 import {
   ElasticLoadBalancingV2Client,
   DescribeLoadBalancersCommand,
   DescribeTagsCommand,
-} from "@aws-sdk/client-elastic-load-balancing-v2";
+} from '@aws-sdk/client-elastic-load-balancing-v2';
 import type {
   DescribeLoadBalancersCommandOutput,
   DescribeTagsCommandOutput,
   LoadBalancer,
   Tag,
-} from "@aws-sdk/client-elastic-load-balancing-v2";
-import type { AgentSourceAdapter, AgentRef } from "./base";
+} from '@aws-sdk/client-elastic-load-balancing-v2';
+import type { AgentSourceAdapter, AgentRef } from './base';
 import type {
   AgentCandidate,
   AgentCapabilityDescriptor,
@@ -58,17 +54,14 @@ import type {
   InvokeRequest,
   InvokeResponse,
   VendedCredentials,
-} from "./base";
-import type {
-  AdapterCredentialProvider,
-  CommandSender,
-} from "./invoke-support";
-import { NotImplementedError } from "./not-implemented";
+} from './base';
+import type { AdapterCredentialProvider, CommandSender } from './invoke-support';
+import { NotImplementedError } from './not-implemented';
 
-const DEFAULT_REGION = process.env.AWS_REGION || "ap-southeast-2";
+const DEFAULT_REGION = process.env.AWS_REGION || 'ap-southeast-2';
 
 /** Resource tag an operator can set to declare a cluster's agent endpoint. */
-const ENDPOINT_TAG = "citadel:endpoint";
+const ENDPOINT_TAG = 'citadel:endpoint';
 
 /** ELBv2 DescribeTags accepts at most 20 resource ARNs per call. */
 const DESCRIBE_TAGS_BATCH = 20;
@@ -109,14 +102,13 @@ export class EksSourceAdapter implements AgentSourceAdapter {
    * adapter is dispatched by SUBSTRATE (not via the protocol registry), and its
    * own invoke() is a NotImplemented stub.
    */
-  public readonly protocol: AgentInvocationProtocol = "HTTP_ENDPOINT";
+  public readonly protocol: AgentInvocationProtocol = 'HTTP_ENDPOINT';
 
   private readonly fetchFn: typeof fetch;
 
   constructor(private readonly deps: EksSourceAdapterDeps = {}) {
     // Late-bind to the current global fetch so test stubs are honoured.
-    this.fetchFn =
-      deps.fetchFn ?? ((input, init) => globalThis.fetch(input, init));
+    this.fetchFn = deps.fetchFn ?? ((input, init) => globalThis.fetch(input, init));
   }
 
   /**
@@ -137,17 +129,16 @@ export class EksSourceAdapter implements AgentSourceAdapter {
       const cluster = await this.resolveCluster(eks, clusterName);
       const arn = cluster?.arn;
       if (!arn) continue;
-      if (s.tagKey && !clusterTagMatches(cluster, s.tagKey, s.tagValue))
-        continue;
+      if (s.tagKey && !clusterTagMatches(cluster, s.tagKey, s.tagValue)) continue;
       const parsed = parseArn(arn);
       candidates.push({
         origin: {
           sourceArn: arn,
-          substrate: "eks",
+          substrate: 'eks',
           region: parsed.region ?? region,
           account: parsed.account ?? s.account ?? this.deps.defaultAccount,
           discoveredAt,
-          ownership: "external",
+          ownership: 'external',
         },
         displayName: cluster.name ?? clusterName ?? arn,
         reference: arn,
@@ -186,31 +177,29 @@ export class EksSourceAdapter implements AgentSourceAdapter {
 
     const tierOne = summarizeCluster(cluster);
     const note = endpoint
-      ? ""
-      : "no invocation endpoint could be resolved from the EKS cluster — the " +
-        "operator must supply the endpoint at import";
-    const description = [tierOne, note]
-      .filter((part) => part.length > 0)
-      .join(" ");
+      ? ''
+      : 'no invocation endpoint could be resolved from the EKS cluster — the ' +
+        'operator must supply the endpoint at import';
+    const description = [tierOne, note].filter((part) => part.length > 0).join(' ');
 
     const invocation: AgentInvocationBlock = {
-      protocol: "HTTP_ENDPOINT",
-      target: endpoint ?? "",
-      auth: { mode: "NONE" },
-      mode: "sync",
+      protocol: 'HTTP_ENDPOINT',
+      target: endpoint ?? '',
+      auth: { mode: 'NONE' },
+      mode: 'sync',
       region,
       account,
     };
     const origin: AgentOrigin = {
       sourceArn: clusterArn,
-      substrate: "eks",
+      substrate: 'eks',
       region,
       account,
       discoveredAt: new Date().toISOString(),
-      ownership: "external",
+      ownership: 'external',
     };
     // Every produced field is inferred (describe/probe-derived), so 'low'.
-    const low: Confidence = "low";
+    const low: Confidence = 'low';
     const fieldConfidence: Record<string, Confidence> = {
       name: low,
       description: low,
@@ -223,7 +212,7 @@ export class EksSourceAdapter implements AgentSourceAdapter {
     return {
       name: cluster?.name ?? deriveName(clusterArn),
       // The k8s version is the most meaningful "version" Tier-1 can infer.
-      version: cluster?.version ? String(cluster.version) : "1",
+      version: cluster?.version ? String(cluster.version) : '1',
       description,
       skills: [],
       categories: [],
@@ -243,18 +232,17 @@ export class EksSourceAdapter implements AgentSourceAdapter {
    */
   async healthCheck(ref: AgentRef): Promise<HealthCheckResult> {
     const clusterArn = refToString(ref);
-    const region =
-      parseArn(clusterArn).region ?? this.deps.defaultRegion ?? DEFAULT_REGION;
+    const region = parseArn(clusterArn).region ?? this.deps.defaultRegion ?? DEFAULT_REGION;
     const nameFromArn = clusterNameFromArn(clusterArn) ?? clusterArn;
     const eks = this.eksClient(region);
     const cluster = await this.resolveCluster(eks, nameFromArn);
     const clusterName = cluster?.name ?? nameFromArn;
     const endpoint = await this.resolveEndpoint(cluster, clusterName, region);
     if (!endpoint) {
-      return { reachable: false, detail: "no endpoint resolved" };
+      return { reachable: false, detail: 'no endpoint resolved' };
     }
     try {
-      const res = await this.fetchFn(endpoint, { method: "GET" });
+      const res = await this.fetchFn(endpoint, { method: 'GET' });
       if (res.ok) return { reachable: true };
       return { reachable: false, detail: `HTTP ${res.status}` };
     } catch (err) {
@@ -266,11 +254,9 @@ export class EksSourceAdapter implements AgentSourceAdapter {
    * Not applicable: EKS candidates invoke over HTTP_ENDPOINT, which needs no
    * AWS invoke role to vend.
    */
-  async vendCredentials(
-    _invocation: AgentInvocationBlock,
-  ): Promise<VendedCredentials> {
+  async vendCredentials(_invocation: AgentInvocationBlock): Promise<VendedCredentials> {
     throw new NotImplementedError(
-      "EksSourceAdapter.vendCredentials: EKS candidates invoke via HTTP_ENDPOINT — no AWS invoke role",
+      'EksSourceAdapter.vendCredentials: EKS candidates invoke via HTTP_ENDPOINT — no AWS invoke role',
     );
   }
 
@@ -279,12 +265,9 @@ export class EksSourceAdapter implements AgentSourceAdapter {
    * HTTP_ENDPOINT adapter (the candidate's invocation protocol), never this
    * discovery adapter.
    */
-  async invoke(
-    _req: InvokeRequest,
-    _descriptor: AgentCapabilityDescriptor,
-  ): Promise<InvokeResponse> {
+  async invoke(_req: InvokeRequest, _descriptor: AgentCapabilityDescriptor): Promise<InvokeResponse> {
     throw new NotImplementedError(
-      "EksSourceAdapter.invoke: EKS candidates invoke via the HTTP_ENDPOINT adapter",
+      'EksSourceAdapter.invoke: EKS candidates invoke via the HTTP_ENDPOINT adapter',
     );
   }
 
@@ -356,7 +339,7 @@ export class EksSourceAdapter implements AgentSourceAdapter {
       const batch = loadBalancers.slice(i, i + DESCRIBE_TAGS_BATCH);
       const arns = batch
         .map((lb) => lb.LoadBalancerArn)
-        .filter((a): a is string => typeof a === "string" && a.length > 0);
+        .filter((a): a is string => typeof a === 'string' && a.length > 0);
       if (arns.length === 0) continue;
 
       const tagsOut = (await elb.send(
@@ -365,9 +348,7 @@ export class EksSourceAdapter implements AgentSourceAdapter {
 
       for (const desc of tagsOut.TagDescriptions ?? []) {
         if (!lbTagsMatchCluster(desc.Tags ?? [], clusterName)) continue;
-        const dns = batch.find(
-          (lb) => lb.LoadBalancerArn === desc.ResourceArn,
-        )?.DNSName;
+        const dns = batch.find((lb) => lb.LoadBalancerArn === desc.ResourceArn)?.DNSName;
         if (dns) return buildClusterLbEndpoint(dns);
       }
     }
@@ -375,9 +356,7 @@ export class EksSourceAdapter implements AgentSourceAdapter {
   }
 
   /** Enumerate every load balancer in the region, paginating via Marker. */
-  private async describeAllLoadBalancers(
-    elb: CommandSender,
-  ): Promise<LoadBalancer[]> {
+  private async describeAllLoadBalancers(elb: CommandSender): Promise<LoadBalancer[]> {
     const loadBalancers: LoadBalancer[] = [];
     let marker: string | undefined;
     do {
@@ -417,10 +396,9 @@ export class EksSourceAdapter implements AgentSourceAdapter {
 // --- helpers (scope / ARN / tags / cluster summary / endpoint / errors) ----
 
 function readScope(scope: unknown): EksDiscoverScope {
-  if (typeof scope !== "object" || scope === null) return {};
+  if (typeof scope !== 'object' || scope === null) return {};
   const o = scope as Record<string, unknown>;
-  const str = (v: unknown): string | undefined =>
-    typeof v === "string" ? v : undefined;
+  const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
   return {
     region: str(o.region),
     account: str(o.account),
@@ -430,13 +408,13 @@ function readScope(scope: unknown): EksDiscoverScope {
 }
 
 function refToString(ref: AgentRef): string {
-  return typeof ref === "string" ? ref : ref.reference;
+  return typeof ref === 'string' ? ref : ref.reference;
 }
 
 /** Parse the standard ARN layout `arn:partition:service:region:account:resource`. */
 function parseArn(arn: string): { region?: string; account?: string } {
-  const parts = arn.split(":");
-  if (parts[0] !== "arn" || parts.length < 6) return {};
+  const parts = arn.split(':');
+  if (parts[0] !== 'arn' || parts.length < 6) return {};
   return { region: parts[3] || undefined, account: parts[4] || undefined };
 }
 
@@ -446,8 +424,8 @@ function parseArn(arn: string): { region?: string; account?: string } {
  * undefined.
  */
 function clusterNameFromArn(arn: string): string | undefined {
-  const parts = arn.split(":");
-  const resource = parts.length >= 6 ? parts.slice(5).join(":") : "";
+  const parts = arn.split(':');
+  const resource = parts.length >= 6 ? parts.slice(5).join(':') : '';
   const match = /^cluster\/(.+)$/.exec(resource);
   return match ? match[1] : undefined;
 }
@@ -456,11 +434,7 @@ function clusterNameFromArn(arn: string): string | undefined {
  * True when the cluster carries `tagKey` (matching `tagValue` when supplied).
  * EKS cluster tags are a string map (not the {key,value}[] array ECS uses).
  */
-function clusterTagMatches(
-  cluster: Cluster,
-  tagKey: string,
-  tagValue?: string,
-): boolean {
+function clusterTagMatches(cluster: Cluster, tagKey: string, tagValue?: string): boolean {
   const tags = cluster.tags ?? {};
   if (!Object.prototype.hasOwnProperty.call(tags, tagKey)) return false;
   return tagValue !== undefined ? tags[tagKey] === tagValue : true;
@@ -475,10 +449,8 @@ function clusterTagMatches(
 function lbTagsMatchCluster(tags: Tag[], clusterName: string): boolean {
   const ownedKey = `kubernetes.io/cluster/${clusterName}`;
   for (const t of tags) {
-    if (t.Key === ownedKey && (t.Value === "owned" || t.Value === "shared"))
-      return true;
-    if (t.Key === "elbv2.k8s.aws/cluster" && t.Value === clusterName)
-      return true;
+    if (t.Key === ownedKey && (t.Value === 'owned' || t.Value === 'shared')) return true;
+    if (t.Key === 'elbv2.k8s.aws/cluster' && t.Value === clusterName) return true;
   }
   return false;
 }
@@ -502,23 +474,17 @@ function buildClusterLbEndpoint(dnsName: string): string {
  * surface. Returns '' when there is no cluster / no notable facts.
  */
 function summarizeCluster(cluster: Cluster | undefined): string {
-  if (!cluster) return "";
+  if (!cluster) return '';
   const seg: string[] = [];
   if (cluster.version) seg.push(`k8sVersion=${cluster.version}`);
   if (cluster.status) seg.push(`status=${String(cluster.status)}`);
-  if (cluster.platformVersion)
-    seg.push(`platformVersion=${cluster.platformVersion}`);
-  return seg.length > 0 ? `[eks ${seg.join(" ")}]` : "";
+  if (cluster.platformVersion) seg.push(`platformVersion=${cluster.platformVersion}`);
+  return seg.length > 0 ? `[eks ${seg.join(' ')}]` : '';
 }
 
 /** Trailing segment of an ARN resource, used as a display-name fallback. */
 function deriveName(arn: string): string {
-  return (
-    arn
-      .split(/[/:]/)
-      .filter((s) => s.length > 0)
-      .pop() ?? arn
-  );
+  return arn.split(/[/:]/).filter((s) => s.length > 0).pop() ?? arn;
 }
 
 function errMessage(err: unknown): string {

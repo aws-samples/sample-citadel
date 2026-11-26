@@ -25,20 +25,14 @@ function extractFunctionBody(src: string, fnName: string): string {
   let i = src.indexOf("(", m.index);
   for (; i < src.length; i++) {
     if (src[i] === "(") parenDepth++;
-    else if (src[i] === ")") {
-      parenDepth--;
-      if (parenDepth === 0) break;
-    }
+    else if (src[i] === ")") { parenDepth--; if (parenDepth === 0) break; }
   }
   const braceStart = src.indexOf("{", i);
   let depth = 0;
   let j = braceStart;
   for (; j < src.length; j++) {
     if (src[j] === "{") depth++;
-    else if (src[j] === "}") {
-      depth--;
-      if (depth === 0) break;
-    }
+    else if (src[j] === "}") { depth--; if (depth === 0) break; }
   }
   return src.slice(braceStart, j + 1);
 }
@@ -52,11 +46,7 @@ describe("changePassword — proves current password", () => {
 
   test("schema does not expose a changePassword mutation (self-service moved to frontend)", () => {
     const schemaPath = path.join(
-      __dirname,
-      "..",
-      "..",
-      "schema",
-      "schema.graphql",
+      __dirname, "..", "..", "schema", "schema.graphql",
     );
     const schema = fs.readFileSync(schemaPath, "utf-8");
     // The mutation line must be removed from the schema
@@ -65,11 +55,7 @@ describe("changePassword — proves current password", () => {
 
   test("ChangePasswordInput type is removed from the schema", () => {
     const schemaPath = path.join(
-      __dirname,
-      "..",
-      "..",
-      "schema",
-      "schema.graphql",
+      __dirname, "..", "..", "schema", "schema.graphql",
     );
     const schema = fs.readFileSync(schemaPath, "utf-8");
     expect(schema).not.toMatch(/input ChangePasswordInput/);
@@ -109,9 +95,7 @@ describe("getUser — uniform error for missing and other-org users", () => {
     // Must NOT contain the old bare "User not found" (without "or not accessible")
     // as the sole error text for org mismatch
     const orgMismatchSection = body.slice(body.indexOf("callerOrg"));
-    const throwMatches = [
-      ...orgMismatchSection.matchAll(/throw new Error\("([^"]+)"\)/g),
-    ];
+    const throwMatches = [...orgMismatchSection.matchAll(/throw new Error\("([^"]+)"\)/g)];
     for (const tm of throwMatches) {
       expect(tm[1]).toBe("User not found or not accessible");
     }

@@ -139,11 +139,7 @@ export async function runMigration(
 
   // 2. Scan datastores table for KNOWLEDGE_BASE rows
   let lastKey: Record<string, unknown> | undefined;
-  const kbRows: Array<{
-    dataStoreId: string;
-    config: Record<string, unknown>;
-    name: string;
-  }> = [];
+  const kbRows: Array<{ dataStoreId: string; config: Record<string, unknown>; name: string }> = [];
 
   do {
     const scanResult = await clients.dynamodb.send(
@@ -158,9 +154,7 @@ export async function runMigration(
 
     for (const item of scanResult.Items ?? []) {
       const config =
-        typeof item.config === "string"
-          ? JSON.parse(item.config)
-          : (item.config ?? {});
+        typeof item.config === "string" ? JSON.parse(item.config) : item.config ?? {};
       kbRows.push({
         dataStoreId: item.dataStoreId as string,
         config,
@@ -194,8 +188,7 @@ export async function runMigration(
         new GetAccessPolicyCommand({ name: policyName, type: "data" }),
       );
 
-      const policyVersion =
-        policyResponse.accessPolicyDetail?.policyVersion ?? "";
+      const policyVersion = policyResponse.accessPolicyDetail?.policyVersion ?? "";
       const policyStr =
         typeof policyResponse.accessPolicyDetail?.policy === "string"
           ? policyResponse.accessPolicyDetail.policy
@@ -222,9 +215,7 @@ export async function runMigration(
           entry.Principal.includes(vendedRoleArn),
         );
         if (alreadyHasVended) {
-          console.log(
-            `  [CLEAN] ${policyName}: no root, vended role present — skipping`,
-          );
+          console.log(`  [CLEAN] ${policyName}: no root, vended role present — skipping`);
           result.alreadyClean++;
           continue;
         }
@@ -236,9 +227,7 @@ export async function runMigration(
       if (opts.dryRun) {
         console.log(`  [DRY RUN] ${policyName}:`);
         console.log(`    Current principals: ${JSON.stringify(oldPrincipals)}`);
-        console.log(
-          `    Proposed principals: ${JSON.stringify(newPrincipals)}`,
-        );
+        console.log(`    Proposed principals: ${JSON.stringify(newPrincipals)}`);
         console.log(`    Action: Would call UpdateAccessPolicy`);
         result.updated++;
       } else {
@@ -250,9 +239,7 @@ export async function runMigration(
             policy: JSON.stringify(newPolicyDoc),
           }),
         );
-        console.log(
-          `  [APPLIED] ${policyName}: updated principals ${JSON.stringify(oldPrincipals)} → ${JSON.stringify(newPrincipals)}`,
-        );
+        console.log(`  [APPLIED] ${policyName}: updated principals ${JSON.stringify(oldPrincipals)} → ${JSON.stringify(newPrincipals)}`);
         result.updated++;
       }
     } catch (error) {

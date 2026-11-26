@@ -116,7 +116,8 @@ function matchesApiKey(
  */
 export function evaluateKeyAuthorization(
   matchedKey:
-    { status: string; expiresAt?: string; keyId?: string } | undefined,
+    | { status: string; expiresAt?: string; keyId?: string }
+    | undefined,
 ): "allow" | "deny" {
   if (!matchedKey) return "deny";
   if (matchedKey.status !== "ACTIVE") return "deny";

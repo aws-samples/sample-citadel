@@ -10,7 +10,7 @@
  * into skills + schemas; healthCheck issues a lightweight `ping`. global.fetch
  * is injected as a fake in tests.
  */
-import type { AgentSourceAdapter, AgentRef } from "./base";
+import type { AgentSourceAdapter, AgentRef } from './base';
 import type {
   AgentCandidate,
   AgentCapabilityDescriptor,
@@ -23,19 +23,15 @@ import type {
   InvokeResponse,
   JsonSchema,
   VendedCredentials,
-} from "./base";
-import {
-  NO_RESPONSE_TEXT,
-  authHeaderScheme,
-  vendImportCredentials,
-} from "./invoke-support";
-import type { AuthHeader } from "./invoke-support";
+} from './base';
+import { NO_RESPONSE_TEXT, authHeaderScheme, vendImportCredentials } from './invoke-support';
+import type { AuthHeader } from './invoke-support';
 
 /** MCP protocol version advertised during the describe() handshake. */
-const MCP_PROTOCOL_VERSION = "2024-11-05";
+const MCP_PROTOCOL_VERSION = '2024-11-05';
 
 /** The auth sub-block of an invocation descriptor. */
-type AuthBlock = AgentInvocationBlock["auth"];
+type AuthBlock = AgentInvocationBlock['auth'];
 
 export interface McpAdapterDeps {
   fetchFn?: typeof fetch;
@@ -50,13 +46,12 @@ export interface McpAdapterDeps {
 }
 
 export class McpAdapter implements AgentSourceAdapter {
-  public readonly protocol: AgentInvocationProtocol = "MCP";
+  public readonly protocol: AgentInvocationProtocol = 'MCP';
   private readonly fetchFn: typeof fetch;
   private readonly resolveSecret?: (secretRef: string) => Promise<string>;
 
   constructor(private readonly deps: McpAdapterDeps = {}) {
-    this.fetchFn =
-      deps.fetchFn ?? ((input, init) => globalThis.fetch(input, init));
+    this.fetchFn = deps.fetchFn ?? ((input, init) => globalThis.fetch(input, init));
     this.resolveSecret = deps.resolveSecret;
   }
 
@@ -66,9 +61,9 @@ export class McpAdapter implements AgentSourceAdapter {
   ): Promise<InvokeResponse> {
     const { target, auth } = descriptor.invocation;
     const rpc = {
-      jsonrpc: "2.0",
+      jsonrpc: '2.0',
       id: 1,
-      method: "tools/call",
+      method: 'tools/call',
       params: {
         name: descriptor.name,
         arguments: {
@@ -82,14 +77,12 @@ export class McpAdapter implements AgentSourceAdapter {
     // Secret-backed auth (API_KEY / OAUTH2 / COGNITO): resolve the secretRef and
     // attach the Authorization header on the JSON-RPC POST. Unchanged (no
     // header) when no resolver is wired, no secretRef is set, or mode is NONE.
-    const headers: Record<string, string> = {
-      "content-type": "application/json",
-    };
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
     const authHeader = await this.resolveAuthHeader(auth);
     if (authHeader) headers[authHeader.name.toLowerCase()] = authHeader.value;
 
     const response = await this.fetchFn(target, {
-      method: "POST",
+      method: 'POST',
       headers,
       body: JSON.stringify(rpc),
     });
@@ -106,17 +99,15 @@ export class McpAdapter implements AgentSourceAdapter {
    * resolved secret value is NEVER logged — only that auth was applied, and the
    * mode.
    */
-  private async resolveAuthHeader(
-    auth: AuthBlock,
-  ): Promise<AuthHeader | undefined> {
+  private async resolveAuthHeader(auth: AuthBlock): Promise<AuthHeader | undefined> {
     if (!this.resolveSecret || !auth.secretRef) return undefined;
     // SIGV4 / NONE need no secret-derived header — skip the GetSecretValue.
-    if (!authHeaderScheme(auth.mode, "", auth.header)) return undefined;
+    if (!authHeaderScheme(auth.mode, '', auth.header)) return undefined;
     const value = await this.resolveSecret(auth.secretRef);
     console.log(
       JSON.stringify({
-        level: "info",
-        msg: "mcp-adapter: applied invocation auth header",
+        level: 'info',
+        msg: 'mcp-adapter: applied invocation auth header',
         mode: auth.mode,
       }),
     );
@@ -132,13 +123,11 @@ export class McpAdapter implements AgentSourceAdapter {
     const s = readEndpointScope(scope);
     if (!s.endpoint) return [];
     const origin: AgentOrigin = {
-      substrate: "mcp",
+      substrate: 'mcp',
       discoveredAt: new Date().toISOString(),
-      ownership: "external",
+      ownership: 'external',
     };
-    return [
-      { origin, displayName: s.name ?? s.endpoint, reference: s.endpoint },
-    ];
+    return [{ origin, displayName: s.name ?? s.endpoint, reference: s.endpoint }];
   }
 
   /**
@@ -151,63 +140,52 @@ export class McpAdapter implements AgentSourceAdapter {
     const url = refToString(ref);
     const auth = resolveMcpAuth(this.deps.auth);
 
-    const initResult = await this.rpc(url, "initialize", 1, {
+    const initResult = await this.rpc(url, 'initialize', 1, {
       protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: {},
-      clientInfo: { name: "citadel-import", version: "1.0.0" },
+      clientInfo: { name: 'citadel-import', version: '1.0.0' },
     });
-    const toolsResult = await this.rpc(url, "tools/list", 2, {});
+    const toolsResult = await this.rpc(url, 'tools/list', 2, {});
 
-    const serverInfo = isObject(initResult.serverInfo)
-      ? initResult.serverInfo
-      : {};
-    const name =
-      typeof serverInfo.name === "string" ? serverInfo.name : hostnameOf(url);
-    const version =
-      typeof serverInfo.version === "string" ? serverInfo.version : "1.0.0";
+    const serverInfo = isObject(initResult.serverInfo) ? initResult.serverInfo : {};
+    const name = typeof serverInfo.name === 'string' ? serverInfo.name : hostnameOf(url);
+    const version = typeof serverInfo.version === 'string' ? serverInfo.version : '1.0.0';
     const description =
-      typeof initResult.instructions === "string"
-        ? initResult.instructions
-        : "";
+      typeof initResult.instructions === 'string' ? initResult.instructions : '';
 
     const tools = Array.isArray(toolsResult.tools) ? toolsResult.tools : [];
     const skills: string[] = [];
     const inputProps: Record<string, JsonSchema> = {};
     const outputProps: Record<string, JsonSchema> = {};
     for (const tool of tools) {
-      if (!isObject(tool) || typeof tool.name !== "string") continue;
+      if (!isObject(tool) || typeof tool.name !== 'string') continue;
       skills.push(tool.name);
       if (isObject(tool.inputSchema)) inputProps[tool.name] = tool.inputSchema;
-      if (isObject(tool.outputSchema))
-        outputProps[tool.name] = tool.outputSchema;
+      if (isObject(tool.outputSchema)) outputProps[tool.name] = tool.outputSchema;
     }
     const inputSchema: JsonSchema =
-      Object.keys(inputProps).length > 0
-        ? { type: "object", properties: inputProps }
-        : {};
+      Object.keys(inputProps).length > 0 ? { type: 'object', properties: inputProps } : {};
     const outputSchema: JsonSchema =
-      Object.keys(outputProps).length > 0
-        ? { type: "object", properties: outputProps }
-        : {};
+      Object.keys(outputProps).length > 0 ? { type: 'object', properties: outputProps } : {};
 
     const invocation: AgentInvocationBlock = {
-      protocol: "MCP",
+      protocol: 'MCP',
       target: url,
       auth,
-      mode: "sync",
+      mode: 'sync',
     };
     const origin: AgentOrigin = {
-      substrate: "mcp",
+      substrate: 'mcp',
       discoveredAt: new Date().toISOString(),
-      ownership: "external",
+      ownership: 'external',
     };
     const fieldConfidence: Record<string, Confidence> = {
-      name: "high",
-      description: "high",
-      version: "high",
-      skills: "high",
-      inputSchema: "high",
-      outputSchema: "high",
+      name: 'high',
+      description: 'high',
+      version: 'high',
+      skills: 'high',
+      inputSchema: 'high',
+      outputSchema: 'high',
     };
 
     return {
@@ -233,9 +211,9 @@ export class McpAdapter implements AgentSourceAdapter {
     const url = refToString(ref);
     try {
       const res = await this.fetchFn(url, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
       });
       if (res.ok) return { reachable: true };
       return { reachable: false, detail: `HTTP ${res.status}` };
@@ -244,9 +222,7 @@ export class McpAdapter implements AgentSourceAdapter {
     }
   }
 
-  async vendCredentials(
-    invocation: AgentInvocationBlock,
-  ): Promise<VendedCredentials> {
+  async vendCredentials(invocation: AgentInvocationBlock): Promise<VendedCredentials> {
     return vendImportCredentials(invocation);
   }
 
@@ -258,9 +234,9 @@ export class McpAdapter implements AgentSourceAdapter {
     params: unknown,
   ): Promise<Record<string, unknown>> {
     const res = await this.fetchFn(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
     });
     const parsed = tryParseJson(await res.text());
     if (isObject(parsed) && isObject(parsed.result)) return parsed.result;
@@ -272,20 +248,20 @@ export class McpAdapter implements AgentSourceAdapter {
 function parseJsonRpcResult(text: string): string {
   try {
     const parsed: unknown = JSON.parse(text);
-    if (parsed && typeof parsed === "object") {
+    if (parsed && typeof parsed === 'object') {
       const envelope = parsed as { result?: unknown; error?: unknown };
-      if (envelope.result && typeof envelope.result === "object") {
+      if (envelope.result && typeof envelope.result === 'object') {
         const result = envelope.result as { content?: unknown };
         if (Array.isArray(result.content)) {
           const texts = result.content
             .filter(
               (c): c is { text: string } =>
                 !!c &&
-                typeof c === "object" &&
-                typeof (c as Record<string, unknown>).text === "string",
+                typeof c === 'object' &&
+                typeof (c as Record<string, unknown>).text === 'string',
             )
             .map((c) => c.text);
-          if (texts.length > 0) return texts.join("");
+          if (texts.length > 0) return texts.join('');
         }
         return JSON.stringify(envelope.result);
       }
@@ -299,21 +275,16 @@ function parseJsonRpcResult(text: string): string {
 
 // --- pasted-endpoint helpers (scope / auth / parsing / errors) -------------
 
-function readEndpointScope(scope: unknown): {
-  endpoint?: string;
-  name?: string;
-} {
+function readEndpointScope(scope: unknown): { endpoint?: string; name?: string } {
   if (!isObject(scope)) return {};
   const endpoint =
-    typeof scope.endpoint === "string" && scope.endpoint.length > 0
-      ? scope.endpoint
-      : undefined;
-  const name = typeof scope.name === "string" ? scope.name : undefined;
+    typeof scope.endpoint === 'string' && scope.endpoint.length > 0 ? scope.endpoint : undefined;
+  const name = typeof scope.name === 'string' ? scope.name : undefined;
   return { endpoint, name };
 }
 
 function refToString(ref: AgentRef): string {
-  return typeof ref === "string" ? ref : ref.reference;
+  return typeof ref === 'string' ? ref : ref.reference;
 }
 
 /**
@@ -321,9 +292,8 @@ function refToString(ref: AgentRef): string {
  * server); a provided secretRef implies OAUTH2 unless an explicit mode is set.
  */
 function resolveMcpAuth(auth?: AuthBlock): AuthBlock {
-  if (auth?.secretRef)
-    return { mode: auth.mode ?? "OAUTH2", secretRef: auth.secretRef };
-  return { mode: auth?.mode ?? "NONE" };
+  if (auth?.secretRef) return { mode: auth.mode ?? 'OAUTH2', secretRef: auth.secretRef };
+  return { mode: auth?.mode ?? 'NONE' };
 }
 
 function hostnameOf(url: string): string {
@@ -343,7 +313,7 @@ function tryParseJson(text: string): unknown {
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
 function errMessage(err: unknown): string {
