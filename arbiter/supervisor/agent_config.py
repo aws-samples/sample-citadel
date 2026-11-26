@@ -57,10 +57,25 @@ def load_config_from_dynamodb(org_id: str | None = None):
     response = table.scan()
     items = response['Items']
     configs = []
+    skipped_missing_config = 0
     for item in items:
         # Only load agents with state 'active'
         if item.get('state') == 'active':
-            cfg = item['config']
+            cfg = item.get('config')
+            if cfg is None:
+                # Name-keyed projection/stub rows can be 'active' without a
+                # config attribute; they cannot be dispatched, so skip them
+                # rather than failing every supervisor task with a KeyError.
+                skipped_missing_config += 1
+                print(json.dumps({
+                    'level': 'WARN',
+                    'component': 'SupervisorAgentConfig',
+                    'action': 'skip_missing_config',
+                    'agentId': item.get('agentId', 'unknown'),
+                    'orgId': item.get('orgId', 'unknown'),
+                    '_canonicalRecordId': item.get('_canonicalRecordId', 'unknown'),
+                }))
+                continue
             # Live DynamoDB rows may store config as a JSON string; parse it.
             if isinstance(cfg, str):
                 try:
@@ -74,6 +89,14 @@ def load_config_from_dynamodb(org_id: str | None = None):
                     }))
                     continue
             configs.append(_with_approval_fields(cfg, item))
+
+    if skipped_missing_config:
+        print(json.dumps({
+            'level': 'INFO',
+            'component': 'SupervisorAgentConfig',
+            'action': 'skipped_unusable_configs',
+            'skippedMissingConfig': skipped_missing_config,
+        }))
 
     # Tenant isolation: filter catalogue to bound org + system records
     if org_id:
