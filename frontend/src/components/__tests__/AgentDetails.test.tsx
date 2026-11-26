@@ -262,7 +262,7 @@ describe('AgentDetails — confirm before saving code edits to an approved regis
     await waitFor(() => expect(screen.getByText('Test Agent')).toBeInTheDocument());
 
     fireEvent.click(screen.getByText('Code'));
-    fireEvent.click(await screen.findByText('Save Code'));
+    fireEvent.click(screen.getByText('Save Code'));
 
     expect(await screen.findByText('Saving will require re-approval')).toBeInTheDocument();
     expect(agentConfigService.updateAgentCode).not.toHaveBeenCalled();
