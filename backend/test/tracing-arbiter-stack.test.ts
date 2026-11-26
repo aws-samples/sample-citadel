@@ -31,7 +31,10 @@ const EXPECTED_PYTHON_FUNCTION_MARKERS = [
 
 describe("tracing foundation — citadel-arbiter-<env> stack", () => {
   if (!templateExists) {
-    guardCdkOutInCi(TEMPLATE_PATH, `npm run build && npx cdk synth ${STACK_NAME}`);
+    guardCdkOutInCi(
+      TEMPLATE_PATH,
+      `npm run build && npx cdk synth ${STACK_NAME}`,
+    );
     it.skip(`skipped: fresh template missing at ${TEMPLATE_PATH} (run 'npm run build && npx cdk synth ${STACK_NAME}' first)`, () => {});
     return;
   }

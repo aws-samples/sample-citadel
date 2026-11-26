@@ -30,7 +30,10 @@ describe("guardCdkOutInCi", () => {
   it("throws an error that names the missing description", () => {
     process.env.CI = "true";
     expect(() =>
-      guardCdkOutInCi("citadel-arbiter-dev, citadel-backend-dev", "cdk synth --all"),
+      guardCdkOutInCi(
+        "citadel-arbiter-dev, citadel-backend-dev",
+        "cdk synth --all",
+      ),
     ).toThrow(/citadel-arbiter-dev, citadel-backend-dev/);
   });
 

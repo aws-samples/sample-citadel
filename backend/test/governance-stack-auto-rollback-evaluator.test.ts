@@ -162,7 +162,11 @@ function createTemplate(): Template {
       "UserOrgMembership",
       "citadel-user-org-membership-test",
     ),
-    agentConfigTable: mockTable(backendStack, "AgentConfig", "citadel-agents-test"),
+    agentConfigTable: mockTable(
+      backendStack,
+      "AgentConfig",
+      "citadel-agents-test",
+    ),
     promotionPolicyConfigWriterRole,
     alarmTopic,
   });

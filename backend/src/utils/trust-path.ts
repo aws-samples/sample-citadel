@@ -27,11 +27,11 @@ import {
   GetRolePolicyCommand,
   type GetRoleCommandOutput,
   type GetRolePolicyCommandOutput,
-} from '@aws-sdk/client-iam';
-import { STSClient, AssumeRoleCommand } from '@aws-sdk/client-sts';
+} from "@aws-sdk/client-iam";
+import { STSClient, AssumeRoleCommand } from "@aws-sdk/client-sts";
 
 /** Inline policy name the scoped citadel roles carry (PolicyManager convention). */
-export const TRUST_PATH_INLINE_POLICY_NAME = 'DataStoreAccess';
+export const TRUST_PATH_INLINE_POLICY_NAME = "DataStoreAccess";
 
 export interface TrustPathPolicyStatementProjected {
   effect: string;
@@ -60,7 +60,9 @@ export interface TrustPathRoleProjected {
  * as a flat string array. Tolerates both string and array shapes —
  * IAM allows either form.
  */
-export function parseTrustPolicyPrincipals(trustPolicyJson: string | undefined): string[] {
+export function parseTrustPolicyPrincipals(
+  trustPolicyJson: string | undefined,
+): string[] {
   if (!trustPolicyJson) return [];
   try {
     const policy = JSON.parse(trustPolicyJson);
@@ -72,11 +74,11 @@ export function parseTrustPolicyPrincipals(trustPolicyJson: string | undefined):
     const principals: string[] = [];
     for (const stmt of statements) {
       const aws = stmt?.Principal?.AWS;
-      if (typeof aws === 'string') {
+      if (typeof aws === "string") {
         principals.push(aws);
       } else if (Array.isArray(aws)) {
         for (const entry of aws) {
-          if (typeof entry === 'string') principals.push(entry);
+          if (typeof entry === "string") principals.push(entry);
         }
       }
     }
@@ -108,23 +110,25 @@ export function projectInlinePolicyDocument(
     for (const stmt of statements) {
       const actionsRaw = stmt?.Action;
       const resourcesRaw = stmt?.Resource;
-      const actions = typeof actionsRaw === 'string'
-        ? [actionsRaw]
-        : Array.isArray(actionsRaw)
-          ? actionsRaw.filter((a): a is string => typeof a === 'string')
-          : [];
-      const resources = typeof resourcesRaw === 'string'
-        ? [resourcesRaw]
-        : Array.isArray(resourcesRaw)
-          ? resourcesRaw.filter((r): r is string => typeof r === 'string')
-          : [];
+      const actions =
+        typeof actionsRaw === "string"
+          ? [actionsRaw]
+          : Array.isArray(actionsRaw)
+            ? actionsRaw.filter((a): a is string => typeof a === "string")
+            : [];
+      const resources =
+        typeof resourcesRaw === "string"
+          ? [resourcesRaw]
+          : Array.isArray(resourcesRaw)
+            ? resourcesRaw.filter((r): r is string => typeof r === "string")
+            : [];
       const condition = stmt?.Condition;
       const conditionsJson =
         condition !== undefined && condition !== null
           ? JSON.stringify(condition)
           : null;
       projected.push({
-        effect: typeof stmt?.Effect === 'string' ? stmt.Effect : 'Allow',
+        effect: typeof stmt?.Effect === "string" ? stmt.Effect : "Allow",
         actions,
         resources,
         conditionsJson,
@@ -142,7 +146,7 @@ export function projectInlinePolicyDocument(
  * paths like `arn:aws:iam::<acct>:role/path/to/<name>`.
  */
 export function roleNameFromArn(arn: string): string {
-  const slashIdx = arn.lastIndexOf('/');
+  const slashIdx = arn.lastIndexOf("/");
   if (slashIdx < 0 || slashIdx === arn.length - 1) return arn;
   return arn.substring(slashIdx + 1);
 }
@@ -153,11 +157,13 @@ export function roleNameFromArn(arn: string): string {
  * input is not a string, is not an ARN, or carries an empty account segment
  * (IAM/S3 ARNs legitimately omit it). Pure — never issues an IAM call.
  */
-export function accountIdFromArn(arn: string | null | undefined): string | null {
-  if (typeof arn !== 'string') return null;
-  const segments = arn.split(':');
+export function accountIdFromArn(
+  arn: string | null | undefined,
+): string | null {
+  if (typeof arn !== "string") return null;
+  const segments = arn.split(":");
   // arn : partition : service : region : account : resource…
-  if (segments.length < 6 || segments[0] !== 'arn') return null;
+  if (segments.length < 6 || segments[0] !== "arn") return null;
   const account = segments[4];
   return account.length > 0 ? account : null;
 }
@@ -178,7 +184,10 @@ export function isCrossAccountRoleArn(
   roleArn: string | null | undefined,
   deploymentAccountId: string | null | undefined,
 ): boolean {
-  if (typeof deploymentAccountId !== 'string' || deploymentAccountId.length === 0) {
+  if (
+    typeof deploymentAccountId !== "string" ||
+    deploymentAccountId.length === 0
+  ) {
     return false;
   }
   const roleAccount = accountIdFromArn(roleArn);
@@ -199,20 +208,20 @@ export function extractCrossAccountRoleArn(
   if (!record) return null;
   // Top-level fast path.
   const direct = record.crossAccountRoleArn;
-  if (typeof direct === 'string' && direct.length > 0) return direct;
+  if (typeof direct === "string" && direct.length > 0) return direct;
   // `config` may be a nested object on datastore / integration rows.
   const cfg = record.config;
-  if (cfg && typeof cfg === 'object') {
+  if (cfg && typeof cfg === "object") {
     const fromCfg = (cfg as Record<string, unknown>).crossAccountRoleArn;
-    if (typeof fromCfg === 'string' && fromCfg.length > 0) return fromCfg;
+    if (typeof fromCfg === "string" && fromCfg.length > 0) return fromCfg;
   }
   // Agent custom metadata path — try to parse customDescriptorContent.
   const metaRaw = record.customDescriptorContent;
-  if (typeof metaRaw === 'string' && metaRaw.length > 0) {
+  if (typeof metaRaw === "string" && metaRaw.length > 0) {
     try {
       const parsed = JSON.parse(metaRaw);
       const fromMeta = parsed?.crossAccountRoleArn;
-      if (typeof fromMeta === 'string' && fromMeta.length > 0) return fromMeta;
+      if (typeof fromMeta === "string" && fromMeta.length > 0) return fromMeta;
     } catch {
       /* swallow — malformed metadata is not a fatal error */
     }
@@ -260,16 +269,19 @@ export async function fetchTrustPathHop(
     // IAM may URL-encode the trust policy — decode if it doesn't already
     // look like raw JSON.
     const trustPolicyJson =
-      typeof trustPolicyEncoded === 'string' && trustPolicyEncoded.length > 0
-        ? (trustPolicyEncoded.trim().startsWith('{')
-            ? trustPolicyEncoded
-            : decodeURIComponent(trustPolicyEncoded))
+      typeof trustPolicyEncoded === "string" && trustPolicyEncoded.length > 0
+        ? trustPolicyEncoded.trim().startsWith("{")
+          ? trustPolicyEncoded
+          : decodeURIComponent(trustPolicyEncoded)
         : undefined;
     trustPolicyPrincipals = parseTrustPolicyPrincipals(trustPolicyJson);
   } catch (err) {
     roleFound = false;
     notes.push(`Role ${arn} not found`);
-    console.warn('getTrustPath: GetRole failed', { arn, error: (err as Error)?.message });
+    console.warn("getTrustPath: GetRole failed", {
+      arn,
+      error: (err as Error)?.message,
+    });
   }
 
   let inlinePolicy: TrustPathPolicyStatementProjected[] = [];
@@ -285,17 +297,20 @@ export async function fetchTrustPathHop(
       );
       const documentEncoded = policyOut.PolicyDocument;
       const documentJson =
-        typeof documentEncoded === 'string' && documentEncoded.length > 0
-          ? (documentEncoded.trim().startsWith('{')
-              ? documentEncoded
-              : decodeURIComponent(documentEncoded))
+        typeof documentEncoded === "string" && documentEncoded.length > 0
+          ? documentEncoded.trim().startsWith("{")
+            ? documentEncoded
+            : decodeURIComponent(documentEncoded)
           : undefined;
       inlinePolicy = projectInlinePolicyDocument(documentJson);
       inlinePolicyNameOut = inlinePolicyName;
       inlinePolicyFound = true;
     } catch (err) {
       notes.push(`Inline policy not present on ${arn}`);
-      console.warn('getTrustPath: GetRolePolicy failed', { arn, error: (err as Error)?.message });
+      console.warn("getTrustPath: GetRolePolicy failed", {
+        arn,
+        error: (err as Error)?.message,
+      });
     }
   }
 
@@ -350,7 +365,7 @@ export interface ComputeTrustPathDeps {
 
 /** An action is over-broad when it is `*` or a service-wide `<svc>:*`. */
 function isWildcardAction(action: string): boolean {
-  return action === '*' || action.endsWith(':*');
+  return action === "*" || action.endsWith(":*");
 }
 
 /**
@@ -359,7 +374,10 @@ function isWildcardAction(action: string): boolean {
  * forces `clean:false` so the activation auto-attest never fires on a role we
  * could not positively verify as scoped.
  */
-function collectHopFindings(result: FetchTrustPathHopResult, findings: string[]): void {
+function collectHopFindings(
+  result: FetchTrustPathHopResult,
+  findings: string[],
+): void {
   const { hop, roleFound } = result;
   if (!roleFound) {
     // The expected role does not exist / is unreadable — treat as drift.
@@ -371,15 +389,15 @@ function collectHopFindings(result: FetchTrustPathHopResult, findings: string[])
     findings.push(`missing-trust: ${hop.arn} has no assumable AWS principals`);
   }
   for (const stmt of hop.inlinePolicy) {
-    if (stmt.effect === 'Deny') continue;
+    if (stmt.effect === "Deny") continue;
     if (stmt.actions.some(isWildcardAction)) {
       findings.push(`over-broad-action: ${hop.arn}`);
       break;
     }
   }
   for (const stmt of hop.inlinePolicy) {
-    if (stmt.effect === 'Deny') continue;
-    if (stmt.resources.includes('*')) {
+    if (stmt.effect === "Deny") continue;
+    if (stmt.resources.includes("*")) {
       findings.push(`over-broad-resource: ${hop.arn}`);
       break;
     }
@@ -403,8 +421,8 @@ export async function computeTrustPath(
   const notes: string[] = [];
   const findings: string[] = [];
 
-  if (typeof roleArn !== 'string' || roleArn.trim().length === 0) {
-    findings.push('invalid-role-arn: roleArn must be a non-empty string');
+  if (typeof roleArn !== "string" || roleArn.trim().length === 0) {
+    findings.push("invalid-role-arn: roleArn must be a non-empty string");
     return { hops, notes, findings, clean: false };
   }
 
@@ -413,18 +431,21 @@ export async function computeTrustPath(
   const primary = await fetchTrustPathHop(
     iamClient,
     roleArn,
-    deps.scope ?? 'role',
+    deps.scope ?? "role",
     deps.inlinePolicyName,
   );
   hops.push(primary.hop);
   notes.push(...primary.notes);
   collectHopFindings(primary, findings);
 
-  if (typeof deps.crossAccountRoleArn === 'string' && deps.crossAccountRoleArn.length > 0) {
+  if (
+    typeof deps.crossAccountRoleArn === "string" &&
+    deps.crossAccountRoleArn.length > 0
+  ) {
     const cross = await fetchTrustPathHop(
       iamClient,
       deps.crossAccountRoleArn,
-      'cross-account',
+      "cross-account",
       deps.inlinePolicyName,
     );
     hops.push(cross.hop);
@@ -434,7 +455,6 @@ export async function computeTrustPath(
 
   return { hops, notes, findings, clean: findings.length === 0 };
 }
-
 
 // ---------------------------------------------------------------------------
 // assumeRoleCredentials — cross-account RAW temporary-credentials primitive
@@ -492,7 +512,7 @@ export async function assumeRoleCredentials(
   deps: AssumeRoleCredentialsDeps = {},
 ): Promise<AssumedRoleCredentials> {
   const stsClient = deps.stsClient ?? new STSClient({});
-  const prefix = deps.sessionNamePrefix ?? 'import-assume';
+  const prefix = deps.sessionNamePrefix ?? "import-assume";
 
   // Short, CloudTrail-friendly session suffix (RoleSessionName ≤ 64 chars,
   // [\w+=,.@-]). Random so concurrent assumes don't collide.
@@ -514,7 +534,7 @@ export async function assumeRoleCredentials(
     !creds.SessionToken
   ) {
     throw new Error(
-      'assumeRoleCredentials: STS AssumeRole returned no usable credentials',
+      "assumeRoleCredentials: STS AssumeRole returned no usable credentials",
     );
   }
 
@@ -567,7 +587,7 @@ export async function assumeAnalysisRoleClient(
   // session-name prefix for CloudTrail attribution.
   const creds = await assumeRoleCredentials(analysisRoleArn, externalId, {
     stsClient: deps.stsClient,
-    sessionNamePrefix: 'import-trustpath',
+    sessionNamePrefix: "import-trustpath",
   });
 
   return new IAMClient({

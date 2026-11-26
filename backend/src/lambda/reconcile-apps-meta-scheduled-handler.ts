@@ -1,4 +1,4 @@
-import { runReconciliation } from '../../scripts/reconcile-apps-meta';
+import { runReconciliation } from "../../scripts/reconcile-apps-meta";
 
 /**
  * EventBridge-scheduled reconciler. Runs in --apply mode every 6h to mirror
@@ -16,12 +16,12 @@ export const handler = async (): Promise<{
   try {
     const summary = await runReconciliation({ apply: true });
     console.log(
-      '[reconcile-apps-meta-scheduled] summary:',
+      "[reconcile-apps-meta-scheduled] summary:",
       JSON.stringify(summary),
     );
     return { statusCode: 200, body: JSON.stringify(summary) };
   } catch (err) {
-    console.error('[reconcile-apps-meta-scheduled] failed:', err);
+    console.error("[reconcile-apps-meta-scheduled] failed:", err);
     throw err; // let Lambda retry policy handle it
   }
 };

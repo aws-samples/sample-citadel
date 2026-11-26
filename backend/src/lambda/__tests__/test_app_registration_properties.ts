@@ -9,27 +9,29 @@
  * The first call issues a PutCommand that succeeds; subsequent calls trigger
  * ConditionalCheckFailedException which is silently caught.
  */
-import * as fc from 'fast-check';
-import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
-import { mockClient } from 'aws-sdk-client-mock';
+import * as fc from "fast-check";
+import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { mockClient } from "aws-sdk-client-mock";
 
 const ddbMock = mockClient(DynamoDBDocumentClient);
 
-import { handler } from '../app-component-registration-handler';
+import { handler } from "../app-component-registration-handler";
 
 // ── Generators ──────────────────────────────────────────────
 
-const appIdArb = fc.string({ minLength: 1, maxLength: 36 })
-  .filter(s => /^[a-zA-Z0-9_-]+$/.test(s));
+const appIdArb = fc
+  .string({ minLength: 1, maxLength: 36 })
+  .filter((s) => /^[a-zA-Z0-9_-]+$/.test(s));
 
-const agentIdArb = fc.string({ minLength: 1, maxLength: 36 })
-  .filter(s => /^[a-zA-Z0-9_-]+$/.test(s));
+const agentIdArb = fc
+  .string({ minLength: 1, maxLength: 36 })
+  .filter((s) => /^[a-zA-Z0-9_-]+$/.test(s));
 
 /** N repetitions: 1..5 */
 const repeatCountArb = fc.integer({ min: 1, max: 5 });
 
 /** Component type: agent or tool */
-const componentTypeArb = fc.constantFrom('agent' as const, 'tool' as const);
+const componentTypeArb = fc.constantFrom("agent" as const, "tool" as const);
 
 // ── Helpers ─────────────────────────────────────────────────
 
@@ -38,28 +40,29 @@ function makeEventBridgeEvent(
   detail: Record<string, unknown>,
 ): Parameters<typeof handler>[0] {
   return {
-    version: '0',
-    id: 'test-event-id',
-    source: 'citadel.fabricator',
-    account: '123456789012',
-    time: '2024-01-01T00:00:00Z',
-    region: 'us-east-1',
+    version: "0",
+    id: "test-event-id",
+    source: "citadel.fabricator",
+    account: "123456789012",
+    time: "2024-01-01T00:00:00Z",
+    region: "us-east-1",
     "detail-type": detailType,
     detail,
   } as unknown as Parameters<typeof handler>[0];
 }
 
 function buildEvent(
-  componentType: 'agent' | 'tool',
+  componentType: "agent" | "tool",
   componentId: string,
   appId: string,
 ) {
-  const detailType = componentType === 'agent' ? 'agent.fabricated' : 'tool.fabricated';
-  const idField = componentType === 'agent' ? 'agentId' : 'toolId';
+  const detailType =
+    componentType === "agent" ? "agent.fabricated" : "tool.fabricated";
+  const idField = componentType === "agent" ? "agentId" : "toolId";
   return makeEventBridgeEvent(detailType, {
     [idField]: componentId,
     appId,
-    orchestrationId: 'orch-test',
+    orchestrationId: "orch-test",
   });
 }
 
@@ -74,17 +77,17 @@ function setupIdempotentMock() {
     if (callCount === 1) {
       return {}; // first call succeeds
     }
-    const err = new Error('The conditional request failed');
-    err.name = 'ConditionalCheckFailedException';
+    const err = new Error("The conditional request failed");
+    err.name = "ConditionalCheckFailedException";
     throw err;
   });
 }
 
 // ── Property 12: Fabrication registration idempotence ───────
 
-describe('Property 12: Fabrication registration idempotence', () => {
+describe("Property 12: Fabrication registration idempotence", () => {
   beforeAll(() => {
-    process.env.APPS_TABLE = 'citadel-apps-test';
+    process.env.APPS_TABLE = "citadel-apps-test";
   });
 
   beforeEach(() => {
@@ -102,7 +105,7 @@ describe('Property 12: Fabrication registration idempotence', () => {
    * should result in exactly one successful PutCommand (the first call).
    * Subsequent calls silently catch ConditionalCheckFailedException.
    */
-  it('processing same event N times produces exactly one successful put', () => {
+  it("processing same event N times produces exactly one successful put", () => {
     return fc.assert(
       fc.asyncProperty(
         componentTypeArb,
@@ -127,16 +130,18 @@ describe('Property 12: Fabrication registration idempotence', () => {
           // The first call is the one that actually creates the item.
           // All calls target the same item with the same idempotency guard.
           const firstInput = putCalls[0].args[0].input;
-          const prefix = componentType === 'agent' ? 'AGENT' : 'TOOL';
+          const prefix = componentType === "agent" ? "AGENT" : "TOOL";
           expect(firstInput.Item).toEqual(
             expect.objectContaining({
               appId: `${appId}#${prefix}#${componentId}`,
               groupId: `APP#${appId}`,
               sortId: `${prefix}#${componentId}`,
-              status: 'DESIGN',
+              status: "DESIGN",
             }),
           );
-          expect(firstInput.ConditionExpression).toBe('attribute_not_exists(groupId)');
+          expect(firstInput.ConditionExpression).toBe(
+            "attribute_not_exists(groupId)",
+          );
         },
       ),
       { numRuns: 50 },
@@ -149,7 +154,7 @@ describe('Property 12: Fabrication registration idempotence', () => {
    * For any fabrication event processed exactly once, the handler issues
    * exactly one PutCommand that succeeds (no ConditionalCheckFailedException).
    */
-  it('single invocation creates exactly one component item', () => {
+  it("single invocation creates exactly one component item", () => {
     return fc.assert(
       fc.asyncProperty(
         componentTypeArb,
@@ -166,8 +171,8 @@ describe('Property 12: Fabrication registration idempotence', () => {
           expect(putCalls).toHaveLength(1);
 
           const input = putCalls[0].args[0].input;
-          const prefix = componentType === 'agent' ? 'AGENT' : 'TOOL';
-          const idField = componentType === 'agent' ? 'agentId' : 'toolId';
+          const prefix = componentType === "agent" ? "AGENT" : "TOOL";
+          const idField = componentType === "agent" ? "agentId" : "toolId";
 
           expect(input.Item).toEqual(
             expect.objectContaining({
@@ -175,11 +180,13 @@ describe('Property 12: Fabrication registration idempotence', () => {
               groupId: `APP#${appId}`,
               sortId: `${prefix}#${componentId}`,
               [idField]: componentId,
-              status: 'DESIGN',
+              status: "DESIGN",
             }),
           );
           expect(input.Item!.addedAt).toBeDefined();
-          expect(input.ConditionExpression).toBe('attribute_not_exists(groupId)');
+          expect(input.ConditionExpression).toBe(
+            "attribute_not_exists(groupId)",
+          );
         },
       ),
       { numRuns: 50 },
@@ -193,7 +200,7 @@ describe('Property 12: Fabrication registration idempotence', () => {
    * ConditionalCheckFailedException on subsequent calls is silently caught,
    * ensuring idempotent behavior.
    */
-  it('duplicate invocations do not throw errors', () => {
+  it("duplicate invocations do not throw errors", () => {
     return fc.assert(
       fc.asyncProperty(
         componentTypeArb,
@@ -212,7 +219,7 @@ describe('Property 12: Fabrication registration idempotence', () => {
           );
 
           for (const result of results) {
-            expect(result.status).toBe('fulfilled');
+            expect(result.status).toBe("fulfilled");
           }
         },
       ),

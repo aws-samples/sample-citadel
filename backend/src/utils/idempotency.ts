@@ -9,8 +9,8 @@
  *   await guard.withIdempotency(eventId, async () => { ... });
  */
 
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
 
 const ddbClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 
@@ -29,23 +29,31 @@ export class IdempotencyGuard {
    * Execute `fn` only if `eventId` has not been processed before.
    * Returns true if the handler executed, false if it was a duplicate.
    */
-  async withIdempotency<T>(eventId: string, fn: () => Promise<T>): Promise<{ executed: boolean; result?: T }> {
+  async withIdempotency<T>(
+    eventId: string,
+    fn: () => Promise<T>,
+  ): Promise<{ executed: boolean; result?: T }> {
     const now = Math.floor(Date.now() / 1000);
     const ttl = now + this.ttlSeconds;
 
     try {
       // Conditional put — fails if the eventId already exists and hasn't expired
-      await ddbClient.send(new PutCommand({
-        TableName: this.tableName,
-        Item: {
-          eventId,
-          processedAt: new Date().toISOString(),
-          ttl,
-        },
-        ConditionExpression: 'attribute_not_exists(eventId)',
-      }));
+      await ddbClient.send(
+        new PutCommand({
+          TableName: this.tableName,
+          Item: {
+            eventId,
+            processedAt: new Date().toISOString(),
+            ttl,
+          },
+          ConditionExpression: "attribute_not_exists(eventId)",
+        }),
+      );
     } catch (error: unknown) {
-      if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
+      if (
+        error instanceof Error &&
+        error.name === "ConditionalCheckFailedException"
+      ) {
         console.log(`Idempotency: skipping duplicate event ${eventId}`);
         return { executed: false };
       }

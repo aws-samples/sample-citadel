@@ -30,7 +30,9 @@ const mockUpdateResource = jest.fn();
 const mockListResources = jest.fn();
 const mockGetResource = jest.fn();
 const mockUpdateResourceStatus = jest.fn();
-const mockSerializeCustomMetadata = jest.fn((meta: unknown) => JSON.stringify(meta));
+const mockSerializeCustomMetadata = jest.fn((meta: unknown) =>
+  JSON.stringify(meta),
+);
 const mockDeserializeCustomMetadata = jest.fn(
   (json: string | null | undefined, defaults: Record<string, unknown>) =>
     json ? { ...defaults, ...JSON.parse(json) } : defaults,
@@ -38,9 +40,9 @@ const mockDeserializeCustomMetadata = jest.fn(
 const mockMapToAgentConfig = jest.fn((record: { recordId: string }) => ({
   agentId: record.recordId,
 }));
-jest.mock('../../services/registry-service', () => ({
+jest.mock("../../services/registry-service", () => ({
   RegistryService: jest.fn().mockImplementation(() => ({
-    getRegistryId: () => 'test-registry',
+    getRegistryId: () => "test-registry",
     createResource: mockCreateResource,
     updateResource: mockUpdateResource,
     listResources: mockListResources,
@@ -56,7 +58,7 @@ jest.mock('../../services/registry-service', () => ({
 const mockExtractOrgFromEvent = jest.fn();
 const mockIsAdminFromEvent = jest.fn(() => false);
 const mockHasRoleFromEvent = jest.fn(() => false);
-jest.mock('../../utils/auth-event', () => ({
+jest.mock("../../utils/auth-event", () => ({
   extractOrgFromEvent: (...args: unknown[]) => mockExtractOrgFromEvent(...args),
   isAdminFromEvent: (...args: unknown[]) => mockIsAdminFromEvent(...args),
   hasRoleFromEvent: (...args: unknown[]) => mockHasRoleFromEvent(...args),
@@ -65,8 +67,8 @@ jest.mock('../../utils/auth-event', () => ({
 // ── Mock agent-discovery: stub resolveSourceRef, KEEP the real typed errors
 //    so the resolver's `instanceof` checks and our fixtures share one class. ─
 const mockResolveSourceRef = jest.fn();
-jest.mock('../../services/agent-discovery', () => {
-  const actual = jest.requireActual('../../services/agent-discovery');
+jest.mock("../../services/agent-discovery", () => {
+  const actual = jest.requireActual("../../services/agent-discovery");
   return {
     __esModule: true,
     ...actual,
@@ -76,35 +78,48 @@ jest.mock('../../services/agent-discovery', () => {
 
 // ── Mock events publish helper (keep real EventTypes; never hit EventBridge)
 const mockPublishEvent = jest.fn();
-jest.mock('../../utils/events', () => {
-  const actual = jest.requireActual('../../utils/events');
-  return { __esModule: true, ...actual, publishEvent: (...a: unknown[]) => mockPublishEvent(...a) };
+jest.mock("../../utils/events", () => {
+  const actual = jest.requireActual("../../utils/events");
+  return {
+    __esModule: true,
+    ...actual,
+    publishEvent: (...a: unknown[]) => mockPublishEvent(...a),
+  };
 });
 
 // ── Mock fabricator-authority lifecycle, governance flag, ADR resolver ──
-jest.mock('../registry-agent-authority-lifecycle', () => ({
+jest.mock("../registry-agent-authority-lifecycle", () => ({
   __esModule: true,
   grantFabricatorAuthority: jest.fn(),
 }));
-jest.mock('../../utils/governance-flag', () => ({
+jest.mock("../../utils/governance-flag", () => ({
   __esModule: true,
-  getGovernanceEnforce: jest.fn().mockResolvedValue('permissive'),
+  getGovernanceEnforce: jest.fn().mockResolvedValue("permissive"),
 }));
-jest.mock('../adr-resolver', () => ({ __esModule: true, createADR: jest.fn() }));
+jest.mock("../adr-resolver", () => ({
+  __esModule: true,
+  createADR: jest.fn(),
+}));
 
 // ── Mock credential-manager (no AWS at load) ─────────────────────────────
 const mockGetAgentInvocationSecret = jest.fn();
 const mockStoreAgentInvocationSecret = jest.fn();
-jest.mock('../../utils/credential-manager', () => ({
+jest.mock("../../utils/credential-manager", () => ({
   __esModule: true,
-  getAgentInvocationSecret: (...a: unknown[]) => mockGetAgentInvocationSecret(...a),
-  storeAgentInvocationSecret: (...a: unknown[]) => mockStoreAgentInvocationSecret(...a),
+  getAgentInvocationSecret: (...a: unknown[]) =>
+    mockGetAgentInvocationSecret(...a),
+  storeAgentInvocationSecret: (...a: unknown[]) =>
+    mockStoreAgentInvocationSecret(...a),
 }));
 
 // ── Mock the untrusted-output sanitizer (passthrough) ───────────────────
-jest.mock('../../utils/sanitize-agent-output', () => ({
+jest.mock("../../utils/sanitize-agent-output", () => ({
   __esModule: true,
-  sanitizeUntrustedAgentOutput: (text: string) => ({ sanitized: text, modified: false, matches: [] }),
+  sanitizeUntrustedAgentOutput: (text: string) => ({
+    sanitized: text,
+    modified: false,
+    matches: [],
+  }),
 }));
 
 // ── Mock the adapter registry factory: capture the { credentialProvider }
@@ -112,17 +127,18 @@ jest.mock('../../utils/sanitize-agent-output', () => ({
 const mockDescribe = jest.fn();
 const mockResolve = jest.fn(() => ({ describe: mockDescribe }));
 const mockBuildRegistry = jest.fn(() => ({ resolve: mockResolve }));
-jest.mock('../../adapters/agent-source/registry-factory', () => ({
+jest.mock("../../adapters/agent-source/registry-factory", () => ({
   __esModule: true,
-  buildDefaultAgentSourceRegistry: (...args: unknown[]) => mockBuildRegistry(...args),
+  buildDefaultAgentSourceRegistry: (...args: unknown[]) =>
+    mockBuildRegistry(...args),
 }));
 
 // ── trust-path: stub ONLY assumeRoleCredentials (keep the real pure helpers).
 //    The REAL toInvokeCredentials (from invoke-support) is intentionally NOT
 //    mocked, so the credential mapping is genuinely exercised. ───────────────
 const mockAssumeRoleCredentials = jest.fn();
-jest.mock('../../utils/trust-path', () => {
-  const actual = jest.requireActual('../../utils/trust-path');
+jest.mock("../../utils/trust-path", () => {
+  const actual = jest.requireActual("../../utils/trust-path");
   return {
     __esModule: true,
     ...actual,
@@ -130,26 +146,37 @@ jest.mock('../../utils/trust-path', () => {
   };
 });
 
-import { handler, _resetRegistryService } from '../agent-import-resolver';
+import { handler, _resetRegistryService } from "../agent-import-resolver";
 
 // ── Fixtures ────────────────────────────────────────────────────────────
-const ORG = 'test-org-a';
-const TARGET_ACCOUNT = '999988887777';
+const ORG = "test-org-a";
+const TARGET_ACCOUNT = "999988887777";
 const DISCOVERY_ROLE = `arn:aws:iam::${TARGET_ACCOUNT}:role/CitadelDiscoveryReadOnly`;
-const EXTERNAL_ID = 'ext-describe-1';
+const EXTERNAL_ID = "ext-describe-1";
 const REF = `arn:aws:lambda:us-east-1:${TARGET_ACCOUNT}:function:imported`;
-const ASSUMED_KEY = 'ASIA-DESCRIBE-ASSUMED';
-const ASSUMED_SECRET = 'assumed-describe-secret-NEVER-LOG-0123456789';
-const ASSUMED_TOKEN = 'assumed-describe-token-NEVER-LOG';
+const ASSUMED_KEY = "ASIA-DESCRIBE-ASSUMED";
+const ASSUMED_SECRET = "assumed-describe-secret-NEVER-LOG-0123456789";
+const ASSUMED_TOKEN = "assumed-describe-token-NEVER-LOG";
 
-const adminIdentity = { claims: { 'custom:role': 'admin' }, sub: 'admin-1' };
-const developerIdentity = { claims: { 'custom:organization': ORG }, sub: 'dev-1' };
+const adminIdentity = { claims: { "custom:role": "admin" }, sub: "admin-1" };
+const developerIdentity = {
+  claims: { "custom:organization": ORG },
+  sub: "dev-1",
+};
 
 function describeEvent(
   args: Record<string, unknown>,
   identity: unknown = adminIdentity,
-): { info: { fieldName: string }; arguments: Record<string, unknown>; identity: unknown } {
-  return { info: { fieldName: 'describeAgentCandidate' }, arguments: args, identity };
+): {
+  info: { fieldName: string };
+  arguments: Record<string, unknown>;
+  identity: unknown;
+} {
+  return {
+    info: { fieldName: "describeAgentCandidate" },
+    arguments: args,
+    identity,
+  };
 }
 
 /** Raw temp credentials shape returned by assumeRoleCredentials (a success). */
@@ -158,15 +185,15 @@ function assumedOk() {
     accessKeyId: ASSUMED_KEY,
     secretAccessKey: ASSUMED_SECRET,
     sessionToken: ASSUMED_TOKEN,
-    expiration: new Date('2030-01-01T00:00:00.000Z'),
+    expiration: new Date("2030-01-01T00:00:00.000Z"),
   };
 }
 
 function descriptorFixture(): Record<string, unknown> {
   return {
-    name: 'imported',
-    description: 'a discovered agent',
-    version: '1.0.0',
+    name: "imported",
+    description: "a discovered agent",
+    version: "1.0.0",
     skills: [],
     categories: [],
     inputSchema: {},
@@ -175,26 +202,30 @@ function descriptorFixture(): Record<string, unknown> {
 }
 
 /** The deps of the buildDefaultAgentSourceRegistry call carrying a credentialProvider. */
-function crossAccountBuildDeps(): { credentialProvider?: Record<string, unknown> } | undefined {
+function crossAccountBuildDeps():
+  { credentialProvider?: Record<string, unknown> } | undefined {
   const call = mockBuildRegistry.mock.calls.find(
-    (c) => (c[0] as { credentialProvider?: unknown } | undefined)?.credentialProvider,
+    (c) =>
+      (c[0] as { credentialProvider?: unknown } | undefined)
+        ?.credentialProvider,
   );
-  return call?.[0] as { credentialProvider?: Record<string, unknown> } | undefined;
+  return call?.[0] as
+    { credentialProvider?: Record<string, unknown> } | undefined;
 }
 
 beforeEach(() => {
-  process.env.REGISTRY_ENABLED = 'true';
-  process.env.REGISTRY_ID = 'test-registry';
-  process.env.AWS_REGION = 'us-east-1';
-  process.env.ACCOUNT_ID = '111122223333';
+  process.env.REGISTRY_ENABLED = "true";
+  process.env.REGISTRY_ID = "test-registry";
+  process.env.AWS_REGION = "us-east-1";
+  process.env.ACCOUNT_ID = "111122223333";
   _resetRegistryService();
   jest.clearAllMocks();
   mockIsAdminFromEvent.mockReturnValue(false);
   mockHasRoleFromEvent.mockReturnValue(false);
   mockExtractOrgFromEvent.mockResolvedValue(ORG);
   mockResolveSourceRef.mockReturnValue({
-    protocol: 'LAMBDA_INVOKE',
-    substrate: 'lambda',
+    protocol: "LAMBDA_INVOKE",
+    substrate: "lambda",
     target: REF,
   });
   mockResolve.mockReturnValue({ describe: mockDescribe });
@@ -210,16 +241,20 @@ afterAll(() => {
 // ===========================================================================
 // describeAgentCandidate — cross-account describe
 // ===========================================================================
-describe('describeAgentCandidate — cross-account describe', () => {
+describe("describeAgentCandidate — cross-account describe", () => {
   beforeEach(() => mockIsAdminFromEvent.mockReturnValue(true));
 
-  it('with discoveryRoleArn+discoveryExternalId: assumes the role, builds the registry with the assumed credentialProvider, describes, and returns the descriptor', async () => {
+  it("with discoveryRoleArn+discoveryExternalId: assumes the role, builds the registry with the assumed credentialProvider, describes, and returns the descriptor", async () => {
     mockAssumeRoleCredentials.mockResolvedValue(assumedOk());
     const descriptor = descriptorFixture();
     mockDescribe.mockResolvedValue(descriptor);
 
     const res = (await handler(
-      describeEvent({ ref: REF, discoveryRoleArn: DISCOVERY_ROLE, discoveryExternalId: EXTERNAL_ID }),
+      describeEvent({
+        ref: REF,
+        discoveryRoleArn: DISCOVERY_ROLE,
+        discoveryExternalId: EXTERNAL_ID,
+      }),
     )) as string;
 
     // assumeRoleCredentials was called with the role + externalId.
@@ -236,24 +271,28 @@ describe('describeAgentCandidate — cross-account describe', () => {
     });
 
     // describe ran on that registry's adapter and the descriptor is returned.
-    expect(mockResolve).toHaveBeenCalledWith('LAMBDA_INVOKE');
+    expect(mockResolve).toHaveBeenCalledWith("LAMBDA_INVOKE");
     expect(mockDescribe).toHaveBeenCalledTimes(1);
-    expect(typeof res).toBe('string');
+    expect(typeof res).toBe("string");
     expect(JSON.parse(res)).toEqual(descriptor);
   });
 
-  it('passes a missing discoveryExternalId through to assumeRoleCredentials as undefined', async () => {
+  it("passes a missing discoveryExternalId through to assumeRoleCredentials as undefined", async () => {
     mockAssumeRoleCredentials.mockResolvedValue(assumedOk());
 
-    await handler(describeEvent({ ref: REF, discoveryRoleArn: DISCOVERY_ROLE }));
+    await handler(
+      describeEvent({ ref: REF, discoveryRoleArn: DISCOVERY_ROLE }),
+    );
 
     expect(mockAssumeRoleCredentials).toHaveBeenCalledTimes(1);
     expect(mockAssumeRoleCredentials.mock.calls[0][0]).toBe(DISCOVERY_ROLE);
     expect(mockAssumeRoleCredentials.mock.calls[0][1]).toBeUndefined();
-    expect(crossAccountBuildDeps()?.credentialProvider).toMatchObject({ accessKeyId: ASSUMED_KEY });
+    expect(crossAccountBuildDeps()?.credentialProvider).toMatchObject({
+      accessKeyId: ASSUMED_KEY,
+    });
   });
 
-  it('WITHOUT discoveryRoleArn: does NOT assume; default registry (no credentialProvider) — unchanged', async () => {
+  it("WITHOUT discoveryRoleArn: does NOT assume; default registry (no credentialProvider) — unchanged", async () => {
     const descriptor = descriptorFixture();
     mockDescribe.mockResolvedValue(descriptor);
 
@@ -267,14 +306,18 @@ describe('describeAgentCandidate — cross-account describe', () => {
     expect(JSON.parse(res)).toEqual(descriptor);
   });
 
-  it('a cross-account ASSUME FAILURE is surfaced as a thrown error (describe is error-shaped, NOT ok/false)', async () => {
+  it("a cross-account ASSUME FAILURE is surfaced as a thrown error (describe is error-shaped, NOT ok/false)", async () => {
     mockAssumeRoleCredentials.mockRejectedValue(
-      new Error('AccessDenied: not authorized to perform sts:AssumeRole'),
+      new Error("AccessDenied: not authorized to perform sts:AssumeRole"),
     );
 
     await expect(
       handler(
-        describeEvent({ ref: REF, discoveryRoleArn: DISCOVERY_ROLE, discoveryExternalId: EXTERNAL_ID }),
+        describeEvent({
+          ref: REF,
+          discoveryRoleArn: DISCOVERY_ROLE,
+          discoveryExternalId: EXTERNAL_ID,
+        }),
       ),
     ).rejects.toThrow(/assume|accessdenied/i);
 
@@ -283,20 +326,34 @@ describe('describeAgentCandidate — cross-account describe', () => {
     expect(mockDescribe).not.toHaveBeenCalled();
   });
 
-  it('NEVER logs the assumed credentials (success path)', async () => {
-    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => undefined);
-    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+  it("NEVER logs the assumed credentials (success path)", async () => {
+    const logSpy = jest
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+    const warnSpy = jest
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    const errorSpy = jest
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
     mockAssumeRoleCredentials.mockResolvedValue(assumedOk());
 
     await handler(
-      describeEvent({ ref: REF, discoveryRoleArn: DISCOVERY_ROLE, discoveryExternalId: EXTERNAL_ID }),
+      describeEvent({
+        ref: REF,
+        discoveryRoleArn: DISCOVERY_ROLE,
+        discoveryExternalId: EXTERNAL_ID,
+      }),
     );
 
-    const all = [...logSpy.mock.calls, ...warnSpy.mock.calls, ...errorSpy.mock.calls]
+    const all = [
+      ...logSpy.mock.calls,
+      ...warnSpy.mock.calls,
+      ...errorSpy.mock.calls,
+    ]
       .flat()
-      .map((a) => (typeof a === 'string' ? a : JSON.stringify(a)))
-      .join('\n');
+      .map((a) => (typeof a === "string" ? a : JSON.stringify(a)))
+      .join("\n");
     expect(all).not.toContain(ASSUMED_SECRET);
     expect(all).not.toContain(ASSUMED_TOKEN);
     expect(all).not.toContain(ASSUMED_KEY);
@@ -305,14 +362,18 @@ describe('describeAgentCandidate — cross-account describe', () => {
     errorSpy.mockRestore();
   });
 
-  it('developer/non-privileged caller is still rejected (gate unchanged) and never assumes', async () => {
+  it("developer/non-privileged caller is still rejected (gate unchanged) and never assumes", async () => {
     mockIsAdminFromEvent.mockReturnValue(false);
     mockHasRoleFromEvent.mockReturnValue(false);
 
     await expect(
       handler(
         describeEvent(
-          { ref: REF, discoveryRoleArn: DISCOVERY_ROLE, discoveryExternalId: EXTERNAL_ID },
+          {
+            ref: REF,
+            discoveryRoleArn: DISCOVERY_ROLE,
+            discoveryExternalId: EXTERNAL_ID,
+          },
           developerIdentity,
         ),
       ),

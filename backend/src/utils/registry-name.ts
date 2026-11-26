@@ -32,7 +32,7 @@
 export const REGISTRY_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_\-./]*$/;
 
 /** Deterministic fallback when sanitization yields an empty string. */
-const FALLBACK_NAME = 'app';
+const FALLBACK_NAME = "app";
 
 /**
  * Derives a registry-safe name from arbitrary human input. Pure, total, and
@@ -44,9 +44,9 @@ export function sanitizeRegistryName(input: string): string {
     return input;
   }
   const mapped = input
-    .replace(/[^a-zA-Z0-9_\-./]/g, '-') // illegal chars → '-'
-    .replace(/-{2,}/g, '-') // collapse '-' runs
-    .replace(/^[^a-zA-Z0-9]+/, '') // first char must be alphanumeric
-    .replace(/-+$/, ''); // strip trailing '-' artifacts
+    .replace(/[^a-zA-Z0-9_\-./]/g, "-") // illegal chars → '-'
+    .replace(/-{2,}/g, "-") // collapse '-' runs
+    .replace(/^[^a-zA-Z0-9]+/, "") // first char must be alphanumeric
+    .replace(/-+$/, ""); // strip trailing '-' artifacts
   return mapped.length > 0 ? mapped : FALLBACK_NAME;
 }

@@ -25,7 +25,7 @@ import {
   ListServicesCommand,
   DescribeServicesCommand,
   DescribeTaskDefinitionCommand,
-} from '@aws-sdk/client-ecs';
+} from "@aws-sdk/client-ecs";
 import type {
   ListClustersCommandOutput,
   ListServicesCommandOutput,
@@ -33,17 +33,17 @@ import type {
   DescribeTaskDefinitionCommandOutput,
   Service,
   TaskDefinition,
-} from '@aws-sdk/client-ecs';
+} from "@aws-sdk/client-ecs";
 import {
   ElasticLoadBalancingV2Client,
   DescribeTargetGroupsCommand,
   DescribeLoadBalancersCommand,
-} from '@aws-sdk/client-elastic-load-balancing-v2';
+} from "@aws-sdk/client-elastic-load-balancing-v2";
 import type {
   DescribeTargetGroupsCommandOutput,
   DescribeLoadBalancersCommandOutput,
-} from '@aws-sdk/client-elastic-load-balancing-v2';
-import type { AgentSourceAdapter, AgentRef } from './base';
+} from "@aws-sdk/client-elastic-load-balancing-v2";
+import type { AgentSourceAdapter, AgentRef } from "./base";
 import type {
   AgentCandidate,
   AgentCapabilityDescriptor,
@@ -55,14 +55,17 @@ import type {
   InvokeRequest,
   InvokeResponse,
   VendedCredentials,
-} from './base';
-import type { AdapterCredentialProvider, CommandSender } from './invoke-support';
-import { NotImplementedError } from './not-implemented';
+} from "./base";
+import type {
+  AdapterCredentialProvider,
+  CommandSender,
+} from "./invoke-support";
+import { NotImplementedError } from "./not-implemented";
 
-const DEFAULT_REGION = process.env.AWS_REGION || 'ap-southeast-2';
+const DEFAULT_REGION = process.env.AWS_REGION || "ap-southeast-2";
 
 /** Resource tag an operator can set to declare a service's invocation endpoint. */
-const ENDPOINT_TAG = 'citadel:endpoint';
+const ENDPOINT_TAG = "citadel:endpoint";
 
 /** ECS DescribeServices accepts at most 10 services per call. */
 const DESCRIBE_SERVICES_BATCH = 10;
@@ -103,13 +106,14 @@ export class EcsSourceAdapter implements AgentSourceAdapter {
    * adapter is dispatched by SUBSTRATE (not via the protocol registry), and its
    * own invoke() is a NotImplemented stub.
    */
-  public readonly protocol: AgentInvocationProtocol = 'HTTP_ENDPOINT';
+  public readonly protocol: AgentInvocationProtocol = "HTTP_ENDPOINT";
 
   private readonly fetchFn: typeof fetch;
 
   constructor(private readonly deps: EcsSourceAdapterDeps = {}) {
     // Late-bind to the current global fetch so test stubs are honoured.
-    this.fetchFn = deps.fetchFn ?? ((input, init) => globalThis.fetch(input, init));
+    this.fetchFn =
+      deps.fetchFn ?? ((input, init) => globalThis.fetch(input, init));
   }
 
   /**
@@ -135,22 +139,23 @@ export class EcsSourceAdapter implements AgentSourceAdapter {
           new DescribeServicesCommand({
             cluster: clusterArn,
             services: batch,
-            include: ['TAGS'],
+            include: ["TAGS"],
           }),
         )) as DescribeServicesCommandOutput;
         for (const svc of out.services ?? []) {
           const arn = svc.serviceArn;
           if (!arn) continue;
-          if (s.tagKey && !serviceTagMatches(svc, s.tagKey, s.tagValue)) continue;
+          if (s.tagKey && !serviceTagMatches(svc, s.tagKey, s.tagValue))
+            continue;
           const parsed = parseArn(arn);
           candidates.push({
             origin: {
               sourceArn: arn,
-              substrate: 'ecs',
+              substrate: "ecs",
               region: parsed.region ?? region,
               account: parsed.account ?? s.account ?? this.deps.defaultAccount,
               discoveredAt,
-              ownership: 'external',
+              ownership: "external",
             },
             displayName: svc.serviceName ?? arn,
             reference: arn,
@@ -181,34 +186,39 @@ export class EcsSourceAdapter implements AgentSourceAdapter {
     const ecs = this.ecsClient(region);
 
     const service = await this.resolveService(ecs, serviceArn);
-    const taskDef = await this.resolveTaskDefinition(ecs, service?.taskDefinition);
+    const taskDef = await this.resolveTaskDefinition(
+      ecs,
+      service?.taskDefinition,
+    );
     const endpoint = await this.resolveEndpoint(service, region);
 
     const tierOne = summarizeTaskDefinition(taskDef);
     const note = endpoint
-      ? ''
-      : 'no invocation endpoint could be resolved from the ECS service — the ' +
-        'operator must supply the endpoint at import';
-    const description = [tierOne, note].filter((part) => part.length > 0).join(' ');
+      ? ""
+      : "no invocation endpoint could be resolved from the ECS service — the " +
+        "operator must supply the endpoint at import";
+    const description = [tierOne, note]
+      .filter((part) => part.length > 0)
+      .join(" ");
 
     const invocation: AgentInvocationBlock = {
-      protocol: 'HTTP_ENDPOINT',
-      target: endpoint ?? '',
-      auth: { mode: 'NONE' },
-      mode: 'sync',
+      protocol: "HTTP_ENDPOINT",
+      target: endpoint ?? "",
+      auth: { mode: "NONE" },
+      mode: "sync",
       region,
       account,
     };
     const origin: AgentOrigin = {
       sourceArn: serviceArn,
-      substrate: 'ecs',
+      substrate: "ecs",
       region,
       account,
       discoveredAt: new Date().toISOString(),
-      ownership: 'external',
+      ownership: "external",
     };
     // Every produced field is inferred (probe/describe-derived), so 'low'.
-    const low: Confidence = 'low';
+    const low: Confidence = "low";
     const fieldConfidence: Record<string, Confidence> = {
       name: low,
       description: low,
@@ -221,7 +231,7 @@ export class EcsSourceAdapter implements AgentSourceAdapter {
     return {
       name: service?.serviceName ?? deriveName(serviceArn),
       description,
-      version: taskDef?.revision != null ? String(taskDef.revision) : '1',
+      version: taskDef?.revision != null ? String(taskDef.revision) : "1",
       skills: [],
       categories: [],
       inputSchema: {},
@@ -241,15 +251,16 @@ export class EcsSourceAdapter implements AgentSourceAdapter {
    */
   async healthCheck(ref: AgentRef): Promise<HealthCheckResult> {
     const serviceArn = refToString(ref);
-    const region = parseArn(serviceArn).region ?? this.deps.defaultRegion ?? DEFAULT_REGION;
+    const region =
+      parseArn(serviceArn).region ?? this.deps.defaultRegion ?? DEFAULT_REGION;
     const ecs = this.ecsClient(region);
     const service = await this.resolveService(ecs, serviceArn);
     const endpoint = await this.resolveEndpoint(service, region);
     if (!endpoint) {
-      return { reachable: false, detail: 'no endpoint resolved' };
+      return { reachable: false, detail: "no endpoint resolved" };
     }
     try {
-      const res = await this.fetchFn(endpoint, { method: 'GET' });
+      const res = await this.fetchFn(endpoint, { method: "GET" });
       if (res.ok) return { reachable: true };
       return { reachable: false, detail: `HTTP ${res.status}` };
     } catch (err) {
@@ -262,9 +273,11 @@ export class EcsSourceAdapter implements AgentSourceAdapter {
    * AWS invoke role to vend. {@link buildImportInvokePolicy} likewise returns no
    * IAM invoke policy for HTTP_ENDPOINT/MCP.
    */
-  async vendCredentials(_invocation: AgentInvocationBlock): Promise<VendedCredentials> {
+  async vendCredentials(
+    _invocation: AgentInvocationBlock,
+  ): Promise<VendedCredentials> {
     throw new NotImplementedError(
-      'EcsSourceAdapter.vendCredentials: ECS candidates invoke via HTTP_ENDPOINT — no AWS invoke role',
+      "EcsSourceAdapter.vendCredentials: ECS candidates invoke via HTTP_ENDPOINT — no AWS invoke role",
     );
   }
 
@@ -273,9 +286,12 @@ export class EcsSourceAdapter implements AgentSourceAdapter {
    * HTTP_ENDPOINT adapter (the candidate's invocation protocol), never this
    * discovery adapter.
    */
-  async invoke(_req: InvokeRequest, _descriptor: AgentCapabilityDescriptor): Promise<InvokeResponse> {
+  async invoke(
+    _req: InvokeRequest,
+    _descriptor: AgentCapabilityDescriptor,
+  ): Promise<InvokeResponse> {
     throw new NotImplementedError(
-      'EcsSourceAdapter.invoke: ECS candidates invoke via the HTTP_ENDPOINT adapter',
+      "EcsSourceAdapter.invoke: ECS candidates invoke via the HTTP_ENDPOINT adapter",
     );
   }
 
@@ -294,7 +310,10 @@ export class EcsSourceAdapter implements AgentSourceAdapter {
     return arns;
   }
 
-  private async listServices(ecs: CommandSender, cluster: string): Promise<string[]> {
+  private async listServices(
+    ecs: CommandSender,
+    cluster: string,
+  ): Promise<string[]> {
     const arns: string[] = [];
     let nextToken: string | undefined;
     do {
@@ -315,7 +334,7 @@ export class EcsSourceAdapter implements AgentSourceAdapter {
       new DescribeServicesCommand({
         cluster: clusterFromServiceArn(serviceArn),
         services: [serviceArn],
-        include: ['TAGS'],
+        include: ["TAGS"],
       }),
     )) as DescribeServicesCommandOutput;
     return (out.services ?? [])[0];
@@ -407,9 +426,10 @@ export class EcsSourceAdapter implements AgentSourceAdapter {
 // --- helpers (scope / ARN / tags / task def / endpoint / errors) -----------
 
 function readScope(scope: unknown): EcsDiscoverScope {
-  if (typeof scope !== 'object' || scope === null) return {};
+  if (typeof scope !== "object" || scope === null) return {};
   const o = scope as Record<string, unknown>;
-  const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
+  const str = (v: unknown): string | undefined =>
+    typeof v === "string" ? v : undefined;
   return {
     region: str(o.region),
     account: str(o.account),
@@ -419,13 +439,13 @@ function readScope(scope: unknown): EcsDiscoverScope {
 }
 
 function refToString(ref: AgentRef): string {
-  return typeof ref === 'string' ? ref : ref.reference;
+  return typeof ref === "string" ? ref : ref.reference;
 }
 
 /** Parse the standard ARN layout `arn:partition:service:region:account:resource`. */
 function parseArn(arn: string): { region?: string; account?: string } {
-  const parts = arn.split(':');
-  if (parts[0] !== 'arn' || parts.length < 6) return {};
+  const parts = arn.split(":");
+  if (parts[0] !== "arn" || parts.length < 6) return {};
   return { region: parts[3] || undefined, account: parts[4] || undefined };
 }
 
@@ -435,16 +455,20 @@ function parseArn(arn: string): { region?: string; account?: string } {
  * the cluster (⇒ undefined, the SDK assumes the default cluster).
  */
 function clusterFromServiceArn(arn: string): string | undefined {
-  const parts = arn.split(':');
-  const resource = parts.length >= 6 ? parts.slice(5).join(':') : '';
+  const parts = arn.split(":");
+  const resource = parts.length >= 6 ? parts.slice(5).join(":") : "";
   const match = /^service\/(.+)$/.exec(resource);
   if (!match) return undefined;
-  const segments = match[1].split('/');
+  const segments = match[1].split("/");
   return segments.length >= 2 ? segments[0] : undefined;
 }
 
 /** True when the service carries `tagKey` (matching `tagValue` when supplied). */
-function serviceTagMatches(svc: Service, tagKey: string, tagValue?: string): boolean {
+function serviceTagMatches(
+  svc: Service,
+  tagKey: string,
+  tagValue?: string,
+): boolean {
   const match = (svc.tags ?? []).find((t) => t.key === tagKey);
   if (!match) return false;
   return tagValue !== undefined ? match.value === tagValue : true;
@@ -455,10 +479,15 @@ function serviceTagMatches(svc: Service, tagKey: string, tagValue?: string): boo
  * Protocol is HTTPS; the port is appended only when present and not the scheme
  * default (80 for http, 443 for https).
  */
-function buildLbEndpoint(dnsName: string, protocol?: string, port?: number): string {
-  const scheme = (protocol ?? '').toUpperCase() === 'HTTPS' ? 'https' : 'http';
-  const defaultPort = scheme === 'https' ? 443 : 80;
-  const portSuffix = typeof port === 'number' && port !== defaultPort ? `:${port}` : '';
+function buildLbEndpoint(
+  dnsName: string,
+  protocol?: string,
+  port?: number,
+): string {
+  const scheme = (protocol ?? "").toUpperCase() === "HTTPS" ? "https" : "http";
+  const defaultPort = scheme === "https" ? 443 : 80;
+  const portSuffix =
+    typeof port === "number" && port !== defaultPort ? `:${port}` : "";
   return `${scheme}://${dnsName}${portSuffix}`;
 }
 
@@ -468,27 +497,32 @@ function buildLbEndpoint(dnsName: string, protocol?: string, port?: number): str
  * secrets). Returns '' when no task definition / no notable facts.
  */
 function summarizeTaskDefinition(taskDef: TaskDefinition | undefined): string {
-  if (!taskDef) return '';
+  if (!taskDef) return "";
   const parts: string[] = [];
   for (const container of taskDef.containerDefinitions ?? []) {
     const seg: string[] = [];
     if (container.image) seg.push(`image=${container.image}`);
     const ports = (container.portMappings ?? [])
       .map((p) => p.containerPort)
-      .filter((p): p is number => typeof p === 'number');
-    if (ports.length > 0) seg.push(`ports=${ports.join(',')}`);
+      .filter((p): p is number => typeof p === "number");
+    if (ports.length > 0) seg.push(`ports=${ports.join(",")}`);
     const envNames = (container.environment ?? [])
       .map((e) => e.name)
-      .filter((n): n is string => typeof n === 'string' && n.length > 0);
-    if (envNames.length > 0) seg.push(`env=${envNames.join(',')}`);
-    if (seg.length > 0) parts.push(`[ecs ${seg.join(' ')}]`);
+      .filter((n): n is string => typeof n === "string" && n.length > 0);
+    if (envNames.length > 0) seg.push(`env=${envNames.join(",")}`);
+    if (seg.length > 0) parts.push(`[ecs ${seg.join(" ")}]`);
   }
-  return parts.join(' ');
+  return parts.join(" ");
 }
 
 /** Trailing segment of an ARN resource, used as a display-name fallback. */
 function deriveName(arn: string): string {
-  return arn.split(/[/:]/).filter((s) => s.length > 0).pop() ?? arn;
+  return (
+    arn
+      .split(/[/:]/)
+      .filter((s) => s.length > 0)
+      .pop() ?? arn
+  );
 }
 
 function errMessage(err: unknown): string {
