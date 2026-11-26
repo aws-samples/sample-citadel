@@ -691,8 +691,11 @@ export class ProjectsStack extends cdk.Stack {
     //   - "citadel.workflows"  -> workflow.* + supervisor.chatter
     //     (arbiter/stepRunner/events.py, workflow-resolver.ts's
     //     workflow.created)
-    //   - "citadel.supervisor" -> task.response
-    //     (arbiter/supervisor/index.py's SUPERVISOR_RESPONSE_SOURCE)
+    //   - "citadel.supervisor" -> chatter, supervisor.feedback,
+    //     task.response, execution.paused
+    //     (arbiter/supervisor/index.py's SUPERVISOR_RESPONSE_SOURCE;
+    //     every supervisor put_events entry must use it, a bare
+    //     "supervisor" Source is dropped by this rule)
     //   - "agent_intake.usage" -> intake.usage.captured
     //     (service/agent_intake_single/tools/state.py)
     // No longer a bus-wide catch-all ({ prefix: "" }) — that previously
