@@ -178,7 +178,11 @@ function synthGovernanceStack(): Template {
       "UserOrgMembershipParity",
       "citadel-user-org-membership-test-parity",
     ),
-    agentConfigTable: mockTable(backendStack, "AgentConfig", "citadel-agents-test"),
+    agentConfigTable: mockTable(
+      backendStack,
+      "AgentConfig",
+      "citadel-agents-test",
+    ),
     promotionPolicyConfigWriterRole,
     alarmTopic,
     governanceUiBaseUrl: "https://ui.example.com",

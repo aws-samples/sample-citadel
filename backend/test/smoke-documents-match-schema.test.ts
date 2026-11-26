@@ -10,10 +10,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { buildSchema, parse, validate } from "graphql";
 
-const SCHEMA_PATH = path.resolve(
-  __dirname,
-  "../src/schema/schema.graphql",
-);
+const SCHEMA_PATH = path.resolve(__dirname, "../src/schema/schema.graphql");
 
 const SMOKE_PATH = path.resolve(
   __dirname,
@@ -29,9 +26,7 @@ const SMOKE_PATH = path.resolve(
 function extractDocuments(): Record<string, string> {
   const src = fs.readFileSync(SMOKE_PATH, "utf-8");
   // Capture from "export const DOCUMENTS = {" to the closing "};"
-  const match = src.match(
-    /export\s+const\s+DOCUMENTS\s*=\s*(\{[\s\S]*?\n\});/,
-  );
+  const match = src.match(/export\s+const\s+DOCUMENTS\s*=\s*(\{[\s\S]*?\n\});/);
   if (!match) {
     throw new Error(
       "Could not find exported DOCUMENTS map in deployed-smoke.mjs",

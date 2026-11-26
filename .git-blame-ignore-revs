@@ -1,0 +1,15 @@
+# Commits that only reformat code. Skipped by `git blame` after running
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# GitHub's blame view reads this file automatically.
+
+# style: format the repository with the pinned prettier configuration (PR #660)
+29a96961a6642ff2ec9c998c0752db3318c7b6e9
+
+# Revert of the formatting commit above (PR #664)
+96dbffced49869477735963a8e87325931e9ad29
+
+# style: format the repository with the pinned prettier configuration (this PR, re-land)
+# Valid only if the PR is merged with a merge commit. A squash or rebase merge
+# creates a new commit with a different SHA, and this entry would then point at
+# a commit that never reaches main.
+749a82584933d95f4cc469dfc5d02a0cc73c84cf

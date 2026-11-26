@@ -230,7 +230,12 @@ describe("agent-import-resolver tag-policy enforcement", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     _resetRegistryService();
-    mockListResourcesChecked.mockResolvedValue({ items: [], partial: false, droppedCount: 0, throttled: false });
+    mockListResourcesChecked.mockResolvedValue({
+      items: [],
+      partial: false,
+      droppedCount: 0,
+      throttled: false,
+    });
     mockCreateResource.mockResolvedValue(makeCreatedRecord());
   });
 

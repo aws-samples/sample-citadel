@@ -59,32 +59,26 @@ describe("resolvePromotionPolicy — canaryMaxBasisPoints field (D5)", () => {
   });
 
   it("merges an org-supplied canaryMaxBasisPoints override", async () => {
-    ddbMock
-      .on(GetCommand)
-      .resolves({
-        Item: { orgId: "org-1", policy: { canaryMaxBasisPoints: 1000 } },
-      });
+    ddbMock.on(GetCommand).resolves({
+      Item: { orgId: "org-1", policy: { canaryMaxBasisPoints: 1000 } },
+    });
     const res = await resolvePromotionPolicy("org-1", "agent-1");
     expect(res.ok).toBe(true);
     if (res.ok) expect(res.policy.canaryMaxBasisPoints).toBe(1000);
   });
 
   it("fails closed (UNREADABLE) on a wrong-typed canaryMaxBasisPoints", async () => {
-    ddbMock
-      .on(GetCommand)
-      .resolves({
-        Item: { orgId: "org-1", policy: { canaryMaxBasisPoints: "lots" } },
-      });
+    ddbMock.on(GetCommand).resolves({
+      Item: { orgId: "org-1", policy: { canaryMaxBasisPoints: "lots" } },
+    });
     const res = await resolvePromotionPolicy("org-1", "agent-1");
     expect(res.ok).toBe(false);
   });
 
   it("drops an out-of-range (but correctly typed) canaryMaxBasisPoints, falling back to default", async () => {
-    ddbMock
-      .on(GetCommand)
-      .resolves({
-        Item: { orgId: "org-1", policy: { canaryMaxBasisPoints: 20000 } },
-      });
+    ddbMock.on(GetCommand).resolves({
+      Item: { orgId: "org-1", policy: { canaryMaxBasisPoints: 20000 } },
+    });
     const res = await resolvePromotionPolicy("org-1", "agent-1");
     expect(res.ok).toBe(true);
     if (res.ok) expect(res.policy.canaryMaxBasisPoints).toBe(2500);

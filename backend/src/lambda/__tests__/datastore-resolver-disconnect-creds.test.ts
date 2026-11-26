@@ -15,18 +15,14 @@ jest.mock("@aws-sdk/lib-dynamodb", () => ({
       },
     }),
   },
-  GetCommand: jest
-    .fn()
-    .mockImplementation((p: unknown) => ({
-      ...p,
-      constructor: { name: "GetCommand" },
-    })),
-  UpdateCommand: jest
-    .fn()
-    .mockImplementation((p: unknown) => ({
-      ...p,
-      constructor: { name: "UpdateCommand" },
-    })),
+  GetCommand: jest.fn().mockImplementation((p: unknown) => ({
+    ...p,
+    constructor: { name: "GetCommand" },
+  })),
+  UpdateCommand: jest.fn().mockImplementation((p: unknown) => ({
+    ...p,
+    constructor: { name: "UpdateCommand" },
+  })),
   PutCommand: jest.fn(),
   DeleteCommand: jest.fn(),
   QueryCommand: jest.fn(),

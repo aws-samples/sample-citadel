@@ -120,10 +120,7 @@ describe("C14 — agentTargetId org binding", () => {
       agentRow: { agentId: "agent-target-1", orgId: "org-A" },
     });
 
-    const run = await startEvalRun(
-      DEFAULT_INPUT,
-      authContextFor("architect"),
-    );
+    const run = await startEvalRun(DEFAULT_INPUT, authContextFor("architect"));
     expect(run.evalRunId).toBeDefined();
     expect(run.status).toBe("PENDING");
   });
@@ -136,10 +133,7 @@ describe("C14 — agentTargetId org binding", () => {
       },
     });
 
-    const run = await startEvalRun(
-      DEFAULT_INPUT,
-      authContextFor("architect"),
-    );
+    const run = await startEvalRun(DEFAULT_INPUT, authContextFor("architect"));
     expect(run.evalRunId).toBeDefined();
   });
 

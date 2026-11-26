@@ -43,7 +43,9 @@ function wireMinimalDdb(): void {
   ddbMock.on(GetCommand).callsFake((input) => {
     if (input.TableName === "test-workflows") {
       if (input.Key.workflowId === WF_ID) {
-        return { Item: { workflowId: WF_ID, orgId: "org-1", appId: undefined } };
+        return {
+          Item: { workflowId: WF_ID, orgId: "org-1", appId: undefined },
+        };
       }
       return { Item: undefined };
     }
@@ -70,14 +72,21 @@ beforeEach(() => {
 
 describe("mirrorToRegistry structured error logging", () => {
   it("bind: logs error class, message, operation, and attempt on registry updateResource failure", async () => {
-    const registryError = new TypeError("Cannot read properties of undefined (reading 'version')");
+    const registryError = new TypeError(
+      "Cannot read properties of undefined (reading 'version')",
+    );
 
     const fakeRegistry: RegistryLike = {
-      async getResource(_type: string, id: string): Promise<RegistryRecordLike | null> {
+      async getResource(
+        _type: string,
+        id: string,
+      ): Promise<RegistryRecordLike | null> {
         return {
           recordId: id,
           name: "Test",
-          customDescriptorContent: JSON.stringify({ manifest: { workflowIds: [], version: 1 } }),
+          customDescriptorContent: JSON.stringify({
+            manifest: { workflowIds: [], version: 1 },
+          }),
         };
       },
       async updateResource(): Promise<RegistryRecordLike> {
@@ -91,7 +100,8 @@ describe("mirrorToRegistry structured error logging", () => {
 
     // The mirrorToRegistry error log must include structured error details
     const mirrorCall = errorSpy.mock.calls.find(
-      (args) => typeof args[0] === "string" && args[0].includes("mirrorToRegistry"),
+      (args) =>
+        typeof args[0] === "string" && args[0].includes("mirrorToRegistry"),
     );
     expect(mirrorCall).toBeDefined();
     const logPayload = mirrorCall![1] as Record<string, unknown>;
@@ -123,7 +133,8 @@ describe("mirrorToRegistry structured error logging", () => {
     await bind(makeDeps(fakeRegistry), APP_ID, WF_ID, { userId: "u1" });
 
     const mirrorCall = errorSpy.mock.calls.find(
-      (args) => typeof args[0] === "string" && args[0].includes("mirrorToRegistry"),
+      (args) =>
+        typeof args[0] === "string" && args[0].includes("mirrorToRegistry"),
     );
     expect(mirrorCall).toBeDefined();
     const logPayload = mirrorCall![1] as Record<string, unknown>;
@@ -141,7 +152,9 @@ describe("mirrorToRegistry structured error logging", () => {
         return { Item: { workflowId: WF_ID, orgId: "org-1", appId: APP_ID } };
       }
       if (input.TableName === "test-apps") {
-        return { Item: { appId: APP_ID, orgId: "org-1", workflowIds: [WF_ID] } };
+        return {
+          Item: { appId: APP_ID, orgId: "org-1", workflowIds: [WF_ID] },
+        };
       }
       return { Item: undefined };
     });
@@ -151,11 +164,16 @@ describe("mirrorToRegistry structured error logging", () => {
     registryError.name = "ConflictException";
 
     const fakeRegistry: RegistryLike = {
-      async getResource(_type: string, id: string): Promise<RegistryRecordLike | null> {
+      async getResource(
+        _type: string,
+        id: string,
+      ): Promise<RegistryRecordLike | null> {
         return {
           recordId: id,
           name: "Test",
-          customDescriptorContent: JSON.stringify({ manifest: { workflowIds: [WF_ID], version: 2 } }),
+          customDescriptorContent: JSON.stringify({
+            manifest: { workflowIds: [WF_ID], version: 2 },
+          }),
         };
       },
       async updateResource(): Promise<RegistryRecordLike> {
@@ -168,7 +186,8 @@ describe("mirrorToRegistry structured error logging", () => {
     await unbind(makeDeps(fakeRegistry), APP_ID, WF_ID, { userId: "u1" });
 
     const mirrorCall = errorSpy.mock.calls.find(
-      (args) => typeof args[0] === "string" && args[0].includes("mirrorToRegistry"),
+      (args) =>
+        typeof args[0] === "string" && args[0].includes("mirrorToRegistry"),
     );
     expect(mirrorCall).toBeDefined();
     const logPayload = mirrorCall![1] as Record<string, unknown>;

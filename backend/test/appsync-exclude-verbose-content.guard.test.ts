@@ -48,10 +48,7 @@ describe("AppSync LogConfig — ExcludeVerboseContent guard", () => {
       missing.join(", "),
       "CITADEL_SKIP_BUNDLING=1 ENVIRONMENT=test npx cdk synth --all",
     );
-    it.skip(
-      `skipped: templates missing for [${missing.join(", ")}] — run synth first`,
-      () => {},
-    );
+    it.skip(`skipped: templates missing for [${missing.join(", ")}] — run synth first`, () => {});
     return;
   }
 

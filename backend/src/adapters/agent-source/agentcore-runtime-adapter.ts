@@ -8,17 +8,17 @@
 import {
   BedrockAgentCoreClient,
   InvokeAgentRuntimeCommand,
-} from '@aws-sdk/client-bedrock-agentcore';
+} from "@aws-sdk/client-bedrock-agentcore";
 import {
   BedrockAgentCoreControlClient,
   ListAgentRuntimesCommand,
   GetAgentRuntimeCommand,
-} from '@aws-sdk/client-bedrock-agentcore-control';
+} from "@aws-sdk/client-bedrock-agentcore-control";
 import type {
   ListAgentRuntimesCommandOutput,
   GetAgentRuntimeCommandOutput,
-} from '@aws-sdk/client-bedrock-agentcore-control';
-import type { AgentSourceAdapter, AgentRef } from './base';
+} from "@aws-sdk/client-bedrock-agentcore-control";
+import type { AgentSourceAdapter, AgentRef } from "./base";
 import type {
   AgentCandidate,
   AgentCapabilityDescriptor,
@@ -31,18 +31,18 @@ import type {
   InvokeResponse,
   JsonSchema,
   VendedCredentials,
-} from './base';
-import type { RegistryService } from '../../services/registry-service';
-import type { CommandSender } from './invoke-support';
+} from "./base";
+import type { RegistryService } from "../../services/registry-service";
+import type { CommandSender } from "./invoke-support";
 import {
   NO_RESPONSE_TEXT,
   extractTextOutput,
   isAsyncIterable,
   vendImportCredentials,
-} from './invoke-support';
-import type { AdapterCredentialProvider } from './invoke-support';
+} from "./invoke-support";
+import type { AdapterCredentialProvider } from "./invoke-support";
 
-const DEFAULT_REGION = process.env.AWS_REGION || 'ap-southeast-2';
+const DEFAULT_REGION = process.env.AWS_REGION || "ap-southeast-2";
 
 /** Optional discovery scope for {@link AgentCoreRuntimeAdapter.discover}. */
 interface AgentCoreDiscoverScope {
@@ -59,7 +59,10 @@ export interface AgentCoreRuntimeAdapterDeps {
   /** Control-plane sender; tests inject a fake, production builds a client. */
   controlSender?: CommandSender;
   /** Optional registry reader used to enrich describe() from a manifest. */
-  registry?: Pick<RegistryService, 'listResources' | 'deserializeCustomMetadata'>;
+  registry?: Pick<
+    RegistryService,
+    "listResources" | "deserializeCustomMetadata"
+  >;
   defaultRegion?: string;
   defaultAccount?: string;
   /**
@@ -72,7 +75,7 @@ export interface AgentCoreRuntimeAdapterDeps {
 }
 
 export class AgentCoreRuntimeAdapter implements AgentSourceAdapter {
-  public readonly protocol: AgentInvocationProtocol = 'AGENTCORE_RUNTIME';
+  public readonly protocol: AgentInvocationProtocol = "AGENTCORE_RUNTIME";
 
   /**
    * @param sender Optional data-plane sender for invoke() (tests inject a fake).
@@ -101,14 +104,17 @@ export class AgentCoreRuntimeAdapter implements AgentSourceAdapter {
       agentRuntimeArn: target,
       runtimeSessionId: req.sessionId,
       payload,
-      qualifier: 'DEFAULT',
+      qualifier: "DEFAULT",
     });
 
     const response = this.sender
       ? await this.sender.send(command)
       : await new BedrockAgentCoreClient(
           this.deps.credentialProvider
-            ? { region: region || DEFAULT_REGION, credentials: this.deps.credentialProvider }
+            ? {
+                region: region || DEFAULT_REGION,
+                credentials: this.deps.credentialProvider,
+              }
             : { region: region || DEFAULT_REGION },
         ).send(command);
 
@@ -144,11 +150,11 @@ export class AgentCoreRuntimeAdapter implements AgentSourceAdapter {
         candidates.push({
           origin: {
             sourceArn: arn,
-            substrate: 'agentcore_runtime',
+            substrate: "agentcore_runtime",
             region: parsed.region ?? region,
             account: s.account ?? parsed.account,
             discoveredAt,
-            ownership: 'external',
+            ownership: "external",
           },
           displayName: rt.agentRuntimeName ?? arn,
           reference: arn,
@@ -178,8 +184,8 @@ export class AgentCoreRuntimeAdapter implements AgentSourceAdapter {
 
     const runtimeArn = detail.agentRuntimeArn ?? arn;
     const name = detail.agentRuntimeName ?? displayNameOf(ref) ?? runtimeArn;
-    let description = detail.description ?? '';
-    let version = detail.agentRuntimeVersion ?? '1.0.0';
+    let description = detail.description ?? "";
+    let version = detail.agentRuntimeVersion ?? "1.0.0";
     let skills: string[] = [];
     let categories: string[] = [];
     let inputSchema: JsonSchema = {};
@@ -190,13 +196,18 @@ export class AgentCoreRuntimeAdapter implements AgentSourceAdapter {
     // self-described (high confidence) and override the bare runtime detail.
     const manifest = await this.lookupManifest(name);
     if (manifest) {
-      if (typeof manifest.description === 'string') description = manifest.description;
-      if (typeof manifest.version === 'string') version = manifest.version;
+      if (typeof manifest.description === "string")
+        description = manifest.description;
+      if (typeof manifest.version === "string") version = manifest.version;
       if (Array.isArray(manifest.skills)) {
-        skills = manifest.skills.filter((v): v is string => typeof v === 'string');
+        skills = manifest.skills.filter(
+          (v): v is string => typeof v === "string",
+        );
       }
       if (Array.isArray(manifest.categories)) {
-        categories = manifest.categories.filter((v): v is string => typeof v === 'string');
+        categories = manifest.categories.filter(
+          (v): v is string => typeof v === "string",
+        );
       }
       if (isObject(manifest.inputSchema)) inputSchema = manifest.inputSchema;
       if (isObject(manifest.outputSchema)) outputSchema = manifest.outputSchema;
@@ -204,26 +215,26 @@ export class AgentCoreRuntimeAdapter implements AgentSourceAdapter {
 
     const origin: AgentOrigin = {
       sourceArn: runtimeArn,
-      substrate: 'agentcore_runtime',
+      substrate: "agentcore_runtime",
       region,
       account,
       discoveredAt: new Date().toISOString(),
-      ownership: 'external',
+      ownership: "external",
     };
     const invocation: AgentInvocationBlock = {
-      protocol: 'AGENTCORE_RUNTIME',
+      protocol: "AGENTCORE_RUNTIME",
       target: runtimeArn,
-      auth: { mode: 'SIGV4' },
-      mode: 'sync',
+      auth: { mode: "SIGV4" },
+      mode: "sync",
       region,
       account,
     };
     const fieldConfidence: Record<string, Confidence> = {
-      name: 'high',
-      description: 'high',
-      version: 'high',
-      skills: 'high',
-      categories: 'high',
+      name: "high",
+      description: "high",
+      version: "high",
+      skills: "high",
+      categories: "high",
     };
 
     return {
@@ -247,10 +258,13 @@ export class AgentCoreRuntimeAdapter implements AgentSourceAdapter {
    */
   async healthCheck(ref: AgentRef): Promise<HealthCheckResult> {
     const arn = refToString(ref);
-    const region = parseArn(arn).region ?? this.deps.defaultRegion ?? DEFAULT_REGION;
+    const region =
+      parseArn(arn).region ?? this.deps.defaultRegion ?? DEFAULT_REGION;
     const sender = this.controlClient(region);
     try {
-      await sender.send(new GetAgentRuntimeCommand({ agentRuntimeId: runtimeIdFromArn(arn) }));
+      await sender.send(
+        new GetAgentRuntimeCommand({ agentRuntimeId: runtimeIdFromArn(arn) }),
+      );
       return { reachable: true };
     } catch (err) {
       if (isResourceNotFound(err)) {
@@ -260,7 +274,9 @@ export class AgentCoreRuntimeAdapter implements AgentSourceAdapter {
     }
   }
 
-  async vendCredentials(invocation: AgentInvocationBlock): Promise<VendedCredentials> {
+  async vendCredentials(
+    invocation: AgentInvocationBlock,
+  ): Promise<VendedCredentials> {
     return vendImportCredentials(invocation);
   }
 
@@ -271,7 +287,9 @@ export class AgentCoreRuntimeAdapter implements AgentSourceAdapter {
     // CommandSender (command in -> Promise out). The double assertion bridges
     // the overload set to the loose injection type used on the test path;
     // production calls flow straight through the real control-plane client.
-    return new BedrockAgentCoreControlClient({ region }) as unknown as CommandSender;
+    return new BedrockAgentCoreControlClient({
+      region,
+    }) as unknown as CommandSender;
   }
 
   /** Best-effort manifest lookup for a runtime registered in the Registry. */
@@ -281,7 +299,7 @@ export class AgentCoreRuntimeAdapter implements AgentSourceAdapter {
     const registry = this.deps.registry;
     if (!registry) return undefined;
     try {
-      const records = await registry.listResources('agent');
+      const records = await registry.listResources("agent");
       const match = records.find((r) => r.name === name);
       if (!match) return undefined;
       const meta = registry.deserializeCustomMetadata<{
@@ -289,7 +307,7 @@ export class AgentCoreRuntimeAdapter implements AgentSourceAdapter {
       }>(match.customDescriptorContent ?? null, {});
       return meta.manifest;
     } catch (err) {
-      console.error('agentcore describe: registry manifest lookup failed', err);
+      console.error("agentcore describe: registry manifest lookup failed", err);
       return undefined;
     }
   }
@@ -298,20 +316,20 @@ export class AgentCoreRuntimeAdapter implements AgentSourceAdapter {
 // --- control-plane helpers (ARN parsing / scope / errors) ------------------
 
 function readScope(scope: unknown): AgentCoreDiscoverScope {
-  if (typeof scope !== 'object' || scope === null) return {};
+  if (typeof scope !== "object" || scope === null) return {};
   const o = scope as Record<string, unknown>;
   return {
-    region: typeof o.region === 'string' ? o.region : undefined,
-    account: typeof o.account === 'string' ? o.account : undefined,
+    region: typeof o.region === "string" ? o.region : undefined,
+    account: typeof o.account === "string" ? o.account : undefined,
   };
 }
 
 function refToString(ref: AgentRef): string {
-  return typeof ref === 'string' ? ref : ref.reference;
+  return typeof ref === "string" ? ref : ref.reference;
 }
 
 function displayNameOf(ref: AgentRef): string | undefined {
-  return typeof ref === 'string' ? undefined : ref.displayName;
+  return typeof ref === "string" ? undefined : ref.displayName;
 }
 
 /** Parse the standard ARN layout `arn:partition:service:region:account:resource`. */
@@ -320,12 +338,12 @@ function parseArn(arn: string): {
   account?: string;
   resource?: string;
 } {
-  const parts = arn.split(':');
-  if (parts[0] !== 'arn' || parts.length < 6) return {};
+  const parts = arn.split(":");
+  if (parts[0] !== "arn" || parts.length < 6) return {};
   return {
     region: parts[3] || undefined,
     account: parts[4] || undefined,
-    resource: parts.slice(5).join(':') || undefined,
+    resource: parts.slice(5).join(":") || undefined,
   };
 }
 
@@ -333,14 +351,17 @@ function parseArn(arn: string): {
 function runtimeIdFromArn(arn: string): string {
   const { resource } = parseArn(arn);
   if (!resource) return arn; // ref may already be a bare runtime id
-  const slash = resource.indexOf('/');
+  const slash = resource.indexOf("/");
   return slash >= 0 ? resource.slice(slash + 1) : resource;
 }
 
 function isResourceNotFound(err: unknown): boolean {
-  if (typeof err !== 'object' || err === null) return false;
+  if (typeof err !== "object" || err === null) return false;
   const e = err as { name?: unknown; $metadata?: { httpStatusCode?: unknown } };
-  return e.name === 'ResourceNotFoundException' || e.$metadata?.httpStatusCode === 404;
+  return (
+    e.name === "ResourceNotFoundException" ||
+    e.$metadata?.httpStatusCode === 404
+  );
 }
 
 function errMessage(err: unknown): string {
@@ -348,28 +369,37 @@ function errMessage(err: unknown): string {
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
+  return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
 /** Parse a streaming or buffered AgentCore runtime response into text. */
 async function parseRuntimeResponse(response: unknown): Promise<string> {
-  if (!response || typeof response !== 'object') return NO_RESPONSE_TEXT;
+  if (!response || typeof response !== "object") return NO_RESPONSE_TEXT;
   const r = response as { contentType?: string; response?: unknown };
   if (r.response == null) return NO_RESPONSE_TEXT;
 
-  const contentType = r.contentType ?? '';
-  if (contentType.includes('text/event-stream') && isAsyncIterable(r.response)) {
+  const contentType = r.contentType ?? "";
+  if (
+    contentType.includes("text/event-stream") &&
+    isAsyncIterable(r.response)
+  ) {
     const chunks: string[] = [];
     for await (const chunk of r.response) {
-      if (chunk != null) chunks.push(Buffer.from(chunk as Uint8Array).toString('utf-8'));
+      if (chunk != null)
+        chunks.push(Buffer.from(chunk as Uint8Array).toString("utf-8"));
     }
-    return parseEventStream(chunks.join('')) || NO_RESPONSE_TEXT;
+    return parseEventStream(chunks.join("")) || NO_RESPONSE_TEXT;
   }
 
-  const body = r.response as { transformToByteArray?: () => Promise<Uint8Array> };
-  if (typeof body.transformToByteArray === 'function') {
+  const body = r.response as {
+    transformToByteArray?: () => Promise<Uint8Array>;
+  };
+  if (typeof body.transformToByteArray === "function") {
     const bytes = await body.transformToByteArray();
-    return extractTextOutput(Buffer.from(bytes).toString('utf-8')) || NO_RESPONSE_TEXT;
+    return (
+      extractTextOutput(Buffer.from(bytes).toString("utf-8")) ||
+      NO_RESPONSE_TEXT
+    );
   }
 
   return NO_RESPONSE_TEXT;
@@ -378,17 +408,17 @@ async function parseRuntimeResponse(response: unknown): Promise<string> {
 /** Collapse an SSE ("data: ...") event stream body into a single string. */
 function parseEventStream(full: string): string {
   const out: string[] = [];
-  for (const line of full.split('\n')) {
-    if (!line.startsWith('data: ')) continue;
+  for (const line of full.split("\n")) {
+    if (!line.startsWith("data: ")) continue;
     const data = line.substring(6);
     try {
       const parsed: unknown = JSON.parse(data);
-      if (typeof parsed === 'string') {
+      if (typeof parsed === "string") {
         out.push(parsed);
       } else if (
         parsed &&
-        typeof parsed === 'object' &&
-        typeof (parsed as Record<string, unknown>).text === 'string'
+        typeof parsed === "object" &&
+        typeof (parsed as Record<string, unknown>).text === "string"
       ) {
         out.push((parsed as Record<string, string>).text);
       } else {
@@ -398,5 +428,5 @@ function parseEventStream(full: string): string {
       out.push(data);
     }
   }
-  return out.join('');
+  return out.join("");
 }

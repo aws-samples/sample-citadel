@@ -33,7 +33,10 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import type { APIGatewayProxyEventV2WithJWTAuthorizer } from "aws-lambda";
 
-import { extractOrgFromHttpEvent, isAdminFromHttpEvent } from "./utils/auth-http-event";
+import {
+  extractOrgFromHttpEvent,
+  isAdminFromHttpEvent,
+} from "./utils/auth-http-event";
 import {
   badRequest,
   forbidden,

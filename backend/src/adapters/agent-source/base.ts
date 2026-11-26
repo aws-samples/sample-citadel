@@ -14,7 +14,7 @@
 import type {
   AgentInvocationProtocol,
   AgentInvocationBlock,
-} from '../../services/registry-service';
+} from "../../services/registry-service";
 import type {
   AgentCandidate,
   AgentCapabilityDescriptor,
@@ -22,7 +22,7 @@ import type {
   InvokeRequest,
   InvokeResponse,
   VendedCredentials,
-} from './types';
+} from "./types";
 
 // Single import surface: re-export the normalized types and the descriptor
 // blocks so callers can `import { ... } from '.../agent-source/base'`.
@@ -35,12 +35,12 @@ export type {
   VendedCredentials,
   InvokeRequest,
   InvokeResponse,
-} from './types';
+} from "./types";
 export type {
   AgentInvocationProtocol,
   AgentInvocationBlock,
   AgentOrigin,
-} from '../../services/registry-service';
+} from "../../services/registry-service";
 
 /**
  * A reference to an agent for describe/healthCheck/vendCredentials/invoke:
@@ -90,7 +90,7 @@ export class UnknownProtocolError extends Error {
 
   constructor(protocol: string) {
     super(`No agent source adapter registered for protocol: ${protocol}`);
-    this.name = 'UnknownProtocolError';
+    this.name = "UnknownProtocolError";
     this.protocol = protocol;
     // Preserve the prototype chain so `instanceof UnknownProtocolError` holds
     // even when this class is transpiled to a lower target.
