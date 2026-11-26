@@ -150,12 +150,36 @@ function renderValue(value: unknown): string {
   return `{{${JSON.stringify(value)}}}`;
 }
 
-function getEnforcingPolicy(template: Template): string {
-  const header = getCustomHeaders(template).find(
-    (h) => h.Header === "Content-Security-Policy",
+// Same as renderValue, but every non-Join, non-string intrinsic becomes an
+// 80-character placeholder, approximating the length of the deployed value
+// (a real host is at most ~80 characters).
+function renderWithPlaceholders(value: unknown): string {
+  if (typeof value === "string") return value;
+  const join = (value as { ["Fn::Join"]?: [string, unknown[]] })?.["Fn::Join"];
+  if (join) return join[1].map(renderWithPlaceholders).join(join[0]);
+  return "x".repeat(80);
+}
+
+// CloudFront rejects the managed security header names in
+// CustomHeadersConfig (InvalidRequest); the policy must live in
+// SecurityHeadersConfig.ContentSecurityPolicy instead.
+function getCspConfig(template: Template): {
+  ContentSecurityPolicy: unknown;
+  Override?: boolean;
+} {
+  const policies = Object.values(
+    template.findResources("AWS::CloudFront::ResponseHeadersPolicy"),
   );
-  expect(header).toBeDefined();
-  return renderValue(header?.Value);
+  expect(policies.length).toBeGreaterThan(0);
+  const csp =
+    policies[0].Properties?.ResponseHeadersPolicyConfig?.SecurityHeadersConfig
+      ?.ContentSecurityPolicy;
+  expect(csp).toBeDefined();
+  return csp;
+}
+
+function getEnforcingPolicy(template: Template): string {
+  return renderValue(getCspConfig(template).ContentSecurityPolicy);
 }
 
 function parseDirectives(policy: string): Map<string, string> {
@@ -263,13 +287,30 @@ describe("FrontendStack — security response headers policy (finding 82997842)"
     expect(cacheBehaviors.length).toBe(0);
   });
 
-  test("the Content-Security-Policy custom header is enforcing: exact header name, override on", () => {
-    const customHeaders = getCustomHeaders(template);
-    const csp = customHeaders.find(
-      (h) => h.Header === "Content-Security-Policy",
+  test("the Content-Security-Policy is set through SecurityHeadersConfig with override on", () => {
+    const csp = getCspConfig(template);
+    expect(csp.Override).toBe(true);
+
+    const policy = renderValue(csp.ContentSecurityPolicy);
+    expect(policy).toContain("script-src 'self'");
+    expect(policy).toContain("worker-src 'self' blob:");
+    expect(policy).toContain(
+      "https://citadel-documents-test-123456789012-us-east-1.s3.us-east-1.amazonaws.com",
     );
-    expect(csp).toBeDefined();
-    expect(csp?.Override).toBe(true);
+  });
+
+  test("no custom header uses a CloudFront-managed security header name (InvalidRequest)", () => {
+    const names = getCustomHeaders(template).map((h) => h.Header);
+    expect(
+      names.filter((n) => n.startsWith("Content-Security-Policy")),
+    ).toEqual([]);
+  });
+
+  test("the resolved Content-Security-Policy stays below the 1783-character CloudFront limit", () => {
+    const policy = renderWithPlaceholders(
+      getCspConfig(template).ContentSecurityPolicy,
+    );
+    expect(policy.length).toBeLessThan(1783);
   });
 
   test("no Content-Security-Policy-Report-Only header remains alongside the enforcing one", () => {
