@@ -222,3 +222,112 @@ class TestChatterEmissionCarriesOrgIdOrIsSkipped:
         )
 
         _mock_events.put_events.assert_not_called()
+
+
+def _emit_chatter():
+    index.EVENT_BUS_NAME = "fake-bus"
+    index.process_agent_call(
+        _agents_config(), _orchestration(org_id="org-alpha"),
+        "worker-agent", {"foo": "bar"}, "use-1",
+    )
+
+
+def _emit_supervisor_feedback():
+    index.EVENT_BUS_NAME = "fake-bus"
+    orchestration = _orchestration(org_id="org-alpha")
+    orchestration["conversation"] = [
+        {"role": "assistant", "content": [{"text": "all done"}]}
+    ]
+    index.invoke_agents_from_conversation(orchestration, _agents_config())
+
+
+def _emit_task_response():
+    index.EVENT_BUS_NAME = "fake-bus"
+    index.send_response("final answer", org_id="org-alpha")
+
+
+def _emit_execution_paused(monkeypatch):
+    index.EVENT_BUS_NAME = "fake-bus"
+    monkeypatch.setattr(index, "_GOVERNANCE_AVAILABLE", True)
+    monkeypatch.setenv("APPROVAL_GATE_ENABLED", "true")
+    finding = index.GovernanceFinding.create(
+        workflow_id="wf-esc",
+        decision=index.ArbitrationDecision.ESCALATE,
+        requesting_agent="supervisor",
+        target_agent="worker-agent",
+        reason="escalation-test",
+        scope_evaluated="supervisor-dispatch",
+    )
+    state = MagicMock()
+    state.authority_units = []
+    state.composition_contracts = []
+    state.case_law = []
+    state.constitutional_layers = []
+    state.enforcement_mode = "strict"
+    state.effective_at = None
+    with patch.object(index, "load_governance_state", return_value=state), \
+            patch.object(index, "GovernanceEngine") as engine, \
+            patch.object(index, "write_finding"), \
+            patch.object(index, "process_agent_call", return_value={}), \
+            patch.object(index, "save_orchestration"), \
+            patch.object(index, "_get_sns", return_value=MagicMock()):
+        engine.return_value.evaluate.return_value = finding
+        index.governed_process_agent_call(
+            {"agents": [{"name": "worker-agent", "domain": "billing",
+                         "registryStatus": "APPROVED"}]},
+            _orchestration(org_id="org-alpha"),
+            "worker-agent", {"foo": "bar"}, "use-1",
+        )
+
+
+_EMITTERS = {
+    "chatter": lambda mp: _emit_chatter(),
+    "supervisor.feedback": lambda mp: _emit_supervisor_feedback(),
+    "task.response": lambda mp: _emit_task_response(),
+    "execution.paused": _emit_execution_paused,
+}
+
+
+class TestSupervisorEventSource:
+    """Every EventBridge entry the supervisor emits must carry
+    SUPERVISOR_RESPONSE_SOURCE ('citadel.supervisor'). The ChatterRule only
+    matches [citadel, citadel.workflows, citadel.supervisor,
+    agent_intake.usage], so a bare 'supervisor' Source is dropped by
+    EventBridge before it reaches the chatter publisher and the UI."""
+
+    @pytest.mark.parametrize("detail_type", list(_EMITTERS))
+    def test_emitted_entry_uses_supervisor_response_source(
+        self, detail_type, monkeypatch
+    ):
+        _mock_events.reset_mock()
+        _mock_sqs.reset_mock()
+
+        _EMITTERS[detail_type](monkeypatch)
+
+        entries = [
+            entry
+            for c in _mock_events.put_events.call_args_list
+            for entry in c.kwargs["Entries"]
+        ]
+        matching = [e for e in entries if e["DetailType"] == detail_type]
+        assert matching, f"no {detail_type!r} entry was emitted"
+        assert all(
+            e["Source"] == index.SUPERVISOR_RESPONSE_SOURCE for e in matching
+        )
+
+    @pytest.mark.parametrize("detail_type", list(_EMITTERS))
+    def test_no_emitted_entry_uses_bare_supervisor_source(
+        self, detail_type, monkeypatch
+    ):
+        _mock_events.reset_mock()
+        _mock_sqs.reset_mock()
+
+        _EMITTERS[detail_type](monkeypatch)
+
+        entries = [
+            entry
+            for c in _mock_events.put_events.call_args_list
+            for entry in c.kwargs["Entries"]
+        ]
+        assert entries, "supervisor emitted no EventBridge entries"
+        assert all(e["Source"] != "supervisor" for e in entries)

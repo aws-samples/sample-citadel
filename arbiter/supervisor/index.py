@@ -1402,7 +1402,7 @@ def process_agent_call(agents_config, orchestration, agent_name, agent_input, ag
             events_client.put_events(
                 Entries=[
                     {
-                        'Source': 'supervisor',
+                        'Source': SUPERVISOR_RESPONSE_SOURCE,
                         'DetailType': 'chatter',
                         'Detail': json.dumps({
                             'action': 'agent_call',
@@ -1493,7 +1493,7 @@ def invoke_agents_from_conversation(orchestration, agents_config, app_id=None, s
                     events_client.put_events(
                         Entries=[
                             {
-                                'Source': 'supervisor',
+                                'Source': SUPERVISOR_RESPONSE_SOURCE,
                                 'DetailType': 'supervisor.feedback',
                                 'Detail': json.dumps({
                                     'action': 'direct_response',
