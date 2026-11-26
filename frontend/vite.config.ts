@@ -29,6 +29,26 @@
           });
         },
       },
+      // @monaco-editor/loader's default config module hardcodes a
+      // jsdelivr CDN URL as its initial `paths.vs` value. That default
+      // is dead once monacoSetup.ts calls `loader.config({ monaco })`
+      // with the locally bundled monaco instance, but the literal
+      // string still ends up in the production bundle. Strip it at
+      // transform time. scripts/assert-no-third-party-script-hosts.mjs
+      // verifies after the build that no such host reaches the output.
+      {
+        name: 'strip-monaco-loader-cdn-default',
+        transform(code, id) {
+          if (!id.includes('@monaco-editor/loader')) {
+            return null;
+          }
+          const stripped = code.replace(
+            /https:\/\/cdn\.jsdelivr\.net\/npm\/monaco-editor@[^'"]*/g,
+            ''
+          );
+          return stripped === code ? null : stripped;
+        },
+      },
     ],
     define: {
       __BUILD_ID__: JSON.stringify(buildId),
