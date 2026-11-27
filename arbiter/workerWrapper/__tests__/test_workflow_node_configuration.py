@@ -71,7 +71,8 @@ def _extract_extra_env(call):
     return env
 
 
-def _run_node(configuration, agent_cfg=None):
+def _run_node(configuration, agent_cfg=None, snapshot_path=None, run_error=None,
+              build_env_error=None):
     """Drive process_event with a workflow-node message; return
     (mock_run, mock_events, agent_cfg)."""
     if agent_cfg is None:
@@ -86,9 +87,16 @@ def _run_node(configuration, agent_cfg=None):
                               return_value=agent_cfg), \
                  patch.object(index, 'get_scoped_credentials', return_value=None), \
                  patch.object(index, 'load_file_from_s3_into_tmp'), \
+                 patch.object(index, '_prepare_governance_snapshot',
+                              return_value=snapshot_path), \
                  patch.object(index, 'run_agent_in_subprocess',
-                              return_value='done') as mock_run:
-                index.process_event(_msg(configuration), {})
+                              return_value='done', side_effect=run_error) as mock_run:
+                if build_env_error is not None:
+                    with patch.object(index, 'build_subprocess_env',
+                                      side_effect=build_env_error):
+                        index.process_event(_msg(configuration), {})
+                else:
+                    index.process_event(_msg(configuration), {})
 
     return mock_run, mock_events, agent_cfg
 
@@ -162,13 +170,56 @@ class TestSystemPromptAdditionApplication:
         assert entry['DetailType'] == 'workflow.node.completed'
 
 
+class TestGovernanceSnapshotWiring:
+    """The parent loads the constitution gate's reads (subprocess has no
+    ambient AWS credentials), hands them over by file, and removes the file."""
+
+    def test_snapshot_path_reaches_subprocess_env_and_is_removed_afterwards(self, tmp_path):
+        snap = tmp_path / 'snap.pkl'
+        snap.write_bytes(b'x')
+
+        mock_run, _, _ = _run_node({}, snapshot_path=str(snap))
+
+        extra_env = _extract_extra_env(mock_run.call_args)
+        assert extra_env['CITADEL_GOVERNANCE_STATE_FILE'] == str(snap)
+        assert not snap.exists()
+
+    def test_snapshot_is_removed_even_when_the_subprocess_fails(self, tmp_path):
+        snap = tmp_path / 'snap.pkl'
+        snap.write_bytes(b'x')
+
+        _, mock_events, _ = _run_node(
+            {}, snapshot_path=str(snap), run_error=RuntimeError('agent crashed'),
+        )
+
+        assert not snap.exists()
+        entry = mock_events.put_events.call_args.kwargs['Entries'][0]
+        assert entry['DetailType'] == 'workflow.node.failed'
+
+
+    def test_snapshot_is_removed_when_dispatch_fails_before_the_subprocess_starts(self, tmp_path):
+        snap = tmp_path / 'snap.pkl'
+        snap.write_bytes(b'x')
+
+        mock_run, mock_events, _ = _run_node(
+            {}, snapshot_path=str(snap), build_env_error=RuntimeError('env build failed'),
+        )
+
+        mock_run.assert_not_called()
+        assert not snap.exists()
+        entry = mock_events.put_events.call_args.kwargs['Entries'][0]
+        assert entry['DetailType'] == 'workflow.node.failed'
+
+
 class TestEmptyAndUnknownConfiguration:
     """Empty config → byte-identical behaviour; unknown keys ignored."""
 
     def test_empty_configuration_builds_todays_exact_env(self):
         mock_run, mock_events, agent_cfg = _run_node({})
 
-        extra_env = _extract_extra_env(mock_run.call_args)
+        extra_env = dict(_extract_extra_env(mock_run.call_args))
+        # The parent-created findings outbox path is per-dispatch (mkstemp).
+        assert extra_env.pop('CITADEL_GOVERNANCE_FINDINGS_OUTBOX')
         # Governance triplet PLUS the tool-call idempotency context (PR1):
         # the workflow-node path threads executionId/nodeId so the subprocess
         # can build ledger keys. orgId is resolved server-side and omitted
@@ -184,6 +235,9 @@ class TestEmptyAndUnknownConfiguration:
             'CITADEL_EXECUTION_ID': 'exec-1',
             'CITADEL_NODE_ID': 'n0',
             'CITADEL_WORKFLOW_DEFINITION_ID': 'wf-1',
+            # Constitution gate evidence: the agent declares no tools here
+            # (set but empty); CITADEL_RUN_ID is omitted (no run id on msg).
+            'CITADEL_DECLARED_TOOLS': '',
         }
         assert agent_cfg['config']['description'] == 'Base agent.'
         # Node completed normally.

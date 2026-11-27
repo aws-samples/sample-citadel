@@ -44,6 +44,7 @@ from governed_tool_handler import (  # noqa: E402
     LedgerWriteError,
     _approval_required_result,
     _approval_unavailable_result,
+    _audit_unavailable_result,
     _awaiting_approval_result,
     _parse_approval_required_tools_env,
     _parse_denied_tools_env,
@@ -169,6 +170,7 @@ class GovernanceEvaluator:
         execution_id: str = "",
         node_id: str = "",
         governance_engine_decision_fn: Any | None = None,
+        constitution_gate: Any | None = None,
     ):
         self._agent_id = agent_id or 'unknown-agent'
         self._workflow_id = workflow_id or 'unknown-workflow'
@@ -197,6 +199,10 @@ class GovernanceEvaluator:
         # all tool calls are implicitly PERMIT at this layer. CIT-031 wires
         # the actual governance engine routing rules here.
         self._governance_engine_decision_fn = governance_engine_decision_fn
+        # Constitution gate (``constitution_gate.ConstitutionGate``): evaluates
+        # each tool dispatch against the governance constitution AFTER the
+        # deny-list and approval gates. ``None`` leaves the layer inert.
+        self._constitution_gate = constitution_gate
 
     @property
     def denied_tools(self) -> set[str]:  # pragma: no cover — trivial accessor
@@ -236,7 +242,9 @@ class GovernanceEvaluator:
         ):
             return True
 
-        return self.evaluate_approval(event, outcome.token)
+        if self.evaluate_approval(event, outcome.token):
+            return True
+        return self.evaluate_constitution(event, outcome.token)
 
     def evaluate_denylist(self, event: Any) -> DenylistOutcome:
         """Deny-list phase ONLY. Writes the PERMIT/DENY audit finding and, on
@@ -358,6 +366,59 @@ class GovernanceEvaluator:
         return self._evaluate_approval(
             event, token.selected, token.tool_name, token.tool_use_id,
         )
+
+    def evaluate_constitution(self, event: Any, token: DenylistPassed) -> bool:
+        """Constitution phase ONLY, after the deny-list and approval gates.
+        Requires the :class:`DenylistPassed` token (same structural guarantee as
+        :meth:`evaluate_approval`). Returns True if the call was REFUSED and
+        ``selected_tool`` swapped; a no-op returning False without a gate.
+
+        The verdict carries the enforcement mode: ``strict`` refuses, shadow
+        and permissive let the call proceed (the gate logs the would-block)."""
+        if not isinstance(token, DenylistPassed):
+            raise TypeError(
+                "evaluate_constitution requires the opaque DenylistPassed token "
+                "from evaluate_denylist"
+            )
+        if self._constitution_gate is None:
+            return False
+        tool_use = getattr(event, "tool_use", None)
+        tool_input: Any = {}
+        if tool_use is not None:
+            tool_input = (
+                tool_use.get("input", {}) if hasattr(tool_use, "get")
+                else getattr(tool_use, "input", {})
+            )
+        try:
+            verdict = self._constitution_gate.evaluate(
+                token.tool_name, token.tool_use_id, tool_input,
+            )
+        except Exception:  # noqa: BLE001 — a gate crash is fail-closed
+            logger.error(
+                'constitution gate crashed for tool=%s; refusing (fail-closed)',
+                token.tool_name, exc_info=True,
+            )
+            from constitution_gate import constitution_denied_result
+            event.selected_tool = _GovernanceDeniedTool(
+                token.selected,
+                constitution_denied_result(
+                    token.tool_use_id, token.tool_name,
+                    'constitution_gate_error', None,
+                ),
+            )
+            return True
+        if not verdict.refuse:
+            return False
+        if verdict.audit_write_failed:
+            result = _audit_unavailable_result(token.tool_use_id, token.tool_name)
+        else:
+            from constitution_gate import constitution_denied_result
+            result = constitution_denied_result(
+                token.tool_use_id, token.tool_name,
+                verdict.reason, verdict.finding_id,
+            )
+        event.selected_tool = _GovernanceDeniedTool(token.selected, result)
+        return True
 
     def _evaluate_approval(
         self, event: Any, selected: Any, tool_name: str, tool_use_id: str,

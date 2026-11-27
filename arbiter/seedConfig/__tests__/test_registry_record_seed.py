@@ -236,8 +236,8 @@ class TestRegistryRecordCreated:
             registry_env=True, existing_records=[],
             registry_client=client,
         )
-        # 3 agents × 2 rows each (canonical + pointer) + 4 governance = 10
-        assert mock_table.put_item.call_count == 10
+        # 3 agents × 2 rows each (canonical + pointer) + 5 governance = 11
+        assert mock_table.put_item.call_count == 11
         items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
         # The canonical row carries full config; the pointer does not.
         record_id = "abc123def456"
@@ -370,7 +370,7 @@ class TestRegistrySkippedWhenNotConfigured:
         client.create_registry_record.assert_not_called()
         client.submit_registry_record_for_approval.assert_not_called()
         # DDB seeding still runs.
-        assert mock_table.put_item.call_count == 7
+        assert mock_table.put_item.call_count == 8
 
     def test_skips_when_catalog_client_unavailable(self):
         """DDB-only envs (no catalog layer) must still seed successfully."""
@@ -397,7 +397,7 @@ class TestRegistrySkippedWhenNotConfigured:
 
         assert mock_send.call_args[0][2] == "SUCCESS"
         client.create_registry_record.assert_not_called()
-        assert mock_table.put_item.call_count == 7
+        assert mock_table.put_item.call_count == 8
 
 
 class TestIdempotency:
@@ -424,7 +424,7 @@ class TestIdempotency:
         # Pre-existing DRAFT system agents still get submitted for approval
         assert client.submit_registry_record_for_approval.call_count == 3
         # DDB seeding unchanged.
-        assert mock_table.put_item.call_count == 10
+        assert mock_table.put_item.call_count == 11
 
     def test_name_match_is_exact(self):
         """A prefix-similar record must not suppress the create."""

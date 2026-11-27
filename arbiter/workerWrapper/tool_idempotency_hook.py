@@ -726,6 +726,10 @@ class ComposedToolHook:
         if self._governance is not None and token is not None:
             if self._governance.evaluate_approval(event, token):
                 return
+            # Constitution gate: after the deny-list and approval gates, so
+            # existing refusals keep their order and meaning.
+            if self._governance.evaluate_constitution(event, token):
+                return
 
         # 4) Idempotency reserve → execute → finalize (wraps selected_tool).
         if self._idempotency is not None:
