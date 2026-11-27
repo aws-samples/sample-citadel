@@ -108,9 +108,9 @@ class TestSeedConfigHandler:
             handler(event, context)
 
             # --- Deterministic call count: 3 agents (fabricator + echo + router) +
-            # 2 units + 1 layer = 6. (Per D3: no global fabricator unit.)
-            assert mock_table.put_item.call_count == 6, (
-                f"expected 6 put_item calls (3 agents + 2 units + 1 layer), "
+            # 3 units + 1 layer = 7. (Per D3: no global fabricator unit.)
+            assert mock_table.put_item.call_count == 7, (
+                f"expected 7 put_item calls (3 agents + 3 units + 1 layer), "
                 f"got {mock_table.put_item.call_count}"
             )
 
@@ -131,9 +131,11 @@ class TestSeedConfigHandler:
             # --- Authority units (US-ARB-011 D2/D3).
             unit_items = [i for i in items if "unitId" in i]
             unit_ids = {i["unitId"] for i in unit_items}
-            assert unit_ids == {"arbiter-invoke-all", "escalate-invoke-all"}, (
-                f"unexpected unit ids: {unit_ids}"
-            )
+            assert unit_ids == {
+                "arbiter-invoke-all",
+                "supervisor-invoke-all",
+                "escalate-invoke-all",
+            }, f"unexpected unit ids: {unit_ids}"
 
             arbiter_unit = next(
                 i for i in unit_items if i["unitId"] == "arbiter-invoke-all"
@@ -146,6 +148,18 @@ class TestSeedConfigHandler:
             assert arbiter_unit["scope"]["domain"] == "*"
             assert arbiter_unit["scope"]["conditions"] == {}
             assert arbiter_unit["scope"]["limits"] == {}
+
+            supervisor_unit = next(
+                i for i in unit_items if i["unitId"] == "supervisor-invoke-all"
+            )
+            assert supervisor_unit["agentId"] == "supervisor"
+            assert supervisor_unit["registryId"] == "*GLOBAL*"
+            assert supervisor_unit["riskRating"] == "low"
+            assert supervisor_unit["revoked"] is False
+            assert supervisor_unit["scope"]["decision_type"] == "invoke_agent"
+            assert supervisor_unit["scope"]["domain"] == "*"
+            assert supervisor_unit["scope"]["conditions"] == {}
+            assert supervisor_unit["scope"]["limits"] == {}
 
             escalate_unit = next(
                 i for i in unit_items if i["unitId"] == "escalate-invoke-all"

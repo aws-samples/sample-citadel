@@ -884,6 +884,23 @@ def handler(event, context):
                     'riskRating': 'low',
                     'revoked': False,
                 },
+                # The supervisor may dispatch invoke_agent actions in any
+                # domain under the global registry. Same shape as the
+                # arbiter's unit above, granted to the supervisor's own
+                # agent id.
+                {
+                    'unitId': 'supervisor-invoke-all',
+                    'agentId': 'supervisor',
+                    'registryId': '*GLOBAL*',
+                    'scope': {
+                        'decision_type': 'invoke_agent',
+                        'domain': '*',
+                        'conditions': {},
+                        'limits': {},
+                    },
+                    'riskRating': 'low',
+                    'revoked': False,
+                },
                 {
                     'unitId': 'escalate-invoke-all',
                     'agentId': 'arbiter',
