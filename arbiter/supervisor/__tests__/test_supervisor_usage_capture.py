@@ -82,7 +82,7 @@ def _bedrock_response_text_only(text="ok", usage=None):
 
 
 _AGENTS_CONFIG = {
-    "agents": [{"name": "agent-a", "description": "test", "schema": {}, "action": {"type": "sqs", "target": "https://sqs.fake/q"}}]
+    "agents": [{"name": "agent-a", "description": "test", "schema": {"type": "object", "properties": {}}, "action": {"type": "sqs", "target": "https://sqs.fake/q"}}]
 }
 
 

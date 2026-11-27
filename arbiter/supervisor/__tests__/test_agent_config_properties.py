@@ -49,7 +49,8 @@ json_like = st.recursive(
 )
 
 agent_config_entry = st.fixed_dictionaries({
-    "name": st.text(min_size=1, max_size=30).filter(lambda s: s.strip() != ""),
+    # Converse tool names must match ^[a-zA-Z0-9_-]{1,64}$.
+    "name": st.from_regex(r"[a-zA-Z0-9_-]{1,30}", fullmatch=True),
     "description": st.text(min_size=1, max_size=100).filter(lambda s: s.strip() != ""),
     "schema": st.fixed_dictionaries({
         "type": st.just("object"),

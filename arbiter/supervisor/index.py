@@ -34,7 +34,7 @@ _this_dir = os.path.dirname(os.path.abspath(__file__))
 if _this_dir not in sys.path:
     sys.path.insert(0, _this_dir)
 
-from agent_config import load_config_from_dynamodb, load_app_scoped_agents, create_agent_specs, parse_decimals
+from agent_config import load_config_from_dynamodb, load_app_scoped_agents, create_agent_specs, parse_decimals, resolve_agent_name
 from circuit_breaker import CircuitBreaker, CircuitBreakerOpen
 import uuid
 import time
@@ -1444,11 +1444,13 @@ def invoke_agents_from_conversation(orchestration, agents_config, app_id=None, s
         if 'toolUse' in content:
             tool_use = content['toolUse']
             print(f'Found toolUse: {json.dumps(tool_use, default=str)}')
-            agent_ids.append(tool_use['name'])
+            # The tool name sent to Bedrock may be a sanitised agent name.
+            agent_name = resolve_agent_name(agents_config, tool_use['name'])
+            agent_ids.append(agent_name)
             result = governed_process_agent_call(
                 agents_config,
                 orchestration,
-                tool_use['name'],
+                agent_name,
                 tool_use['input'],
                 tool_use['toolUseId'],
                 app_id=app_id if app_id is not None else orchestration.get('app_id'),
@@ -1646,8 +1648,24 @@ def _run_orchestration(orchestration, app_id=None):
         send_response("No active agents configured", callback=callback_info, org_id=orchestration.get('orgId'))
         return
     
-    agent_specs = create_agent_specs(agent_configs)
+    skipped_specs = []
+    agent_specs = create_agent_specs(agent_configs, skipped=skipped_specs)
     print(f"Agent specs created: {json.dumps(agent_specs, default=str)}")
+    if not agent_specs:
+        # Every active agent failed tool-spec validation (each already logged
+        # as a WARN). Converse rejects an empty toolConfig, so do not call it.
+        print(json.dumps({
+            'level': 'WARN',
+            'component': 'Supervisor',
+            'action': 'no_valid_tool_specs',
+            'skippedAgents': len(skipped_specs),
+        }))
+        send_response(
+            "No usable agents configured",
+            callback=orchestration.get('callback'),
+            org_id=orchestration.get('orgId'),
+        )
+        return
     print(f"Calling Bedrock with conversation: {json.dumps(orchestration['conversation'], default=str)}")
 
     _converse_start = time.perf_counter()
