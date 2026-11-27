@@ -1722,6 +1722,47 @@ export class ArbiterStack extends cdk.Stack {
       }),
     );
 
+    // The supervisor emits best-effort metrics with no grant behind them, so
+    // every put_metric_data call failed with AccessDenied inside its catch:
+    //   - Citadel/Workflows: release-dispatch, canary-assignment and
+    //     approval-dispatch metrics (arbiter/supervisor/index.py via
+    //     common.metrics_constants.METRIC_NAMESPACE) and
+    //     GovernanceModeDefaulted (arbiter/governance/hierarchy.py).
+    //   - Citadel/Arbiter: SupervisorOrgSourceMismatch
+    //     (arbiter/supervisor/index.py) and the tenant-guard metric
+    //     (arbiter/common/tenant_guard.py, reached through agent_config).
+    // PutMetricData has no resource-level scoping, so Resource must be "*";
+    // the cloudwatch:namespace condition narrows the grant to these two
+    // namespaces. StringEquals with a list is a logical OR. Same shape as the
+    // registry-sync grant in registry-stack.ts.
+    supervisorLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ["cloudwatch:PutMetricData"],
+        resources: ["*"],
+        conditions: {
+          StringEquals: {
+            "cloudwatch:namespace": ["Citadel/Workflows", "Citadel/Arbiter"],
+          },
+        },
+      }),
+    );
+    NagSuppressions.addResourceSuppressions(
+      supervisorLambda.role!,
+      [
+        {
+          id: "AwsSolutions-IAM5",
+          reason:
+            "cloudwatch:PutMetricData has no resource-level scoping, so " +
+            "Resource must be *; the statement is narrowed by a " +
+            "cloudwatch:namespace StringEquals condition to Citadel/Workflows " +
+            "and Citadel/Arbiter, the only namespaces the supervisor writes.",
+          appliesTo: ["Resource::*"],
+        },
+      ],
+      true,
+    );
+
     // Seed initial agent configuration
     const seedAgentConfigLambda = new lambda.Function(
       this,
