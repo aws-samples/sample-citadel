@@ -1104,6 +1104,73 @@ def _remove_governance_snapshot(path: str | None) -> None:
     remove_governance_snapshot(path)
 
 
+def _prepare_governance_outbox() -> str | None:
+    """Create the private file the subprocess queues constitution findings in.
+
+    None (logged) leaves the subprocess to write directly, which fails closed.
+    """
+    try:
+        from constitution_gate import prepare_findings_outbox
+        return prepare_findings_outbox()
+    except Exception:  # noqa: BLE001 — subprocess falls back to a fail-closed direct write
+        print(json.dumps({
+            'level': 'ERROR', 'component': 'WorkerWrapper',
+            'action': 'governance_outbox_unavailable',
+        }))
+        return None
+
+
+def _drain_governance_outbox(path: str | None, execution_id: str):
+    """Write the subprocess's queued findings with the worker's own role and
+    remove the file. Never raises.
+
+    Returns an ``AgentExecutionError`` when a PERMIT finding (a tool that
+    ran) could not be recorded, else None. The caller raises it so the node
+    fails through the existing node-failure path with the same
+    ``LedgerWriteError`` class a governance-write refusal carries.
+    """
+    if not path:
+        return None
+    try:
+        from constitution_gate import drain_findings_outbox, remove_findings_outbox
+    except Exception:  # noqa: BLE001 — worker-bundle sibling; cannot drain without it
+        print(json.dumps({
+            'level': 'ERROR', 'component': 'WorkerWrapper',
+            'action': 'governance_outbox_drain_unavailable', 'executionId': execution_id,
+        }))
+        return None
+    try:
+        result = drain_findings_outbox(path, expected_workflow_id=execution_id)
+    except Exception:  # noqa: BLE001 — drain must never mask the dispatch outcome
+        print(json.dumps({
+            'level': 'ERROR', 'component': 'WorkerWrapper',
+            'action': 'governance_outbox_drain_failed', 'executionId': execution_id,
+        }))
+        return AgentExecutionError(
+            'LedgerWriteError',
+            'audit_write_failed: constitution findings outbox could not be drained',
+        )
+    finally:
+        remove_findings_outbox(path)
+    print(json.dumps({
+        'level': 'ERROR' if result.failed else 'INFO',
+        'component': 'WorkerWrapper',
+        'action': 'governance_outbox_drained',
+        'executionId': execution_id,
+        'written': result.written,
+        'failed': result.failed,
+    }))
+    if result.permit_failures:
+        return AgentExecutionError(
+            'LedgerWriteError',
+            'audit_write_failed: %d constitution finding(s) for executed tool '
+            'calls could not be recorded (%s)' % (
+                len(result.permit_failures), ', '.join(result.permit_failures[:5]),
+            ),
+        )
+    return None
+
+
 def run_agent_in_subprocess(request: dict, scoped_credentials: dict | None, extra_env: dict | None = None, *, raise_on_error: bool = False, usage_sink: list | None = None, credential_mode: str) -> str:
     """
     Execute the agent code in an isolated subprocess.
@@ -1995,14 +2062,17 @@ def _process_workflow_node(event, message_attributes=None):
             # the constitution gate's governance/executions reads are done HERE
             # with the worker's own role and handed over as a private file.
             governance_snapshot_path = None
+            governance_outbox_path = None
             try:
                 governance_snapshot_path = _prepare_governance_snapshot(msg.execution_id)
+                governance_outbox_path = _prepare_governance_outbox()
                 extra_env = build_subprocess_env(
                     {},
                     model_override=model_override,
                     agent_id=msg.agent_id,
                     workflow_id=msg.execution_id,
                     governance_snapshot_path=governance_snapshot_path,
+                    governance_findings_outbox_path=governance_outbox_path,
                     # Tool-call idempotency (PR1) context. orgId is resolved
                     # SERVER-SIDE from the execution row (never trusted from the
                     # dispatch payload); executionId/nodeId come from the validated
@@ -2038,6 +2108,14 @@ def _process_workflow_node(event, message_attributes=None):
                 )
             finally:
                 _remove_governance_snapshot(governance_snapshot_path)
+                # The subprocess queued its constitution findings (it has no
+                # ledger access); write them with the worker's role whether it
+                # succeeded or failed.
+                outbox_error = _drain_governance_outbox(
+                    governance_outbox_path, msg.execution_id,
+                )
+            if outbox_error is not None:
+                raise outbox_error
         except Exception as exc:  # noqa: BLE001 — any failure becomes node.failed
             # finding 56d763d4: carry the exception CLASS as the node-result error
             # so the step runner's retry.py failure-class logic (should_retry:

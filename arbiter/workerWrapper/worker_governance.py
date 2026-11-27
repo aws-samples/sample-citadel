@@ -202,6 +202,7 @@ def build_subprocess_env(
     run_id: str | None = None,
     declared_tools: list[Any] | None = None,
     governance_snapshot_path: str | None = None,
+    governance_findings_outbox_path: str | None = None,
 ) -> dict:
     """Build the subprocess environment with governance and config overrides.
 
@@ -358,6 +359,14 @@ def build_subprocess_env(
     # the gate reads live and fails closed.
     if isinstance(governance_snapshot_path, str) and governance_snapshot_path:
         env['CITADEL_GOVERNANCE_STATE_FILE'] = governance_snapshot_path
+    # Parent-created private file the gate appends constitution findings to
+    # (the subprocess cannot write the ledger); the parent writes them after
+    # the subprocess exits. Absent means the gate writes directly.
+    if (
+        isinstance(governance_findings_outbox_path, str)
+        and governance_findings_outbox_path
+    ):
+        env['CITADEL_GOVERNANCE_FINDINGS_OUTBOX'] = governance_findings_outbox_path
 
     # Per-target circuit breaker (task 28d624b1). The per-dispatch map of tool
     # NAME -> [targetKind, targetId] the worker's breaker resolves against.

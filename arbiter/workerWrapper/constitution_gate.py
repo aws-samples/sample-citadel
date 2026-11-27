@@ -28,6 +28,15 @@ private file named by ``CITADEL_GOVERNANCE_STATE_FILE``. Without the variable
 the gate reads live (same ``boto3.resource('dynamodb')`` construction as the
 ledger write) and fails closed if that read is refused.
 
+Findings: the subprocess cannot write the governance ledger either. The parent
+creates a private outbox file (``prepare_findings_outbox``) named by
+``CITADEL_GOVERNANCE_FINDINGS_OUTBOX``; with it set the gate appends each
+finding as one JSON line instead of calling ``write_finding`` and does not
+refuse on that basis (the verdict is still enforced in the subprocess). After
+the subprocess exits the parent writes every line with its own role
+(``drain_findings_outbox``). Without the variable the gate writes directly and
+fails closed.
+
 Enforcement mirrors the supervisor: ``strict`` refuses any non-PERMIT
 decision, ``shadow``/``permissive`` log the would-block and proceed. A state
 or engine failure, or a finding-write failure, refuses in every mode.
@@ -38,6 +47,8 @@ Bundle-sibling module (top-level importable, no ``arbiter.`` prefix); the
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import logging
 import os
 import pickle
@@ -45,12 +56,23 @@ import tempfile
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from governance.models import ArbitrationDecision, DispatchRequest  # noqa: E402
+from governance.models import (  # noqa: E402
+    ArbitrationDecision,
+    DispatchRequest,
+    GovernanceFinding,
+)
 from governance.ledger import LedgerWriteError, write_finding  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
 SCOPE_WORKER_TOOL_DISPATCH = 'worker-tool-dispatch'
+
+FINDINGS_OUTBOX_ENV = 'CITADEL_GOVERNANCE_FINDINGS_OUTBOX'
+
+# Upper bounds on what the parent will read back from a file the agent
+# subprocess could also write to.
+_OUTBOX_MAX_BYTES = 8 * 1024 * 1024
+_OUTBOX_MAX_LINES = 10_000
 
 # Execution/node statuses meaning the run is parked waiting for a human.
 _UNCONFIRMED_STATUSES = frozenset({'awaiting_approval'})
@@ -155,6 +177,143 @@ def remove_governance_snapshot(path: str | None) -> None:
         logger.warning('could not remove governance snapshot %s', path, exc_info=True)
 
 
+def prepare_findings_outbox(*, directory: str | None = None) -> str | None:
+    """Parent side: create the private (0600) empty file the subprocess
+    appends its constitution findings to.
+
+    Returns the path, or None when the file cannot be created (logged). None
+    leaves the subprocess to write directly, which fails closed without
+    ledger access.
+    """
+    try:
+        fd, path = tempfile.mkstemp(
+            prefix='citadel-findings-', suffix='.jsonl', dir=directory,
+        )
+        os.close(fd)
+        return path
+    except OSError:
+        logger.error('governance findings outbox unavailable', exc_info=True)
+        return None
+
+
+def remove_findings_outbox(path: str | None) -> None:
+    if not path:
+        return
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.warning('could not remove findings outbox %s', path, exc_info=True)
+
+
+@dataclass
+class OutboxDrainResult:
+    """Outcome of writing an outbox to the ledger from the parent.
+
+    ``permit_failures`` lists the finding ids (``'<unreadable>'`` for a line
+    that could not be parsed) of PERMIT findings that were not recorded: the
+    tool ran, so that execution is unaudited.
+    """
+
+    written: int = 0
+    failed: int = 0
+    permit_failures: list[str] = dataclasses.field(default_factory=list)
+
+
+def _finding_from_record(record: dict) -> GovernanceFinding:
+    names = {f.name for f in dataclasses.fields(GovernanceFinding)}
+    kwargs = {k: v for k, v in record.items() if k in names}
+    kwargs['finding_id'] = record['findingId']
+    kwargs['workflow_id'] = record['workflowId']
+    kwargs['decision'] = ArbitrationDecision(record['decision'])
+    return GovernanceFinding(**kwargs)
+
+
+def drain_findings_outbox(
+    path: str | None,
+    *,
+    expected_workflow_id: str | None = None,
+    write_finding_fn: Callable[[Any], None] | None = None,
+) -> OutboxDrainResult:
+    """Parent side: write every finding in the outbox to the ledger with the
+    worker's own credentials. Never raises; failures are counted and logged.
+
+    A line that is not a valid finding, or whose ``workflowId`` differs from
+    ``expected_workflow_id`` (the file is writable by the agent subprocess),
+    is rejected and counted as failed.
+    """
+    result = OutboxDrainResult()
+    if not path:
+        return result
+    try:
+        size = os.path.getsize(path)
+        if size > _OUTBOX_MAX_BYTES:
+            logger.error('findings outbox %s too large (%d bytes); not drained', path, size)
+            result.failed += 1
+            result.permit_failures.append('<unreadable>')
+            return result
+        with open(path, 'r', encoding='utf-8') as fh:
+            lines = fh.read().splitlines()
+    except FileNotFoundError:
+        return result
+    except (OSError, UnicodeDecodeError):
+        logger.error('findings outbox %s unreadable', path, exc_info=True)
+        result.failed += 1
+        result.permit_failures.append('<unreadable>')
+        return result
+
+    writer = write_finding_fn or write_finding
+    for line in lines[:_OUTBOX_MAX_LINES]:
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+            if (
+                expected_workflow_id is not None
+                and record.get('workflowId') != expected_workflow_id
+            ):
+                raise ValueError('finding belongs to another workflow')
+            finding = _finding_from_record(record)
+        except Exception:  # noqa: BLE001 — one bad line must not hide the rest
+            logger.error('malformed finding in outbox %s; skipped', path, exc_info=True)
+            result.failed += 1
+            result.permit_failures.append('<unreadable>')
+            continue
+        try:
+            writer(finding)
+            result.written += 1
+        except Exception as exc:  # noqa: BLE001 — keep draining the rest
+            result.failed += 1
+            logger.error(
+                'parent ledger write FAILED finding_id=%s decision=%s: %s',
+                finding.finding_id, finding.decision, exc,
+            )
+            if finding.decision == ArbitrationDecision.PERMIT:
+                result.permit_failures.append(finding.finding_id)
+    if len(lines) > _OUTBOX_MAX_LINES:
+        logger.error('findings outbox %s truncated at %d lines', path, _OUTBOX_MAX_LINES)
+        result.failed += len(lines) - _OUTBOX_MAX_LINES
+        result.permit_failures.append('<unreadable>')
+    logger.info(
+        'findings outbox drained written=%d failed=%d', result.written, result.failed,
+    )
+    return result
+
+
+def _append_to_outbox(path: str, finding: GovernanceFinding) -> None:
+    """Append one finding (the item ``write_finding`` would store) as a JSON line."""
+    from governance.ledger import _serialize_finding
+    data = (json.dumps(_serialize_finding(finding), default=str) + '\n').encode('utf-8')
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND)
+    try:
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view):]
+    finally:
+        os.close(fd)
+
+
 def _load_snapshot(path: str) -> dict:
     with open(path, 'rb') as fh:
         data = pickle.load(fh)
@@ -214,6 +373,7 @@ class ConstitutionGate:
         registry_id: str | None = None,
         load_state_fn: Callable[..., Any] | None = None,
         write_finding_fn: Callable[[Any], None] | None = None,
+        findings_outbox: str | None = None,
         execution_lookup_fn: Callable[[str], dict | None] | None = None,
         trace_id_fn: Callable[[], str | None] | None = None,
     ):
@@ -234,6 +394,11 @@ class ConstitutionGate:
         self._registry_id = registry_id
         self._load_state_fn = load_state_fn or _default_load_state
         self._write_finding_fn = write_finding_fn or write_finding
+        # Set in the agent subprocess (no ledger access): findings are queued
+        # for the parent to write instead of written here.
+        self._findings_outbox = (
+            findings_outbox or os.environ.get(FINDINGS_OUTBOX_ENV) or None
+        )
         self._execution_lookup_fn = execution_lookup_fn or _default_execution_lookup
         self._trace_id_fn = trace_id_fn or _default_trace_id
         # Per-process cache of the execution record (success only).
@@ -349,9 +514,19 @@ class ConstitutionGate:
         except Exception:  # noqa: BLE001 — stamps never alter the decision
             logger.debug('finding stamp failed; written unstamped', exc_info=True)
 
-        # Fail closed: an unauditable dispatch is refused in every mode.
+        # Fail closed: an unauditable dispatch is refused in every mode. With an
+        # outbox the parent writes the ledger row, so only a failure to queue
+        # the finding makes the dispatch unauditable.
         try:
-            self._write_finding_fn(finding)
+            if self._findings_outbox:
+                try:
+                    _append_to_outbox(self._findings_outbox, finding)
+                except Exception as exc:  # noqa: BLE001 — queueing failed
+                    raise LedgerWriteError(
+                        f'findings outbox write failed: {exc}'
+                    ) from exc
+            else:
+                self._write_finding_fn(finding)
         except LedgerWriteError as exc:
             logger.error(
                 'constitution finding write FAILED (fail-closed) '

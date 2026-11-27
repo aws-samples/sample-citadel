@@ -217,7 +217,9 @@ class TestEmptyAndUnknownConfiguration:
     def test_empty_configuration_builds_todays_exact_env(self):
         mock_run, mock_events, agent_cfg = _run_node({})
 
-        extra_env = _extract_extra_env(mock_run.call_args)
+        extra_env = dict(_extract_extra_env(mock_run.call_args))
+        # The parent-created findings outbox path is per-dispatch (mkstemp).
+        assert extra_env.pop('CITADEL_GOVERNANCE_FINDINGS_OUTBOX')
         # Governance triplet PLUS the tool-call idempotency context (PR1):
         # the workflow-node path threads executionId/nodeId so the subprocess
         # can build ledger keys. orgId is resolved server-side and omitted
