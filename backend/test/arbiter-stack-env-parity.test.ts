@@ -133,6 +133,57 @@ const AMBIENT_OR_SUBPROCESS = new Set<string>([
   "MODEL_OVERRIDE",
 ]);
 
+/**
+ * Agent-process environment contract for the constitution gate
+ * (arbiter/workerWrapper/constitution_gate.py).
+ *
+ * The worker PARENT builds the agent CHILD process env in
+ * `build_subprocess_env` (arbiter/workerWrapper/worker_governance.py). Those
+ * variables are an in-process contract between parent and child, never Lambda
+ * configuration, so they must NOT be set on the CDK function. They are
+ * classified here, and `classified agent-process env` below keeps each list
+ * honest against the Python source so it cannot go stale.
+ */
+const WORKER_GOVERNANCE_FILE = "workerWrapper/worker_governance.py";
+const CONSTITUTION_GATE_FILE = "workerWrapper/constitution_gate.py";
+
+// Injected by build_subprocess_env; the test asserts each is still set there.
+const SUBPROCESS_PROVIDED = new Set<string>([
+  "CITADEL_RUN_ID", // server-minted run id; absent -> '' (omitted from evidence)
+  "CITADEL_DECLARED_TOOLS", // declared tool list; absent -> None (scope unknown)
+  "CITADEL_GOVERNANCE_STATE_FILE", // parent-loaded snapshot; absent -> live read
+]);
+
+// Read by the gate with a documented default but not yet set by any producer.
+// The test asserts build_subprocess_env still does NOT set them; once a
+// producer lands, move the variable to SUBPROCESS_PROVIDED.
+const SUBPROCESS_RESERVED_UNSET = new Set<string>([
+  "CITADEL_AGENT_DOMAIN", // absent -> '*' (all domains)
+  "CITADEL_APP_ID", // absent -> None (no registry scope)
+]);
+
+// Optional operator flags: absent means the feature is off. Never required on
+// the function env; an operator opts in per deployment.
+const OPERATOR_OPTIONAL = new Set<string>([
+  "ARBITER_GOVERNANCE_BYPASS", // absent -> 'false' (no bypass)
+]);
+
+function buildSubprocessEnvBody(): string {
+  const src = fs.readFileSync(
+    path.join(ARBITER_ROOT, WORKER_GOVERNANCE_FILE),
+    "utf8",
+  );
+  const start = src.indexOf("def build_subprocess_env(");
+  if (start < 0) throw new Error("build_subprocess_env not found");
+  const rest = src.slice(start + 1);
+  const next = rest.search(/\n(?:def|class) /);
+  return next < 0 ? rest : rest.slice(0, next);
+}
+
+function setsInSubprocessEnv(body: string, name: string): boolean {
+  return new RegExp(`env\\[\\s*['"]${name}['"]\\s*\\]\\s*=`).test(body);
+}
+
 interface Target {
   name: string;
   logicalIdPrefix: string;
@@ -286,6 +337,11 @@ describe("ArbiterStack — handler env-var parity (deployment contract)", () => 
       for (const name of read) {
         if (AMBIENT_OR_SUBPROCESS.has(name)) continue;
         if (target.optional.has(name)) continue;
+        if (target.name === "WorkerAgentWrapper") {
+          if (SUBPROCESS_PROVIDED.has(name)) continue;
+          if (SUBPROCESS_RESERVED_UNSET.has(name)) continue;
+          if (OPERATOR_OPTIONAL.has(name)) continue;
+        }
         if (!provided.has(name)) missing.push(name);
       }
       expect({ fn: target.name, missing: missing.sort() }).toEqual({
@@ -294,6 +350,41 @@ describe("ArbiterStack — handler env-var parity (deployment contract)", () => 
       });
     });
   }
+
+  describe("classified agent-process env", () => {
+    const classified = [
+      ...SUBPROCESS_PROVIDED,
+      ...SUBPROCESS_RESERVED_UNSET,
+      ...OPERATOR_OPTIONAL,
+    ];
+
+    test.each([...SUBPROCESS_PROVIDED])(
+      "%s is still set by build_subprocess_env",
+      (name) => {
+        expect(setsInSubprocessEnv(buildSubprocessEnvBody(), name)).toBe(true);
+      },
+    );
+
+    test.each([...SUBPROCESS_RESERVED_UNSET])(
+      "%s has no producer in build_subprocess_env (move to SUBPROCESS_PROVIDED once one lands)",
+      (name) => {
+        expect(setsInSubprocessEnv(buildSubprocessEnvBody(), name)).toBe(false);
+      },
+    );
+
+    test.each(classified)(
+      "%s is still read by the constitution gate (list is not stale)",
+      (name) => {
+        expect(envVarsRead([CONSTITUTION_GATE_FILE])).toContain(name);
+      },
+    );
+
+    test("no classified agent-process variable is set on the WorkerAgentWrapper function", () => {
+      const provided = functionEnvKeys(template, "WorkerAgentWrapper");
+      const leaked = classified.filter((name) => provided.has(name));
+      expect(leaked).toEqual([]);
+    });
+  });
 
   test("GOVERNANCE_LEDGER_TABLE is wired on the worker (Bug C regression guard)", () => {
     // The specific var behind Bug C — pinned so a future edit that drops it
