@@ -184,6 +184,9 @@ class TestEmptyAndUnknownConfiguration:
             'CITADEL_EXECUTION_ID': 'exec-1',
             'CITADEL_NODE_ID': 'n0',
             'CITADEL_WORKFLOW_DEFINITION_ID': 'wf-1',
+            # Constitution gate evidence: the agent declares no tools here
+            # (set but empty); CITADEL_RUN_ID is omitted (no run id on msg).
+            'CITADEL_DECLARED_TOOLS': '',
         }
         assert agent_cfg['config']['description'] == 'Base agent.'
         # Node completed normally.

@@ -41,6 +41,7 @@ _BUNDLE_MODULES = [
     "tool_idempotency_hook.py",
     "tool_idempotency.py",
     "governance_tool_hook.py",
+    "constitution_gate.py",
     "governed_tool_handler.py",
     "worker_governance.py",
     "credential_guard.py",

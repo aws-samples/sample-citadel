@@ -179,6 +179,8 @@ def build_subprocess_env(
     approval_required_tools: list[str] | None = None,
     workflow_definition_id: str | None = None,
     tool_breaker_targets: dict | None = None,
+    run_id: str | None = None,
+    declared_tools: list[str] | None = None,
 ) -> dict:
     """Build the subprocess environment with governance and config overrides.
 
@@ -317,6 +319,19 @@ def build_subprocess_env(
             env['APPROVAL_REQUIRED_TOOLS'] = ','.join(cleaned_approval)
     if isinstance(workflow_definition_id, str) and workflow_definition_id:
         env['CITADEL_WORKFLOW_DEFINITION_ID'] = workflow_definition_id
+
+    # Constitution gate evidence. ``run_id`` is the server-minted correlation
+    # id carried on the dispatch message; ``declared_tools`` is the agent's
+    # declared tool list (config['tools']), used to detect a tool outside the
+    # agent's declared scope. An EMPTY declared list is still set (the agent
+    # declared no tools); only ``None`` leaves the variable unset, which the
+    # gate treats as an unknown scope.
+    if isinstance(run_id, str) and run_id:
+        env['CITADEL_RUN_ID'] = run_id
+    if declared_tools is not None:
+        env['CITADEL_DECLARED_TOOLS'] = ','.join(
+            str(t) for t in declared_tools if t
+        )
 
     # Per-target circuit breaker (task 28d624b1). The per-dispatch map of tool
     # NAME -> [targetKind, targetId] the worker's breaker resolves against.

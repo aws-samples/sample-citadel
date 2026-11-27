@@ -271,7 +271,13 @@ _CASES = [
         "import agent_runner\n"
         "import tool_idempotency_hook\n"
         "import governed_tool_handler\n"
-        "import credential_guard\n",
+        "import credential_guard\n"
+        # constitution_gate lazily imports governance.engine /
+        # governance.hierarchy inside function bodies; import them (and the
+        # gate itself) so a layout regression there cannot hide.
+        "import constitution_gate\n"
+        "import governance.engine\n"
+        "import governance.hierarchy\n",
     ),
 ]
 

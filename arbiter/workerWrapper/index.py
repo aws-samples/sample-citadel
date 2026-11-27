@@ -1995,6 +1995,10 @@ def _process_workflow_node(event, message_attributes=None):
                 # tool) grant against execution_id.
                 approval_required_tools=_approval_required_tools(),
                 workflow_definition_id=msg.workflow_id,
+                # Constitution gate evidence: the server-minted run id from the
+                # dispatch message and the agent's declared tool list.
+                run_id=getattr(msg, 'run_id', None),
+                declared_tools=list(config.get('tools') or []),
             )
 
             usage_sink: list = []

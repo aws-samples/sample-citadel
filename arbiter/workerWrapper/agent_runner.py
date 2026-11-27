@@ -718,6 +718,22 @@ def _build_tool_breaker(execution_id, node_id):
     )
 
 
+def _build_constitution_gate(agent_id: str):
+    """Build the constitution gate from the CITADEL_* env, or None when there
+    is no execution context. Import failure aborts the node (fail-loud)."""
+    try:
+        from constitution_gate import build_constitution_gate_from_env
+    except ImportError as exc:
+        raise RuntimeError(
+            'constitution gate REQUIRED but constitution_gate could not be '
+            'imported in the agent_runner subprocess while a governance '
+            'envelope is active (CITADEL_AGENT_ID set). Check that the worker '
+            "bundle ships constitution_gate and the ArbiterCatalogLayer "
+            f"'governance' package is on the subprocess PYTHONPATH: {exc}"
+        ) from exc
+    return build_constitution_gate_from_env(agent_id)
+
+
 def _install_tool_call_hooks():
     """Install the SINGLE composed ``BeforeToolCallEvent`` seam that applies
     layer-2 tool governance THEN tool-call idempotency (finding 027c4a89).
@@ -808,6 +824,12 @@ def _install_tool_call_hooks():
             workflow_definition_id=os.environ.get('CITADEL_WORKFLOW_DEFINITION_ID', ''),
             execution_id=os.environ.get('CITADEL_EXECUTION_ID', ''),
             node_id=os.environ.get('CITADEL_NODE_ID', ''),
+            # Constitution gate: evaluates each tool dispatch against the
+            # governance constitution after the deny-list and approval gates.
+            # None on the supervisor task path (no execution record to
+            # evidence against). FAIL-LOUD like the other controls: a gate
+            # that cannot be built must not silently disable itself.
+            constitution_gate=_build_constitution_gate(agent_id or 'unknown-agent'),
         )
 
     idempotency = None
