@@ -457,11 +457,105 @@ def create_orchestration(conversation, callback=None, run_id=None, org_id=None, 
 
 
 def save_orchestration(orchestration):
+    """Persist the orchestration row. Returns True once ``put_item`` succeeded.
+
+    Failures still propagate to the caller (unchanged); the return value only
+    makes success observable for callers that need evidence of persistence.
+    """
     table = dynamodb.Table(ORCHESTRATION_TABLE)
     table.put_item(
         TableName=ORCHESTRATION_TABLE,
         Item=orchestration
     )
+    return True
+
+
+def _persist_audit_record(orchestration) -> bool:
+    """Persist the orchestration row as the audit record of the intended action.
+
+    Returns True only when ``save_orchestration`` reported success. A failure
+    is logged and reported as False; it never raises, so the governance
+    engine (not this helper) decides what a missing audit record means.
+    """
+    if not (isinstance(orchestration, dict) and orchestration.get('orchestrationId')):
+        logger.error("audit record not persisted: orchestration has no orchestrationId")
+        return False
+    try:
+        return save_orchestration(orchestration) is True
+    except Exception:
+        logger.error(
+            "audit record persist failed for orchestration %r",
+            orchestration.get('orchestrationId') if isinstance(orchestration, dict) else None,
+            exc_info=True,
+        )
+        return False
+
+
+# Orchestration ``status`` values meaning the orchestration is parked waiting
+# for a human decision (set by the escalation approval gate in
+# ``governed_process_agent_call``).
+_UNCONFIRMED_ORCHESTRATION_STATUSES = frozenset({'awaiting_approval'})
+
+
+def _audit_evidence_context(
+    orchestration,
+    audit_record_persisted: bool,
+    *,
+    agent_name,
+    loaded_agent_names,
+) -> dict:
+    """Build ``DispatchRequest.context`` from evidence only.
+
+    ``audit.record_produced`` is True only when the orchestration record was
+    persisted for this dispatch. The record identifiers are included only
+    alongside that evidence; ``run_id`` and ``trace_id`` are included only
+    when known (never as None).
+
+    ``scope.expansion_under_unconfirmed_state`` is True when EITHER
+    (a) ``agent_name`` is not among ``loaded_agent_names``, the catalogue
+    agents loaded and offered to the model as tools for this orchestration
+    (a dispatch outside that set is a dynamic scope expansion; an unknown
+    catalogue, ``None``, counts as not confirmed), OR (b) the orchestration
+    is in an unconfirmed state, i.e. its ``status`` is in
+    ``_UNCONFIRMED_ORCHESTRATION_STATUSES`` (``awaiting_approval``). It is
+    False otherwise.
+    """
+    context = {'audit.record_produced': bool(audit_record_persisted)}
+
+    in_catalogue = (
+        loaded_agent_names is not None and agent_name in loaded_agent_names
+    )
+    try:
+        unconfirmed = (
+            orchestration.get('status') in _UNCONFIRMED_ORCHESTRATION_STATUSES
+        )
+    except Exception:
+        # An unreadable status cannot be shown to be confirmed.
+        logger.debug("status lookup for dispatch context failed", exc_info=True)
+        unconfirmed = True
+    context['scope.expansion_under_unconfirmed_state'] = bool(
+        (not in_catalogue) or unconfirmed
+    )
+
+    if audit_record_persisted:
+        context['audit_record_type'] = 'orchestration'
+        context['audit_record_id'] = orchestration.get('orchestrationId')
+
+    try:
+        run_id = orchestration.get('runId')
+        if isinstance(run_id, str) and run_id:
+            context['run_id'] = run_id
+    except Exception:
+        logger.debug("run-id lookup for dispatch context failed", exc_info=True)
+
+    try:
+        trace_ctx = tracing.active_trace_context()
+        if trace_ctx and trace_ctx.get('traceId'):
+            context['trace_id'] = trace_ctx['traceId']
+    except Exception:
+        logger.debug("trace-id lookup for dispatch context failed", exc_info=True)
+
+    return context
 
 
 def load_orchestration(orchestration_id=None):
@@ -865,6 +959,11 @@ def governed_process_agent_call(
     # supervisor is the default requesting_agent_id.
     requesting_agent_id = orchestration.get('requesting_agent_id', 'supervisor')
 
+    # The orchestration row is the audit trail of the intended action. Persist
+    # it BEFORE the engine is consulted and hand the engine only what actually
+    # happened (the global constitution's audit.record_produced invariant).
+    audit_record_persisted = _persist_audit_record(orchestration)
+
     request = DispatchRequest(
         requesting_agent_id=requesting_agent_id,
         target_agent_id=agent_name,
@@ -872,7 +971,14 @@ def governed_process_agent_call(
         domain=domain,
         workflow_id=workflow_id,
         agent_use_id=agent_use_id,
-        context={},
+        context=_audit_evidence_context(
+            orchestration,
+            audit_record_persisted,
+            agent_name=agent_name,
+            loaded_agent_names={
+                a.get('name') for a in agents_config.get('agents', [])
+            },
+        ),
         agent_input=agent_input if isinstance(agent_input, dict) else {'raw': agent_input},
     )
 
