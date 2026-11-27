@@ -97,6 +97,20 @@ _AGENTS_CFG = {"agents": [{"name": "agent-a", "domain": "billing", "registryStat
 _ORCH = {"orchestrationId": "orch-esc-1", "orgId": "org-test"}
 
 
+def _approval_saves(mock_save):
+    """save_orchestration calls that persisted an awaiting_approval row.
+
+    Every governed dispatch also persists the row once, before the engine is
+    consulted, as the audit record; only the approval-state save is the
+    subject of the escalation tests.
+    """
+    return [
+        c for c in mock_save.call_args_list
+        if (c.args[0] if c.args else c.kwargs.get("orchestration")).get("status")
+        == "awaiting_approval"
+    ]
+
+
 def _common_patches(mode, finding):
     return (
         patch.object(supervisor_mod, "load_governance_state", return_value=_make_state(mode)),
@@ -133,7 +147,9 @@ class TestGateOnEscalateAwaitsApproval:
         mock_dispatch.assert_not_called()
 
         # Orchestration saved with awaiting_approval status + approval request
-        mock_save.assert_called_once()
+        # Two saves: the pre-dispatch audit record, then the approval state.
+        assert mock_save.call_count == 2
+        assert len(_approval_saves(mock_save)) == 2  # same dict object, mutated in place
         saved = mock_save.call_args.kwargs.get("orchestration", mock_save.call_args[0][0] if mock_save.call_args[0] else None)
         assert saved["status"] == "awaiting_approval"
         assert "approvalRequest" in saved
@@ -216,8 +232,10 @@ class TestGateOffEscalateTerminal:
             )
 
         mock_dispatch.assert_not_called()
-        # save_orchestration NOT called from the ESCALATE path (terminal)
-        mock_save.assert_not_called()
+        # No approval-state save from the ESCALATE path (terminal); only the
+        # pre-dispatch audit record is persisted.
+        mock_save.assert_called_once()
+        assert _approval_saves(mock_save) == []
         assert result["escalated"] is True
         assert result["reason"] == "escalation-test"  # original reason, not awaiting_approval
 
@@ -236,7 +254,8 @@ class TestGateOffEscalateTerminal:
                 _AGENTS_CFG, orch, "agent-a", {"x": 1}, "use-1",
             )
 
-        mock_save.assert_not_called()
+        mock_save.assert_called_once()  # pre-dispatch audit record only
+        assert _approval_saves(mock_save) == []
         assert result["reason"] == "escalation-test"
 
 
@@ -285,6 +304,7 @@ class TestHaltStaysTerminal:
             )
 
         mock_dispatch.assert_not_called()
-        mock_save.assert_not_called()
+        mock_save.assert_called_once()  # pre-dispatch audit record only
+        assert _approval_saves(mock_save) == []
         assert result["escalated"] is True
         assert result["reason"] == "halt-reason"
