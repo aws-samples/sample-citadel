@@ -1994,43 +1994,44 @@ def _process_workflow_node(event, message_attributes=None):
             # The subprocess runs with every ambient AWS credential scrubbed, so
             # the constitution gate's governance/executions reads are done HERE
             # with the worker's own role and handed over as a private file.
-            governance_snapshot_path = _prepare_governance_snapshot(msg.execution_id)
-            extra_env = build_subprocess_env(
-                {},
-                model_override=model_override,
-                agent_id=msg.agent_id,
-                workflow_id=msg.execution_id,
-                governance_snapshot_path=governance_snapshot_path,
-                # Tool-call idempotency (PR1) context. orgId is resolved
-                # SERVER-SIDE from the execution row (never trusted from the
-                # dispatch payload); executionId/nodeId come from the validated
-                # node-dispatch message. When these are threaded, agent_runner
-                # installs the idempotency hook in the subprocess.
-                execution_id=msg.execution_id,
-                node_id=msg.node_id,
-                org_id=_resolve_execution_org_id(msg.execution_id),
-                # PR2 dispatch-generation fence: carried on the validated
-                # node-dispatch message (server-minted by the step runner's
-                # dispatch guard). When present, agent_runner fences the tool-call
-                # reserve against it; when None (pre-fence dispatch) the reserve is
-                # unfenced, preserving back-compat.
-                dispatch_generation=msg.dispatch_generation,
-                # Approval-required tool gating (finding c947aa77). The OPT-IN set
-                # is assembled SERVER-SIDE here (never the S3 tool module). The
-                # grant scope's workflow-DEFINITION id is msg.workflow_id (the
-                # reusable template), distinct from the per-run execution_id above;
-                # the evaluator single-use-consumes the (org, workflowDef, node,
-                # tool) grant against execution_id.
-                approval_required_tools=_approval_required_tools(),
-                workflow_definition_id=msg.workflow_id,
-                # Constitution gate evidence: the server-minted run id from the
-                # dispatch message and the agent's declared tool list.
-                run_id=getattr(msg, 'run_id', None),
-                declared_tools=list(config.get('tools') or []),
-            )
-
-            usage_sink: list = []
+            governance_snapshot_path = None
             try:
+                governance_snapshot_path = _prepare_governance_snapshot(msg.execution_id)
+                extra_env = build_subprocess_env(
+                    {},
+                    model_override=model_override,
+                    agent_id=msg.agent_id,
+                    workflow_id=msg.execution_id,
+                    governance_snapshot_path=governance_snapshot_path,
+                    # Tool-call idempotency (PR1) context. orgId is resolved
+                    # SERVER-SIDE from the execution row (never trusted from the
+                    # dispatch payload); executionId/nodeId come from the validated
+                    # node-dispatch message. When these are threaded, agent_runner
+                    # installs the idempotency hook in the subprocess.
+                    execution_id=msg.execution_id,
+                    node_id=msg.node_id,
+                    org_id=_resolve_execution_org_id(msg.execution_id),
+                    # PR2 dispatch-generation fence: carried on the validated
+                    # node-dispatch message (server-minted by the step runner's
+                    # dispatch guard). When present, agent_runner fences the tool-call
+                    # reserve against it; when None (pre-fence dispatch) the reserve is
+                    # unfenced, preserving back-compat.
+                    dispatch_generation=msg.dispatch_generation,
+                    # Approval-required tool gating (finding c947aa77). The OPT-IN set
+                    # is assembled SERVER-SIDE here (never the S3 tool module). The
+                    # grant scope's workflow-DEFINITION id is msg.workflow_id (the
+                    # reusable template), distinct from the per-run execution_id above;
+                    # the evaluator single-use-consumes the (org, workflowDef, node,
+                    # tool) grant against execution_id.
+                    approval_required_tools=_approval_required_tools(),
+                    workflow_definition_id=msg.workflow_id,
+                    # Constitution gate evidence: the server-minted run id from the
+                    # dispatch message and the agent's declared tool list.
+                    run_id=getattr(msg, 'run_id', None),
+                    declared_tools=list(config.get('tools') or []),
+                )
+
+                usage_sink: list = []
                 response = run_agent_in_subprocess(
                     msg.input, scoped_credentials, extra_env, raise_on_error=True,
                     usage_sink=usage_sink, credential_mode=credential_mode,

@@ -71,7 +71,8 @@ def _extract_extra_env(call):
     return env
 
 
-def _run_node(configuration, agent_cfg=None, snapshot_path=None, run_error=None):
+def _run_node(configuration, agent_cfg=None, snapshot_path=None, run_error=None,
+              build_env_error=None):
     """Drive process_event with a workflow-node message; return
     (mock_run, mock_events, agent_cfg)."""
     if agent_cfg is None:
@@ -90,7 +91,12 @@ def _run_node(configuration, agent_cfg=None, snapshot_path=None, run_error=None)
                               return_value=snapshot_path), \
                  patch.object(index, 'run_agent_in_subprocess',
                               return_value='done', side_effect=run_error) as mock_run:
-                index.process_event(_msg(configuration), {})
+                if build_env_error is not None:
+                    with patch.object(index, 'build_subprocess_env',
+                                      side_effect=build_env_error):
+                        index.process_event(_msg(configuration), {})
+                else:
+                    index.process_event(_msg(configuration), {})
 
     return mock_run, mock_events, agent_cfg
 
@@ -186,6 +192,20 @@ class TestGovernanceSnapshotWiring:
             {}, snapshot_path=str(snap), run_error=RuntimeError('agent crashed'),
         )
 
+        assert not snap.exists()
+        entry = mock_events.put_events.call_args.kwargs['Entries'][0]
+        assert entry['DetailType'] == 'workflow.node.failed'
+
+
+    def test_snapshot_is_removed_when_dispatch_fails_before_the_subprocess_starts(self, tmp_path):
+        snap = tmp_path / 'snap.pkl'
+        snap.write_bytes(b'x')
+
+        mock_run, mock_events, _ = _run_node(
+            {}, snapshot_path=str(snap), build_env_error=RuntimeError('env build failed'),
+        )
+
+        mock_run.assert_not_called()
         assert not snap.exists()
         entry = mock_events.put_events.call_args.kwargs['Entries'][0]
         assert entry['DetailType'] == 'workflow.node.failed'
