@@ -88,7 +88,10 @@ def _state() -> MagicMock:
     return state
 
 
-def _dispatch(orchestration, *, save_side_effect=None, save_return=True, order=None):
+def _dispatch(
+    orchestration, *, save_side_effect=None, save_return=True, order=None,
+    agents_config=None, agent_name="demo-echo-agent",
+):
     """Run governed_process_agent_call; return (request seen by engine, save mock)."""
     order = order if order is not None else []
 
@@ -114,7 +117,8 @@ def _dispatch(orchestration, *, save_side_effect=None, save_return=True, order=N
          ):
         MockEngine.return_value.evaluate.side_effect = _evaluate
         supervisor_mod.governed_process_agent_call(
-            _AGENTS_CONFIG, orchestration, "demo-echo-agent", {"x": 1}, "use-1",
+            agents_config if agents_config is not None else _AGENTS_CONFIG,
+            orchestration, agent_name, {"x": 1}, "use-1",
         )
         request = MockEngine.return_value.evaluate.call_args.args[0]
     return request, mock_save
@@ -153,6 +157,7 @@ class TestDispatchAuditContext:
             "audit_record_id": _ORCH_ID,
             "run_id": _RUN_ID,
             "trace_id": _TRACE_ID,
+            "scope.expansion_under_unconfirmed_state": False,
         }
 
     def test_record_is_persisted_before_the_engine_is_consulted(self):
@@ -342,15 +347,12 @@ class TestSeededConstitutionEvaluation:
         assert finding.decision == AD.DENY
         assert "audit.record_produced" in finding.reason
 
-    def test_supervisor_context_satisfies_the_audit_invariant(self):
-        # With the evidence-only context the audit invariant no longer fires.
-        # (The second seeded rule is checked in its own test below.)
+    def test_supervisor_context_is_allowed_by_both_seeded_rules(self):
         from arbiter.governance.models import ArbitrationDecision as AD
 
         finding = _seeded_engine().evaluate(_demo_echo_request(_supervisor_context()))
 
-        assert "audit.record_produced" not in finding.reason
-        assert finding.decision in (AD.PERMIT, AD.DENY)
+        assert finding.decision == AD.PERMIT
 
     def test_unpersisted_record_is_legitimately_denied_by_the_audit_invariant(self):
         from arbiter.governance.models import ArbitrationDecision as AD
@@ -361,19 +363,74 @@ class TestSeededConstitutionEvaluation:
         assert finding.decision == AD.DENY
         assert "audit.record_produced" in finding.reason
 
-    def test_allow_requires_the_scope_expansion_field_the_supervisor_does_not_set(self):
-        # Pins the current state of the second seeded rule
-        # (scope.expansion_under_unconfirmed_state eq False): absent from the
-        # context it reads as None, which violates `eq False`. The supervisor
-        # has no evidence for that field, so it does not assert it.
+    def test_missing_scope_field_is_denied_by_the_scope_rule(self):
+        # An absent field reads as None, which violates `eq False`.
         from arbiter.governance.models import ArbitrationDecision as AD
 
-        ctx = _supervisor_context()
-        denied = _seeded_engine().evaluate(_demo_echo_request(ctx))
-        allowed = _seeded_engine().evaluate(_demo_echo_request(
-            {**ctx, "scope.expansion_under_unconfirmed_state": False},
-        ))
+        ctx = {
+            k: v for k, v in _supervisor_context().items()
+            if k != "scope.expansion_under_unconfirmed_state"
+        }
+        finding = _seeded_engine().evaluate(_demo_echo_request(ctx))
 
-        assert denied.decision == AD.DENY
-        assert "scope.expansion_under_unconfirmed_state" in denied.reason
-        assert allowed.decision == AD.PERMIT
+        assert finding.decision == AD.DENY
+        assert "scope.expansion_under_unconfirmed_state" in finding.reason
+
+    def test_dynamic_expansion_context_is_denied_by_the_scope_rule(self):
+        from arbiter.governance.models import ArbitrationDecision as AD
+
+        request, _ = _dispatch(_orch(), agent_name="not-in-catalogue")
+        finding = _seeded_engine().evaluate(_demo_echo_request(request.context))
+
+        assert finding.decision == AD.DENY
+        assert "scope.expansion_under_unconfirmed_state" in finding.reason
+
+    def test_awaiting_approval_context_is_denied_by_the_scope_rule(self):
+        from arbiter.governance.models import ArbitrationDecision as AD
+
+        request, _ = _dispatch({**_orch(), "status": "awaiting_approval"})
+        finding = _seeded_engine().evaluate(_demo_echo_request(request.context))
+
+        assert finding.decision == AD.DENY
+        assert "scope.expansion_under_unconfirmed_state" in finding.reason
+
+
+# ---------------------------------------------------------------------------
+# 4. scope.expansion_under_unconfirmed_state evidence
+# ---------------------------------------------------------------------------
+
+_SCOPE_FIELD = "scope.expansion_under_unconfirmed_state"
+
+
+class TestScopeConfinementEvidence:
+    def test_catalogue_agent_in_running_orchestration_is_not_an_expansion(self):
+        request, _ = _dispatch({**_orch(), "status": "running"})
+
+        assert request.context[_SCOPE_FIELD] is False
+
+    def test_catalogue_agent_with_no_status_is_not_an_expansion(self):
+        request, _ = _dispatch(_orch())
+
+        assert request.context[_SCOPE_FIELD] is False
+
+    def test_agent_outside_the_loaded_catalogue_is_an_expansion(self):
+        request, _ = _dispatch(_orch(), agent_name="surprise-agent")
+
+        assert request.context[_SCOPE_FIELD] is True
+
+    def test_awaiting_approval_orchestration_is_an_expansion(self):
+        request, _ = _dispatch({**_orch(), "status": "awaiting_approval"})
+
+        assert request.context[_SCOPE_FIELD] is True
+
+    def test_empty_loaded_catalogue_is_an_expansion(self):
+        request, _ = _dispatch(_orch(), agents_config={"agents": []})
+
+        assert request.context[_SCOPE_FIELD] is True
+
+    def test_helper_treats_unknown_catalogue_as_an_expansion(self):
+        ctx = supervisor_mod._audit_evidence_context(
+            _orch(), True, agent_name="demo-echo-agent", loaded_agent_names=None,
+        )
+
+        assert ctx[_SCOPE_FIELD] is True
