@@ -149,8 +149,8 @@ class TestRegistryDeniedIsNonFatal:
         assert data["registrySeeded"] is False
 
         # DDB seeding stays authoritative: fabricator, demo-echo-agent,
-        # demo-router-agent, 3 authority units, 1 constitutional layer = 7 put_item calls.
-        assert mock_table.put_item.call_count == 7
+        # demo-router-agent, 4 authority units, 1 constitutional layer = 8 put_item calls.
+        assert mock_table.put_item.call_count == 8
         items = [c.kwargs["Item"] for c in mock_table.put_item.call_args_list]
         agent_ids = {i.get("agentId") for i in items if "agentId" in i}
         assert "fabricator" in agent_ids

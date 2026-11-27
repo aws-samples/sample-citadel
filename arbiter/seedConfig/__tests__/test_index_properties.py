@@ -108,9 +108,9 @@ class TestSeedConfigHandler:
             handler(event, context)
 
             # --- Deterministic call count: 3 agents (fabricator + echo + router) +
-            # 3 units + 1 layer = 7. (Per D3: no global fabricator unit.)
-            assert mock_table.put_item.call_count == 7, (
-                f"expected 7 put_item calls (3 agents + 3 units + 1 layer), "
+            # 4 units + 1 layer = 8. (Per D3: no global fabricator unit.)
+            assert mock_table.put_item.call_count == 8, (
+                f"expected 8 put_item calls (3 agents + 4 units + 1 layer), "
                 f"got {mock_table.put_item.call_count}"
             )
 
@@ -135,6 +135,7 @@ class TestSeedConfigHandler:
                 "arbiter-invoke-all",
                 "supervisor-invoke-all",
                 "escalate-invoke-all",
+                "worker-invoke-tool-all",
             }, f"unexpected unit ids: {unit_ids}"
 
             arbiter_unit = next(
@@ -168,6 +169,21 @@ class TestSeedConfigHandler:
             assert escalate_unit["registryId"] == "*GLOBAL*"
             assert escalate_unit["scope"]["decision_type"] == "invoke_tool"
             assert escalate_unit["scope"]["domain"] == "escalate"
+
+            # Worker tool dispatches are evaluated against the constitution
+            # as ``invoke_tool`` under a wildcard requester; this unit keeps
+            # existing workflows passing until the owner narrows it.
+            worker_tool_unit = next(
+                i for i in unit_items if i["unitId"] == "worker-invoke-tool-all"
+            )
+            assert worker_tool_unit["agentId"] == "*"
+            assert worker_tool_unit["registryId"] == "*GLOBAL*"
+            assert worker_tool_unit["riskRating"] == "low"
+            assert worker_tool_unit["revoked"] is False
+            assert worker_tool_unit["scope"]["decision_type"] == "invoke_tool"
+            assert worker_tool_unit["scope"]["domain"] == "*"
+            assert worker_tool_unit["scope"]["conditions"] == {}
+            assert worker_tool_unit["scope"]["limits"] == {}
 
             # Per D3: no global fabricator unit.
             assert not any(

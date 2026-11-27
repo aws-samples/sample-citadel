@@ -901,6 +901,23 @@ def handler(event, context):
                     'riskRating': 'low',
                     'revoked': False,
                 },
+                # Worker tool dispatches are evaluated against the constitution
+                # as ``invoke_tool`` actions. This wildcard unit keeps existing
+                # workflows passing (the constitution's audit and scope rules
+                # still apply); the owner can narrow it per agent or domain.
+                {
+                    'unitId': 'worker-invoke-tool-all',
+                    'agentId': '*',
+                    'registryId': '*GLOBAL*',
+                    'scope': {
+                        'decision_type': 'invoke_tool',
+                        'domain': '*',
+                        'conditions': {},
+                        'limits': {},
+                    },
+                    'riskRating': 'low',
+                    'revoked': False,
+                },
                 {
                     'unitId': 'escalate-invoke-all',
                     'agentId': 'arbiter',
