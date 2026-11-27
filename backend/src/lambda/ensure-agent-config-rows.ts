@@ -26,7 +26,11 @@ import {
   BatchGetCommand,
   PutCommand,
 } from "@aws-sdk/lib-dynamodb";
-import { buildAgentCacheRecord, toInternalState } from "./registry-sync";
+import {
+  buildAgentCacheRecord,
+  toInternalState,
+  type AgentCacheRecord,
+} from "./registry-sync";
 import { getRegistryService } from "./agent-config-resolver";
 import { resolveKind } from "../utils/citadel-kind";
 
@@ -103,6 +107,40 @@ async function findExistingRows(agentIds: string[]): Promise<Set<string>> {
   return existing;
 }
 
+/** Row shape this writer creates: the shared cache row plus a config flag. */
+type EnsuredAgentRow = AgentCacheRecord & { configStatus?: "incomplete" };
+
+function isNonBlankString(value: unknown): boolean {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function hasSchemaContent(schema: unknown): boolean {
+  if (typeof schema === "string") return schema.trim().length > 0;
+  return (
+    typeof schema === "object" &&
+    schema !== null &&
+    !Array.isArray(schema) &&
+    Object.keys(schema).length > 0
+  );
+}
+
+/**
+ * Names the parts of a projected agent config the supervisor needs to build a
+ * tool (name, description, a non-empty schema) that are missing or blank.
+ * Empty when the config is complete.
+ */
+function missingConfigParts(config: unknown): string[] {
+  if (typeof config !== "object" || config === null || Array.isArray(config)) {
+    return ["config"];
+  }
+  const fields = config as Record<string, unknown>;
+  const missing: string[] = [];
+  if (!isNonBlankString(fields.name)) missing.push("name");
+  if (!isNonBlankString(fields.description)) missing.push("description");
+  if (!hasSchemaContent(fields.schema)) missing.push("schema");
+  return missing;
+}
+
 /**
  * Ensures an AGENT_CONFIG_TABLE row exists for every given registry
  * recordId. Missing rows are synthesized from the live registry record via
@@ -163,7 +201,7 @@ export async function ensureAgentConfigRows(
         continue;
       }
       // SAME row shape registry-sync writes for CREATED/UPDATED events…
-      const item = buildAgentCacheRecord(agentId, {
+      const item: EnsuredAgentRow = buildAgentCacheRecord(agentId, {
         description: record.description,
         customDescriptorContent: record.customDescriptorContent ?? null,
         createdAt: record.createdAt
@@ -186,6 +224,21 @@ export async function ensureAgentConfigRows(
       item.registryStatus = record.status;
       item.registryRecordId = record.recordId;
       item.statusUpdatedAt = new Date().toISOString();
+
+      // A row the supervisor cannot build a tool from must not be active:
+      // the approval status says "approved", but dispatch would skip it.
+      // Project it inactive and flag it so the gap is visible and the row
+      // can be repaired; the activator only flips rows that exist, so it
+      // stays unchanged.
+      const missing = missingConfigParts(item.config);
+      if (missing.length > 0) {
+        item.state = "inactive";
+        item.configStatus = "incomplete";
+        console.warn(
+          `ensureAgentConfigRows: incomplete agent config for "${agentId}", projecting inactive`,
+          { agentId, registryStatus: record.status, missing },
+        );
+      }
 
       await docClient.send(
         new PutCommand({

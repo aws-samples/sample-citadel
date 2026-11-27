@@ -55,6 +55,38 @@ interface FakeRegistryRecord {
   updatedAt?: Date;
 }
 
+/** A config the supervisor can build a tool from: name, description, schema. */
+function completeConfig(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    name: "ap-billing-agent-v1",
+    description: "Billing agent",
+    schema: { type: "object", properties: { q: { type: "string" } } },
+    ...overrides,
+  };
+}
+
+/** Registry record whose descriptor carries exactly the given `config`. */
+function recordWithConfig(
+  recordId: string,
+  config: unknown,
+  status = "APPROVED",
+): FakeRegistryRecord {
+  return registryRecord({
+    recordId,
+    status,
+    customDescriptorContent: JSON.stringify({
+      citadelKind: "agent",
+      categories: [],
+      icon: "",
+      state: "active",
+      manifest: { name: "ap-billing-agent-v1", version: "1.0.0" },
+      ...(config === undefined ? {} : { config }),
+    }),
+  });
+}
+
 function registryRecord(
   overrides: Partial<FakeRegistryRecord> = {},
 ): FakeRegistryRecord {
@@ -70,6 +102,7 @@ function registryRecord(
       state: "active",
       manifest: { name: "ap-billing-agent-v1", version: "1.0.0" },
       sourceProjectId: "sess-1",
+      config: completeConfig(),
     }),
     createdAt: new Date("2026-07-20T00:00:00.000Z"),
     updatedAt: new Date("2026-07-20T01:00:00.000Z"),
@@ -156,7 +189,7 @@ describe("ensureAgentConfigRows", () => {
     // SAME row mapping as registry-sync.buildAgentCacheRecord.
     expect(input.Item).toMatchObject({
       agentId: "xL0K6QlfKkEx",
-      config: undefined,
+      config: completeConfig(),
       description: "Billing agent",
       state: "active", // APPROVED → active
       categories: ["fabricated"],
@@ -356,5 +389,115 @@ describe("ensureAgentConfigRows", () => {
     const input = ddbMock.commandCalls(PutCommand)[0].args[0].input;
     expect(input.Item?.sourceProjectId).toBe("proj-99");
     expect(input.Item?.registryRecordId).toBe("rec-proj");
+  });
+});
+
+describe("ensureAgentConfigRows — incomplete agent configs", () => {
+  const incompleteConfigs: Array<[string, unknown]> = [
+    ["config absent", undefined],
+    ["config null", null],
+    ["config empty object", {}],
+    ["name absent", completeConfig({ name: undefined })],
+    ["name blank", completeConfig({ name: "   " })],
+    ["description absent", completeConfig({ description: undefined })],
+    ["description blank", completeConfig({ description: "" })],
+    ["schema absent", completeConfig({ schema: undefined })],
+    ["schema null", completeConfig({ schema: null })],
+    ["schema empty object", completeConfig({ schema: {} })],
+    ["schema blank string", completeConfig({ schema: "  " })],
+  ];
+
+  async function projectedItem(
+    config: unknown,
+    status = "APPROVED",
+  ): Promise<Record<string, unknown>> {
+    mockBatchGetExisting([]);
+    mockRegistry({ "rec-cfg": recordWithConfig("rec-cfg", config, status) });
+    ddbMock.on(PutCommand).resolves({});
+    await ensureAgentConfigRows(["rec-cfg"]);
+    const puts = ddbMock.commandCalls(PutCommand);
+    expect(puts).toHaveLength(1);
+    return puts[0].args[0].input.Item as Record<string, unknown>;
+  }
+
+  it.each(incompleteConfigs)(
+    "writes state inactive and configStatus incomplete for an APPROVED record when %s",
+    async (_label, config) => {
+      const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+      const item = await projectedItem(config);
+
+      expect(item.state).toBe("inactive");
+      expect(item.configStatus).toBe("incomplete");
+      // The approval-gate fields still mirror the live record.
+      expect(item[REGISTRY_STATUS_FIELD]).toBe("APPROVED");
+      expect(item[REGISTRY_RECORD_ID_FIELD]).toBe("rec-cfg");
+      warnSpy.mockRestore();
+    },
+  );
+
+  it("logs a WARN naming the agent and what is missing", async () => {
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+
+    await projectedItem(completeConfig({ description: "", schema: {} }));
+
+    const messages = warnSpy.mock.calls.map((call) => JSON.stringify(call));
+    const incompleteWarn = messages.find((m) => m.includes("incomplete"));
+    expect(incompleteWarn).toBeDefined();
+    expect(incompleteWarn).toContain("rec-cfg");
+    expect(incompleteWarn).toContain("description");
+    expect(incompleteWarn).toContain("schema");
+    warnSpy.mockRestore();
+  });
+
+  it("never writes state active for an incomplete config, whatever the record status", async () => {
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+    for (const status of ["APPROVED", "DRAFT", "PENDING_APPROVAL"]) {
+      ddbMock.reset();
+      const item = await projectedItem({}, status);
+      expect(item.state).toBe("inactive");
+      expect(item.configStatus).toBe("incomplete");
+    }
+    warnSpy.mockRestore();
+  });
+
+  it("keeps state active and sets no configStatus for a complete config", async () => {
+    const item = await projectedItem(completeConfig());
+
+    expect(item.state).toBe("active");
+    expect(item).not.toHaveProperty("configStatus");
+  });
+
+  it("treats a JSON-string config the same as an object config", async () => {
+    const item = await projectedItem(JSON.stringify(completeConfig()));
+
+    expect(item.state).toBe("active");
+    expect(item).not.toHaveProperty("configStatus");
+  });
+
+  it("keeps the plain creation-only Put the activator relies on", async () => {
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+    mockBatchGetExisting([]);
+    mockRegistry({ "rec-cfg": recordWithConfig("rec-cfg", {}) });
+    ddbMock.on(PutCommand).resolves({});
+
+    await ensureAgentConfigRows(["rec-cfg"]);
+
+    const input = ddbMock.commandCalls(PutCommand)[0].args[0].input;
+    expect(input.Item?.agentId).toBe("rec-cfg");
+    expect(input.ConditionExpression).toBe("attribute_not_exists(agentId)");
+    warnSpy.mockRestore();
+  });
+
+  it("still counts an incomplete row as ensured (the row exists, inactive)", async () => {
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+    mockBatchGetExisting([]);
+    mockRegistry({ "rec-cfg": recordWithConfig("rec-cfg", {}) });
+    ddbMock.on(PutCommand).resolves({});
+
+    const result = await ensureAgentConfigRows(["rec-cfg"]);
+
+    expect(result.ensured).toEqual(["rec-cfg"]);
+    expect(result.failed).toEqual([]);
+    warnSpy.mockRestore();
   });
 });
