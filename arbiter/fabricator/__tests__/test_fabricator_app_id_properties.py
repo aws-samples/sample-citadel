@@ -67,7 +67,9 @@ file_names = st.text(
     alphabet=st.characters(whitelist_categories=("L", "N")),
 ).map(lambda s: f"/tmp/{s}.py")
 
-descriptions = st.text(min_size=1, max_size=100)
+# Blank descriptions are rejected by the agent config contract, so the
+# strategy only generates non-blank ones.
+descriptions = st.text(min_size=1, max_size=100).filter(lambda s: s.strip() != "")
 
 
 # ---------------------------------------------------------------------------

@@ -51,6 +51,7 @@ from registry_recovery import (
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
+from common.agent_config_contract import agent_config_problem
 from common.region import cross_region_prefix
 from common.workflow_tracking import RESERVED_WORKFLOW_TRACKING_KEYS
 from model_config_loader import load_model_id
@@ -1420,6 +1421,20 @@ def get_worker_tool(tool_name: str) -> str:
         f"no org-owned registry record found."
     )
 
+def _reject_incomplete_agent_config(
+    agent_id: Any, agent_description: Any, llm_tool_schema: Any, caller: str
+) -> None:
+    """Raise ValueError when the supervisor could not build a tool from this config.
+
+    Called before any write, in the same style as the reserved-agent-id guard.
+    """
+    problem = agent_config_problem(agent_id, agent_description, llm_tool_schema)
+    if problem is not None:
+        error_msg = f"agent config invalid for agent_id {agent_id!r}: {problem}"
+        print(f"[{caller}] ERROR: {error_msg}")
+        raise ValueError(error_msg)
+
+
 @tool
 def store_agent_config_dynamo(file_name: str, agent_id: str, llm_tool_schema: Any, agent_description: str, app_id: str = None, source_project_id: str = None, registry_record_id: str = None):
     """Store agent configuration in DynamoDB.
@@ -1486,6 +1501,12 @@ def store_agent_config_dynamo(file_name: str, agent_id: str, llm_tool_schema: An
             )
             print(f"[store_agent_config_dynamo] ERROR: {error_msg}")
             raise ValueError(error_msg)
+
+        # Contract check before any write: the supervisor skips an agent whose
+        # name/description is empty or whose schema it cannot turn into a tool.
+        _reject_incomplete_agent_config(
+            agent_id, agent_description, llm_tool_schema, "store_agent_config_dynamo"
+        )
 
         # if llm_tool_schema is str then json loads it
         if isinstance(llm_tool_schema, str):
@@ -1746,6 +1767,11 @@ def store_agent_config_registry(
             )
             print(f"[store_agent_config_registry] ERROR: {error_msg}")
             raise ValueError(error_msg)
+
+        # Contract check before the existing-record lookup or any write.
+        _reject_incomplete_agent_config(
+            agent_id, agent_description, llm_tool_schema, "store_agent_config_registry"
+        )
 
         # Normalize the schema — strings arrive from the LLM as JSON text.
         if isinstance(llm_tool_schema, str):
