@@ -10,6 +10,7 @@ import {
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../../components/ui/card';
 import { Skeleton } from '../../components/ui/skeleton';
 import { Button } from '../../components/ui/button';
+import { QueueHealthRow } from '../../components/QueueHealthRow';
 
 interface ChartRow4Props {
   counts: any;
@@ -77,6 +78,7 @@ export default function ChartRow4({ counts, dataStores: _dataStores }: ChartRow4
               <HealthBarWithIcon icon={<Workflow className="size-4 text-chart-4" />} label="Workflows" value={workflowsHealth} />
               <HealthBarWithIcon icon={<Plug className="size-4 text-destructive" />} label="Integrations" value={integrationsHealth} />
               <HealthBarWithIcon icon={<Activity className="size-4 text-chart-2" />} label="Infrastructure" value={infraHealth} />
+              <QueueHealthRow />
               <div className="pt-4 border-t border-border">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
