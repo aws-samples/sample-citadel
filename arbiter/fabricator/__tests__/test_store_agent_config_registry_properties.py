@@ -59,7 +59,9 @@ safe_text = st.text(
 agent_ids = safe_text
 app_ids = safe_text
 requester_ids = safe_text
-descriptions = st.text(min_size=1, max_size=100)
+# Blank descriptions are rejected by the agent config contract, so the
+# strategy only generates non-blank ones.
+descriptions = st.text(min_size=1, max_size=100).filter(lambda s: s.strip() != "")
 
 tool_schemas = st.fixed_dictionaries({
     "type": st.just("object"),
