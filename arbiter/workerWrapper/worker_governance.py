@@ -39,6 +39,7 @@ Plan: US-ARB-015 Δ 14. QD-5 distinct-scope rule.
 import json
 import logging
 import os
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +164,25 @@ def apply_system_prompt_addition(system_prompt: str, addition: str | None) -> st
     return system_prompt + '\n' + addition
 
 
+def declared_tool_identifiers(tools: Any) -> list[str]:
+    """Every identifier an agent's ``config['tools']`` entries go by.
+
+    Entries are bare toolIds (strings) or dicts with ``name`` and/or
+    ``toolId`` (the worker resolves a tool's name as ``name or toolId``), so
+    both are collected, order-preserving and de-duplicated.
+    """
+    out: list[str] = []
+    for entry in tools or []:
+        candidates = (
+            [entry.get('name'), entry.get('toolId')]
+            if isinstance(entry, dict) else [entry]
+        )
+        for c in candidates:
+            if isinstance(c, str) and c and c not in out:
+                out.append(c)
+    return out
+
+
 def build_subprocess_env(
     base_env: dict,
     app_config: dict | None = None,
@@ -180,7 +200,8 @@ def build_subprocess_env(
     workflow_definition_id: str | None = None,
     tool_breaker_targets: dict | None = None,
     run_id: str | None = None,
-    declared_tools: list[str] | None = None,
+    declared_tools: list[Any] | None = None,
+    governance_snapshot_path: str | None = None,
 ) -> dict:
     """Build the subprocess environment with governance and config overrides.
 
@@ -330,8 +351,13 @@ def build_subprocess_env(
         env['CITADEL_RUN_ID'] = run_id
     if declared_tools is not None:
         env['CITADEL_DECLARED_TOOLS'] = ','.join(
-            str(t) for t in declared_tools if t
+            declared_tool_identifiers(declared_tools)
         )
+    # Read-only governance evidence the parent loaded with the worker's own
+    # credentials (the subprocess has none of them). Optional: absent means
+    # the gate reads live and fails closed.
+    if isinstance(governance_snapshot_path, str) and governance_snapshot_path:
+        env['CITADEL_GOVERNANCE_STATE_FILE'] = governance_snapshot_path
 
     # Per-target circuit breaker (task 28d624b1). The per-dispatch map of tool
     # NAME -> [targetKind, targetId] the worker's breaker resolves against.

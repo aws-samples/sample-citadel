@@ -12,8 +12,21 @@ server-side facts only:
   ``EXECUTIONS_TABLE``, cached per process).
 * ``scope.expansion_under_unconfirmed_state`` is True when the tool is not in
   the agent's declared tools (``CITADEL_DECLARED_TOOLS``, absent means not
-  confirmed) or the execution/node status is ``awaiting_approval``.
+  confirmed) or the execution/node status is ``awaiting_approval``. A declared
+  entry matches by ANY of its identifiers (``name`` or ``toolId``), compared
+  with case and ``-``/``_`` folded. An EMPTY declared list means the agent
+  declares no external tools and uses only built-in tools defined inline by
+  its own module, so nothing can expand beyond it and every tool is in scope.
 * ``run_id`` and ``trace_id`` ride along only when known.
+
+Credentials: the agent subprocess runs with every ambient AWS credential
+scrubbed (scoped STS credentials, or none for ``credentialMode: none``), so it
+cannot read the governance tables or the executions table with the worker's
+Lambda role. The parent loads that read-only evidence with its own credentials
+before spawning (``prepare_governance_snapshot``) and passes it through a
+private file named by ``CITADEL_GOVERNANCE_STATE_FILE``. Without the variable
+the gate reads live (same ``boto3.resource('dynamodb')`` construction as the
+ledger write) and fails closed if that read is refused.
 
 Enforcement mirrors the supervisor: ``strict`` refuses any non-PERMIT
 decision, ``shadow``/``permissive`` log the would-block and proceed. A state
@@ -27,6 +40,8 @@ from __future__ import annotations
 
 import logging
 import os
+import pickle
+import tempfile
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -77,6 +92,75 @@ def constitution_denied_result(
 def _default_load_state(registry_id: str | None = None):
     from governance.hierarchy import load_governance_state
     return load_governance_state(registry_id=registry_id)
+
+
+def _fold_tool_name(name: str) -> str:
+    return name.strip().lower().replace('-', '_')
+
+
+def _tool_in_declared_scope(tool_name: str, declared: frozenset[str] | None) -> bool:
+    """None (unknown) is never in scope; an empty set is built-in tools only."""
+    if declared is None:
+        return False
+    if not declared:
+        return True
+    folded = _fold_tool_name(tool_name)
+    return tool_name in declared or any(_fold_tool_name(d) == folded for d in declared)
+
+
+def prepare_governance_snapshot(
+    *,
+    execution_id: str,
+    registry_id: str | None = None,
+    load_state_fn: Callable[..., Any] | None = None,
+    execution_lookup_fn: Callable[[str], dict | None] | None = None,
+    directory: str | None = None,
+) -> str | None:
+    """Parent side: load the gate's read-only evidence with the worker's own
+    credentials and write it to a private (0600) file for the subprocess.
+
+    Returns the file path, or None when any read fails (logged). None leaves
+    the subprocess to read live, which fails closed if it lacks access.
+    """
+    try:
+        state = (load_state_fn or _default_load_state)(registry_id=registry_id)
+        item = (execution_lookup_fn or _default_execution_lookup)(execution_id)
+    except Exception:  # noqa: BLE001 — subprocess falls back to a live (fail-closed) read
+        logger.error(
+            'governance snapshot unavailable for execution=%s; the subprocess '
+            'will read live', execution_id, exc_info=True,
+        )
+        return None
+    fd, path = tempfile.mkstemp(
+        prefix='citadel-governance-', suffix='.pkl', dir=directory,
+    )
+    try:
+        with os.fdopen(fd, 'wb') as fh:
+            pickle.dump({'state': state, 'execution': item}, fh)
+    except Exception:  # noqa: BLE001
+        logger.error('governance snapshot write failed', exc_info=True)
+        remove_governance_snapshot(path)
+        return None
+    return path
+
+
+def remove_governance_snapshot(path: str | None) -> None:
+    if not path:
+        return
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.warning('could not remove governance snapshot %s', path, exc_info=True)
+
+
+def _load_snapshot(path: str) -> dict:
+    with open(path, 'rb') as fh:
+        data = pickle.load(fh)
+    if not isinstance(data, dict) or 'state' not in data:
+        raise ValueError('malformed governance snapshot')
+    return data
 
 
 def _default_trace_id() -> str | None:
@@ -142,6 +226,7 @@ class ConstitutionGate:
         self._eval_run_id = eval_run_id or None
         # ``None`` means the declared tool list is unknown: nothing can be
         # shown to be in scope, so every tool counts as an expansion.
+        # An empty list is "built-in tools only" (see module docstring).
         self._declared_tools = (
             None if declared_tools is None else frozenset(declared_tools)
         )
@@ -188,9 +273,7 @@ class ConstitutionGate:
         item = self._execution_record()
         produced = item is not None
         context: dict[str, Any] = {'audit.record_produced': produced}
-        in_scope = (
-            self._declared_tools is not None and tool_name in self._declared_tools
-        )
+        in_scope = _tool_in_declared_scope(tool_name, self._declared_tools)
         context['scope.expansion_under_unconfirmed_state'] = bool(
             (not in_scope) or self._unconfirmed_state(item)
         )
@@ -324,7 +407,18 @@ def build_constitution_gate_from_env(agent_id: str) -> ConstitutionGate | None:
     execution_id = os.environ.get('CITADEL_EXECUTION_ID', '')
     if not execution_id:
         return None
+    load_state_fn = None
+    execution_lookup_fn = None
+    snapshot_path = os.environ.get('CITADEL_GOVERNANCE_STATE_FILE')
+    if snapshot_path:
+        def load_state_fn(registry_id=None, _p=snapshot_path):  # noqa: F811
+            return _load_snapshot(_p)['state']
+
+        def execution_lookup_fn(_eid, _p=snapshot_path):  # noqa: F811
+            return _load_snapshot(_p).get('execution')
     return ConstitutionGate(
+        load_state_fn=load_state_fn,
+        execution_lookup_fn=execution_lookup_fn,
         agent_id=agent_id,
         workflow_id=os.environ.get('CITADEL_WORKFLOW_ID', execution_id),
         execution_id=execution_id,
