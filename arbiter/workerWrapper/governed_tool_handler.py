@@ -74,6 +74,7 @@ from typing import Any
 # ``governance`` resolves there too.
 from governance.models import ArbitrationDecision, GovernanceFinding  # noqa: E402
 from governance.ledger import write_finding, LedgerWriteError  # noqa: E402
+from constitution_gate import deliver_finding  # noqa: E402
 
 # Strands imports — these live in the Lambda runtime image but may be
 # absent (or differently namespaced) in local test envs. Fall back to a
@@ -373,7 +374,9 @@ def record_governance_decision(
         org_id=org_id,
     )
     try:
-        write_finding(finding)
+        # Outbox in the worker subprocess (no ledger credentials there), the
+        # module-local ``write_finding`` elsewhere.
+        deliver_finding(finding, write_fn=write_finding)
     except LedgerWriteError as exc:
         # FAIL-CLOSED: unauditable execution is not permitted. Fail the node
         # (refusal sink) AND block the tool (audit-unavailable error result).
@@ -402,13 +405,13 @@ def record_approval_finding(
     """Write the ALWAYS-visible ``worker-tool-approval`` audit finding for an
     approval decision (decision c0ca4576). Uses the module-local ``write_finding``
     (so the same fail-closed policy + test monkeypatch conventions apply as the
-    deny-list decision). Raises ``LedgerWriteError`` on write failure — the
-    caller treats that as an infrastructure refusal (fail-loud)."""
-    write_finding(build_approval_finding(
+    deny-list decision). Raises ``LedgerWriteError`` on delivery failure (outbox
+    append or direct write) — the caller treats that as an infrastructure refusal (fail-loud)."""
+    deliver_finding(build_approval_finding(
         tool_name, permitted, reason_code,
         agent_id=agent_id, workflow_id=workflow_id, eval_run_id=eval_run_id,
         org_id=org_id,
-    ))
+    ), write_fn=write_finding)
 
 
 # ---------------------------------------------------------------------------

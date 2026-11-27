@@ -314,6 +314,33 @@ def _append_to_outbox(path: str, finding: GovernanceFinding) -> None:
         os.close(fd)
 
 
+def deliver_finding(
+    finding: GovernanceFinding,
+    *,
+    write_fn: Callable[[Any], None] | None = None,
+) -> None:
+    """Child side: hand one governance finding to the ledger.
+
+    With ``CITADEL_GOVERNANCE_FINDINGS_OUTBOX`` set (the worker subprocess)
+    the finding is appended as one JSON line for the parent to write with its
+    own role, because the subprocess may hold no AWS credentials. Without it
+    the finding is written directly (tests, supervisor paths); ``write_fn``
+    overrides the default ``write_finding`` for callers that expose their own
+    patchable writer.
+
+    Raises ``LedgerWriteError`` when the finding could not be delivered:
+    a failed append, or a failed direct write.
+    """
+    path = os.environ.get(FINDINGS_OUTBOX_ENV) or None
+    if not path:
+        (write_fn or write_finding)(finding)
+        return
+    try:
+        _append_to_outbox(path, finding)
+    except Exception as exc:  # noqa: BLE001 — queueing failed
+        raise LedgerWriteError(f'findings outbox write failed: {exc}') from exc
+
+
 def _load_snapshot(path: str) -> dict:
     with open(path, 'rb') as fh:
         data = pickle.load(fh)

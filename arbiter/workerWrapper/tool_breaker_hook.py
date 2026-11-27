@@ -238,7 +238,7 @@ def _emit_finding(
 ) -> None:
     try:
         from governance.models import ArbitrationDecision, GovernanceFinding
-        from governance.ledger import write_finding
+        from constitution_gate import deliver_finding
     except ImportError as exc:  # pragma: no cover — layer-staged package
         logger.error("tool-breaker finding import failed: %s", exc)
         return
@@ -249,7 +249,7 @@ def _emit_finding(
         else ArbitrationDecision.DENY
     )
     try:
-        write_finding(GovernanceFinding.create(
+        deliver_finding(GovernanceFinding.create(
             workflow_id=workflow_id or "unknown-workflow",
             decision=decision,
             requesting_agent=agent_id or "unknown-agent",
