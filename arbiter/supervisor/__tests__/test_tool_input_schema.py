@@ -203,7 +203,7 @@ class TestFunctionWrapper:
 class TestInvalidSchemas:
     def test_e_non_dict_schemas_are_rejected(self):
         ac = _fresh_agent_config()
-        for bad in ("{}", [{"type": "object"}], None, 5):
+        for bad in ("not json", [{"type": "object"}], None, 5):
             result, reason = ac.to_tool_input_schema(bad, "helper")
             assert result is None and reason == "schema_not_dict"
 
@@ -211,6 +211,10 @@ class TestInvalidSchemas:
         ac = _fresh_agent_config()
         for bad in ({"type": "string"}, {"type": ["object", "null"]}):
             assert ac.to_tool_input_schema(bad, "helper") == (None, "schema_type_not_object")
+
+    def test_e_stringified_empty_dict_is_rejected_as_type_missing(self):
+        ac = _fresh_agent_config()
+        assert ac.to_tool_input_schema("{}", "helper") == (None, "schema_type_missing")
 
     def test_e_dict_with_no_type_and_no_properties_is_rejected(self):
         ac = _fresh_agent_config()
@@ -274,3 +278,144 @@ class TestCreateAgentSpecsOutput:
         assert len(specs) == 1
         assert specs[0]["toolSpec"]["inputSchema"]["json"]["type"] == "object"
         assert specs[0]["toolSpec"]["name"] == "oas"
+
+
+# Live stored shapes (2026-11 scan of the agents table), redacted.
+_OBJ = {
+    "type": "object",
+    "properties": {"invoice_id": {"type": "string", "description": "Invoice id"}},
+    "required": ["invoice_id"],
+}
+
+
+class TestStoredSchemaShapes:
+    def test_function_wrapper_with_outer_type_function_is_unwrapped(self, capsys):
+        # invoice_approval_router_agent: outer type gate used to reject it.
+        ac = _fresh_agent_config()
+        stored = {
+            "type": "function",
+            "function": {"name": "route", "description": "d", "parameters": _OBJ},
+            "returns": {"type": "object", "properties": {"ok": {"type": "boolean"}}},
+        }
+        assert ac.to_tool_input_schema(stored, "helper") == (_OBJ, None)
+        assert len(_warns(capsys.readouterr().out, "unwrapped_function_schema")) == 1
+
+    def test_function_wrapper_with_outer_type_function_and_bad_parameters_is_skipped(self):
+        ac = _fresh_agent_config()
+        stored = {"type": "function", "function": {"parameters": {"type": "string"}}}
+        result, reason = ac.to_tool_input_schema(stored, "helper")
+        assert result is None and reason == "schema_type_not_object"
+
+    def test_outer_type_function_without_function_key_is_still_rejected(self):
+        ac = _fresh_agent_config()
+        assert ac.to_tool_input_schema({"type": "function"}, "helper") == (None, "schema_type_not_object")
+
+    def test_input_schema_wrapper_is_unwrapped(self, capsys):
+        # 11 live agents: {name, description, handler, inputSchema, outputSchema, ...}
+        ac = _fresh_agent_config()
+        stored = {
+            "name": "x", "description": "d", "version": "1",
+            "inputSchema": _OBJ, "outputSchema": {"type": "object"},
+        }
+        assert ac.to_tool_input_schema(stored, "helper") == (_OBJ, None)
+        warns = _warns(capsys.readouterr().out, "unwrapped_input_schema")
+        assert len(warns) == 1 and warns[0]["key"] == "inputSchema"
+
+    def test_input_schema_wrapper_keeps_json_schema_extras(self):
+        ac = _fresh_agent_config()
+        inner = {**_OBJ, "$schema": "http://json-schema.org/draft-07/schema#", "title": "T"}
+        result, reason = ac.to_tool_input_schema({"inputSchema": inner}, "helper")
+        assert (result, reason) == (inner, None)
+
+    def test_snake_case_input_schema_wrapper_is_unwrapped(self, capsys):
+        ac = _fresh_agent_config()
+        assert ac.to_tool_input_schema({"name": "x", "input_schema": _OBJ}, "helper") == (_OBJ, None)
+        warns = _warns(capsys.readouterr().out, "unwrapped_input_schema")
+        assert len(warns) == 1 and warns[0]["key"] == "input_schema"
+
+    def test_input_schema_wrapper_without_type_but_with_properties_is_normalised(self, capsys):
+        ac = _fresh_agent_config()
+        inner = {"properties": {"q": {"type": "string"}}}
+        result, reason = ac.to_tool_input_schema({"inputSchema": inner}, "helper")
+        assert reason is None and result == {**inner, "type": "object"}
+        assert len(_warns(capsys.readouterr().out, "normalised_schema_type")) == 1
+
+    def test_input_schema_wrapper_with_non_object_inner_is_skipped(self):
+        ac = _fresh_agent_config()
+        result, reason = ac.to_tool_input_schema({"inputSchema": {"type": "string"}}, "helper")
+        assert result is None and reason == "schema_type_not_object"
+
+    def test_input_schema_wrapper_with_non_schema_value_is_skipped(self):
+        ac = _fresh_agent_config()
+        assert ac.to_tool_input_schema({"inputSchema": 5}, "helper") == (None, "schema_type_missing")
+
+    def test_parameters_only_document_is_unwrapped(self, capsys):
+        # 3 live agents: {name, description, parameters, returns}
+        ac = _fresh_agent_config()
+        stored = {"name": "x", "description": "d", "parameters": _OBJ, "returns": {"type": "object"}}
+        assert ac.to_tool_input_schema(stored, "helper") == (_OBJ, None)
+        assert len(_warns(capsys.readouterr().out, "unwrapped_parameters_schema")) == 1
+
+    def test_parameters_that_is_not_a_schema_is_skipped(self):
+        ac = _fresh_agent_config()
+        assert ac.to_tool_input_schema({"parameters": ["a", "b"]}, "helper") == (None, "schema_type_missing")
+
+    def test_swagger_2_document_is_derived_like_openapi(self, capsys):
+        ac = _fresh_agent_config()
+        doc = {
+            "swagger": "2.0",
+            "info": {"title": "x"},
+            "paths": {"/run": {"post": {"parameters": [
+                {"name": "q", "in": "query", "type": "string", "required": True},
+            ]}}},
+        }
+        result, reason = ac.to_tool_input_schema(doc, "helper")
+        assert reason is None and result["type"] == "object"
+        assert len(_warns(capsys.readouterr().out, "schema_derived_from_openapi")) == 1
+
+    def test_swagger_document_without_paths_falls_back_to_free_text(self, capsys):
+        ac = _fresh_agent_config()
+        result, reason = ac.to_tool_input_schema({"swagger": "2.0", "info": {}}, "helper")
+        assert (result, reason) == (_FALLBACK, None)
+        warns = _warns(capsys.readouterr().out, "schema_derived_from_openapi")
+        assert warns[0]["strategy"] == "fallback_input"
+
+    def test_stringified_object_schema_is_parsed(self, capsys):
+        ac = _fresh_agent_config()
+        result, reason = ac.to_tool_input_schema(json.dumps(_OBJ), "helper")
+        assert (result, reason) == (_OBJ, None)
+        assert len(_warns(capsys.readouterr().out, "parsed_stringified_schema")) == 1
+
+    def test_stringified_wrapper_is_parsed_then_unwrapped(self):
+        ac = _fresh_agent_config()
+        result, reason = ac.to_tool_input_schema(json.dumps({"inputSchema": _OBJ}), "helper")
+        assert (result, reason) == (_OBJ, None)
+
+    def test_stringified_non_dict_json_is_rejected(self):
+        ac = _fresh_agent_config()
+        for bad in ("[1, 2]", "5", "null", "not json"):
+            assert ac.to_tool_input_schema(bad, "helper") == (None, "schema_not_dict")
+
+    def test_nested_wrappers_stop_at_a_depth_limit(self):
+        ac = _fresh_agent_config()
+        deep = {"type": "object"}
+        for _ in range(10):
+            deep = {"inputSchema": deep}
+        assert ac.to_tool_input_schema(deep, "helper") == (None, "schema_too_deeply_nested")
+
+    def test_does_not_mutate_input(self):
+        ac = _fresh_agent_config()
+        stored = {"type": "function", "function": {"parameters": copy.deepcopy(_OBJ)}}
+        before = copy.deepcopy(stored)
+        ac.to_tool_input_schema(stored, "helper")
+        assert stored == before
+
+    def test_create_agent_specs_keeps_input_schema_wrapper_agent(self):
+        ac = _fresh_agent_config()
+        skipped: list = []
+        specs = ac.create_agent_specs(
+            {"agents": [_agent("claims-intake-agent", schema={"inputSchema": _OBJ, "outputSchema": {}})]},
+            skipped,
+        )
+        assert skipped == []
+        assert specs[0]["toolSpec"]["inputSchema"]["json"] == _OBJ

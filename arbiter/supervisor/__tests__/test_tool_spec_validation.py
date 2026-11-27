@@ -100,10 +100,10 @@ class TestInvalidSchemaIsSkipped:
         warns = _warns(capsys.readouterr().out, "skip_invalid_tool_schema")
         assert [w["reason"] for w in warns] == ["schema_not_dict"]
 
-    def test_json_string_schema_is_skipped(self, capsys):
+    def test_non_json_string_schema_is_skipped(self, capsys):
         ac = _fresh_agent_config()
         specs = ac.create_agent_specs(
-            {"agents": [_agent("stringy", schema='{"type": "object"}')]}
+            {"agents": [_agent("stringy", schema='type: object')]}
         )
         assert specs == []
         warns = _warns(capsys.readouterr().out, "skip_invalid_tool_schema")

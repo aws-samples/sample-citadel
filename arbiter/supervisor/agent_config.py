@@ -330,33 +330,82 @@ def _schema_from_openapi(doc: dict, agent_name: str):
     }, 'fallback_input'
 
 
-def to_tool_input_schema(schema: Any, agent_name: Any, agent_id: Any = None):
+# Wrapper keys that hold the real input schema (an MCP/Anthropic-style tool
+# definition or an agent manifest) next to name/description/outputSchema.
+_INPUT_SCHEMA_KEYS = ('inputSchema', 'input_schema')
+# Bounds nested wrappers (including stringified ones) so a malformed record
+# cannot recurse without limit.
+_MAX_SCHEMA_DEPTH = 4
+
+
+def to_tool_input_schema(schema: Any, agent_name: Any, agent_id: Any = None, _depth: int = 0):
     """Return ``(schema, None)`` or ``(None, reason)`` for a Converse input schema.
 
     Converse requires ``inputSchema.json`` to be a JSON Schema with
     ``type: 'object'``. Stored agent schemas come in other shapes:
 
+    - a string holding a JSON object: parsed, then handled as below
+      (WARN ``parsed_stringified_schema``);
+    - ``{'function': {'parameters': {...}}}`` with any outer ``type`` (the
+      OpenAI wrapper has ``type: 'function'``): the parameters, validated
+      like any other schema (WARN ``unwrapped_function_schema``);
+    - ``{'inputSchema': {...}}`` or ``{'input_schema': {...}}`` with no
+      ``type: 'object'`` of its own: the inner schema (WARN
+      ``unwrapped_input_schema`` with the ``key``);
     - ``type: 'object'``: returned unchanged;
     - ``properties`` but no ``type``: ``type: 'object'`` added to a copy
       (WARN ``normalised_schema_type``);
-    - OpenAPI document (``openapi``/``paths``): the first operation's JSON
-      request body if it is an object schema without ``$ref``, else an object
-      built from its parameters, else a single free-text ``input`` property
-      (WARN ``schema_derived_from_openapi`` with the ``strategy`` used);
-    - ``{'function': {'parameters': {...}}}``: the parameters, if they are
-      themselves usable (WARN ``unwrapped_function_schema``);
-    - anything else (non-dict, other ``type``, no ``type`` and no
-      ``properties``): ``(None, reason)``; the caller skips the agent.
+    - OpenAPI 3 / Swagger 2 document (``openapi``/``swagger``/``paths``): the
+      first operation's JSON request body if it is an object schema without
+      ``$ref``, else an object built from its parameters, else a single
+      free-text ``input`` property (WARN ``schema_derived_from_openapi`` with
+      the ``strategy`` used);
+    - ``{'parameters': {...}}`` with no ``type``: the inner schema (WARN
+      ``unwrapped_parameters_schema``);
+    - anything else (non-dict, other ``type``, no ``type`` and nothing above):
+      ``(None, reason)``; the caller skips the agent.
 
-    ``agent_id``, when given, is added to the WARN lines. Never raises and
-    never mutates ``schema``.
+    Every unwrapped inner schema goes back through this function, so the
+    object-type rules apply to it too. ``agent_id``, when given, is added to
+    the WARN lines. Never raises and never mutates ``schema``.
     """
     log = {'name': _name_for_log({'name': agent_name})}
     if agent_id is not None:
         log['agentId'] = str(agent_id)
+    if _depth > _MAX_SCHEMA_DEPTH:
+        return None, 'schema_too_deeply_nested'
+    if isinstance(schema, str):
+        try:
+            parsed = json.loads(schema)
+        except (ValueError, TypeError):
+            return None, 'schema_not_dict'
+        if not isinstance(parsed, dict):
+            return None, 'schema_not_dict'
+        _warn('parsed_stringified_schema', **log)
+        return to_tool_input_schema(parsed, agent_name, agent_id, _depth + 1)
     if not isinstance(schema, dict):
         return None, 'schema_not_dict'
+
+    def unwrap(inner: Any, action: str, **extra: Any):
+        derived, reason = to_tool_input_schema(inner, agent_name, agent_id, _depth + 1)
+        if derived is None:
+            return None, reason
+        _warn(action, **extra, **log)
+        return derived, None
+
     schema_type = schema.get('type')
+    # The function wrapper is checked before the type gate: the OpenAI form
+    # carries ``type: 'function'`` on the outside.
+    function = schema.get('function')
+    if isinstance(function, dict) and ('parameters' in function or schema_type is None):
+        parameters = function.get('parameters')
+        if not isinstance(parameters, (dict, str)):
+            return None, 'function_parameters_invalid'
+        return unwrap(parameters, 'unwrapped_function_schema')
+    if schema_type != 'object':
+        for key in _INPUT_SCHEMA_KEYS:
+            if isinstance(schema.get(key), (dict, str)):
+                return unwrap(schema[key], 'unwrapped_input_schema', key=key)
     if schema_type is not None:
         if schema_type != 'object':
             return None, 'schema_type_not_object'
@@ -364,20 +413,12 @@ def to_tool_input_schema(schema: Any, agent_name: Any, agent_id: Any = None):
     if isinstance(schema.get('properties'), dict):
         _warn('normalised_schema_type', **log)
         return {**schema, 'type': 'object'}, None
-    if 'openapi' in schema or 'paths' in schema:
+    if 'openapi' in schema or 'swagger' in schema or 'paths' in schema:
         derived, strategy = _schema_from_openapi(schema, str(agent_name))
         _warn('schema_derived_from_openapi', strategy=strategy, **log)
         return derived, None
-    function = schema.get('function')
-    if isinstance(function, dict):
-        parameters = function.get('parameters')
-        if not isinstance(parameters, dict):
-            return None, 'function_parameters_invalid'
-        inner, reason = to_tool_input_schema(parameters, agent_name, agent_id)
-        if inner is None:
-            return None, reason
-        _warn('unwrapped_function_schema', **log)
-        return inner, None
+    if isinstance(schema.get('parameters'), (dict, str)):
+        return unwrap(schema['parameters'], 'unwrapped_parameters_schema')
     return None, 'schema_type_missing'
 
 
