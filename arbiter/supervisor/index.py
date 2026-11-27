@@ -1431,8 +1431,127 @@ def process_agent_call(agents_config, orchestration, agent_name, agent_input, ag
         return response
 
 
+def _denial_from_result(result, agent_name, tool_use_id):
+    """Normalise a governed_process_agent_call denial into a record.
+
+    Returns None when ``result`` is not a denial. ``findingId`` is omitted
+    (not None) when the refusal carried no ledger finding (governance
+    package unavailable, release / approval refusals).
+    """
+    if not isinstance(result, dict) or not result.get('denied'):
+        return None
+    denial = {
+        'toolUseId': tool_use_id,
+        'agent': agent_name,
+        'reason': result.get('reason') or 'denied',
+    }
+    if result.get('finding_id'):
+        denial['findingId'] = result['finding_id']
+    return denial
+
+
+def _public_denials(denials):
+    """Denials as published to callers (no toolUseId)."""
+    return [{k: v for k, v in d.items() if k != 'toolUseId'} for d in denials]
+
+
+def _emit_denial_feedback(orchestration, denial):
+    """Publish a 'supervisor.feedback' chatter event for one denied dispatch.
+
+    Best effort, and fail closed on tenancy like every other supervisor
+    emission: no orgId, no event.
+    """
+    org_id = orchestration.get('orgId')
+    if not EVENT_BUS_NAME:
+        return
+    if not isinstance(org_id, str) or not org_id:
+        logger.error(
+            "supervisor.feedback emission refused: orchestration %r carries "
+            "no orgId — refusing to publish chatter without tenancy.",
+            orchestration.get("orchestrationId"),
+        )
+        return
+    detail = {
+        'action': 'dispatch_denied',
+        'agent_name': denial['agent'],
+        'reason': denial['reason'],
+        'message': (
+            f"Agent '{denial['agent']}' was denied by governance: "
+            f"{denial['reason']}"
+        ),
+        'orchestration_id': orchestration["orchestrationId"],
+        'timestamp': time.time(),
+        'orgId': org_id,
+    }
+    if denial.get('findingId'):
+        detail['findingId'] = denial['findingId']
+    try:
+        events_client.put_events(
+            Entries=[{
+                'Source': SUPERVISOR_RESPONSE_SOURCE,
+                'DetailType': 'supervisor.feedback',
+                'Detail': json.dumps(detail, default=str),
+                'EventBusName': EVENT_BUS_NAME,
+            }]
+        )
+    except Exception:
+        logger.exception(
+            "could not publish denial feedback for orchestration %s",
+            orchestration.get('orchestrationId', 'unknown'),
+        )
+
+
+def _report_governance_denials(orchestration, denials):
+    """End the task: nothing was dispatched, so no worker will ever resume it.
+
+    Records the orchestration as 'denied' and publishes a task.response with
+    status 'denied'. Best effort on both legs, like
+    ``_report_orchestration_failure``: a failure while reporting is logged
+    and never raised.
+    """
+    orchestration['status'] = 'denied'
+    orchestration['deniedAt'] = int(time.time())
+    try:
+        save_orchestration(orchestration=orchestration)
+    except Exception:
+        logger.exception(
+            "could not persist denied orchestration %s",
+            orchestration.get('orchestrationId', 'unknown'),
+        )
+
+    first = denials[0]
+    message = "Task denied by governance: " + "; ".join(
+        f"agent '{d['agent']}' ({d['reason']}"
+        + (f", finding {d['findingId']}" if d.get('findingId') else "")
+        + ")"
+        for d in denials
+    )
+    extra_detail = {
+        'reason': first['reason'],
+        'denials': _public_denials(denials),
+    }
+    if first.get('findingId'):
+        extra_detail['findingId'] = first['findingId']
+    try:
+        send_response(
+            message,
+            callback=orchestration.get('callback'),
+            org_id=orchestration.get('orgId'),
+            status='denied',
+            orchestration_id=orchestration.get('orchestrationId'),
+            run_id=orchestration.get('runId'),
+            extra_detail=extra_detail,
+        )
+    except Exception:
+        logger.exception(
+            "could not publish denial response for orchestration %s",
+            orchestration.get('orchestrationId', 'unknown'),
+        )
+
+
 def invoke_agents_from_conversation(orchestration, agents_config, app_id=None, supervisor_usage=None):
     agent_ids = []
+    denials = []
     output_message = orchestration["conversation"][-1]
     text_response = None
 
@@ -1446,7 +1565,6 @@ def invoke_agents_from_conversation(orchestration, agents_config, app_id=None, s
             print(f'Found toolUse: {json.dumps(tool_use, default=str)}')
             # The tool name sent to Bedrock may be a sanitised agent name.
             agent_name = resolve_agent_name(agents_config, tool_use['name'])
-            agent_ids.append(agent_name)
             result = governed_process_agent_call(
                 agents_config,
                 orchestration,
@@ -1457,6 +1575,14 @@ def invoke_agents_from_conversation(orchestration, agents_config, app_id=None, s
                 supervisor_usage=supervisor_usage,
             )
             print(f'Agent call result: {result}')
+            denial = _denial_from_result(result, agent_name, tool_use['toolUseId'])
+            if denial is not None:
+                # A denied agent is never dispatched, so it must not be
+                # tracked: the resume waits for every tracked node to complete.
+                denials.append(denial)
+                _emit_denial_feedback(orchestration, denial)
+            else:
+                agent_ids.append(agent_name)
         elif 'text' in content:
             text_response = content['text']
             print(f"Text response from model: {text_response}")
@@ -1464,10 +1590,20 @@ def invoke_agents_from_conversation(orchestration, agents_config, app_id=None, s
     print(f'Total agents invoked: {len(agent_ids)}')
     print(f'Agent IDs: {agent_ids}')
 
+    if denials:
+        orchestration['denials'] = (orchestration.get('denials') or []) + denials
+
     if len(agent_ids) > 0:
+        if denials:
+            # Other agents were dispatched: the conversation resumes when they
+            # complete, and the denial is fed back to the model then.
+            orchestration['pendingDenials'] = denials
         request_id = create_workflow_tracking_record(agent_ids)
         orchestration["request_id"] = request_id
         print(f'Created workflow tracking with request_id: {request_id}')
+    elif denials:
+        print('Every requested agent was denied by governance; ending the task')
+        _report_governance_denials(orchestration, orchestration['denials'])
     else:
         print('No agents were invoked - model may have responded with text only')
         
@@ -1476,7 +1612,14 @@ def invoke_agents_from_conversation(orchestration, agents_config, app_id=None, s
         org_id = orchestration.get('orgId')
         if text_response and callback_info:
             print(f"Orchestration complete, sending response to callback")
-            send_response(text_response, callback=callback_info, org_id=org_id)
+            earlier_denials = orchestration.get('denials')
+            send_response(
+                text_response, callback=callback_info, org_id=org_id,
+                extra_detail=(
+                    {'denials': _public_denials(earlier_denials)}
+                    if earlier_denials else None
+                ),
+            )
         
         # Publish supervisor feedback to EventBridge for chatter visibility.
         # Wave-2a tenancy (finding 87a171ad): fail closed — never emit
@@ -1526,6 +1669,26 @@ def update_orchestration_with_results(results, orchestration):
             }
         }
         tool_results.append(tool_result)
+
+    # Every toolUse in the assistant message needs a toolResult in the next
+    # user message, so a dispatch the governance gate denied is answered with
+    # an error result the model can read and explain to the user. Consumed
+    # once: the cumulative record stays on orchestration['denials'].
+    for denial in orchestration.pop('pendingDenials', None) or []:
+        payload = {
+            'error': 'governance_denied',
+            'agent': denial.get('agent'),
+            'reason': denial.get('reason'),
+        }
+        if denial.get('findingId'):
+            payload['findingId'] = denial['findingId']
+        tool_results.append({
+            "toolResult": {
+                "toolUseId": denial['toolUseId'],
+                "content": [{"json": payload}],
+                "status": "error",
+            }
+        })
 
     orchestration["conversation"].append({
         "role": "user",
@@ -1719,7 +1882,7 @@ def _run_orchestration(orchestration, app_id=None):
     save_orchestration(orchestration=orchestration)
 
 def send_response(message, callback=None, org_id=None, *, status=None, error=None,
-                  orchestration_id=None, run_id=None):
+                  orchestration_id=None, run_id=None, extra_detail=None):
     """Send response to the default event bus or to a specific callback address.
 
     Security (finding 87a171ad, items g/h): every event this function emits
@@ -1743,6 +1906,10 @@ def send_response(message, callback=None, org_id=None, *, status=None, error=Non
     and omitted from the event Detail when not given, so the success-path
     shape is unchanged. A failure report passes status='failed' and an
     ``error`` dict ({'type', 'message'}).
+
+    ``extra_detail`` is an additive dict merged into the Detail after the
+    keys above (a governance denial passes reason / findingId / denials).
+    It can never override the reserved keys set by this function.
     """
 
     if not isinstance(org_id, str) or not org_id:
@@ -1764,6 +1931,9 @@ def send_response(message, callback=None, org_id=None, *, status=None, error=Non
         extra['orchestrationId'] = orchestration_id
     if run_id:
         extra['runId'] = run_id
+    if extra_detail:
+        for key, value in extra_detail.items():
+            extra.setdefault(key, value)
 
     # If no callback specified, send to default event bus
     if not callback:
