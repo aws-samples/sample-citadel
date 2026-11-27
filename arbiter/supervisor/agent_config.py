@@ -236,7 +236,7 @@ def load_app_scoped_agents(app_id: str) -> dict:
 _TOOL_SPEC_FIELDS = ('name', 'description', 'schema')
 
 # Bedrock Converse toolSpec.name constraint.
-_TOOL_NAME_RE = re.compile(r'[a-zA-Z0-9_-]{1,64}')
+_INVALID_TOOL_NAME_CHARS = re.compile(r'[^a-zA-Z0-9_-]')
 
 
 def _name_for_log(agent: dict) -> str:
@@ -248,30 +248,160 @@ def _agent_id_for_log(agent: dict) -> str:
     return str(agent.get('agentId') or agent.get('_canonicalRecordId') or 'unknown')
 
 
-def _validate_tool_schema(agent: dict, schema: Any):
-    """Return ``(schema, None)`` or ``(None, reason)``.
+_HTTP_METHODS = ('get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace')
 
-    Converse requires ``inputSchema.json`` to be a JSON Schema object with
-    ``type: 'object'``. A schema with no ``type`` but a ``properties`` dict is
-    unambiguous, so it is normalised (on a copy) with a WARN; anything else
-    (non-dict, another ``type``, an OpenAPI document, a ``{'function': ...}``
-    wrapper) cannot be sent and the agent is skipped.
+
+def _is_object_schema(schema: Any) -> bool:
+    return isinstance(schema, dict) and schema.get('type') == 'object'
+
+
+def _first_openapi_operation(doc: dict):
+    paths = doc.get('paths')
+    if not isinstance(paths, dict):
+        return None
+    for path_item in paths.values():
+        if not isinstance(path_item, dict):
+            continue
+        for method in _HTTP_METHODS:
+            operation = path_item.get(method)
+            if isinstance(operation, dict):
+                return operation
+    return None
+
+
+def _openapi_request_body_schema(operation: dict):
+    try:
+        schema = operation['requestBody']['content']['application/json']['schema']
+    except (KeyError, TypeError):
+        return None
+    # A $ref points into the original document, which is not sent to the
+    # model, so a body that contains one cannot be used.
+    if _is_object_schema(schema) and '"$ref"' not in json.dumps(schema, default=str):
+        return schema
+    return None
+
+
+def _openapi_parameters_schema(operation: dict):
+    parameters = operation.get('parameters')
+    if not isinstance(parameters, list):
+        return None
+    properties = {}
+    required = []
+    for parameter in parameters:
+        if not isinstance(parameter, dict) or not isinstance(parameter.get('name'), str):
+            continue
+        param_schema = parameter.get('schema')
+        param_type = param_schema.get('type') if isinstance(param_schema, dict) else None
+        if param_type not in ('string', 'number', 'integer', 'boolean', 'array', 'object'):
+            param_type = 'string'
+        prop = {'type': param_type}
+        if isinstance(parameter.get('description'), str):
+            prop['description'] = parameter['description']
+        properties[parameter['name']] = prop
+        if parameter.get('required') is True:
+            required.append(parameter['name'])
+    if not properties:
+        return None
+    schema = {'type': 'object', 'properties': properties}
+    if required:
+        schema['required'] = required
+    return schema
+
+
+def _schema_from_openapi(doc: dict, agent_name: str):
+    """Return ``(schema, strategy)`` for the first operation of an OpenAPI doc."""
+    operation = _first_openapi_operation(doc)
+    if operation is not None:
+        body = _openapi_request_body_schema(operation)
+        if body is not None:
+            return body, 'request_body'
+        params = _openapi_parameters_schema(operation)
+        if params is not None:
+            return params, 'parameters'
+    return {
+        'type': 'object',
+        'properties': {
+            'input': {
+                'type': 'string',
+                'description': f'Free-text request for {agent_name}',
+            }
+        },
+        'required': ['input'],
+    }, 'fallback_input'
+
+
+def to_tool_input_schema(schema: Any, agent_name: Any, agent_id: Any = None):
+    """Return ``(schema, None)`` or ``(None, reason)`` for a Converse input schema.
+
+    Converse requires ``inputSchema.json`` to be a JSON Schema with
+    ``type: 'object'``. Stored agent schemas come in other shapes:
+
+    - ``type: 'object'``: returned unchanged;
+    - ``properties`` but no ``type``: ``type: 'object'`` added to a copy
+      (WARN ``normalised_schema_type``);
+    - OpenAPI document (``openapi``/``paths``): the first operation's JSON
+      request body if it is an object schema without ``$ref``, else an object
+      built from its parameters, else a single free-text ``input`` property
+      (WARN ``schema_derived_from_openapi`` with the ``strategy`` used);
+    - ``{'function': {'parameters': {...}}}``: the parameters, if they are
+      themselves usable (WARN ``unwrapped_function_schema``);
+    - anything else (non-dict, other ``type``, no ``type`` and no
+      ``properties``): ``(None, reason)``; the caller skips the agent.
+
+    ``agent_id``, when given, is added to the WARN lines. Never raises and
+    never mutates ``schema``.
     """
+    log = {'name': _name_for_log({'name': agent_name})}
+    if agent_id is not None:
+        log['agentId'] = str(agent_id)
     if not isinstance(schema, dict):
         return None, 'schema_not_dict'
     schema_type = schema.get('type')
-    if schema_type is None:
-        if isinstance(schema.get('properties'), dict):
-            _warn(
-                'normalised_schema_type',
-                agentId=_agent_id_for_log(agent),
-                name=_name_for_log(agent),
-            )
-            return {**schema, 'type': 'object'}, None
-        return None, 'schema_type_missing'
-    if schema_type != 'object':
-        return None, 'schema_type_not_object'
-    return schema, None
+    if schema_type is not None:
+        if schema_type != 'object':
+            return None, 'schema_type_not_object'
+        return schema, None
+    if isinstance(schema.get('properties'), dict):
+        _warn('normalised_schema_type', **log)
+        return {**schema, 'type': 'object'}, None
+    if 'openapi' in schema or 'paths' in schema:
+        derived, strategy = _schema_from_openapi(schema, str(agent_name))
+        _warn('schema_derived_from_openapi', strategy=strategy, **log)
+        return derived, None
+    function = schema.get('function')
+    if isinstance(function, dict):
+        parameters = function.get('parameters')
+        if not isinstance(parameters, dict):
+            return None, 'function_parameters_invalid'
+        inner, reason = to_tool_input_schema(parameters, agent_name, agent_id)
+        if inner is None:
+            return None, reason
+        _warn('unwrapped_function_schema', **log)
+        return inner, None
+    return None, 'schema_type_missing'
+
+
+def sanitise_tool_name(name: Any):
+    """Return ``name`` rewritten to Converse's ``[a-zA-Z0-9_-]{1,64}``.
+
+    Invalid characters become ``_`` and the result is cut to 64 characters.
+    Returns ``None`` for a non-string or empty name, which cannot be repaired.
+    """
+    if not isinstance(name, str) or not name:
+        return None
+    return _INVALID_TOOL_NAME_CHARS.sub('_', name)[:64]
+
+
+def resolve_agent_name(agents_config: dict, tool_name: str) -> str:
+    """Map a tool name returned by the model back to the agent's own name.
+
+    Dispatch and governance key on ``agent['name']``; the tool name sent to
+    Bedrock may be a sanitised form of it. Falls back to ``tool_name`` itself.
+    """
+    for agent in agents_config.get('agents', []):
+        if sanitise_tool_name(agent.get('name')) == tool_name:
+            return agent['name']
+    return tool_name
 
 
 def validate_tool_spec(agent: dict):
@@ -282,15 +412,19 @@ def validate_tool_spec(agent: dict):
     ``skip_invalid_tool_schema`` (agentId, name, reason). Never raises and
     never mutates ``agent``.
 
-    The name is validated, not rewritten: dispatch resolves the agent by the
-    tool name the model returns, and governance keys on it, so a sanitised
-    name would no longer match its own record.
+    The schema goes through ``to_tool_input_schema``. The tool name is
+    sanitised to Converse's pattern (WARN ``tool_name_sanitised`` when it
+    changes); ``resolve_agent_name`` maps the model's tool name back to the
+    agent's own name at dispatch, so governance still keys on the original.
     """
     name = agent.get('name')
-    if not isinstance(name, str) or not _TOOL_NAME_RE.fullmatch(name):
-        reason = 'invalid_tool_name'
+    tool_name = sanitise_tool_name(name)
+    if tool_name is None:
+        schema, reason = None, 'invalid_tool_name'
     else:
-        schema, reason = _validate_tool_schema(agent, parse_decimals(agent['schema']))
+        schema, reason = to_tool_input_schema(
+            parse_decimals(agent['schema']), name, _agent_id_for_log(agent)
+        )
     if reason is not None:
         _warn(
             'skip_invalid_tool_schema',
@@ -300,6 +434,13 @@ def validate_tool_spec(agent: dict):
         )
         return None, reason
 
+    if tool_name != name:
+        _warn(
+            'tool_name_sanitised',
+            agentId=_agent_id_for_log(agent),
+            name=name,
+            toolName=tool_name,
+        )
     description = agent['description']
     if not isinstance(description, str) or not description.strip():
         _warn(
@@ -307,10 +448,10 @@ def validate_tool_spec(agent: dict):
             agentId=_agent_id_for_log(agent),
             name=name,
         )
-        description = name
+        description = tool_name
     return {
         "toolSpec": {
-            "name": name,
+            "name": tool_name,
             "description": description,
             "inputSchema": {"json": schema},
         }
@@ -324,6 +465,8 @@ def create_agent_specs(agents_config, skipped=None):
     agent so the caller can report counts.
     """
     specs = []
+    # tool name -> whether it came from a sanitised agent name
+    seen_tool_names = {}
     for agent in agents_config["agents"]:
         # An agent that cannot form a valid tool spec (e.g. an empty projected
         # config with only a fallback name) must not fail every task.
@@ -342,5 +485,20 @@ def create_agent_specs(agents_config, skipped=None):
             if skipped is not None:
                 skipped.append(reason)
             continue
+        tool_name = spec["toolSpec"]["name"]
+        was_sanitised = tool_name != agent["name"]
+        if tool_name in seen_tool_names and (was_sanitised or seen_tool_names[tool_name]):
+            # Converse rejects duplicate tool names; sanitising can create
+            # them. Duplicates among already-valid names are left as before.
+            _warn(
+                'skip_invalid_tool_schema',
+                agentId=_agent_id_for_log(agent),
+                name=_name_for_log(agent),
+                reason='duplicate_tool_name',
+            )
+            if skipped is not None:
+                skipped.append('duplicate_tool_name')
+            continue
+        seen_tool_names.setdefault(tool_name, was_sanitised)
         specs.append(spec)
     return specs

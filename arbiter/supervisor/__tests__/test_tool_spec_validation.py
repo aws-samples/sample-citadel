@@ -13,13 +13,14 @@ task because of one agent:
   - schema must be a dict;
   - ``type`` absent but ``properties`` present -> normalised to ``object``
     (WARN ``normalised_schema_type``);
+  - OpenAPI documents and ``{"function": ...}`` wrappers are converted (see
+    test_tool_input_schema.py);
   - any other ``type`` (or no ``type`` and no ``properties``), or a schema
     that is not a dict -> agent skipped (WARN ``skip_invalid_tool_schema``
     with agentId, name, reason);
-  - name must match ``^[a-zA-Z0-9_-]{1,64}$``, otherwise the agent is
-    skipped (WARN ``skip_invalid_tool_schema``, reason ``invalid_tool_name``).
-    The name is never rewritten: dispatch looks the agent up by the tool name
-    the model returns, and governance keys on that name;
+  - name is sanitised to ``^[a-zA-Z0-9_-]{1,64}$`` (WARN
+    ``tool_name_sanitised``); a non-string name skips the agent
+    (``invalid_tool_name``). Dispatch maps the tool name back to the agent;
   - blank description -> falls back to the name (WARN ``description_fallback``).
 """
 from __future__ import annotations
@@ -108,20 +109,21 @@ class TestInvalidSchemaIsSkipped:
         warns = _warns(capsys.readouterr().out, "skip_invalid_tool_schema")
         assert [w["reason"] for w in warns] == ["schema_not_dict"]
 
-    def test_openapi_document_without_type_is_skipped(self, capsys):
+    def test_openapi_document_without_type_is_derived_not_skipped(self, capsys):
         ac = _fresh_agent_config()
         openapi = {"openapi": "3.0.0", "info": {"title": "x"}, "paths": {}}
         specs = ac.create_agent_specs({"agents": [_agent("oas", schema=openapi)]})
-        assert specs == []
-        warns = _warns(capsys.readouterr().out, "skip_invalid_tool_schema")
-        assert [w["reason"] for w in warns] == ["schema_type_missing"]
+        assert _names(specs) == ["oas"]
+        assert specs[0]["toolSpec"]["inputSchema"]["json"]["type"] == "object"
+        assert _warns(capsys.readouterr().out, "skip_invalid_tool_schema") == []
 
-    def test_function_wrapper_schema_is_skipped(self, capsys):
+    def test_function_wrapper_schema_is_unwrapped_not_skipped(self, capsys):
         ac = _fresh_agent_config()
         wrapped = {"function": {"name": "f", "parameters": {"type": "object"}}}
         specs = ac.create_agent_specs({"agents": [_agent("wrapped", schema=wrapped)]})
-        assert specs == []
-        assert len(_warns(capsys.readouterr().out, "skip_invalid_tool_schema")) == 1
+        assert _names(specs) == ["wrapped"]
+        assert specs[0]["toolSpec"]["inputSchema"]["json"] == {"type": "object"}
+        assert _warns(capsys.readouterr().out, "skip_invalid_tool_schema") == []
 
     def test_non_string_type_is_skipped(self, capsys):
         ac = _fresh_agent_config()
@@ -140,7 +142,7 @@ class TestInvalidSchemaIsSkipped:
                 "agents": [
                     _agent("a", schema={"type": "string"}),
                     _agent("b", schema=[]),
-                    _agent("bad name"),
+                    _agent(123),
                     _agent("ok"),
                 ]
             },
@@ -182,37 +184,37 @@ class TestMissingTypeWithProperties:
 
 
 class TestToolName:
-    def test_name_with_invalid_characters_is_skipped(self, capsys):
+    def test_name_with_invalid_characters_is_sanitised(self, capsys):
         ac = _fresh_agent_config()
         specs = ac.create_agent_specs(
             {"agents": [_agent("Catering Agent!"), _agent("good")]}
         )
-        assert _names(specs) == ["good"]
-        warns = _warns(capsys.readouterr().out, "skip_invalid_tool_schema")
+        assert _names(specs) == ["Catering_Agent_", "good"]
+        warns = _warns(capsys.readouterr().out, "tool_name_sanitised")
         assert len(warns) == 1
-        assert warns[0]["reason"] == "invalid_tool_name"
         assert warns[0]["name"] == "Catering Agent!"
+        assert warns[0]["agentId"] == "id-Catering Agent!"
 
-    def test_name_longer_than_64_characters_is_skipped(self):
+    def test_name_longer_than_64_characters_is_cut(self):
         ac = _fresh_agent_config()
-        assert ac.create_agent_specs({"agents": [_agent("a" * 65)]}) == []
+        assert _names(ac.create_agent_specs({"agents": [_agent("a" * 65)]})) == ["a" * 64]
 
     def test_name_of_exactly_64_characters_is_kept(self):
         ac = _fresh_agent_config()
         assert _names(ac.create_agent_specs({"agents": [_agent("a" * 64)]})) == ["a" * 64]
 
-    def test_name_with_trailing_newline_is_skipped(self):
+    def test_name_with_trailing_newline_is_sanitised(self):
         # ``$`` alone would accept "good\n"; Bedrock does not.
         ac = _fresh_agent_config()
-        assert ac.create_agent_specs({"agents": [_agent("good\n")]}) == []
+        assert _names(ac.create_agent_specs({"agents": [_agent("good\n")]})) == ["good_"]
 
     def test_non_string_name_is_skipped_not_raised(self):
         ac = _fresh_agent_config()
         assert ac.create_agent_specs({"agents": [_agent(123)]}) == []
 
-    def test_dotted_name_is_skipped(self):
+    def test_dotted_name_is_sanitised(self):
         ac = _fresh_agent_config()
-        assert ac.create_agent_specs({"agents": [_agent("a.b")]}) == []
+        assert _names(ac.create_agent_specs({"agents": [_agent("a.b")]})) == ["a_b"]
 
 
 class TestDescription:
@@ -244,7 +246,7 @@ class TestLoaderStampsAgentIdForWarnings:
                     "config": {
                         "name": "catering-fuel-sequencing-agent",
                         "description": "d",
-                        "schema": {"openapi": "3.0.0", "paths": {}},
+                        "schema": {"type": "string"},
                     },
                 }
             ]
@@ -305,7 +307,11 @@ class TestConversePayload:
         supervisor_mod._run_orchestration(_orchestration())
 
         tools = mock_breaker.call.call_args.kwargs["toolConfig"]["tools"]
-        assert [t["toolSpec"]["name"] for t in tools] == ["first", "needs-type"]
+        assert [t["toolSpec"]["name"] for t in tools] == [
+            "first",
+            "openapi-agent",
+            "needs-type",
+        ]
         for tool in tools:
             assert tool["toolSpec"]["inputSchema"]["json"]["type"] == "object"
 
@@ -325,3 +331,24 @@ class TestConversePayload:
         mock_breaker.call.assert_not_called()
         mock_invoke.assert_not_called()
         mock_send.assert_called_once()
+
+
+class TestDispatchResolvesSanitisedToolName:
+    @patch.object(supervisor_mod, "create_workflow_tracking_record")
+    @patch.object(supervisor_mod, "governed_process_agent_call")
+    def test_dispatch_and_tracking_use_the_original_agent_name(self, mock_governed, _mock_track):
+        config = {"agents": [_agent("Catering Agent!")]}
+        orchestration = _orchestration()
+        orchestration["conversation"].append(
+            {
+                "role": "assistant",
+                "content": [
+                    {"toolUse": {"name": "Catering_Agent_", "input": {"q": "x"}, "toolUseId": "t1"}}
+                ],
+            }
+        )
+
+        supervisor_mod.invoke_agents_from_conversation(orchestration, config)
+
+        assert mock_governed.call_args.args[2] == "Catering Agent!"
+        _mock_track.assert_called_once_with(["Catering Agent!"])

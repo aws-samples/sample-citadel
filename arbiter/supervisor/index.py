@@ -34,7 +34,7 @@ _this_dir = os.path.dirname(os.path.abspath(__file__))
 if _this_dir not in sys.path:
     sys.path.insert(0, _this_dir)
 
-from agent_config import load_config_from_dynamodb, load_app_scoped_agents, create_agent_specs, parse_decimals
+from agent_config import load_config_from_dynamodb, load_app_scoped_agents, create_agent_specs, parse_decimals, resolve_agent_name
 from circuit_breaker import CircuitBreaker, CircuitBreakerOpen
 import uuid
 import time
@@ -1444,11 +1444,13 @@ def invoke_agents_from_conversation(orchestration, agents_config, app_id=None, s
         if 'toolUse' in content:
             tool_use = content['toolUse']
             print(f'Found toolUse: {json.dumps(tool_use, default=str)}')
-            agent_ids.append(tool_use['name'])
+            # The tool name sent to Bedrock may be a sanitised agent name.
+            agent_name = resolve_agent_name(agents_config, tool_use['name'])
+            agent_ids.append(agent_name)
             result = governed_process_agent_call(
                 agents_config,
                 orchestration,
-                tool_use['name'],
+                agent_name,
                 tool_use['input'],
                 tool_use['toolUseId'],
                 app_id=app_id if app_id is not None else orchestration.get('app_id'),
