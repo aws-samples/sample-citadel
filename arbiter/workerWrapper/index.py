@@ -1105,7 +1105,7 @@ def _remove_governance_snapshot(path: str | None) -> None:
 
 
 def _prepare_governance_outbox() -> str | None:
-    """Create the private file the subprocess queues constitution findings in.
+    """Create the private file the subprocess queues its governance findings in.
 
     None (logged) leaves the subprocess to write directly, which fails closed.
     """
@@ -1148,7 +1148,7 @@ def _drain_governance_outbox(path: str | None, execution_id: str):
         }))
         return AgentExecutionError(
             'LedgerWriteError',
-            'audit_write_failed: constitution findings outbox could not be drained',
+            'audit_write_failed: governance findings outbox could not be drained',
         )
     finally:
         remove_findings_outbox(path)
@@ -1163,7 +1163,7 @@ def _drain_governance_outbox(path: str | None, execution_id: str):
     if result.permit_failures:
         return AgentExecutionError(
             'LedgerWriteError',
-            'audit_write_failed: %d constitution finding(s) for executed tool '
+            'audit_write_failed: %d governance finding(s) for executed tool '
             'calls could not be recorded (%s)' % (
                 len(result.permit_failures), ', '.join(result.permit_failures[:5]),
             ),
