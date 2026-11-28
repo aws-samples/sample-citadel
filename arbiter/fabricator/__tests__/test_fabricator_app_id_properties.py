@@ -27,6 +27,7 @@ os.environ.setdefault("COMPLETION_BUS_NAME", "fake-bus")
 os.environ.setdefault("WORKER_QUEUE_URL", "https://sqs.fake/queue")
 
 from index import publish_fabrication_event
+from common.workflow_tracking import RESERVED_WORKFLOW_TRACKING_KEYS
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +46,11 @@ app_ids = st.text(
 
 orchestration_ids = safe_text
 agent_ids = safe_text
+# store_agent_config_dynamo rejects RESERVED_WORKFLOW_TRACKING_KEYS ("requestId",
+# "data") as agent ids by design. Property tests that call it must not draw
+# them; the rejection itself is asserted deterministically in
+# test_store_agent_config_reserved_agent_ids.py.
+storable_agent_ids = agent_ids.filter(lambda s: s not in RESERVED_WORKFLOW_TRACKING_KEYS)
 tool_ids = safe_text
 event_types = st.sampled_from(["agent.fabricated", "tool.fabricated", "agent.fabrication.failed"])
 error_messages = st.text(min_size=1, max_size=200)
@@ -137,7 +143,7 @@ class TestStoreAgentConfigAppId:
     """
 
     @given(
-        agent_id=agent_ids,
+        agent_id=storable_agent_ids,
         file_name=file_names,
         schema=tool_schemas,
         description=descriptions,
@@ -169,7 +175,7 @@ class TestStoreAgentConfigAppId:
         assert item["appId"] == app_id
 
     @given(
-        agent_id=agent_ids,
+        agent_id=storable_agent_ids,
         file_name=file_names,
         schema=tool_schemas,
         description=descriptions,
